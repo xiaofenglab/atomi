@@ -3,6 +3,7 @@ from pathlib import Path
 
 from atomi.viz.cp2k import plot_cp2k, plot_cp2k_all
 from atomi.viz.lammps import plot_lammps_live
+from atomi.viz.mace import plot_mace_live
 from atomi.viz.vasp_live import plot_vasp_live, plot_vasp_live4
 
 
@@ -88,6 +89,24 @@ def plotcp2kall(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     plot_cp2k_all(args.logfile)
+
+
+def plotmace(argv: list[str] | None = None) -> None:
+    """Compatibility command: plotmace mace_train.log [window_epochs] [refresh_seconds]."""
+    parser = argparse.ArgumentParser(prog="plotmace")
+    parser.add_argument("logfile", type=Path)
+    parser.add_argument("window", type=int, nargs="?", default=100)
+    parser.add_argument("refresh", type=int, nargs="?", default=5)
+    parser.add_argument(
+        "mode",
+        nargs="?",
+        choices=("always", "onchange"),
+        default="always",
+        help="Accepted for compatibility; packaged gnuplot handles live refresh.",
+    )
+    args = parser.parse_args(argv)
+
+    plot_mace_live(logfile=args.logfile, window=args.window, refresh=args.refresh)
 
 
 def _split_files_and_optional_window(items: list[str], default_window: int) -> tuple[list[str], int]:

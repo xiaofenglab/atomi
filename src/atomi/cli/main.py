@@ -5,6 +5,7 @@ from atomi.core.project import create_project
 from atomi.core.scheduler import render_submit_script
 from atomi.viz.cp2k import plot_cp2k, plot_cp2k_all
 from atomi.viz.lammps import format_summary, plot_lammps_live, read_thermo_rows, summarize_thermo
+from atomi.viz.mace import plot_mace_live
 from atomi.viz.vasp_live import plot_vasp_live, plot_vasp_live4
 
 
@@ -101,6 +102,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cp2k_all.add_argument("logfile", type=Path)
 
+    mace_live = subparsers.add_parser(
+        "mace-live",
+        help="Live terminal plot for MACE training logs.",
+    )
+    mace_live.add_argument("logfile", type=Path)
+    mace_live.add_argument("--window", type=int, default=100)
+    mace_live.add_argument("--refresh", type=int, default=5)
+
     return parser
 
 
@@ -179,6 +188,10 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.subcommand == "cp2k-all":
         plot_cp2k_all(args.logfile)
+        return
+
+    if args.subcommand == "mace-live":
+        plot_mace_live(logfile=args.logfile, window=args.window, refresh=args.refresh)
         return
 
 

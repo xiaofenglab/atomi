@@ -31,6 +31,7 @@ plotlammps = "atomi.cli.compat:plotlammps"
 plotcp2k = "atomi.cli.compat:plotcp2k"
 plotcp2ck = "atomi.cli.compat:plotcp2k"
 plotcp2kall = "atomi.cli.compat:plotcp2kall"
+plotmace = "atomi.cli.compat:plotmace"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -43,6 +44,7 @@ atomi = [
   "viz/gnuplot/*.gp",
   "viz/cp2k/*.gp",
   "viz/cp2k/*.py",
+  "viz/mace/*.gp",
 ]
 
 [tool.ruff]

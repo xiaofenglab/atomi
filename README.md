@@ -60,6 +60,8 @@ plotvasp4 vasp.outA vasp.outB vasp.outC vasp.outD 200
 plotlammps log.lammps
 plotcp2k cp2k.log
 plotcp2k cp2k.log trajectory.xyz
+plotmace mace_train.log
+plotmace mace_train.log 200 5
 ```
 
 `plotcp2ck` is also accepted as an alias for `plotcp2k`.
