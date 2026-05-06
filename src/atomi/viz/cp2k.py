@@ -188,7 +188,11 @@ def _plot_cp2k_geo(
 
 def _run_gnuplot(assignments: list[str], script: Path) -> None:
     command = ["gnuplot", "-e", "; ".join(assignments), str(script)]
-    result = subprocess.run(command, stderr=subprocess.PIPE, text=True)
+    try:
+        result = subprocess.run(command, stderr=subprocess.PIPE, text=True)
+    except KeyboardInterrupt:
+        print("\nStopped CP2K live plot.")
+        return
     if result.returncode != 0:
         stderr = result.stderr.strip()
         message = [

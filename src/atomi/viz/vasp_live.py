@@ -34,21 +34,25 @@ def plot_vasp_live(
     script = files("atomi").joinpath("viz", "gnuplot", "vasp_live.gp")
     previous_count = -1
 
-    while True:
-        current_count = count_dav_steps(output_file)
-        if current_count != previous_count or once:
-            _clear_terminal()
-            _run_gnuplot(
-                [
-                    f"file='{_gnuplot_quote(output_file)}'",
-                    f"win={window}",
-                ],
-                script,
-            )
-            previous_count = current_count
-        if once:
-            return
-        time.sleep(interval)
+    try:
+        while True:
+            current_count = count_dav_steps(output_file)
+            if current_count != previous_count or once:
+                _clear_terminal()
+                _run_gnuplot(
+                    [
+                        f"file='{_gnuplot_quote(output_file)}'",
+                        f"win={window}",
+                    ],
+                    script,
+                )
+                previous_count = current_count
+            if once:
+                return
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\nStopped VASP live plot.")
+        return
 
 
 def plot_vasp_live4(
@@ -67,20 +71,24 @@ def plot_vasp_live4(
     script = files("atomi").joinpath("viz", "gnuplot", "vasp_live4.gp")
     previous_count = -1
 
-    while True:
-        current_count = sum(count_dav_steps(path) for path in output_files)
-        if current_count != previous_count or once:
-            _clear_terminal()
-            args = [f"nfiles={len(output_files)}", f"win={window}"]
-            args.extend(
-                f"file{index}='{_gnuplot_quote(path)}'"
-                for index, path in enumerate(output_files, start=1)
-            )
-            _run_gnuplot(args, script)
-            previous_count = current_count
-        if once:
-            return
-        time.sleep(interval)
+    try:
+        while True:
+            current_count = sum(count_dav_steps(path) for path in output_files)
+            if current_count != previous_count or once:
+                _clear_terminal()
+                args = [f"nfiles={len(output_files)}", f"win={window}"]
+                args.extend(
+                    f"file{index}='{_gnuplot_quote(path)}'"
+                    for index, path in enumerate(output_files, start=1)
+                )
+                _run_gnuplot(args, script)
+                previous_count = current_count
+            if once:
+                return
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\nStopped VASP live plot.")
+        return
 
 
 def _run_gnuplot(assignments: list[str], script: Path) -> None:

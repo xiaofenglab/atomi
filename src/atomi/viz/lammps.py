@@ -138,20 +138,24 @@ def plot_lammps_live(
     script = files("atomi").joinpath("viz", "gnuplot", "lammps_thermo.gp")
     previous_count = -1
 
-    while True:
-        rows = read_thermo_rows(logfile)
-        current_count = len(rows)
-        if current_count != previous_count or once:
-            subprocess.run(["clear"], check=False)
-            _print_live_header(logfile, rows, interval)
-            _run_gnuplot(logfile, script, window)
-            previous_count = current_count
-        if once:
-            return
-        if stop_on_finish and _contains_loop_time(logfile):
-            print("\nRun appears finished, found 'Loop time'. Exiting monitor.")
-            return
-        time.sleep(interval)
+    try:
+        while True:
+            rows = read_thermo_rows(logfile)
+            current_count = len(rows)
+            if current_count != previous_count or once:
+                subprocess.run(["clear"], check=False)
+                _print_live_header(logfile, rows, interval)
+                _run_gnuplot(logfile, script, window)
+                previous_count = current_count
+            if once:
+                return
+            if stop_on_finish and _contains_loop_time(logfile):
+                print("\nRun appears finished, found 'Loop time'. Exiting monitor.")
+                return
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\nStopped LAMMPS live plot.")
+        return
 
 
 def _print_live_header(logfile: Path, rows: list[LammpsThermoRow], interval: float) -> None:

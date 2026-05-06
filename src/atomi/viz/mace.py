@@ -29,7 +29,11 @@ def plot_mace_live(logfile: Path, window: int = 100, refresh: int = 5) -> None:
             f"metafile='{_quote(metafile)}'",
         ]
     )
-    subprocess.run(["gnuplot", "-e", expression, str(script)], check=True)
+    try:
+        subprocess.run(["gnuplot", "-e", expression, str(script)], check=True)
+    except KeyboardInterrupt:
+        print("\nStopped MACE live plot.")
+        return
 
 
 def _safe_stem(path: Path) -> str:
