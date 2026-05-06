@@ -24,7 +24,21 @@ python -m pip install -e ".[dev,materials]"
 For use on an HPC system:
 
 ```bash
-python -m pip install git+https://github.com/<user>/<repo>.git
+python -m pip install git+https://github.com/xiaofenglab/atomi.git
+```
+
+To update an existing Atomi install on an HPC system:
+
+```bash
+python -m pip install --upgrade --force-reinstall git+https://github.com/xiaofenglab/atomi.git
+```
+
+If Atomi was installed in editable mode from a cloned repository:
+
+```bash
+cd atomi
+git pull
+python -m pip install -e ".[materials]"
 ```
 
 If the compute environment has no internet access, install on a login node or build a wheel:
@@ -32,6 +46,12 @@ If the compute environment has no internet access, install on a login node or bu
 ```bash
 python -m pip wheel . -w dist
 python -m pip install dist/atomi-*.whl
+```
+
+For an offline update, rebuild the wheel from the latest repository checkout, copy the new wheel to the HPC environment, and reinstall it:
+
+```bash
+python -m pip install --upgrade --force-reinstall dist/atomi-*.whl
 ```
 
 ## Command Line
