@@ -1,6 +1,7 @@
 import argparse
 from pathlib import Path
 
+from atomi.cli.vasp import extv
 from atomi.core.project import create_project
 from atomi.core.scheduler import render_submit_script
 from atomi.viz.cp2k import plot_cp2k, plot_cp2k_all
@@ -110,6 +111,12 @@ def build_parser() -> argparse.ArgumentParser:
     mace_live.add_argument("--window", type=int, default=100)
     mace_live.add_argument("--refresh", type=int, default=5)
 
+    vasp_outcar = subparsers.add_parser(
+        "vasp-outcar",
+        help="Quick VASP OUTCAR summary.",
+    )
+    vasp_outcar.add_argument("outcar", type=Path, nargs="?", default=Path("OUTCAR"))
+
     return parser
 
 
@@ -192,6 +199,10 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.subcommand == "mace-live":
         plot_mace_live(logfile=args.logfile, window=args.window, refresh=args.refresh)
+        return
+
+    if args.subcommand == "vasp-outcar":
+        extv([str(args.outcar)])
         return
 
 
