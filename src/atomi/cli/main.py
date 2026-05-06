@@ -96,6 +96,30 @@ def build_parser() -> argparse.ArgumentParser:
     lammps_summary.add_argument("logfile", type=Path)
     lammps_summary.add_argument("--last-fraction", type=float, default=0.5)
 
+    lammps_md_init = subparsers.add_parser(
+        "lammps-md-init",
+        help="Copy LAMMPS MD workflow templates into a project directory.",
+    )
+    lammps_md_init.add_argument("workflow_args", nargs=argparse.REMAINDER)
+
+    lammps_md_workflow = subparsers.add_parser(
+        "lammps-md-workflow",
+        help="Run or resume the config-driven LAMMPS MD workflow.",
+    )
+    lammps_md_workflow.add_argument("workflow_args", nargs=argparse.REMAINDER)
+
+    lammps_postprocess = subparsers.add_parser(
+        "lammps-postprocess",
+        help="Postprocess one LAMMPS NPT thermo log with window diagnostics.",
+    )
+    lammps_postprocess.add_argument("postprocess_args", nargs=argparse.REMAINDER)
+
+    lammps_thermo_series = subparsers.add_parser(
+        "lammps-thermo-series",
+        help="Postprocess production LAMMPS NPT thermo series with UQ.",
+    )
+    lammps_thermo_series.add_argument("analysis_args", nargs=argparse.REMAINDER)
+
     cp2k_live = subparsers.add_parser(
         "cp2k-live",
         help="Auto-detect CP2K MD/GEO logs and launch the terminal monitor.",
@@ -195,6 +219,26 @@ def main(argv: list[str] | None = None) -> None:
 
         mace_convert_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "lammps-md-init":
+        from atomi.lammps.workflow_cli import init_workflow
+
+        init_workflow(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "lammps-md-workflow":
+        from atomi.lammps.workflow_cli import run_workflow
+
+        run_workflow(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "lammps-postprocess":
+        from atomi.lammps.postprocess import main as lammps_postprocess_main
+
+        lammps_postprocess_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "lammps-thermo-series":
+        from atomi.lammps.thermo_series import main as thermo_series_main
+
+        thermo_series_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "doctor":
         doctor_main(raw_args[1:])
         return
@@ -263,6 +307,30 @@ def main(argv: list[str] | None = None) -> None:
         rows = read_thermo_rows(args.logfile)
         summary = summarize_thermo(rows, last_fraction=args.last_fraction)
         print(format_summary(summary))
+        return
+
+    if args.subcommand == "lammps-md-init":
+        from atomi.lammps.workflow_cli import init_workflow
+
+        init_workflow(args.workflow_args)
+        return
+
+    if args.subcommand == "lammps-md-workflow":
+        from atomi.lammps.workflow_cli import run_workflow
+
+        run_workflow(args.workflow_args)
+        return
+
+    if args.subcommand == "lammps-postprocess":
+        from atomi.lammps.postprocess import main as lammps_postprocess_main
+
+        lammps_postprocess_main(args.postprocess_args)
+        return
+
+    if args.subcommand == "lammps-thermo-series":
+        from atomi.lammps.thermo_series import main as thermo_series_main
+
+        thermo_series_main(args.analysis_args)
         return
 
     if args.subcommand == "cp2k-live":

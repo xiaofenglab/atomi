@@ -35,6 +35,10 @@ plotmace = "atomi.cli.compat:plotmace"
 convertmace = "atomi.ml.mace.convert:main"
 extv = "atomi.cli.vasp:extv"
 atomi-doctor = "atomi.core.doctor:main"
+lammps-md-init = "atomi.lammps.workflow_cli:init_workflow"
+lammps-md-workflow = "atomi.lammps.workflow_cli:run_workflow"
+lammps-postprocess = "atomi.lammps.postprocess:main"
+lammps-thermo-series = "atomi.lammps.thermo_series:main"
 mace-build-dataset = "atomi.ml.mace.datasets:main"
 mace-energy-outliers = "atomi.ml.mace.outliers:main"
 mace-update-outliers = "atomi.ml.mace.update_outliers:main"
@@ -49,6 +53,7 @@ where = ["src"]
 atomi = [
   "templates/**/*.yaml",
   "templates/**/*.sh",
+  "templates/**/*.json",
   "shell/*.sh",
   "viz/gnuplot/*.gp",
   "viz/cp2k/*.gp",

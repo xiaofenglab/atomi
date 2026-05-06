@@ -69,6 +69,7 @@ atomi init-project my_vasp_run --code vasp
 atomi write-submit --scheduler slurm --profile generic_cpu
 atomi inspect .
 atomi doctor
+atomi lammps-md-init my_lammps_md_project
 ```
 
 ## HPC Environment Check
@@ -97,6 +98,16 @@ For example, edit the `profiles.mace_lammps` block in `atomi_hpc_config.json` to
 convertmace modelname.model --hpc-config atomi_hpc_config.json
 ```
 
+For LAMMPS MD workflows, also review the `profiles.lammps_md_workflow` block. The project launcher and GPU wrapper use these environment variables when needed:
+
+```text
+ATOMI_LAMMPS_ENV
+ATOMI_LAMMPS_MODULES
+ATOMI_LAMMPS_PREFIX
+ATOMI_LMP_EXE
+ATOMI_LIBTORCH_LIB
+```
+
 ## Familiar Plot Commands
 
 Atomi keeps short compatibility commands for day-to-day monitoring:
@@ -111,6 +122,11 @@ plotmace mace_train.log
 plotmace mace_train.log 200 5
 convertmace modelname.model
 extv OUTCAR
+lammps-md-init my_lammps_md_project
+lammps-md-workflow --config config.json
+lammps-md-workflow --resume --config config.json
+lammps-postprocess --log stages/npt_prod_1400K/chunk_production/log.in.npt_prod_1400K_production --temperature 1400 --outdir analysis/npt_prod_1400K
+lammps-thermo-series --config config_production.json --outdir analysis/thermo_0_300K_uq
 mace-build-dataset --neareq neareq_train.extxyz --phonopy phonopy.extxyz --force-spread forces.extxyz --prefail-group prefail=prefail.extxyz
 mace-energy-outliers --extxyz training.extxyz --model model.model --outdir energy_outliers --device cuda --dtype float32 --top-n 30 --write-poscars
 mace-update-outliers --report energy_outliers/report.txt --train-in training.extxyz --valid-in validation.extxyz --train-out training_clean.extxyz --valid-out validation_clean.extxyz
@@ -161,6 +177,81 @@ convertmace modelname.model --local
 ```
 
 `plotcp2ck` is also accepted as an alias for `plotcp2k`.
+
+## LAMMPS MD Workflow
+
+The packaged LAMMPS MD engine runs staged equilibration or production workflows from a JSON config. Create a project skeleton with:
+
+```bash
+lammps-md-init my_lammps_md_project
+cd my_lammps_md_project
+```
+
+Then edit `config.json` for equilibration or `config_production.json` for production runs. Put structures under `structures/`, MACE-LAMMPS `.pt` models under `models/`, and keep generated run state under `stages/`.
+
+Run directly on a login/interactive workflow allocation:
+
+```bash
+lammps-md-workflow --config config.json
+lammps-md-workflow --resume --config config.json
+lammps-md-workflow --resume --start-from npt_200K --config config.json
+lammps-md-workflow --resume --only npt_prod_1400K --config config_production.json
+```
+
+When a regular equilibration workflow finishes, Atomi automatically writes `config_production.json` from completed NPT equilibrium stages. A completed stage must have `stages/<stage>/PASS` plus `<stage>.restart` or `<stage>.data`. The generated production config is flagged with `generated_by`, `source_config`, and `source_equilibration_stage` fields so it is clear it came from the finished `config.json` run.
+
+To change the production length during generation:
+
+```bash
+lammps-md-workflow --config config.json --production-time-ps 100
+lammps-md-workflow --config config.json --production-steps 1000000
+lammps-md-workflow --config config.json --production-config-out config_production_100ps.json
+```
+
+To skip production config generation:
+
+```bash
+lammps-md-workflow --config config.json --no-write-production-config
+```
+
+Or submit the orchestrator itself to Slurm:
+
+```bash
+sbatch run_workflow.sh resume
+sbatch run_workflow.sh fresh
+sbatch run_workflow.sh resume npt_200K config.json
+sbatch run_workflow.sh resume "" config_production.json
+```
+
+The workflow submits one LAMMPS chunk at a time using `run_lammps_gpu.sh`, waits for `squeue` to clear, checks wrapper exit status, parses thermo output, writes `summary.txt` and optional `thermo.png`, and stores stage `PASS` markers for resume.
+
+For one temperature or one log file, use the single-run postprocessor:
+
+```bash
+lammps-postprocess --log stages/npt_prod_1400K/chunk_production/log.in.npt_prod_1400K_production --temperature 1400 --timestep-ps 0.0001 --natoms 96 --discard-ps 20 --window-ps 5 --window-stride-ps 1 --plot-bin-ps 0.5 --outdir analysis/npt_prod_1400K
+```
+
+This writes `thermo_summary.json`, `window_summaries.csv/json`, `selected_timeseries.csv`, and diagnostic plots for the selected window and subwindows.
+
+After production runs finish, analyze the temperature series from `config_production.json`:
+
+```bash
+lammps-thermo-series --config config_production.json --outdir analysis/thermo_0_300K_uq --min-window-ps 18 --window-stride-ps 2 --plot-bin-ps 0.5 --raw-decimate 5 --natoms 96 --plot-T-min 0 --plot-T-max 300 --plot-T-step 10 --anchor-zero --n-bootstrap 300
+```
+
+Use `--cp-source dH` to use dH/dT for Cp:
+
+```bash
+lammps-thermo-series --config config_production.json --outdir analysis/thermo_0_300K_uq_dH --min-window-ps 18 --window-stride-ps 2 --plot-bin-ps 0.5 --natoms 96 --plot-T-min 0 --plot-T-max 300 --plot-T-step 10 --anchor-zero --cp-source dH --n-bootstrap 300
+```
+
+For high-temperature integration anchored at 300 K:
+
+```bash
+lammps-thermo-series --config config_production.json --outdir analysis/thermo_anchor_300K --min-window-ps 20 --window-stride-ps 2 --plot-bin-ps 0.5 --natoms 96 --plot-T-min 300 --plot-T-max 1500 --plot-T-step 10 --cp-source dH --thermo-anchor-T 300 --thermo-anchor-S 78.0 --thermo-anchor-Cp 64.0 --use-anchor-for-integration --use-anchor-Cp-in-fit --n-bootstrap 100
+```
+
+This command packages the v4 anchor-capable analyzer, which also supports the earlier v3-style fluctuation and dH workflows.
 
 ## VASP Live Plotting
 

@@ -16,9 +16,10 @@ USER_CONFIG = Path("~/.config/atomi/hpc.json").expanduser()
 
 EXECUTABLES = {
     "core": ["python", "python3"],
-    "scheduler": ["sbatch", "srun", "qsub"],
+    "scheduler": ["sbatch", "squeue", "srun", "qsub"],
     "visualization": ["gnuplot"],
-    "engines": ["vasp_std", "vasp_gam", "vasp_ncl", "cp2k", "lmp", "lammps"],
+    "engines": ["vasp_std", "vasp_gam", "vasp_ncl", "cp2k", "lmp", "lammps", "nvidia-smi"],
+    "environment": ["module"],
 }
 
 PYTHON_PACKAGES = [
@@ -47,8 +48,13 @@ HPC_ASSUMPTIONS = [
     },
     {
         "key": "gpu_resource_names",
-        "applies_to": ["convertmace", "mace-energy-outliers"],
+        "applies_to": ["convertmace", "mace-energy-outliers", "lammps-md-workflow"],
         "note": "GPU partitions and gres strings vary by cluster.",
+    },
+    {
+        "key": "lammps_md_workflow_runtime",
+        "applies_to": ["lammps-md-init", "lammps-md-workflow"],
+        "note": "The MD workflow needs Slurm sbatch/squeue, a LAMMPS executable, GPU modules, and MACE/LAMMPS runtime libraries configured for each HPC.",
     },
 ]
 
@@ -105,7 +111,9 @@ def _executable_version(name: str) -> str | None:
         "sbatch": ["sbatch", "--version"],
         "srun": ["srun", "--version"],
         "qsub": ["qsub", "--version"],
+        "squeue": ["squeue", "--version"],
         "cp2k": ["cp2k", "--version"],
+        "nvidia-smi": ["nvidia-smi"],
         "lmp": ["lmp", "-help"],
         "lammps": ["lammps", "-help"],
     }
@@ -171,6 +179,15 @@ def build_report() -> dict[str, Any]:
                 "partition": "gpu",
                 "gres": "gpu:1",
                 "time": "00:15:00",
+            },
+            "lammps_md_workflow": {
+                "env_path": "~/m_lammps_env",
+                "partition": "gpu",
+                "gres": "gpu:1",
+                "modules": ["compiler/gnu", "mpi/openmpi", "numlib/mkl/2020.2", "devel/cuda/12.3"],
+                "lammps_prefix": "~/projects/lammps/gup_run",
+                "lammps_executable": "~/projects/lammps/gup_run/install/bin/lmp",
+                "libtorch_lib": "~/projects/lammps/gup_run/src/libtorch-gpu/lib",
             }
         },
         "hpc_assumptions": HPC_ASSUMPTIONS,

@@ -1,0 +1,1744 @@
+#!/usr/bin/env python3
+"""
+thermo_series_uq_v4.py
+
+Read a production MD config JSON, locate each T-dependent NPT production run,
+auto-select a stable analysis window from each run, compute per-temperature
+thermodynamic summaries, then build T-dependent thermodynamic curves.
+
+This script integrates the core logic of postprocess_npt_thermo_v3.py, but
+automates the full temperature series.
+
+Main goals
+----------
+1) Read config_production.json and find production stages such as:
+     npt_prod_50K, npt_prod_100K, ..., npt_prod_1400K
+
+2) For each stage, locate its production LAMMPS log, usually:
+     stages/<stage_name>/chunk_production/log.in.<stage_name>_production
+
+3) Auto-select a stable window of at least 20 ps from each trajectory.
+   The selected window is chosen by scanning fixed-size windows and minimizing
+   a stationarity score based on:
+     - temperature closeness to target
+     - volume drift
+     - enthalpy drift
+     - energy drift
+     - mean pressure magnitude
+
+4) Compute per-T quantities:
+     <T>, <P>, <V>, lattice proxy a, density
+     <E>, <H>
+     Cp from NPT enthalpy fluctuation
+     KT from volume fluctuation
+     slopes/drift diagnostics
+
+5) Plot diagnostics for each T:
+     raw gray points + thick binned mean curve
+     selected window highlighted
+
+6) Also plot one combined diagnostic figure containing all T stages:
+     T, P, V, PE, H panels
+     raw gray points + thick binned curves
+     selected step/time windows highlighted by transparent shaded regions
+
+6) Combine all temperatures:
+     all_T_summary.csv/json
+     per_T_analysis/all_T_MD_diagnostics_with_selected_windows.png
+     V(T), a(T), density(T), H(T), Cp(T), KT(T)
+     CTE alpha_V(T), alpha_L(T)
+     S(T)-S(T0), G(T)-G(T0), relative functions by numerical integration
+
+Usage
+-----
+A) Auto post-process from production config:
+    python3 connect_npt_temperature_series.py \
+      --config config_production.json \
+      --outdir analysis/production_thermo_series \
+      --window-ps 20 \
+      --window-stride-ps 2 \
+      --natoms 96 \
+      --plot-bin-ps 0.5
+
+B) Use existing manual analysis directories instead of re-parsing logs:
+    python3 connect_npt_temperature_series.py \
+      --manual-analysis-root analysis/manual_windows \
+      --outdir analysis/production_thermo_series_from_manual
+
+Manual analysis mode expects files like:
+    analysis/manual_windows/npt_prod_600K/thermo_summary.json
+or:
+    analysis/manual_windows/*/thermo_summary.json
+
+C) Force a larger stable window, e.g. 30 ps:
+    python3 connect_npt_temperature_series.py \
+      --config config_production.json \
+      --outdir analysis/production_thermo_series_win30ps \
+      --window-ps 30 \
+      --window-stride-ps 2
+
+
+python3 ./analysis/thermo_series_uq_v4_anchor.py \
+  --config config_production.json \
+  --outdir analysis/thermo_anchor_300K \
+  --min-window-ps 20 \
+  --window-stride-ps 2 \
+  --plot-bin-ps 0.5 \
+  --natoms 96 \
+  --plot-T-min 300 \
+  --plot-T-max 1500 \
+  --plot-T-step 10 \
+  --cp-source dH \
+  --thermo-anchor-T 300 \
+  --thermo-anchor-S 78.0 \
+  --thermo-anchor-Cp 64.0 \
+  --use-anchor-for-integration \
+  --use-anchor-Cp-in-fit \
+  --n-bootstrap 100
+
+
+Important units
+---------------
+Per-mole convention:
+  For UO2 fluorite, Z=4 per conventional cell. A 2x2x2 conventional supercell has
+  96 atoms = 32 UO2 formula units. The script uses n_formula_units = natoms/3,
+  so with --natoms 96 the molar outputs are per mole of UO2 formula units.
+  Absolute H from MD is also reported in kJ/mol-UO2, but its zero depends on the MLIP energy reference.
+
+
+LAMMPS metal:
+  pressure = bar
+  volume = Angstrom^3
+  energy = eV per simulation cell
+
+Conversions:
+  1 bar = 1e-4 GPa
+  P*V in bar*Angstrom^3 = 6.241509074e-7 eV
+
+Notes
+-----
+- Cp from enthalpy fluctuations can be noisy for a 96-atom cell.
+- KT from volume fluctuations can be very sensitive to slow NPT breathing.
+- For CTE, the most robust output is usually from fitted V(T) or a(T).
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import os
+import re
+import tempfile
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+
+_mpl_cache = Path(tempfile.gettempdir()) / "atomi-matplotlib"
+_mpl_cache.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(_mpl_cache))
+os.environ.setdefault("XDG_CACHE_HOME", str(_mpl_cache))
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+
+# -----------------------------
+# constants
+# -----------------------------
+
+KB_EV_PER_K = 8.617333262145e-5
+EV_TO_J = 1.602176634e-19
+NA = 6.02214076e23
+BAR_A3_TO_EV = 6.241509074e-7
+EV_A3_TO_GPA = 160.21766208
+EV_CELL_TO_KJ_PER_MOL_UO2 = EV_TO_J * NA / 1000.0  # multiply by eV_cell/n_formula_units
+
+# approximate molar mass UO2 in g/mol
+MOLAR_MASS_UO2_G_MOL = 238.0289 + 2.0 * 15.999
+
+THERMO_RE = re.compile(
+    r"^\s*(\d+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)(?:\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+))?"
+)
+
+
+# -----------------------------
+# general helpers
+# -----------------------------
+
+def load_json(path: Path) -> dict:
+    with path.open() as f:
+        return json.load(f)
+
+
+def dump_json(path: Path, obj) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
+        json.dump(obj, f, indent=2)
+
+
+def infer_temperature_from_name(path_or_name) -> Optional[float]:
+    m = re.search(r"(\d+(?:\.\d+)?)K", str(path_or_name))
+    if m:
+        return float(m.group(1))
+    return None
+
+
+def resolve_relative_to(base: Path, p: str | Path) -> Path:
+    p = Path(p)
+    if p.is_absolute():
+        return p
+    return (base / p).resolve()
+
+
+def linear_slope(x: np.ndarray, y: np.ndarray) -> float:
+    if len(x) < 2:
+        return float("nan")
+    xm = float(np.mean(x))
+    ym = float(np.mean(y))
+    den = float(np.sum((x - xm) ** 2))
+    if den == 0:
+        return 0.0
+    return float(np.sum((x - xm) * (y - ym)) / den)
+
+
+def block_average_sem(y: np.ndarray, nblocks: int = 5) -> tuple[float, float]:
+    if len(y) < nblocks:
+        return float(np.mean(y)), float("nan")
+    blocks = np.array_split(y, nblocks)
+    means = np.array([np.mean(b) for b in blocks if len(b) > 0])
+    sem = np.std(means, ddof=1) / math.sqrt(len(means)) if len(means) > 1 else float("nan")
+    return float(np.mean(y)), float(sem)
+
+
+def trapz_cumulative(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    out = np.zeros_like(x, dtype=float)
+    for i in range(1, len(x)):
+        out[i] = out[i - 1] + 0.5 * (y[i] + y[i - 1]) * (x[i] - x[i - 1])
+    return out
+
+
+def split_indices_into_blocks(n: int, nblocks: int) -> list[np.ndarray]:
+    nblocks = max(1, min(int(nblocks), int(n)))
+    return [b for b in np.array_split(np.arange(n), nblocks) if len(b) > 0]
+
+
+def block_mean_sem_full(y: np.ndarray, nblocks: int = 5) -> tuple[float, float, np.ndarray]:
+    y = np.asarray(y, dtype=float)
+    if len(y) == 0:
+        return float("nan"), float("nan"), np.array([])
+    blocks = split_indices_into_blocks(len(y), nblocks)
+    means = np.array([float(np.mean(y[b])) for b in blocks], dtype=float)
+    sem = float(np.std(means, ddof=1) / math.sqrt(len(means))) if len(means) > 1 else float("nan")
+    return float(np.mean(y)), sem, means
+
+
+def percentile_band(samples: np.ndarray, low: float = 16.0, high: float = 84.0) -> tuple[np.ndarray, np.ndarray]:
+    return np.nanpercentile(samples, low, axis=0), np.nanpercentile(samples, high, axis=0)
+
+
+def fit_eval_functions(T: np.ndarray, V: np.ndarray, a: np.ndarray, H_eV: np.ndarray, Cp: np.ndarray,
+                       T_grid: np.ndarray, fit_degree: int, cp_source: str,
+                       nfu: float, anchor_zero: bool) -> dict[str, np.ndarray]:
+    deg_fit = min(fit_degree, max(len(T) - 1, 1))
+
+    pV = np.poly1d(np.polyfit(T, V, deg_fit))
+    dpV = np.polyder(pV)
+    pa = np.poly1d(np.polyfit(T, a, deg_fit))
+    dpa = np.polyder(pa)
+    pH = np.poly1d(np.polyfit(T, H_eV, deg_fit))
+    dpH = np.polyder(pH)
+
+    V_grid = pV(T_grid)
+    a_grid = pa(T_grid)
+    H_grid_eV = pH(T_grid)
+    H_abs_kJ_per_mol_UO2_grid = H_grid_eV * EV_CELL_TO_KJ_PER_MOL_UO2 / nfu
+
+    alpha_V_grid = dpV(T_grid) / V_grid
+    alpha_L_grid = dpa(T_grid) / a_grid
+    Cp_from_H_grid = dpH(T_grid) * EV_TO_J * NA / nfu
+
+    if cp_source == "dH":
+        Cp_grid = Cp_from_H_grid.copy()
+    else:
+        finite = np.isfinite(Cp)
+        if finite.sum() >= 3:
+            cp_deg = min(3, finite.sum() - 1)
+            pCp = np.poly1d(np.polyfit(T[finite], Cp[finite], cp_deg))
+            Cp_grid = pCp(T_grid)
+        elif finite.sum() >= 2:
+            Cp_grid = np.interp(T_grid, T[finite], Cp[finite])
+        else:
+            Cp_grid = np.zeros_like(T_grid)
+
+    if anchor_zero and len(T_grid) and abs(T_grid[0]) < 1.0e-12:
+        Cp_grid[0] = 0.0
+
+    Cp_over_T = np.zeros_like(Cp_grid)
+    nz = T_grid > 1.0e-12
+    Cp_over_T[nz] = Cp_grid[nz] / T_grid[nz]
+
+    H_rel = trapz_cumulative(T_grid, Cp_grid)
+    S_rel = trapz_cumulative(T_grid, Cp_over_T)
+    G_rel = H_rel - T_grid * S_rel
+
+    mass_g = nfu * MOLAR_MASS_UO2_G_MOL / NA
+    rho_grid = mass_g / (V_grid * 1.0e-24)
+
+    return {
+        "V_grid": V_grid,
+        "a_grid": a_grid,
+        "density_grid": rho_grid,
+        "H_grid_eV": H_grid_eV,
+        "H_abs_kJ_per_mol_UO2_grid": H_grid_eV * EV_CELL_TO_KJ_PER_MOL_UO2 / nfu,
+        "Cp_grid": Cp_grid,
+        "Cp_from_H_grid": Cp_from_H_grid,
+        "alpha_V_grid": alpha_V_grid,
+        "alpha_L_grid": alpha_L_grid,
+        "H_rel_J_mol_grid": H_rel,
+        "S_rel_J_mol_K_grid": S_rel,
+        "G_rel_J_mol_grid": G_rel,
+    }
+
+
+def bootstrap_temperature_functions(T: np.ndarray, V: np.ndarray, V_sem: np.ndarray,
+                                    a: np.ndarray, a_sem: np.ndarray,
+                                    H: np.ndarray, H_sem: np.ndarray,
+                                    Cp: np.ndarray, Cp_sem: np.ndarray,
+                                    T_grid: np.ndarray, fit_degree: int,
+                                    cp_source: str, nfu: float, anchor_zero: bool,
+                                    n_boot: int, seed: int) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    rng = np.random.default_rng(seed)
+    samples: dict[str, list[np.ndarray]] = {}
+
+    def safe_sigma(y, s):
+        y = np.asarray(y, dtype=float)
+        s = np.asarray(s, dtype=float)
+        fallback = np.nanmedian(np.abs(y - np.nanmedian(y))) * 0.05
+        if not np.isfinite(fallback) or fallback == 0:
+            fallback = max(abs(float(np.nanmean(y))) * 1e-6, 1e-12)
+        return np.where(np.isfinite(s) & (s > 0), s, fallback)
+
+    sigV = safe_sigma(V, V_sem)
+    siga = safe_sigma(a, a_sem)
+    sigH = safe_sigma(H, H_sem)
+    sigCp = safe_sigma(Cp, Cp_sem)
+
+    for _ in range(int(n_boot)):
+        Vb = rng.normal(V, sigV)
+        ab = rng.normal(a, siga)
+        Hb = rng.normal(H, sigH)
+        Cpb = rng.normal(Cp, sigCp)
+        try:
+            funcs = fit_eval_functions(T, Vb, ab, Hb, Cpb, T_grid, fit_degree, cp_source, nfu, anchor_zero)
+        except Exception:
+            continue
+        for k, v in funcs.items():
+            samples.setdefault(k, []).append(v)
+
+    bands = {}
+    for k, vals in samples.items():
+        arr = np.array(vals)
+        if len(arr) >= 5:
+            bands[k] = percentile_band(arr, 16.0, 84.0)
+    return bands
+
+
+def plot_function_with_band(outpath: Path, T_data: np.ndarray, y_data: np.ndarray,
+                            y_sem: Optional[np.ndarray], T_grid: np.ndarray, y_grid: np.ndarray,
+                            band: Optional[tuple[np.ndarray, np.ndarray]],
+                            xlabel: str, ylabel: str, title: str) -> None:
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    if y_sem is not None:
+        ax.errorbar(T_data, y_data, yerr=y_sem, fmt="o", color="0.35", alpha=0.75, capsize=3,
+                    label="MD window mean ± block SEM")
+    else:
+        ax.scatter(T_data, y_data, color="0.35", alpha=0.75, label="MD window mean")
+    if band is not None:
+        lo, hi = band
+        ax.fill_between(T_grid, lo, hi, alpha=0.22, label="MD UQ band, 16–84%")
+    ax.plot(T_grid, y_grid, linewidth=2.3, label="fit/function")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=180)
+    plt.close(fig)
+
+
+# -----------------------------
+# parsing LAMMPS thermo
+# -----------------------------
+
+def parse_lammps_thermo(log_path: Path) -> dict[str, np.ndarray]:
+    step, temp, pe, etot, press, vol, lx, ly, lz = [], [], [], [], [], [], [], [], []
+
+    with log_path.open(errors="ignore") as f:
+        for line in f:
+            m = THERMO_RE.match(line)
+            if not m:
+                continue
+            g = m.groups()
+            step.append(int(g[0]))
+            temp.append(float(g[1]))
+            pe.append(float(g[2]))
+            etot.append(float(g[3]))
+            press.append(float(g[4]))
+            vol.append(float(g[5]))
+            lx.append(float(g[6]) if g[6] is not None else np.nan)
+            ly.append(float(g[7]) if g[7] is not None else np.nan)
+            lz.append(float(g[8]) if g[8] is not None else np.nan)
+
+    if not step:
+        raise RuntimeError(f"No thermo rows found in {log_path}")
+
+    return {
+        "step": np.array(step, dtype=float),
+        "temp": np.array(temp, dtype=float),
+        "pe": np.array(pe, dtype=float),
+        "etot": np.array(etot, dtype=float),
+        "press_bar": np.array(press, dtype=float),
+        "vol_A3": np.array(vol, dtype=float),
+        "lx_A": np.array(lx, dtype=float),
+        "ly_A": np.array(ly, dtype=float),
+        "lz_A": np.array(lz, dtype=float),
+    }
+
+
+def add_derived_series(data: dict[str, np.ndarray], natoms: int, atoms_per_formula_unit: int) -> dict[str, np.ndarray]:
+    nfu = natoms / atoms_per_formula_unit
+    out = dict(data)
+    out["press_GPa"] = out["press_bar"] * 1.0e-4
+    out["enthalpy_eV"] = out["etot"] + out["press_bar"] * out["vol_A3"] * BAR_A3_TO_EV
+    out["a_proxy_A"] = (4.0 * out["vol_A3"] / nfu) ** (1.0 / 3.0)
+    # density g/cm3: mass = nfu*M g/mol / NA; volume A3 = 1e-24 cm3
+    mass_g = nfu * MOLAR_MASS_UO2_G_MOL / NA
+    out["density_g_cm3"] = mass_g / (out["vol_A3"] * 1.0e-24)
+    return out
+
+
+# -----------------------------
+# window selection
+# -----------------------------
+
+def make_candidate_windows(step: np.ndarray,
+                           timestep_ps: float,
+                           window_ps: float,
+                           stride_ps: float) -> list[tuple[int, int, np.ndarray]]:
+    windows = []
+    start = step[0]
+    end = step[-1]
+    window_steps = window_ps / timestep_ps
+    stride_steps = stride_ps / timestep_ps
+
+    left = start
+    while left + window_steps <= end + 1e-9:
+        right = left + window_steps
+        mask = (step >= left) & (step < right)
+        if mask.sum() >= 5:
+            windows.append((int(left), int(right), mask))
+        left += stride_steps
+
+    return windows
+
+
+def score_window(data: dict[str, np.ndarray],
+                 mask: np.ndarray,
+                 target_T: float,
+                 timestep_ps: float) -> dict:
+    step = data["step"][mask]
+    tps = (step - step[0]) * timestep_ps
+
+    T = data["temp"][mask]
+    P = data["press_GPa"][mask]
+    V = data["vol_A3"][mask]
+    PE = data["pe"][mask]
+    H = data["enthalpy_eV"][mask]
+
+    V_mean = float(np.mean(V))
+    H_span = max(float(np.max(H) - np.min(H)), 1.0e-12)
+    PE_span = max(float(np.max(PE) - np.min(PE)), 1.0e-12)
+
+    V_slope = linear_slope(tps, V)
+    H_slope = linear_slope(tps, H)
+    PE_slope = linear_slope(tps, PE)
+
+    # Dimensionless-ish diagnostics.
+    T_penalty = abs(float(np.mean(T)) - target_T) / max(target_T, 1.0)
+    P_penalty = abs(float(np.mean(P))) / 5.0  # 5 GPa scale for small-cell NPT
+    V_drift_frac = abs(V_slope) * max(float(tps[-1] - tps[0]), 1e-12) / max(V_mean, 1e-12)
+    H_drift_frac = abs(H_slope) * max(float(tps[-1] - tps[0]), 1e-12) / H_span
+    PE_drift_frac = abs(PE_slope) * max(float(tps[-1] - tps[0]), 1e-12) / PE_span
+
+    score = (
+        2.0 * T_penalty +
+        1.0 * P_penalty +
+        8.0 * V_drift_frac +
+        4.0 * H_drift_frac +
+        2.0 * PE_drift_frac
+    )
+
+    return {
+        "score": float(score),
+        "T_penalty": float(T_penalty),
+        "P_penalty": float(P_penalty),
+        "V_drift_frac": float(V_drift_frac),
+        "H_drift_frac": float(H_drift_frac),
+        "PE_drift_frac": float(PE_drift_frac),
+        "V_slope_A3_per_ps": float(V_slope),
+        "H_slope_eV_per_ps": float(H_slope),
+        "PE_slope_eV_per_ps": float(PE_slope),
+        "T_mean_K": float(np.mean(T)),
+        "P_mean_GPa": float(np.mean(P)),
+        "V_mean_A3": float(np.mean(V)),
+        "H_mean_eV": float(np.mean(H)),
+    }
+
+
+def auto_select_window(data: dict[str, np.ndarray],
+                       target_T: float,
+                       timestep_ps: float,
+                       min_window_ps: float = 20.0,
+                       window_ps: Optional[float] = None,
+                       stride_ps: float = 2.0,
+                       discard_initial_ps: float = 0.0) -> tuple[np.ndarray, dict, list[dict]]:
+    if window_ps is None:
+        window_ps = min_window_ps
+    if window_ps < min_window_ps:
+        window_ps = min_window_ps
+
+    step = data["step"]
+    base_mask = np.ones(len(step), dtype=bool)
+    if discard_initial_ps > 0:
+        base_mask &= step >= step[0] + discard_initial_ps / timestep_ps
+
+    sub = {k: v[base_mask] for k, v in data.items()}
+    if len(sub["step"]) < 5:
+        raise RuntimeError("No data left after initial discard.")
+
+    candidates = make_candidate_windows(sub["step"], timestep_ps, window_ps, stride_ps)
+    if not candidates:
+        # fallback: use entire remaining region if it is at least min_window_ps
+        total_ps = (sub["step"][-1] - sub["step"][0]) * timestep_ps
+        if total_ps < min_window_ps:
+            raise RuntimeError(f"Trajectory shorter than minimum window: {total_ps:.3f} ps < {min_window_ps:.3f} ps")
+        mask = base_mask
+        metrics = score_window(data, mask, target_T, timestep_ps)
+        metrics.update({
+            "selected_step_min": int(step[mask][0]),
+            "selected_step_max": int(step[mask][-1]),
+            "selected_time_ps": float((step[mask][-1] - step[mask][0]) * timestep_ps),
+            "selection_method": "fallback_all_remaining",
+        })
+        return mask, metrics, [metrics]
+
+    scored = []
+    for left, right, local_mask in candidates:
+        # convert local mask on sub arrays to global mask
+        global_mask = np.zeros(len(step), dtype=bool)
+        global_indices = np.where(base_mask)[0]
+        global_mask[global_indices[local_mask]] = True
+
+        metrics = score_window(data, global_mask, target_T, timestep_ps)
+        metrics.update({
+            "selected_step_min": left,
+            "selected_step_max": right,
+            "selected_time_ps": float((right - left) * timestep_ps),
+            "selection_method": "auto_min_score",
+        })
+        scored.append((metrics["score"], global_mask, metrics))
+
+    scored.sort(key=lambda x: x[0])
+    best_score, best_mask, best_metrics = scored[0]
+    window_table = [x[2] for x in scored]
+    return best_mask, best_metrics, window_table
+
+
+# -----------------------------
+# thermodynamic summary for a window
+# -----------------------------
+
+def summarize_selected_window(data: dict[str, np.ndarray],
+                              mask: np.ndarray,
+                              target_T: float,
+                              timestep_ps: float,
+                              natoms: int,
+                              atoms_per_formula_unit: int,
+                              nblocks: int = 5) -> dict:
+    nfu = natoms / atoms_per_formula_unit
+    sel = {k: v[mask] for k, v in data.items()}
+
+    T = sel["temp"]
+    P_bar = sel["press_bar"]
+    P_GPa = sel["press_GPa"]
+    V = sel["vol_A3"]
+    PE = sel["pe"]
+    Etot = sel["etot"]
+    H = sel["enthalpy_eV"]
+    a = sel["a_proxy_A"]
+    rho = sel["density_g_cm3"]
+
+    T_for_fluct = target_T if target_T is not None else float(np.mean(T))
+
+    H_var = float(np.var(H, ddof=1)) if len(H) > 1 else float("nan")
+    Cp_cell_eV_per_K = H_var / (KB_EV_PER_K * T_for_fluct**2)
+    Cp_J_per_mol_UO2_K = Cp_cell_eV_per_K * EV_TO_J * NA / nfu
+
+    # Block-wise Cp estimates from enthalpy fluctuations.
+    # This is an MD statistical uncertainty proxy, not an experimental error bar.
+    cp_block_vals = []
+    for b in split_indices_into_blocks(len(H), nblocks):
+        if len(b) > 2:
+            H_var_b = float(np.var(H[b], ddof=1))
+            Cp_b = H_var_b / (KB_EV_PER_K * T_for_fluct**2) * EV_TO_J * NA / nfu
+            cp_block_vals.append(Cp_b)
+    cp_block_vals = np.array(cp_block_vals, dtype=float)
+    Cp_sem = float(np.std(cp_block_vals, ddof=1) / math.sqrt(len(cp_block_vals))) if len(cp_block_vals) > 1 else float("nan")
+
+    V_var = float(np.var(V, ddof=1)) if len(V) > 1 else float("nan")
+    if V_var and V_var > 0:
+        KT_eV_A3 = KB_EV_PER_K * T_for_fluct * float(np.mean(V)) / V_var
+        KT_GPa = KT_eV_A3 * EV_A3_TO_GPA
+    else:
+        KT_GPa = float("nan")
+
+    time_ps = (sel["step"] - sel["step"][0]) * timestep_ps
+
+    V_mean, V_sem = block_average_sem(V, nblocks)
+    a_mean, a_sem = block_average_sem(a, nblocks)
+    H_mean, H_sem = block_average_sem(H, nblocks)
+    PE_mean, PE_sem = block_average_sem(PE, nblocks)
+
+    return {
+        "target_T_K": float(target_T),
+        "n_used_points": int(mask.sum()),
+        "step_min": int(sel["step"][0]),
+        "step_max": int(sel["step"][-1]),
+        "time_ps": float((sel["step"][-1] - sel["step"][0]) * timestep_ps),
+        "T_mean_K": float(np.mean(T)),
+        "T_std_K": float(np.std(T, ddof=1)),
+        "P_mean_bar": float(np.mean(P_bar)),
+        "P_std_bar": float(np.std(P_bar, ddof=1)),
+        "P_mean_GPa": float(np.mean(P_GPa)),
+        "P_std_GPa": float(np.std(P_GPa, ddof=1)),
+        "V_mean_A3": V_mean,
+        "V_sem_A3": V_sem,
+        "V_std_A3": float(np.std(V, ddof=1)),
+        "a_mean_A": a_mean,
+        "a_sem_A": a_sem,
+        "density_mean_g_cm3": float(np.mean(rho)),
+        "density_sem_g_cm3": block_average_sem(rho, nblocks)[1],
+        "density_std_g_cm3": float(np.std(rho, ddof=1)),
+        "PE_mean_eV_cell": PE_mean,
+        "PE_sem_eV_cell": PE_sem,
+        "Etot_mean_eV_cell": float(np.mean(Etot)),
+        "PE_mean_kJ_per_mol_UO2": float(PE_mean * EV_CELL_TO_KJ_PER_MOL_UO2 / nfu),
+        "PE_sem_kJ_per_mol_UO2": float(PE_sem * EV_CELL_TO_KJ_PER_MOL_UO2 / nfu),
+        "Etot_mean_kJ_per_mol_UO2": float(np.mean(Etot) * EV_CELL_TO_KJ_PER_MOL_UO2 / nfu),
+        "H_mean_eV_cell": H_mean,
+        "H_sem_eV_cell": H_sem,
+        "H_mean_kJ_per_mol_UO2": float(H_mean * EV_CELL_TO_KJ_PER_MOL_UO2 / nfu),
+        "H_sem_kJ_per_mol_UO2": float(H_sem * EV_CELL_TO_KJ_PER_MOL_UO2 / nfu),
+        "Cp_fluct_J_per_mol_UO2_K": float(Cp_J_per_mol_UO2_K),
+        "Cp_fluct_sem_J_per_mol_UO2_K": float(Cp_sem),
+        "KT_GPa_from_V_fluct": float(KT_GPa),
+        "V_slope_A3_per_ps": linear_slope(time_ps, V),
+        "PE_slope_eV_per_ps": linear_slope(time_ps, PE),
+        "H_slope_eV_per_ps": linear_slope(time_ps, H),
+    }
+
+
+def write_selected_timeseries(path: Path, data: dict[str, np.ndarray], mask: np.ndarray, timestep_ps: float) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sel = {k: v[mask] for k, v in data.items()}
+    time_ps = (sel["step"] - sel["step"][0]) * timestep_ps
+
+    with path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["step", "time_ps", "T_K", "P_bar", "P_GPa", "V_A3", "a_A", "density_g_cm3", "PE_eV", "Etot_eV", "H_eV"])
+        for i in range(len(time_ps)):
+            w.writerow([
+                int(sel["step"][i]), float(time_ps[i]), float(sel["temp"][i]),
+                float(sel["press_bar"][i]), float(sel["press_GPa"][i]),
+                float(sel["vol_A3"][i]), float(sel["a_proxy_A"][i]),
+                float(sel["density_g_cm3"][i]), float(sel["pe"][i]),
+                float(sel["etot"][i]), float(sel["enthalpy_eV"][i]),
+            ])
+
+
+# -----------------------------
+# plotting
+# -----------------------------
+
+def decimate_xy(x: np.ndarray, y: np.ndarray, stride: int = 1) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Return decimated x/y arrays for plotting raw scatter points only.
+
+    This does not affect any analysis, window selection, binned means, fits, or UQ.
+    It only reduces the number of raw points sent to matplotlib.
+    """
+    stride = max(1, int(stride))
+    return x[::stride], y[::stride]
+
+
+def binned_mean_curve(x: np.ndarray, y: np.ndarray, bin_ps: Optional[float]) -> tuple[np.ndarray, np.ndarray]:
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    if len(x) == 0:
+        return x, y
+    xmin = float(np.min(x))
+    xmax = float(np.max(x))
+    span = xmax - xmin
+    if span <= 0:
+        return x, y
+
+    if bin_ps is None or bin_ps <= 0:
+        bin_ps = max(span / 80.0, 1.0e-12)
+
+    edges = np.arange(xmin, xmax + bin_ps, bin_ps)
+    xb, yb = [], []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        mask = (x >= lo) & (x < hi if hi != edges[-1] else x <= hi)
+        if np.any(mask):
+            xb.append(float(np.mean(x[mask])))
+            yb.append(float(np.mean(y[mask])))
+    return np.array(xb), np.array(yb)
+
+
+def plot_raw_binned_with_window(outpath: Path,
+                                data: dict[str, np.ndarray],
+                                selected_mask: np.ndarray,
+                                timestep_ps: float,
+                                plot_bin_ps: Optional[float],
+                                title: str,
+                                raw_alpha: float = 0.20,
+                                raw_size: float = 6.0,
+                                raw_decimate: int = 1) -> None:
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+
+    time_total = (data["step"] - data["step"][0]) * timestep_ps
+    sel_time_min = float(np.min(time_total[selected_mask]))
+    sel_time_max = float(np.max(time_total[selected_mask]))
+
+    series = [
+        ("temp", "T (K)"),
+        ("press_GPa", "P (GPa)"),
+        ("vol_A3", "V (Å$^3$)"),
+        ("enthalpy_eV", "H (eV)"),
+        ("pe", "PE (eV)"),
+    ]
+
+    fig, ax = plt.subplots(len(series), 1, figsize=(8.5, 11), sharex=True)
+    for i, (key, ylabel) in enumerate(series):
+        y = data[key]
+        xd, yd = decimate_xy(time_total, y, raw_decimate)
+        ax[i].scatter(xd, yd, s=raw_size, alpha=raw_alpha, color="0.45", linewidths=0)
+        xb, yb = binned_mean_curve(time_total, y, plot_bin_ps)
+        ax[i].plot(xb, yb, linewidth=2.3)
+        ax[i].axvspan(sel_time_min, sel_time_max, alpha=0.15)
+        ax[i].set_ylabel(ylabel)
+    ax[-1].set_xlabel("Total production time (ps)")
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=180)
+    plt.close(fig)
+
+
+def plot_all_temperature_diagnostics(outpath: Path,
+                                     records: list[dict],
+                                     timestep_ps: float,
+                                     plot_bin_ps: Optional[float],
+                                     raw_alpha: float = 0.10,
+                                     raw_size: float = 4.0,
+                                     raw_decimate: int = 1) -> None:
+    """
+    Plot all production MD results in one figure.
+
+    Each temperature/stage is plotted as:
+      - transparent gray raw points
+      - thick binned mean curve
+      - transparent shaded region for the selected analysis window
+
+    To make multiple temperatures comparable in one figure, each stage's time axis
+    is shifted so the first logged step starts at 0 ps.
+    """
+    if not records:
+        return
+
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+
+    panels = [
+        ("temp", "T (K)"),
+        ("press_GPa", "P (GPa)"),
+        ("vol_A3", "V (Å$^3$)"),
+        ("pe", "PE (eV)"),
+        ("enthalpy_eV", "H (eV)"),
+    ]
+
+    fig, ax = plt.subplots(len(panels), 1, figsize=(9.5, 12.5), sharex=True)
+
+    for rec in records:
+        data = rec["data"]
+        selected_mask = rec["selected_mask"]
+        label = rec["label"]
+
+        time_ps = (data["step"] - data["step"][0]) * timestep_ps
+        sel_time_min = float(np.min(time_ps[selected_mask]))
+        sel_time_max = float(np.max(time_ps[selected_mask]))
+
+        for i, (key, ylabel) in enumerate(panels):
+            y = data[key]
+            xd, yd = decimate_xy(time_ps, y, raw_decimate)
+            ax[i].scatter(xd, yd, s=raw_size, alpha=raw_alpha, color="0.55", linewidths=0)
+            xb, yb = binned_mean_curve(time_ps, y, plot_bin_ps)
+            ax[i].plot(xb, yb, linewidth=2.0, label=label if i == 0 else None)
+            ax[i].axvspan(sel_time_min, sel_time_max, alpha=0.08)
+            ax[i].set_ylabel(ylabel)
+
+    ax[-1].set_xlabel("Production time from start of each log (ps)")
+    ax[0].legend(ncol=3, fontsize=8, frameon=False)
+    fig.suptitle("All production NPT trajectories with selected analysis windows")
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=180)
+    plt.close(fig)
+
+
+
+def plot_all_temperature_diagnostics_mixed_dt(outpath: Path,
+                                              records: list[dict],
+                                              plot_bin_ps: Optional[float],
+                                              raw_alpha: float = 0.10,
+                                              raw_size: float = 4.0,
+                                              raw_decimate: int = 1) -> None:
+    if not records:
+        return
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    panels = [
+        ("temp", "T (K)"),
+        ("press_GPa", "P (GPa)"),
+        ("vol_A3", "V (Å$^3$)"),
+        ("pe", "PE (eV)"),
+        ("enthalpy_eV", "H (eV)"),
+    ]
+    fig, ax = plt.subplots(len(panels), 1, figsize=(9.5, 12.5), sharex=True)
+    for rec in records:
+        data = rec["data"]
+        selected_mask = rec["selected_mask"]
+        label = rec["label"]
+        dt = float(rec.get("timestep_ps", 0.0001))
+        time_ps = (data["step"] - data["step"][0]) * dt
+        sel_time_min = float(np.min(time_ps[selected_mask]))
+        sel_time_max = float(np.max(time_ps[selected_mask]))
+        for i, (key, ylabel) in enumerate(panels):
+            y = data[key]
+            xd, yd = decimate_xy(time_ps, y, raw_decimate)
+            ax[i].scatter(xd, yd, s=raw_size, alpha=raw_alpha, color="0.55", linewidths=0)
+            xb, yb = binned_mean_curve(time_ps, y, plot_bin_ps)
+            ax[i].plot(xb, yb, linewidth=2.0, label=label if i == 0 else None)
+            ax[i].axvspan(sel_time_min, sel_time_max, alpha=0.08)
+            ax[i].set_ylabel(ylabel)
+    ax[-1].set_xlabel("Production time from start of each log (ps)")
+    ax[0].legend(ncol=3, fontsize=8, frameon=False)
+    fig.suptitle("All production NPT trajectories with selected analysis windows")
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=180)
+    plt.close(fig)
+
+def plot_xy(outpath: Path, x, y, xlabel, ylabel, title=None, y2=None, y2label=None) -> None:
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.scatter(x, y, color="0.45", alpha=0.6)
+    ax.plot(x, y, linewidth=2.2)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    if title:
+        ax.set_title(title)
+    if y2 is not None:
+        ax2 = ax.twinx()
+        ax2.plot(x, y2, linewidth=2.0, linestyle="--")
+        ax2.set_ylabel(y2label or "secondary")
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=180)
+    plt.close(fig)
+
+
+# -----------------------------
+# stage/log discovery
+# -----------------------------
+
+def is_production_stage(stage: dict) -> bool:
+    return stage.get("production_run", False) or stage.get("name", "").startswith("npt_prod")
+
+
+def find_stage_log(root: Path, stage: dict) -> Path:
+    name = stage["name"]
+    chunk_name = stage.get("chunk_name", "chunk_production")
+    chunk_dir = root / "stages" / name / chunk_name
+
+    expected = chunk_dir / f"log.in.{name}_production"
+    if expected.exists():
+        return expected
+
+    candidates = sorted(chunk_dir.glob("log.in.*"))
+    if candidates:
+        return candidates[-1]
+
+    candidates = sorted(chunk_dir.glob("log.*"))
+    if candidates:
+        return candidates[-1]
+
+    raise FileNotFoundError(f"No LAMMPS log found for {name} in {chunk_dir}")
+
+
+# -----------------------------
+# per-T processing
+# -----------------------------
+
+
+def collect_config_paths(configs: list[str] | None, config_dir: str | None, config_glob: str) -> list[Path]:
+    paths: list[Path] = []
+    if configs:
+        for c in configs:
+            paths.append(Path(c).resolve())
+    if config_dir:
+        paths.extend(sorted(Path(config_dir).resolve().glob(config_glob)))
+    # de-duplicate
+    out=[]; seen=set()
+    for x in paths:
+        if not x.exists():
+            raise FileNotFoundError(f"Config not found: {x}")
+        if x not in seen:
+            out.append(x); seen.add(x)
+    if not out:
+        raise RuntimeError("No config files provided. Use --config and/or --config-dir.")
+    return out
+
+
+def discover_production_records(config_paths: list[Path], duplicate_policy: str = "highest_config_order") -> list[dict]:
+    """Discover production-stage logs across multiple configs."""
+    records=[]
+    for ci, config_path in enumerate(config_paths):
+        cfg=load_json(config_path)
+        root=config_path.resolve().parent
+        for stage in cfg.get("stages", []):
+            if not is_production_stage(stage):
+                continue
+            name=stage["name"]
+            T=stage.get("temperature", infer_temperature_from_name(name))
+            if T is None:
+                print(f"WARNING: could not infer temperature for {name} in {config_path}; skipping")
+                continue
+            T=float(T)
+            try:
+                log_path=find_stage_log(root, stage)
+            except FileNotFoundError as exc:
+                print(f"WARNING: {exc}; skipping")
+                continue
+            records.append({
+                "temperature": T,
+                "stage": stage,
+                "stage_name": name,
+                "config_path": config_path,
+                "config_root": root,
+                "config_index": ci,
+                "log_path": log_path,
+                "timestep_ps": float(cfg.get("timestep", 0.0001)),
+            })
+    if not records:
+        raise RuntimeError("No production logs found across provided config files.")
+
+    # Merge duplicate temperatures.
+    merged={}
+    for r in records:
+        T=r["temperature"]
+        if T in merged:
+            if duplicate_policy == "error":
+                raise RuntimeError(f"Duplicate T={T} K:\n  {merged[T]['log_path']}\n  {r['log_path']}")
+            if duplicate_policy == "first":
+                continue
+            # highest_config_order: later configs override earlier configs.
+            old=merged[T]
+            if r["config_index"] >= old["config_index"]:
+                print(f"WARNING: duplicate T={T} K; keeping later config record:\n  old: {old['log_path']}\n  new: {r['log_path']}")
+                merged[T]=r
+        else:
+            merged[T]=r
+    return [merged[T] for T in sorted(merged)]
+
+
+def filter_records_by_T(records: list[dict], T_min: Optional[float], T_max: Optional[float]) -> list[dict]:
+    T_all=np.array([r["temperature"] for r in records], dtype=float)
+    if T_max is None:
+        T_high=float(np.max(T_all))
+    else:
+        below=T_all[T_all <= T_max]
+        if len(below):
+            T_high=float(np.max(below))
+        else:
+            T_high=float(T_all[np.argmin(np.abs(T_all - T_max))])
+    T_low=float(T_min) if T_min is not None else float(np.min(T_all))
+    out=[r for r in records if r["temperature"] >= T_low - 1e-9 and r["temperature"] <= T_high + 1e-9]
+    if not out:
+        raise RuntimeError(f"No production stages remain after filtering T_min={T_min}, T_max={T_max}")
+    print(f"Temperature-stage filter: requested min={T_min}, requested max={T_max}; processing {out[0]['temperature']}–{out[-1]['temperature']} K ({len(out)} stages).", flush=True)
+    return out
+
+
+def process_records(records: list[dict],
+                    outdir: Path,
+                    natoms: int,
+                    atoms_per_formula_unit: int,
+                    min_window_ps: float,
+                    window_ps: Optional[float],
+                    window_stride_ps: float,
+                    discard_initial_ps: float,
+                    plot_bin_ps: Optional[float],
+                    nblocks: int,
+                    timestep_override_ps: Optional[float] = None,
+                    skip_per_T_plots: bool = False,
+                    skip_combined_MD_plot: bool = False,
+                    skip_selected_timeseries: bool = False,
+                    raw_decimate: int = 1) -> list[dict]:
+    summaries=[]
+    diagnostic_records=[]
+
+    for rec in records:
+        stage=rec["stage"]
+        name=rec["stage_name"]
+        T=float(rec["temperature"])
+        log_path=rec["log_path"]
+        timestep_ps = float(timestep_override_ps) if timestep_override_ps is not None else float(rec.get("timestep_ps", 0.0001))
+
+        print(f"Processing {name}: T={T} K, config={rec['config_path'].name}, log={log_path}")
+
+        stage_out = outdir / name
+        stage_out.mkdir(parents=True, exist_ok=True)
+
+        data = parse_lammps_thermo(log_path)
+        data = add_derived_series(data, natoms, atoms_per_formula_unit)
+
+        sel_mask, sel_metrics, window_table = auto_select_window(
+            data=data,
+            target_T=T,
+            timestep_ps=timestep_ps,
+            min_window_ps=min_window_ps,
+            window_ps=window_ps,
+            stride_ps=window_stride_ps,
+            discard_initial_ps=discard_initial_ps,
+        )
+
+        summary = summarize_selected_window(
+            data=data,
+            mask=sel_mask,
+            target_T=T,
+            timestep_ps=timestep_ps,
+            natoms=natoms,
+            atoms_per_formula_unit=atoms_per_formula_unit,
+            nblocks=nblocks,
+        )
+
+        summary.update({
+            "stage_name": name,
+            "config_file": str(rec["config_path"].resolve()),
+            "log_file": str(log_path.resolve()),
+            "timestep_ps": timestep_ps,
+            "selection_score": sel_metrics["score"],
+            "selection_metrics": sel_metrics,
+        })
+
+        dump_json(stage_out / "thermo_summary.json", summary)
+        dump_json(stage_out / "window_candidates.json", window_table)
+
+        if not skip_selected_timeseries:
+            write_selected_timeseries(stage_out / "selected_timeseries.csv", data, sel_mask, timestep_ps)
+
+        if not skip_per_T_plots:
+            plot_raw_binned_with_window(
+                outpath=stage_out / "total_time_with_selected_window.png",
+                data=data,
+                selected_mask=sel_mask,
+                timestep_ps=timestep_ps,
+                plot_bin_ps=plot_bin_ps,
+                title=f"{name}: auto-selected window {summary['time_ps']:.2f} ps",
+                raw_decimate=raw_decimate,
+            )
+
+        summaries.append(summary)
+        diagnostic_records.append({
+            "label": f"{int(T) if float(T).is_integer() else T} K",
+            "data": data,
+            "selected_mask": sel_mask,
+            "timestep_ps": timestep_ps,
+        })
+
+    summaries.sort(key=lambda d: d["target_T_K"])
+
+    if not skip_combined_MD_plot:
+        # If mixed timesteps, combined plot uses individual timestep per record.
+        # The original plotting function assumes a common timestep. Use first one if all identical.
+        unique_dt=sorted(set(round(r.get("timestep_ps", records[0].get("timestep_ps", 0.0001)), 12) for r in records))
+        if len(unique_dt) == 1:
+            plot_all_temperature_diagnostics(
+                outpath=outdir / "all_T_MD_diagnostics_with_selected_windows.png",
+                records=diagnostic_records,
+                timestep_ps=unique_dt[0],
+                plot_bin_ps=plot_bin_ps,
+                raw_decimate=raw_decimate,
+            )
+        else:
+            plot_all_temperature_diagnostics_mixed_dt(
+                outpath=outdir / "all_T_MD_diagnostics_with_selected_windows.png",
+                records=diagnostic_records,
+                plot_bin_ps=plot_bin_ps,
+            )
+
+    return summaries
+
+
+def process_from_config(config_path: Path,
+                        outdir: Path,
+                        natoms: int,
+                        atoms_per_formula_unit: int,
+                        min_window_ps: float,
+                        window_ps: Optional[float],
+                        window_stride_ps: float,
+                        discard_initial_ps: float,
+                        plot_bin_ps: Optional[float],
+                        nblocks: int) -> list[dict]:
+    records = discover_production_records([config_path])
+    return process_records(records, outdir, natoms, atoms_per_formula_unit, min_window_ps, window_ps, window_stride_ps, discard_initial_ps, plot_bin_ps, nblocks)
+
+def process_from_manual(manual_root: Path) -> list[dict]:
+    files = sorted(manual_root.glob("**/thermo_summary.json"))
+    if not files:
+        raise RuntimeError(f"No thermo_summary.json files found under {manual_root}")
+
+    summaries = []
+    for f in files:
+        d = load_json(f)
+        if "target_T_K" not in d:
+            T = d.get("target_temperature_K", infer_temperature_from_name(f))
+            d["target_T_K"] = T
+        d["manual_summary_file"] = str(f.resolve())
+        summaries.append(d)
+
+    summaries.sort(key=lambda d: d["target_T_K"])
+    return summaries
+
+
+# -----------------------------
+# combined thermodynamics
+# -----------------------------
+
+def polynomial_fit_and_derivative(T: np.ndarray, y: np.ndarray, degree: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    degree = min(degree, max(len(T) - 1, 1))
+    coeff = np.polyfit(T, y, degree)
+    p = np.poly1d(coeff)
+    dp = np.polyder(p)
+    yfit = p(T)
+    dydT = dp(T)
+    return coeff, yfit, dydT
+
+
+
+def insert_anchor_point_for_cp_fit(T: np.ndarray,
+                                   Cp: np.ndarray,
+                                   T_anchor: Optional[float],
+                                   Cp_anchor: Optional[float],
+                                   replace_tol_K: float = 1.0e-6) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Add or replace a Cp(T_anchor) point for fitting/integration.
+
+    This is useful when Cp(300 K) comes from phonopy/QHA or literature,
+    while high-T Cp comes from MLIP-MD dH/dT.
+    """
+    if T_anchor is None or Cp_anchor is None:
+        return T, Cp
+
+    T_anchor = float(T_anchor)
+    Cp_anchor = float(Cp_anchor)
+
+    T_new = np.array(T, dtype=float).copy()
+    Cp_new = np.array(Cp, dtype=float).copy()
+
+    idx = np.where(np.abs(T_new - T_anchor) <= replace_tol_K)[0]
+    if len(idx) > 0:
+        Cp_new[idx[0]] = Cp_anchor
+    else:
+        T_new = np.append(T_new, T_anchor)
+        Cp_new = np.append(Cp_new, Cp_anchor)
+
+    order = np.argsort(T_new)
+    return T_new[order], Cp_new[order]
+
+
+def integrate_from_reference(T_grid: np.ndarray,
+                             Cp_grid: np.ndarray,
+                             T_ref: float,
+                             S_ref_J_mol_K: Optional[float] = None,
+                             H_ref_J_mol: Optional[float] = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Integrate Cp from a reference temperature.
+
+    Returns H(T), S(T), G(T), where:
+      S(T_ref) = S_ref if provided, otherwise 0
+      H(T_ref) = H_ref if provided, otherwise 0
+
+    The integration is done on T_grid. This is intended for a splice workflow:
+      0--T_ref: phonopy/QHA/literature
+      T_ref--high T: MLIP-MD Cp
+    """
+    T_grid = np.asarray(T_grid, dtype=float)
+    Cp_grid = np.asarray(Cp_grid, dtype=float)
+
+    S0 = 0.0 if S_ref_J_mol_K is None else float(S_ref_J_mol_K)
+    H0 = 0.0 if H_ref_J_mol is None else float(H_ref_J_mol)
+    T_ref = float(T_ref)
+
+    H_out = np.full_like(T_grid, np.nan, dtype=float)
+    S_out = np.full_like(T_grid, np.nan, dtype=float)
+
+    # Need an integration grid that includes T_ref exactly.
+    grid = np.array(T_grid, dtype=float)
+    if not np.any(np.isclose(grid, T_ref, rtol=0.0, atol=1.0e-12)):
+        grid = np.sort(np.append(grid, T_ref))
+
+    Cp_interp = np.interp(grid, T_grid, Cp_grid)
+
+    ref_idx = int(np.argmin(np.abs(grid - T_ref)))
+
+    H_grid = np.full_like(grid, np.nan, dtype=float)
+    S_grid = np.full_like(grid, np.nan, dtype=float)
+    H_grid[ref_idx] = H0
+    S_grid[ref_idx] = S0
+
+    # Integrate upward from T_ref.
+    for i in range(ref_idx + 1, len(grid)):
+        dT = grid[i] - grid[i - 1]
+        H_grid[i] = H_grid[i - 1] + 0.5 * (Cp_interp[i] + Cp_interp[i - 1]) * dT
+        cpt_i = Cp_interp[i] / grid[i] if grid[i] > 1.0e-12 else 0.0
+        cpt_j = Cp_interp[i - 1] / grid[i - 1] if grid[i - 1] > 1.0e-12 else 0.0
+        S_grid[i] = S_grid[i - 1] + 0.5 * (cpt_i + cpt_j) * dT
+
+    # Integrate downward from T_ref, if requested grid goes below T_ref.
+    for i in range(ref_idx - 1, -1, -1):
+        dT = grid[i + 1] - grid[i]
+        H_grid[i] = H_grid[i + 1] - 0.5 * (Cp_interp[i + 1] + Cp_interp[i]) * dT
+        cpt_i = Cp_interp[i] / grid[i] if grid[i] > 1.0e-12 else 0.0
+        cpt_j = Cp_interp[i + 1] / grid[i + 1] if grid[i + 1] > 1.0e-12 else 0.0
+        S_grid[i] = S_grid[i + 1] - 0.5 * (cpt_i + cpt_j) * dT
+
+    H_out = np.interp(T_grid, grid, H_grid)
+    S_out = np.interp(T_grid, grid, S_grid)
+    G_out = H_out - T_grid * S_out
+    return H_out, S_out, G_out
+
+
+def build_combined_thermo(summaries: list[dict],
+                          outdir: Path,
+                          fit_degree: int = 3,
+                          cp_source: str = "fluct",
+                          plot_T_min: Optional[float] = None,
+                          plot_T_max: Optional[float] = None,
+                          plot_T_step: float = 10.0,
+                          anchor_zero: bool = False,
+                          n_bootstrap: int = 300,
+                          bootstrap_seed: int = 12345,
+                          thermo_anchor_T: Optional[float] = None,
+                          thermo_anchor_S_J_mol_K: Optional[float] = None,
+                          thermo_anchor_Cp_J_mol_K: Optional[float] = None,
+                          thermo_anchor_H_J_mol: Optional[float] = None,
+                          use_anchor_for_integration: bool = False,
+                          use_anchor_Cp_in_fit: bool = False) -> list[dict]:
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    T_data_all = np.array([s["target_T_K"] for s in summaries], dtype=float)
+
+    # Temperature range selection.
+    # If plot_T_max is requested, use the closest available completed production T
+    # at or below the requested high-T limit. If none is below, use the nearest available.
+    Tmax_available = float(np.max(T_data_all))
+    Tmin_available = float(np.min(T_data_all))
+
+    if plot_T_max is None:
+        T_high_dataset = Tmax_available
+    else:
+        below = T_data_all[T_data_all <= plot_T_max]
+        if len(below) > 0:
+            T_high_dataset = float(np.max(below))
+        else:
+            T_high_dataset = float(T_data_all[np.argmin(np.abs(T_data_all - plot_T_max))])
+
+    # For fitting, only use data up to the selected highest completed T.
+    use_mask = T_data_all <= T_high_dataset + 1.0e-9
+    summaries = [s for s, keep in zip(summaries, use_mask) if keep]
+
+    # Number of UO2 formula units in the MD simulation cell.
+    # For 2x2x2 fluorite UO2: 96 atoms / 3 atoms per UO2 = 32 formula units.
+    # This must be defined before any eV/cell -> kJ/mol-UO2 conversion.
+    nfu = float(summaries[0].get("n_formula_units", 32.0))
+
+    T = np.array([s["target_T_K"] for s in summaries], dtype=float)
+    V = np.array([s["V_mean_A3"] for s in summaries], dtype=float)
+    a = np.array([s.get("a_mean_A", s.get("a_proxy_mean_A")) for s in summaries], dtype=float)
+    rho = np.array([s["density_mean_g_cm3"] for s in summaries], dtype=float)
+    H_eV = np.array([s["H_mean_eV_cell"] for s in summaries], dtype=float)
+    H_kJ_mol = H_eV * EV_CELL_TO_KJ_PER_MOL_UO2 / summaries[0].get("n_formula_units", 32.0)
+    Cp_fluct = np.array([s["Cp_fluct_J_per_mol_UO2_K"] for s in summaries], dtype=float)
+    KT = np.array([s["KT_GPa_from_V_fluct"] for s in summaries], dtype=float)
+
+    V_sem = np.array([s.get("V_sem_A3", np.nan) for s in summaries], dtype=float)
+    a_sem = np.array([s.get("a_sem_A", np.nan) for s in summaries], dtype=float)
+    H_sem = np.array([s.get("H_sem_eV_cell", np.nan) for s in summaries], dtype=float)
+    Cp_sem = np.array([s.get("Cp_fluct_sem_J_per_mol_UO2_K", np.nan) for s in summaries], dtype=float)
+    rho_sem = np.array([s.get("density_sem_g_cm3", np.nan) for s in summaries], dtype=float)
+
+    # Plot/evaluation grid. This can start from 0 K even if no MD data exist at 0 K.
+    if plot_T_min is None:
+        T_grid_min = 0.0 if anchor_zero else float(np.min(T))
+    else:
+        T_grid_min = float(plot_T_min)
+
+    T_grid_max = T_high_dataset
+    if plot_T_step <= 0:
+        raise ValueError("plot_T_step must be positive.")
+    T_grid = np.arange(T_grid_min, T_grid_max + 0.5 * plot_T_step, plot_T_step)
+    if len(T_grid) == 0 or T_grid[-1] < T_grid_max:
+        T_grid = np.append(T_grid, T_grid_max)
+
+    # Fit V and a using available MD data; evaluate both at MD T and on user grid.
+    deg_fit = min(fit_degree, max(len(T) - 1, 1))
+    coeff_V = np.polyfit(T, V, deg_fit)
+    pV = np.poly1d(coeff_V)
+    dpV = np.polyder(pV)
+    V_fit = pV(T)
+    dVdT = dpV(T)
+    V_grid = pV(T_grid)
+    dVdT_grid = dpV(T_grid)
+
+    coeff_a = np.polyfit(T, a, deg_fit)
+    pa = np.poly1d(coeff_a)
+    dpa = np.polyder(pa)
+    a_fit = pa(T)
+    dadT = dpa(T)
+    a_grid = pa(T_grid)
+    dadT_grid = dpa(T_grid)
+
+    alpha_V = dVdT / V_fit
+    alpha_L = dadT / a_fit
+    alpha_V_grid = dVdT_grid / V_grid
+    alpha_L_grid = dadT_grid / a_grid
+
+    # H derivative gives Cp estimate in J/mol-UO2/K.
+    coeff_H = np.polyfit(T, H_eV, deg_fit)
+    pH = np.poly1d(coeff_H)
+    dpH = np.polyder(pH)
+    H_fit_eV = pH(T)
+    H_grid_eV = pH(T_grid)
+    H_abs_kJ_per_mol_UO2_grid = H_grid_eV * EV_CELL_TO_KJ_PER_MOL_UO2 / nfu
+    dHdT_eV_per_K_cell = dpH(T)
+    dHdT_grid_eV_per_K_cell = dpH(T_grid)
+
+    nfu = float(nfu)
+    Cp_from_H = dHdT_eV_per_K_cell * EV_TO_J * NA / nfu
+    Cp_from_H_grid = dHdT_grid_eV_per_K_cell * EV_TO_J * NA / nfu
+
+    if cp_source == "dH":
+        Cp_for_integral_data = Cp_from_H
+    else:
+        Cp_for_integral_data = Cp_fluct
+
+    # Optional external Cp anchor, e.g. Cp(300 K) from phonopy/QHA or literature.
+    # This constrains the Cp fit/integration but does not change the MD raw summaries.
+    T_for_Cp_fit = T
+    Cp_for_Cp_fit = Cp_for_integral_data
+    if use_anchor_Cp_in_fit and thermo_anchor_T is not None and thermo_anchor_Cp_J_mol_K is not None:
+        T_for_Cp_fit, Cp_for_Cp_fit = insert_anchor_point_for_cp_fit(
+            T, Cp_for_integral_data, thermo_anchor_T, thermo_anchor_Cp_J_mol_K
+        )
+
+    # Smooth Cp for integration using polynomial fit if enough finite points.
+    finite = np.isfinite(Cp_for_Cp_fit)
+    if finite.sum() >= 3:
+        cp_deg = min(3, finite.sum() - 1)
+        coeff_Cp = np.polyfit(T_for_Cp_fit[finite], Cp_for_Cp_fit[finite], cp_deg)
+        pCp = np.poly1d(coeff_Cp)
+        Cp_smooth = pCp(T)
+        Cp_grid = pCp(T_grid)
+    else:
+        Cp_smooth = Cp_for_integral_data
+        Cp_grid = np.interp(T_grid, T_for_Cp_fit, Cp_for_Cp_fit)
+
+    # Optional physical anchor at 0 K for integrals: Cp(0)=0, S(0)=0, H_rel(0)=0, G_rel(0)=0.
+    # This does not add a fake MD data point; it only anchors the integration grid.
+    if anchor_zero and T_grid[0] > 0:
+        T_grid = np.insert(T_grid, 0, 0.0)
+        V_grid = np.insert(V_grid, 0, pV(0.0))
+        a_grid = np.insert(a_grid, 0, pa(0.0))
+        alpha_V_grid = np.insert(alpha_V_grid, 0, dpV(0.0) / pV(0.0))
+        alpha_L_grid = np.insert(alpha_L_grid, 0, dpa(0.0) / pa(0.0))
+        H_grid_eV = np.insert(H_grid_eV, 0, pH(0.0))
+        Cp_from_H_grid = np.insert(Cp_from_H_grid, 0, dpH(0.0) * EV_TO_J * NA / nfu)
+        Cp_grid = np.insert(Cp_grid, 0, 0.0)
+    elif anchor_zero and abs(T_grid[0]) < 1e-12:
+        Cp_grid[0] = 0.0
+
+    # Avoid division by zero in Cp/T integral. At T=0, use integrand 0 for the endpoint.
+    Cp_over_T = np.zeros_like(Cp_grid, dtype=float)
+    nonzero_T = T_grid > 1.0e-12
+    Cp_over_T[nonzero_T] = Cp_grid[nonzero_T] / T_grid[nonzero_T]
+
+    # Relative/anchored thermodynamic integrations.
+    # Default: integrate from first grid point, usually 0 K if --anchor-zero is used.
+    # Anchor mode: use S(T_anchor), H(T_anchor), and optionally Cp(T_anchor)
+    # from phonopy/QHA or literature, then integrate MLIP-MD Cp away from T_anchor.
+    if use_anchor_for_integration and thermo_anchor_T is not None:
+        H_rel_J_mol_grid, S_rel_J_mol_K_grid, G_rel_J_mol_grid = integrate_from_reference(
+            T_grid=T_grid,
+            Cp_grid=Cp_grid,
+            T_ref=thermo_anchor_T,
+            S_ref_J_mol_K=thermo_anchor_S_J_mol_K,
+            H_ref_J_mol=thermo_anchor_H_J_mol,
+        )
+    else:
+        H_rel_J_mol_grid = trapz_cumulative(T_grid, Cp_grid)
+        S_rel_J_mol_K_grid = trapz_cumulative(T_grid, Cp_over_T)
+        G_rel_J_mol_grid = H_rel_J_mol_grid - T_grid * S_rel_J_mol_K_grid
+
+    # Interpolate grid relative functions back to MD T for the summary table.
+    H_rel_J_mol = np.interp(T, T_grid, H_rel_J_mol_grid)
+    S_rel_J_mol_K = np.interp(T, T_grid, S_rel_J_mol_K_grid)
+    G_rel_J_mol = np.interp(T, T_grid, G_rel_J_mol_grid)
+    Cp_grid_at_T = np.interp(T, T_grid, Cp_grid)
+    Cp_from_H_at_T = np.interp(T, T_grid, Cp_from_H_grid)
+
+    uq_bands = {}
+    if n_bootstrap and n_bootstrap > 0 and len(T) >= 3:
+        uq_bands = bootstrap_temperature_functions(
+            T=T, V=V, V_sem=V_sem, a=a, a_sem=a_sem,
+            H=H_eV, H_sem=H_sem, Cp=Cp_fluct, Cp_sem=Cp_sem,
+            T_grid=T_grid, fit_degree=fit_degree, cp_source=cp_source,
+            nfu=nfu, anchor_zero=anchor_zero,
+            n_boot=n_bootstrap, seed=bootstrap_seed,
+        )
+
+    combined = []
+    for i, s in enumerate(summaries):
+        row = dict(s)
+        row.update({
+            "V_fit_A3": float(V_fit[i]),
+            "a_fit_A": float(a_fit[i]),
+            "alpha_V_1_per_K": float(alpha_V[i]),
+            "alpha_L_1_per_K": float(alpha_L[i]),
+            "alpha_V_micro_per_K": float(alpha_V[i] * 1e6),
+            "alpha_L_micro_per_K": float(alpha_L[i] * 1e6),
+            "H_fit_eV_cell": float(H_fit_eV[i]),
+            "H_abs_kJ_per_mol_UO2": float(H_fit_eV[i] * EV_CELL_TO_KJ_PER_MOL_UO2 / nfu),
+            "Cp_from_dH_J_per_mol_UO2_K": float(Cp_from_H_at_T[i]),
+            "Cp_used_for_integration_J_per_mol_UO2_K": float(Cp_grid_at_T[i]),
+            "S_rel_J_per_mol_UO2_K": float(S_rel_J_mol_K[i]),
+            "H_rel_J_per_mol_UO2": float(H_rel_J_mol[i]),
+            "G_rel_J_per_mol_UO2": float(G_rel_J_mol[i]),
+        })
+        combined.append(row)
+
+    # write combined outputs
+    keys = list(combined[0].keys())
+    with (outdir / "all_T_summary.csv").open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=keys, extrasaction="ignore")
+        w.writeheader()
+        for row in combined:
+            w.writerow(row)
+    dump_json(outdir / "all_T_summary.json", combined)
+
+    grid_rows = []
+    # Density on grid from V_grid.
+    mass_g = nfu * MOLAR_MASS_UO2_G_MOL / NA
+    rho_grid = mass_g / (V_grid * 1.0e-24)
+    for i in range(len(T_grid)):
+        grid_rows.append({
+            "T_K": float(T_grid[i]),
+            "V_fit_A3": float(V_grid[i]),
+            "a_fit_A": float(a_grid[i]),
+            "density_fit_g_cm3": float(rho_grid[i]),
+            "alpha_V_1_per_K": float(alpha_V_grid[i]),
+            "alpha_L_1_per_K": float(alpha_L_grid[i]),
+            "alpha_V_micro_per_K": float(alpha_V_grid[i] * 1e6),
+            "alpha_L_micro_per_K": float(alpha_L_grid[i] * 1e6),
+            "H_fit_eV_cell": float(H_grid_eV[i]),
+            "H_abs_kJ_per_mol_UO2": float(H_abs_kJ_per_mol_UO2_grid[i]),
+            "Cp_from_dH_J_per_mol_UO2_K": float(Cp_from_H_grid[i]),
+            "Cp_used_for_integration_J_per_mol_UO2_K": float(Cp_grid[i]),
+            "H_rel_J_per_mol_UO2": float(H_rel_J_mol_grid[i]),
+            "S_rel_J_per_mol_UO2_K": float(S_rel_J_mol_K_grid[i]),
+            "G_rel_J_per_mol_UO2": float(G_rel_J_mol_grid[i]),
+        })
+        for key, band in uq_bands.items():
+            lo, hi = band
+            grid_rows[-1][f"{key}_p16"] = float(lo[i])
+            grid_rows[-1][f"{key}_p84"] = float(hi[i])
+
+    grid_keys = list(grid_rows[0].keys())
+    with (outdir / "thermo_functions_grid.csv").open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=grid_keys)
+        w.writeheader()
+        for row in grid_rows:
+            w.writerow(row)
+    dump_json(outdir / "thermo_functions_grid.json", grid_rows)
+
+    range_meta = {
+        "available_T_min_K": Tmin_available,
+        "available_T_max_K": Tmax_available,
+        "requested_plot_T_min_K": plot_T_min,
+        "requested_plot_T_max_K": plot_T_max,
+        "used_highest_dataset_T_K": T_high_dataset,
+        "plot_T_grid_min_K": float(T_grid[0]),
+        "plot_T_grid_max_K": float(T_grid[-1]),
+        "plot_T_step_K": plot_T_step,
+        "anchor_zero": anchor_zero,
+        "cp_source": cp_source,
+        "fit_degree": deg_fit,
+        "thermo_anchor_T": thermo_anchor_T,
+        "thermo_anchor_S_J_mol_K": thermo_anchor_S_J_mol_K,
+        "thermo_anchor_Cp_J_mol_K": thermo_anchor_Cp_J_mol_K,
+        "thermo_anchor_H_J_mol": thermo_anchor_H_J_mol,
+        "use_anchor_for_integration": use_anchor_for_integration,
+        "use_anchor_Cp_in_fit": use_anchor_Cp_in_fit,
+    }
+    dump_json(outdir / "temperature_range_metadata.json", range_meta)
+
+    # plots
+    plot_xy(outdir / "V_vs_T.png", T, V, "T (K)", "V (Å$^3$)", "Volume vs T", y2=V_fit, y2label="V fit")
+    plot_xy(outdir / "a_vs_T.png", T, a, "T (K)", "a proxy (Å)", "Lattice proxy vs T", y2=a_fit, y2label="a fit")
+    plot_xy(outdir / "density_vs_T.png", T, rho, "T (K)", "density (g/cm$^3$)", "Density vs T")
+    plot_xy(outdir / "H_vs_T.png", T, H_eV, "T (K)", "H (eV/cell)", "Enthalpy vs T", y2=H_fit_eV, y2label="H fit")
+    plot_xy(outdir / "H_abs_kJ_per_mol_UO2_vs_T.png", T, H_kJ_mol, "T (K)", "H (kJ/mol-UO$_2$)", "Absolute MD enthalpy scale vs T", y2=H_fit_eV * EV_CELL_TO_KJ_PER_MOL_UO2 / nfu, y2label="H fit")
+    plot_xy(outdir / "Cp_vs_T.png", T, Cp_fluct, "T (K)", "Cp (J/mol-UO$_2$/K)", "Cp vs T", y2=Cp_from_H, y2label="Cp from dH/dT")
+    plot_xy(outdir / "KT_vs_T.png", T, KT, "T (K)", "K$_T$ (GPa)", "Bulk modulus from V fluctuations")
+    plot_xy(outdir / "CTE_vs_T.png", T, alpha_V * 1e6, "T (K)", r"$\alpha_V$ ($10^{-6}$ K$^{-1}$)", "Volumetric CTE", y2=alpha_L * 1e6, y2label=r"$\alpha_L$ ($10^{-6}$ K$^{-1}$)")
+    plot_xy(outdir / "S_rel_vs_T.png", T, S_rel_J_mol_K, "T (K)", "S-S$_0$ (J/mol/K)", "Relative entropy")
+    plot_xy(outdir / "G_rel_vs_T.png", T, G_rel_J_mol / 1000.0, "T (K)", "G-G$_0$ (kJ/mol)", "Relative Gibbs energy")
+
+    # Smooth/grid function plots over user-requested range.
+    plot_xy(outdir / "V_function_grid.png", T_grid, V_grid, "T (K)", "V fit (Å$^3$)", "Volume function")
+    plot_xy(outdir / "a_function_grid.png", T_grid, a_grid, "T (K)", "a fit (Å)", "Lattice function")
+    plot_xy(outdir / "CTE_function_grid.png", T_grid, alpha_V_grid * 1e6, "T (K)", r"$\alpha_V$ ($10^{-6}$ K$^{-1}$)", "CTE function", y2=alpha_L_grid * 1e6, y2label=r"$\alpha_L$ ($10^{-6}$ K$^{-1}$)")
+    plot_xy(outdir / "Cp_function_grid.png", T_grid, Cp_grid, "T (K)", "Cp used (J/mol-UO$_2$/K)", "Cp function")
+    plot_xy(outdir / "S_function_grid.png", T_grid, S_rel_J_mol_K_grid, "T (K)", "S-S$_0$ (J/mol/K)", "Relative entropy function")
+    plot_xy(outdir / "G_function_grid.png", T_grid, G_rel_J_mol_grid / 1000.0, "T (K)", "G-G$_0$ (kJ/mol)", "Relative Gibbs function")
+
+
+    # UQ-band plots. Bands are MD processing/statistical bands from block SEM + bootstrap.
+    plot_function_with_band(
+        outdir / "V_function_grid_UQ.png", T, V, V_sem, T_grid, V_grid,
+        uq_bands.get("V_grid"), "T (K)", "V (Å$^3$)", "Volume function with MD UQ band"
+    )
+    plot_function_with_band(
+        outdir / "a_function_grid_UQ.png", T, a, a_sem, T_grid, a_grid,
+        uq_bands.get("a_grid"), "T (K)", "a (Å)", "Lattice function with MD UQ band"
+    )
+    plot_function_with_band(
+        outdir / "density_function_grid_UQ.png", T, rho, rho_sem, T_grid, rho_grid,
+        uq_bands.get("density_grid"), "T (K)", "density (g/cm$^3$)", "Density function with MD UQ band"
+    )
+    plot_function_with_band(
+        outdir / "H_function_grid_UQ.png", T, H_eV, H_sem, T_grid, H_grid_eV,
+        uq_bands.get("H_grid_eV"), "T (K)", "H (eV/cell)", "Enthalpy function with MD UQ band"
+    )
+    plot_function_with_band(
+        outdir / "H_abs_kJ_per_mol_UO2_function_grid_UQ.png",
+        T, H_kJ_mol, H_sem * EV_CELL_TO_KJ_PER_MOL_UO2 / nfu,
+        T_grid, H_abs_kJ_per_mol_UO2_grid,
+        (uq_bands["H_grid_eV"][0] * EV_CELL_TO_KJ_PER_MOL_UO2 / nfu, uq_bands["H_grid_eV"][1] * EV_CELL_TO_KJ_PER_MOL_UO2 / nfu) if "H_grid_eV" in uq_bands else None,
+        "T (K)", "H (kJ/mol-UO$_2$)", "Absolute MD enthalpy scale with MD UQ band"
+    )
+    # Cp plotting:
+    # If cp_source == "dH", the thermodynamic Cp function comes from dH/dT.
+    # Do NOT use the NPT fluctuation Cp points to set the y-axis in that case,
+    # because small-cell NPT fluctuation Cp can be orders of magnitude too large.
+    if cp_source == "dH":
+        plot_function_with_band(
+            outdir / "Cp_function_grid_UQ.png",
+            T,
+            Cp_from_H_at_T,
+            None,
+            T_grid,
+            Cp_grid,
+            uq_bands.get("Cp_grid"),
+            "T (K)",
+            "Cp from dH/dT (J/mol-UO$_2$/K)",
+            "Cp from dH/dT with MD UQ band",
+        )
+
+        # Keep the fluctuation estimator as a separate diagnostic only.
+        plot_function_with_band(
+            outdir / "Cp_fluctuation_diagnostic_UQ.png",
+            T,
+            Cp_fluct,
+            Cp_sem,
+            T_grid,
+            Cp_fluct if len(Cp_fluct) == len(T_grid) else np.interp(T_grid, T, Cp_fluct),
+            None,
+            "T (K)",
+            "NPT fluctuation Cp (J/mol-UO$_2$/K)",
+            "Diagnostic only: NPT fluctuation Cp",
+        )
+    else:
+        plot_function_with_band(
+            outdir / "Cp_function_grid_UQ.png", T, Cp_fluct, Cp_sem, T_grid, Cp_grid,
+            uq_bands.get("Cp_grid"), "T (K)", "Cp (J/mol-UO$_2$/K)", "Cp function with MD UQ band"
+        )
+    plot_function_with_band(
+        outdir / "CTE_alphaV_function_grid_UQ.png", T, alpha_V * 1e6, None, T_grid, alpha_V_grid * 1e6,
+        (uq_bands["alpha_V_grid"][0] * 1e6, uq_bands["alpha_V_grid"][1] * 1e6) if "alpha_V_grid" in uq_bands else None,
+        "T (K)", r"$\alpha_V$ ($10^{-6}$ K$^{-1}$)", "Volumetric CTE with MD UQ band"
+    )
+    plot_function_with_band(
+        outdir / "S_function_grid_UQ.png", T, S_rel_J_mol_K, None, T_grid, S_rel_J_mol_K_grid,
+        uq_bands.get("S_rel_J_mol_K_grid"), "T (K)", "S-S$_0$ (J/mol/K)", "Relative entropy with MD UQ band"
+    )
+    plot_function_with_band(
+        outdir / "G_function_grid_UQ.png", T, G_rel_J_mol / 1000.0, None, T_grid, G_rel_J_mol_grid / 1000.0,
+        (uq_bands["G_rel_J_mol_grid"][0] / 1000.0, uq_bands["G_rel_J_mol_grid"][1] / 1000.0) if "G_rel_J_mol_grid" in uq_bands else None,
+        "T (K)", "G-G$_0$ (kJ/mol)", "Relative Gibbs energy with MD UQ band"
+    )
+
+    dump_json(outdir / "uncertainty_metadata.json", {
+        "uncertainty_type": "MD processing/statistical uncertainty from selected-window block SEM plus parametric bootstrap",
+        "band_percentiles": [16, 84],
+        "n_bootstrap": n_bootstrap,
+        "bootstrap_seed": bootstrap_seed,
+        "not_included": [
+            "MLIP model-form uncertainty",
+            "DFT reference-data uncertainty",
+            "finite-size systematic error",
+            "thermostat/barostat systematic bias"
+        ]
+    })
+
+    return combined
+
+
+# -----------------------------
+# main
+# -----------------------------
+
+
+def main(argv: list[str] | None = None) -> None:
+    ap = argparse.ArgumentParser(prog="lammps-thermo-series")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--config", nargs="+", help="One or more production config JSON files")
+    src.add_argument("--manual-analysis-root", help="Root containing existing thermo_summary.json files")
+    ap.add_argument("--config-dir", default=None, help="Optional directory containing more config JSON files")
+    ap.add_argument("--config-glob", default="*.json", help="Glob pattern used with --config-dir")
+    ap.add_argument("--duplicate-policy", choices=["highest_config_order", "first", "error"], default="highest_config_order")
+    ap.add_argument("--timestep-ps", type=float, default=None, help="Override timestep for all configs; otherwise each config timestep is used")
+
+    ap.add_argument("--outdir", default="analysis/temperature_series_thermo")
+    ap.add_argument("--natoms", type=int, default=96)
+    ap.add_argument("--atoms-per-formula-unit", type=int, default=3)
+    ap.add_argument("--min-window-ps", type=float, default=20.0)
+    ap.add_argument("--window-ps", type=float, default=None, help="Auto-selection window length. Default=min-window-ps")
+    ap.add_argument("--window-stride-ps", type=float, default=2.0)
+    ap.add_argument("--discard-initial-ps", type=float, default=0.0, help="Ignore this early part before auto window search")
+    ap.add_argument("--plot-bin-ps", type=float, default=0.5)
+    ap.add_argument("--nblocks", type=int, default=5)
+    ap.add_argument("--fit-degree", type=int, default=3)
+    ap.add_argument("--cp-source", choices=["fluct", "dH"], default="fluct", help="Cp source for S/G integration")
+    ap.add_argument("--plot-T-min", type=float, default=None, help="Lowest T for fitted function grid. Can be 0 even without MD data at 0 K")
+    ap.add_argument("--plot-T-max", type=float, default=None, help="Requested high T. Script uses closest completed production T at/below this value")
+    ap.add_argument("--plot-T-step", type=float, default=10.0, help="Temperature grid step for fitted functions")
+    ap.add_argument("--anchor-zero", action="store_true", help="Anchor integration at T=0 with Cp(0)=S(0)=Hrel(0)=Grel(0)=0")
+    ap.add_argument("--n-bootstrap", type=int, default=300, help="Bootstrap samples for MD UQ bands. Use 0 to disable")
+    ap.add_argument("--bootstrap-seed", type=int, default=12345)
+
+    # Optional thermodynamic anchor for phonopy/QHA/literature splice.
+    ap.add_argument("--thermo-anchor-T", type=float, default=None,
+                    help="Reference temperature for external Cp/S/H anchor, e.g. 300")
+    ap.add_argument("--thermo-anchor-S", type=float, default=None,
+                    help="Entropy at anchor T in J/mol-UO2/K, e.g. literature or phonopy S(300 K)")
+    ap.add_argument("--thermo-anchor-Cp", type=float, default=None,
+                    help="Cp at anchor T in J/mol-UO2/K, e.g. phonopy/literature Cp(300 K)")
+    ap.add_argument("--thermo-anchor-H", type=float, default=None,
+                    help="Relative enthalpy at anchor T in J/mol-UO2. Optional; default 0 at anchor")
+    ap.add_argument("--use-anchor-for-integration", action="store_true",
+                    help="Use the external anchor for S/H/G integration instead of integrating from 0 K")
+    ap.add_argument("--use-anchor-Cp-in-fit", action="store_true",
+                    help="Add/replace Cp(T_anchor) in the Cp fit used for S/H/G integration")
+
+    # Speed controls for large log sets.
+    ap.add_argument("--skip-per-T-plots", action="store_true", help="Skip individual per-temperature raw/binned diagnostic PNGs")
+    ap.add_argument("--skip-combined-MD-plot", action="store_true", help="Skip the very large all-temperature raw MD diagnostic PNG")
+    ap.add_argument("--skip-selected-timeseries", action="store_true", help="Do not write selected_timeseries.csv for each temperature")
+    ap.add_argument("--raw-decimate", type=int, default=10, help="Plot only every Nth raw MD point in diagnostic scatter plots. Does not affect analysis. Use 1 for no decimation")
+    args = ap.parse_args(argv)
+
+    outdir = Path(args.outdir)
+
+    if args.config:
+        config_paths = collect_config_paths(args.config, args.config_dir, args.config_glob)
+        print("Config files:")
+        for p in config_paths:
+            print(f"  - {p}")
+        records_all = discover_production_records(config_paths, duplicate_policy=args.duplicate_policy)
+        records = filter_records_by_T(records_all, args.plot_T_min, args.plot_T_max)
+        outdir.mkdir(parents=True, exist_ok=True)
+        dump_json(outdir / "discovered_stage_records.json", [
+            {"temperature": r["temperature"], "stage_name": r["stage_name"], "config_path": str(r["config_path"]), "log_path": str(r["log_path"])}
+            for r in records_all
+        ])
+        dump_json(outdir / "used_stage_records.json", [
+            {"temperature": r["temperature"], "stage_name": r["stage_name"], "config_path": str(r["config_path"]), "log_path": str(r["log_path"])}
+            for r in records
+        ])
+        summaries = process_records(
+            records=records,
+            outdir=outdir / "per_T_analysis",
+            natoms=args.natoms,
+            atoms_per_formula_unit=args.atoms_per_formula_unit,
+            min_window_ps=args.min_window_ps,
+            window_ps=args.window_ps,
+            window_stride_ps=args.window_stride_ps,
+            discard_initial_ps=args.discard_initial_ps,
+            plot_bin_ps=args.plot_bin_ps,
+            nblocks=args.nblocks,
+            timestep_override_ps=args.timestep_ps,
+            skip_per_T_plots=args.skip_per_T_plots,
+            skip_combined_MD_plot=args.skip_combined_MD_plot,
+            skip_selected_timeseries=args.skip_selected_timeseries,
+            raw_decimate=args.raw_decimate,
+        )
+    else:
+        summaries = process_from_manual(Path(args.manual_analysis_root))
+
+    build_combined_thermo(
+        summaries=summaries,
+        outdir=outdir,
+        fit_degree=args.fit_degree,
+        cp_source=args.cp_source,
+        plot_T_min=args.plot_T_min,
+        plot_T_max=args.plot_T_max,
+        plot_T_step=args.plot_T_step,
+        anchor_zero=args.anchor_zero,
+        n_bootstrap=args.n_bootstrap,
+        bootstrap_seed=args.bootstrap_seed,
+        thermo_anchor_T=args.thermo_anchor_T,
+        thermo_anchor_S_J_mol_K=args.thermo_anchor_S,
+        thermo_anchor_Cp_J_mol_K=args.thermo_anchor_Cp,
+        thermo_anchor_H_J_mol=args.thermo_anchor_H,
+        use_anchor_for_integration=args.use_anchor_for_integration,
+        use_anchor_Cp_in_fit=args.use_anchor_Cp_in_fit,
+    )
+
+    print(f"Done. Outputs written to: {outdir.resolve()}")
+
+
+if __name__ == "__main__":
+    main()
