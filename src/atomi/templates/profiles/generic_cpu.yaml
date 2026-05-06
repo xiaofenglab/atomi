@@ -1,0 +1,9 @@
+account: CHANGE_ME
+partition: standard
+nodes: 1
+ntasks: 32
+time: "24:00:00"
+modules: |
+  module purge
+  module load python
+
