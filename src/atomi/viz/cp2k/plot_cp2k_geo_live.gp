@@ -31,7 +31,7 @@ if (strlen(xyzfile) > 0) {
 }
 
 system("clear")
-set term dumb size 170,58 noenhanced
+set term dumb ansi size 170,58 noenhanced
 
 # -------- latest values --------
 fname_cmd         = "basename " . file
@@ -109,7 +109,7 @@ set autoscale y
 
 if (have_scf) {
     plot scfdat using (($1==laststep)?$2:1/0):(($1==laststep)?$5:1/0) \
-         with linespoints pt 7 ps 0.25 lw 1.2
+         with linespoints pt 7 ps 0.25 lw 1.2 lc rgb "cyan"
 } else {
     plot NaN title "no SCF table parsed"
 }
@@ -127,7 +127,7 @@ set autoscale y
 
 if (have_scf) {
     plot scfdat using (($1==laststep && $4>0)?$2:1/0):(($1==laststep && $4>0)?log($4)/log(10):1/0) \
-         with linespoints pt 7 ps 0.25 lw 1.2
+         with linespoints pt 7 ps 0.25 lw 1.2 lc rgb "magenta"
 } else {
     plot NaN title "no SCF convergence parsed"
 }
@@ -143,7 +143,7 @@ set ylabel "Energy (Ha)"
 set xrange [gxmin:gxmax]
 set autoscale y
 
-plot geodat using 1:2 with lines lw 1.5
+plot geodat using 1:2 with lines lw 1.5 lc rgb "cyan"
 
 # =========================================================
 # Panel 4 — gradients
@@ -157,19 +157,20 @@ set xrange [gxmin:gxmax]
 set yrange [-4:0]
 
 plot \
-  geodat using 1:(($7>0)?log($7)/log(10):1/0) with lines lw 1.5 title "Max grad", \
-  geodat using 1:(($8>0)?log($8)/log(10):1/0) with lines lw 1.5 title "RMS grad", \
-  -3.0000 with lines lw 1.2 dt 2 title "target max", \
-  -3.1549 with lines lw 1.2 dt 4 title "target rms"
+  geodat using 1:(($7>0)?log($7)/log(10):1/0) with lines lw 1.5 lc rgb "red" title "Max grad", \
+  geodat using 1:(($8>0)?log($8)/log(10):1/0) with lines lw 1.5 lc rgb "magenta" title "RMS grad", \
+  -3.0000 with lines lw 1.2 lc rgb "green" dt 2 title "target max", \
+  -3.1549 with lines lw 1.2 lc rgb "cyan" dt 4 title "target rms"
 
 # ============================================================
 # PANEL 5 : Individual nearest-shell bond distances
 # ============================================================
 set title "Nearest-shell metal-ligand distances"
 set xlabel "Frame"
-set ylabel "Distance (Angstrom)"
+set ylabel "Distance (Angstrom)" offset -2,0
 set grid
-set key right
+set key outside right top
+set rmargin 18
 
 if (int(system(sprintf("test -f '%s'; echo $?", bond_dat))) == 0) {
     ncols = int(system(sprintf("awk '!/^#/ {print NF; exit}' '%s'", bond_dat)))
@@ -177,10 +178,10 @@ if (int(system(sprintf("test -f '%s'; echo $?", bond_dat))) == 0) {
     if (ncols >= 5) {
         if (nrows <= 1) {
             set xrange [0.5:1.5]
-            plot for [col=5:ncols] bond_dat using 1:col with points title sprintf("d%d", col-4)
+            plot for [col=5:ncols] bond_dat using 1:col with points pt 7 ps 0.35 lc col title sprintf("d%d", col-4)
         } else {
             set autoscale x
-            plot for [col=5:ncols] bond_dat using 1:col with lines title sprintf("d%d", col-4)
+            plot for [col=5:ncols] bond_dat using 1:col with lines lw 1.2 lc col title sprintf("d%d", col-4)
         }
     } else {
         plot NaN title "no bond-distance columns"
@@ -194,24 +195,25 @@ if (int(system(sprintf("test -f '%s'; echo $?", bond_dat))) == 0) {
 # ============================================================
 set title "Bond summary"
 set xlabel "Frame"
-set ylabel "Distance (Angstrom)"
+set ylabel "Distance (Angstrom)" offset -2,0
 set grid
-set key right
+set key outside right top
+set rmargin 18
 
 if (int(system(sprintf("test -f '%s'; echo $?", bond_dat))) == 0) {
     nrows = int(system(sprintf("awk '!/^#/ {n++} END{print n+0}' '%s'", bond_dat)))
     if (nrows <= 1) {
         set xrange [0.5:1.5]
         plot \
-        bond_dat using 1:2 with points title "min", \
-        bond_dat using 1:3 with points title "max", \
-        bond_dat using 1:4 with points title "mean"
+        bond_dat using 1:2 with points pt 7 ps 0.4 lc rgb "blue" title "min", \
+        bond_dat using 1:3 with points pt 7 ps 0.4 lc rgb "red" title "max", \
+        bond_dat using 1:4 with points pt 7 ps 0.4 lc rgb "green" title "mean"
     } else {
         set autoscale x
         plot \
-        bond_dat using 1:2 with lines title "min", \
-        bond_dat using 1:3 with lines title "max", \
-        bond_dat using 1:4 with lines title "mean"
+        bond_dat using 1:2 with lines lw 1.4 lc rgb "blue" title "min", \
+        bond_dat using 1:3 with lines lw 1.4 lc rgb "red" title "max", \
+        bond_dat using 1:4 with lines lw 1.4 lc rgb "green" title "mean"
     }
 } else {
     plot NaN title "bond data not available"

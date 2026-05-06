@@ -89,7 +89,7 @@ if (strlen(inpfile) > 0) {
 
 system("clear")
 
-set term dumb size 170,64 noenhanced
+set term dumb ansi size 170,64 noenhanced
 set multiplot layout 3,2 title sprintf("CP2K AIMD Live Monitor (window=%d, refresh=%ds)", int(win), int(refresh))
 
 set tmargin 8
@@ -182,7 +182,7 @@ set grid
 set key off
 set xrange [xmin:xmax]
 set autoscale y
-plot live_dat using 0:3 with lines
+plot live_dat using 0:3 with lines lc rgb "red" lw 1.4
 
 # ============================================================
 # PANEL 2 : Potential / Conserved Energy
@@ -195,8 +195,8 @@ set key right
 set xrange [xmin:xmax]
 set autoscale y
 plot \
-live_dat using 0:4 with lines title "Potential", \
-live_dat using 0:6 with lines title "Conserved"
+live_dat using 0:4 with lines lc rgb "cyan" lw 1.4 title "Potential", \
+live_dat using 0:6 with lines lc rgb "yellow" lw 1.4 title "Conserved"
 
 # ============================================================
 # PANEL 3 : Kinetic Energy
@@ -208,7 +208,7 @@ set grid
 set key off
 set xrange [xmin:xmax]
 set autoscale y
-plot live_dat using 0:5 with lines
+plot live_dat using 0:5 with lines lc rgb "magenta" lw 1.4
 
 # ============================================================
 # PANEL 4 : SCF effort
@@ -220,16 +220,17 @@ set grid
 set key off
 set xrange [xmin:xmax]
 set autoscale y
-plot live_dat using 0:7 with lines
+plot live_dat using 0:7 with lines lc rgb "green" lw 1.4
 
 # ============================================================
 # PANEL 5 : Individual nearest-shell bond distances
 # ============================================================
 set title "Nearest-shell metal-ligand distances"
 set xlabel "Frame"
-set ylabel "Distance (Angstrom)"
+set ylabel "Distance (Angstrom)" offset -2,0
 set grid
-set key right
+set key outside right top
+set rmargin 18
 
 have_bonds = 0
 ncols = 0
@@ -248,9 +249,9 @@ bxmin = (bond_rows > win) ? (bond_rows - win + 1) : 1
 if (have_bonds && ncols >= 5) {
     set xrange [bxmin:bxmax]
     if (bond_rows <= 1) {
-        plot for [col=5:ncols] bond_dat using 1:col with points title sprintf("d%d", col-4)
+        plot for [col=5:ncols] bond_dat using 1:col with points pt 7 ps 0.35 lc col title sprintf("d%d", col-4)
     } else {
-        plot for [col=5:ncols] bond_dat using 1:col with lines title sprintf("d%d", col-4)
+        plot for [col=5:ncols] bond_dat using 1:col with lines lw 1.2 lc col title sprintf("d%d", col-4)
     }
 } else {
     plot NaN title "no bond-distance data"
@@ -261,9 +262,10 @@ if (have_bonds && ncols >= 5) {
 # ============================================================
 set title "Bond summary"
 set xlabel "Frame"
-set ylabel "Distance (Angstrom)"
+set ylabel "Distance (Angstrom)" offset -2,0
 set grid
-set key right
+set key outside right top
+set rmargin 18
 if (have_bonds) {
     set xrange [bxmin:bxmax]
 }
@@ -273,14 +275,14 @@ if (!have_bonds) {
 } else {
     if (bond_rows <= 1) {
         plot \
-        bond_dat using 1:2 with points title "min", \
-        bond_dat using 1:3 with points title "max", \
-        bond_dat using 1:4 with points title "mean"
+        bond_dat using 1:2 with points pt 7 ps 0.4 lc rgb "blue" title "min", \
+        bond_dat using 1:3 with points pt 7 ps 0.4 lc rgb "red" title "max", \
+        bond_dat using 1:4 with points pt 7 ps 0.4 lc rgb "green" title "mean"
     } else {
         plot \
-        bond_dat using 1:2 with lines title "min", \
-        bond_dat using 1:3 with lines title "max", \
-        bond_dat using 1:4 with lines title "mean"
+        bond_dat using 1:2 with lines lw 1.4 lc rgb "blue" title "min", \
+        bond_dat using 1:3 with lines lw 1.4 lc rgb "red" title "max", \
+        bond_dat using 1:4 with lines lw 1.4 lc rgb "green" title "mean"
     }
 }
 

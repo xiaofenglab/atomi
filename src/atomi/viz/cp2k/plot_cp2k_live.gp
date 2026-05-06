@@ -7,7 +7,7 @@ if (!exists("mode")) {
     mode = "unknown"
 }
 
-set term dumb size 140,42 noenhanced
+set term dumb ansi size 140,42 noenhanced
 
 # -------------------------
 # GEO_OPT MODE
