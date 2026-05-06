@@ -65,6 +65,7 @@ plotmace mace_train.log 200 5
 extv OUTCAR
 mace-build-dataset --neareq neareq_train.extxyz --phonopy phonopy.extxyz --force-spread forces.extxyz --prefail-group prefail=prefail.extxyz
 mace-energy-outliers --extxyz training.extxyz --model model.model --outdir energy_outliers --device cuda --dtype float32 --top-n 30 --write-poscars
+mace-update-outliers --report energy_outliers/report.txt --train-in training.extxyz --valid-in validation.extxyz --train-out training_clean.extxyz --valid-out validation_clean.extxyz
 ```
 
 For the same MACE dataset builder through the grouped command:
@@ -77,6 +78,13 @@ For MACE energy outlier detection on a GPU allocation:
 
 ```bash
 atomi mace-energy-outliers --extxyz training.extxyz --model model.model --outdir energy_outliers --device cuda --dtype float32 --top-n 30 --write-poscars
+```
+
+To remove outlier frames and optionally append rerun results:
+
+```bash
+mace-update-outliers --report energy_outliers/report.txt --train-in training.extxyz --valid-in validation.extxyz --train-out training_clean.extxyz --valid-out validation_clean.extxyz
+mace-update-outliers --report energy_outliers/report.txt --train-in training.extxyz --valid-in validation.extxyz --train-out training_updated.extxyz --valid-out validation_updated.extxyz --add-extxyz rerun_bad_energy.extxyz
 ```
 
 `plotcp2ck` is also accepted as an alias for `plotcp2k`.

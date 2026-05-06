@@ -131,6 +131,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mace_energy_outliers.add_argument("outlier_args", nargs=argparse.REMAINDER)
 
+    mace_update_outliers = subparsers.add_parser(
+        "mace-update-outliers",
+        help="Remove outlier frames and optionally append rerun extxyz frames.",
+    )
+    mace_update_outliers.add_argument("update_args", nargs=argparse.REMAINDER)
+
     return parser
 
 
@@ -143,6 +149,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.ml.mace.outliers import main as mace_energy_outliers_main
 
         mace_energy_outliers_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "mace-update-outliers":
+        from atomi.ml.mace.update_outliers import main as mace_update_outliers_main
+
+        mace_update_outliers_main(raw_args[1:])
         return
 
     parser = build_parser()
@@ -237,6 +248,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.ml.mace.outliers import main as mace_energy_outliers_main
 
         mace_energy_outliers_main(args.outlier_args)
+        return
+
+    if args.subcommand == "mace-update-outliers":
+        from atomi.ml.mace.update_outliers import main as mace_update_outliers_main
+
+        mace_update_outliers_main(args.update_args)
         return
 
 

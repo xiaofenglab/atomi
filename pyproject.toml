@@ -35,6 +35,7 @@ plotmace = "atomi.cli.compat:plotmace"
 extv = "atomi.cli.vasp:extv"
 mace-build-dataset = "atomi.ml.mace.datasets:main"
 mace-energy-outliers = "atomi.ml.mace.outliers:main"
+mace-update-outliers = "atomi.ml.mace.update_outliers:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
