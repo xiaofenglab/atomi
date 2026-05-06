@@ -30,7 +30,7 @@ atomi = "atomi.cli.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-atomi = ["templates/**/*.yaml", "templates/**/*.sh", "shell/*.sh"]
+atomi = ["templates/**/*.yaml", "templates/**/*.sh", "shell/*.sh", "viz/gnuplot/*.gp"]
 
 [tool.ruff]
 line-length = 100

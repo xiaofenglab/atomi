@@ -50,6 +50,29 @@ atomi write-submit --scheduler slurm --profile generic_cpu
 atomi inspect .
 ```
 
+## VASP Live Plotting
+
+The first visualization tools wrap your gnuplot terminal monitors for VASP SCF progress.
+
+For one output file:
+
+```bash
+atomi vasp-live vasp.out
+atomi vasp-live vasp.out --window 200
+```
+
+For one to four output files:
+
+```bash
+atomi vasp-live4 run1/vasp.out run2/vasp.out run3/vasp.out run4/vasp.out --window 100
+```
+
+These commands require `gnuplot` on `PATH`. On an HPC system, that usually means:
+
+```bash
+module load gnuplot
+```
+
 ## Recommended Migration Pattern
 
 1. Put reusable Python logic under `src/atomi/`.
