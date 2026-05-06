@@ -25,12 +25,25 @@ materials = [
 
 [project.scripts]
 atomi = "atomi.cli.main:main"
+plotvasp = "atomi.cli.compat:plotvasp"
+plotvasp4 = "atomi.cli.compat:plotvasp4"
+plotlammps = "atomi.cli.compat:plotlammps"
+plotcp2k = "atomi.cli.compat:plotcp2k"
+plotcp2ck = "atomi.cli.compat:plotcp2k"
+plotcp2kall = "atomi.cli.compat:plotcp2kall"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-atomi = ["templates/**/*.yaml", "templates/**/*.sh", "shell/*.sh", "viz/gnuplot/*.gp"]
+atomi = [
+  "templates/**/*.yaml",
+  "templates/**/*.sh",
+  "shell/*.sh",
+  "viz/gnuplot/*.gp",
+  "viz/cp2k/*.gp",
+  "viz/cp2k/*.py",
+]
 
 [tool.ruff]
 line-length = 100

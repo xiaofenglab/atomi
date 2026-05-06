@@ -3,6 +3,7 @@ from pathlib import Path
 
 from atomi.core.project import create_project
 from atomi.core.scheduler import render_submit_script
+from atomi.viz.cp2k import plot_cp2k, plot_cp2k_all
 from atomi.viz.lammps import format_summary, plot_lammps_live, read_thermo_rows, summarize_thermo
 from atomi.viz.vasp_live import plot_vasp_live, plot_vasp_live4
 
@@ -84,6 +85,22 @@ def build_parser() -> argparse.ArgumentParser:
     lammps_summary.add_argument("logfile", type=Path)
     lammps_summary.add_argument("--last-fraction", type=float, default=0.5)
 
+    cp2k_live = subparsers.add_parser(
+        "cp2k-live",
+        help="Auto-detect CP2K MD/GEO logs and launch the terminal monitor.",
+    )
+    cp2k_live.add_argument("logfile", type=Path)
+    cp2k_live.add_argument("xyzfile", type=Path, nargs="?")
+    cp2k_live.add_argument("--mode", choices=("auto", "md", "geo"), default="auto")
+    cp2k_live.add_argument("--window", type=int, default=300)
+    cp2k_live.add_argument("--refresh", type=int, default=15)
+
+    cp2k_all = subparsers.add_parser(
+        "cp2k-all",
+        help="Full CP2K GEO convergence dashboard.",
+    )
+    cp2k_all.add_argument("logfile", type=Path)
+
     return parser
 
 
@@ -148,6 +165,20 @@ def main(argv: list[str] | None = None) -> None:
         rows = read_thermo_rows(args.logfile)
         summary = summarize_thermo(rows, last_fraction=args.last_fraction)
         print(format_summary(summary))
+        return
+
+    if args.subcommand == "cp2k-live":
+        plot_cp2k(
+            logfile=args.logfile,
+            xyzfile=args.xyzfile,
+            mode=args.mode,
+            window=args.window,
+            refresh=args.refresh,
+        )
+        return
+
+    if args.subcommand == "cp2k-all":
+        plot_cp2k_all(args.logfile)
         return
 
 

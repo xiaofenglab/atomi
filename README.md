@@ -50,6 +50,20 @@ atomi write-submit --scheduler slurm --profile generic_cpu
 atomi inspect .
 ```
 
+## Familiar Plot Commands
+
+Atomi keeps short compatibility commands for day-to-day monitoring:
+
+```bash
+plotvasp vasp.out 2000
+plotvasp4 vasp.outA vasp.outB vasp.outC vasp.outD 200
+plotlammps log.lammps
+plotcp2k cp2k.log
+plotcp2k cp2k.log trajectory.xyz
+```
+
+`plotcp2ck` is also accepted as an alias for `plotcp2k`.
+
 ## VASP Live Plotting
 
 The first visualization tools wrap your gnuplot terminal monitors for VASP SCF progress.
@@ -96,6 +110,19 @@ Step Temp PotEng TotEng Press Volume
 ```
 
 More flexible column-name parsing can be added as the LAMMPS toolkit grows.
+
+## CP2K Live Plotting
+
+The CP2K command auto-detects common MD and GEO optimization logs:
+
+```bash
+atomi cp2k-live cp2k.log
+atomi cp2k-live cp2k.log trajectory.xyz
+atomi cp2k-all cp2k_geoopt.log
+```
+
+For MD logs, `plotcp2k` calls the packaged bond-tracking and ETA helpers when useful.
+If no trajectory is found, the MD monitor still plots energy/temperature/SCF data and skips bond panels.
 
 ## Recommended Migration Pattern
 
