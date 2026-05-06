@@ -137,6 +137,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mace_update_outliers.add_argument("update_args", nargs=argparse.REMAINDER)
 
+    mace_check_extxyz = subparsers.add_parser(
+        "mace-check-extxyz",
+        help="Check extxyz labels, composition, histograms, and optional REF-key rewriting.",
+    )
+    mace_check_extxyz.add_argument("check_args", nargs=argparse.REMAINDER)
+
     return parser
 
 
@@ -154,6 +160,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.ml.mace.update_outliers import main as mace_update_outliers_main
 
         mace_update_outliers_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "mace-check-extxyz":
+        from atomi.ml.mace.check_extxyz import main as mace_check_extxyz_main
+
+        mace_check_extxyz_main(raw_args[1:])
         return
 
     parser = build_parser()
@@ -254,6 +265,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.ml.mace.update_outliers import main as mace_update_outliers_main
 
         mace_update_outliers_main(args.update_args)
+        return
+
+    if args.subcommand == "mace-check-extxyz":
+        from atomi.ml.mace.check_extxyz import main as mace_check_extxyz_main
+
+        mace_check_extxyz_main(args.check_args)
         return
 
 
