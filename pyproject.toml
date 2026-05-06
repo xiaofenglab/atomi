@@ -33,6 +33,7 @@ plotcp2ck = "atomi.cli.compat:plotcp2k"
 plotcp2kall = "atomi.cli.compat:plotcp2kall"
 plotmace = "atomi.cli.compat:plotmace"
 extv = "atomi.cli.vasp:extv"
+mace-build-dataset = "atomi.ml.mace.datasets:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

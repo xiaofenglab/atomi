@@ -63,6 +63,13 @@ plotcp2k cp2k.log trajectory.xyz
 plotmace mace_train.log
 plotmace mace_train.log 200 5
 extv OUTCAR
+mace-build-dataset --neareq neareq_train.extxyz --phonopy phonopy.extxyz --force-spread forces.extxyz --prefail-group prefail=prefail.extxyz
+```
+
+For the same MACE dataset builder through the grouped command:
+
+```bash
+atomi mace-build-dataset --neareq neareq_train.extxyz --phonopy phonopy.extxyz --force-spread forces.extxyz --prefail-group prefail=prefail.extxyz
 ```
 
 `plotcp2ck` is also accepted as an alias for `plotcp2k`.

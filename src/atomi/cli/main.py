@@ -1,4 +1,5 @@
 import argparse
+import sys
 from pathlib import Path
 
 from atomi.cli.vasp import extv
@@ -8,6 +9,7 @@ from atomi.viz.cp2k import plot_cp2k, plot_cp2k_all
 from atomi.viz.lammps import format_summary, plot_lammps_live, read_thermo_rows, summarize_thermo
 from atomi.viz.mace import plot_mace_live
 from atomi.viz.vasp_live import plot_vasp_live, plot_vasp_live4
+from atomi.ml.mace.datasets import main as mace_build_dataset_main
 
 
 SUPPORTED_CODES = ("vasp", "cp2k", "lammps", "turbomole", "molcas")
@@ -117,12 +119,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vasp_outcar.add_argument("outcar", type=Path, nargs="?", default=Path("OUTCAR"))
 
+    mace_build_dataset = subparsers.add_parser(
+        "mace-build-dataset",
+        help="Build adaptive MACE train/validation extxyz datasets.",
+    )
+    mace_build_dataset.add_argument("dataset_args", nargs=argparse.REMAINDER)
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
+    raw_args = sys.argv[1:] if argv is None else argv
+    if raw_args and raw_args[0] == "mace-build-dataset":
+        mace_build_dataset_main(raw_args[1:])
+        return
+
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_args)
 
     if args.subcommand == "init-project":
         created = create_project(path=args.path, code=args.code)
@@ -203,6 +216,10 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.subcommand == "vasp-outcar":
         extv([str(args.outcar)])
+        return
+
+    if args.subcommand == "mace-build-dataset":
+        mace_build_dataset_main(args.dataset_args)
         return
 
 
