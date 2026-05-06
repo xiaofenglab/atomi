@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 from atomi.cli.vasp import extv
+from atomi.core.doctor import main as doctor_main
 from atomi.core.project import create_project
 from atomi.core.scheduler import render_submit_script
 from atomi.viz.cp2k import plot_cp2k, plot_cp2k_all
@@ -49,6 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a quick summary of a calculation folder.",
     )
     inspect.add_argument("path", type=Path, nargs="?", default=Path("."))
+
+    doctor = subparsers.add_parser(
+        "doctor",
+        help="Inspect this HPC environment and write an optional JSON config.",
+    )
+    doctor.add_argument("doctor_args", nargs=argparse.REMAINDER)
 
     vasp_live = subparsers.add_parser(
         "vasp-live",
@@ -188,6 +195,9 @@ def main(argv: list[str] | None = None) -> None:
 
         mace_convert_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "doctor":
+        doctor_main(raw_args[1:])
+        return
 
     parser = build_parser()
     args = parser.parse_args(raw_args)
@@ -215,6 +225,10 @@ def main(argv: list[str] | None = None) -> None:
         print("Files:")
         for name in files:
             print(f"  {name}")
+        return
+
+    if args.subcommand == "doctor":
+        doctor_main(args.doctor_args)
         return
 
     if args.subcommand == "vasp-live":

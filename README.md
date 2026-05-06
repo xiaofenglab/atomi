@@ -48,6 +48,33 @@ Examples:
 atomi init-project my_vasp_run --code vasp
 atomi write-submit --scheduler slurm --profile generic_cpu
 atomi inspect .
+atomi doctor
+```
+
+## HPC Environment Check
+
+Before using Atomi on a new cluster, run:
+
+```bash
+atomi doctor
+atomi doctor --write atomi_hpc_config.json
+```
+
+The doctor report checks common executables, scheduler commands, plotting tools, atomistic engine names, and Python packages used by the currently packaged workflows. It also records cluster-specific assumptions that should be reviewed before a command is treated as portable.
+
+Atomi looks for configuration in this order:
+
+```text
+--hpc-config PATH
+ATOMI_HPC_CONFIG
+./atomi_hpc_config.json
+~/.config/atomi/hpc.json
+```
+
+For example, edit the `profiles.mace_lammps` block in `atomi_hpc_config.json` to match a cluster's GPU partition, gres string, wall time, and MACE environment path. Then:
+
+```bash
+convertmace modelname.model --hpc-config atomi_hpc_config.json
 ```
 
 ## Familiar Plot Commands
@@ -109,6 +136,7 @@ To convert a trained MACE model for LAMMPS:
 ```bash
 convertmace modelname.model
 convertmace modelname.model --env ~/m_lammps_env --partition gpu --gres gpu:1
+convertmace modelname.model --hpc-config atomi_hpc_config.json
 convertmace modelname.model --local
 ```
 

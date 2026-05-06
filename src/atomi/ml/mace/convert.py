@@ -3,6 +3,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from atomi.core.doctor import load_hpc_config, mace_lammps_defaults
+
 
 def find_default_model() -> Path | None:
     """Return the first .model file in the current directory, if any."""
@@ -85,13 +87,24 @@ def main(argv: list[str] | None = None) -> None:
         description="Convert a trained MACE .model file to a LAMMPS .pt model.",
     )
     parser.add_argument("model", type=Path, nargs="?", default=None)
-    parser.add_argument("--env", type=Path, default=Path("~/m_lammps_env").expanduser())
-    parser.add_argument("--partition", default="gpu")
-    parser.add_argument("--gres", default="gpu:1")
-    parser.add_argument("--time", default="00:15:00")
+    parser.add_argument(
+        "--hpc-config",
+        type=Path,
+        help="Read cluster defaults from this atomi doctor JSON config.",
+    )
+    parser.add_argument("--env", type=Path)
+    parser.add_argument("--partition")
+    parser.add_argument("--gres")
+    parser.add_argument("--time")
     parser.add_argument("--local", action="store_true", help="Run conversion in the active environment.")
     parser.add_argument("--dry-run", action="store_true", help="Print the Slurm script without submitting.")
     args = parser.parse_args(argv)
+
+    defaults = mace_lammps_defaults(load_hpc_config(args.hpc_config))
+    env_path = args.env or Path(defaults["env_path"]).expanduser()
+    partition = args.partition or defaults["partition"]
+    gres = args.gres or defaults["gres"]
+    time_limit = args.time or defaults["time"]
 
     model = args.model or find_default_model()
     if model is None:
@@ -103,10 +116,10 @@ def main(argv: list[str] | None = None) -> None:
 
     submit_mace_conversion(
         model=model,
-        env_path=args.env,
-        partition=args.partition,
-        gres=args.gres,
-        time_limit=args.time,
+        env_path=env_path,
+        partition=partition,
+        gres=gres,
+        time_limit=time_limit,
         dry_run=args.dry_run,
     )
 
