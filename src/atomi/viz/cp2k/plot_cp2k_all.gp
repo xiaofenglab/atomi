@@ -3,7 +3,7 @@ if (!exists("file")) {
     exit
 }
 
-set term dumb ansi 150 58
+set term dumb size 150,58 noenhanced
 set multiplot layout 2,2 title "CP2K GEO_OPT Full Convergence"
 
 # leave space at top for text header

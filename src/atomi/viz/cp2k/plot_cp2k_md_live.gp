@@ -89,7 +89,7 @@ if (strlen(inpfile) > 0) {
 
 system("clear")
 
-set term dumb ansi 170 64
+set term dumb size 170,64 noenhanced
 set multiplot layout 3,2 title sprintf("CP2K AIMD Live Monitor (window=%d, refresh=%ds)", int(win), int(refresh))
 
 set tmargin 8
@@ -270,16 +270,18 @@ if (have_bonds) {
 
 if (!have_bonds) {
     plot NaN title "no bond-distance data"
-} else if (bond_rows <= 1) {
-    plot \
-    bond_dat using 1:2 with points title "min", \
-    bond_dat using 1:3 with points title "max", \
-    bond_dat using 1:4 with points title "mean"
 } else {
-    plot \
-    bond_dat using 1:2 with lines title "min", \
-    bond_dat using 1:3 with lines title "max", \
-    bond_dat using 1:4 with lines title "mean"
+    if (bond_rows <= 1) {
+        plot \
+        bond_dat using 1:2 with points title "min", \
+        bond_dat using 1:3 with points title "max", \
+        bond_dat using 1:4 with points title "mean"
+    } else {
+        plot \
+        bond_dat using 1:2 with lines title "min", \
+        bond_dat using 1:3 with lines title "max", \
+        bond_dat using 1:4 with lines title "mean"
+    }
 }
 
 unset multiplot

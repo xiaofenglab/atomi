@@ -3,6 +3,7 @@ import json
 import os
 import platform
 import shutil
+import subprocess
 import sys
 from importlib import metadata, util
 from pathlib import Path
@@ -93,8 +94,39 @@ def executable_report() -> dict[str, dict[str, dict[str, str | bool | None]]]:
         report[group] = {}
         for name in names:
             path = shutil.which(name)
-            report[group][name] = {"available": path is not None, "path": path}
+            version = _executable_version(name) if path else None
+            report[group][name] = {"available": path is not None, "path": path, "version": version}
     return report
+
+
+def _executable_version(name: str) -> str | None:
+    version_args = {
+        "gnuplot": ["gnuplot", "--version"],
+        "sbatch": ["sbatch", "--version"],
+        "srun": ["srun", "--version"],
+        "qsub": ["qsub", "--version"],
+        "cp2k": ["cp2k", "--version"],
+        "lmp": ["lmp", "-help"],
+        "lammps": ["lammps", "-help"],
+    }
+    command = version_args.get(name)
+    if command is None:
+        return None
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in result.stdout.splitlines():
+        clean = line.strip()
+        if clean:
+            return clean[:200]
+    return None
 
 
 def python_package_report() -> dict[str, dict[str, str | bool | None]]:
@@ -155,6 +187,10 @@ def print_summary(report: dict[str, Any]) -> None:
         found = [name for name, item in entries.items() if item["available"]]
         missing = [name for name, item in entries.items() if not item["available"]]
         print(f"  {group}: found {', '.join(found) if found else 'none'}")
+        for name in found:
+            version = entries[name].get("version")
+            if version:
+                print(f"    {name}: {version}")
         if missing:
             print(f"  {group}: missing {', '.join(missing)}")
     print("")

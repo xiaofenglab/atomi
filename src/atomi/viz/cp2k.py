@@ -187,7 +187,18 @@ def _plot_cp2k_geo(
 
 
 def _run_gnuplot(assignments: list[str], script: Path) -> None:
-    subprocess.run(["gnuplot", "-e", "; ".join(assignments), str(script)], check=True)
+    command = ["gnuplot", "-e", "; ".join(assignments), str(script)]
+    result = subprocess.run(command, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        message = [
+            f"gnuplot failed with exit code {result.returncode}.",
+            "Command:",
+            " ".join(command),
+        ]
+        if stderr:
+            message.extend(["gnuplot stderr:", stderr])
+        raise RuntimeError("\n".join(message))
 
 
 def _resource(name: str) -> Path:

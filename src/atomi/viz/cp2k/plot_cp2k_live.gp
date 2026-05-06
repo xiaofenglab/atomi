@@ -7,7 +7,7 @@ if (!exists("mode")) {
     mode = "unknown"
 }
 
-set term dumb ansi 140 42
+set term dumb size 140,42 noenhanced
 
 # -------------------------
 # GEO_OPT MODE
@@ -102,7 +102,7 @@ if (mode eq "geo") {
 # -------------------------
 # AIMD MODE
 # -------------------------
-else if (mode eq "md") {
+if (mode eq "md") {
 
     set multiplot layout 2,1 title "CP2K AIMD Monitor"
 
@@ -177,6 +177,6 @@ else if (mode eq "md") {
 # -------------------------
 # UNKNOWN
 # -------------------------
-else {
+if (mode ne "geo" && mode ne "md") {
     print "Mode not recognized yet."
 }

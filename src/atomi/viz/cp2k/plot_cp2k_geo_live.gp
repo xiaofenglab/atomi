@@ -31,7 +31,7 @@ if (strlen(xyzfile) > 0) {
 }
 
 system("clear")
-set term dumb ansi 170 58
+set term dumb size 170,58 noenhanced
 
 # -------- latest values --------
 fname_cmd         = "basename " . file
