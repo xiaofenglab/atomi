@@ -3,6 +3,7 @@ from pathlib import Path
 
 from atomi.core.project import create_project
 from atomi.core.scheduler import render_submit_script
+from atomi.viz.lammps import format_summary, plot_lammps_live, read_thermo_rows, summarize_thermo
 from atomi.viz.vasp_live import plot_vasp_live, plot_vasp_live4
 
 
@@ -62,6 +63,27 @@ def build_parser() -> argparse.ArgumentParser:
     vasp_live4.add_argument("--interval", type=float, default=5.0)
     vasp_live4.add_argument("--once", action="store_true", help="Draw once and exit.")
 
+    lammps_live = subparsers.add_parser(
+        "lammps-live",
+        help="Live terminal plot for a LAMMPS log file.",
+    )
+    lammps_live.add_argument("logfile", type=Path)
+    lammps_live.add_argument("--window", type=int, default=40)
+    lammps_live.add_argument("--interval", type=float, default=10.0)
+    lammps_live.add_argument("--once", action="store_true", help="Draw once and exit.")
+    lammps_live.add_argument(
+        "--keep-going",
+        action="store_true",
+        help="Keep monitoring after a Loop time line appears.",
+    )
+
+    lammps_summary = subparsers.add_parser(
+        "lammps-summary",
+        help="Summarize LAMMPS thermo data from a log file.",
+    )
+    lammps_summary.add_argument("logfile", type=Path)
+    lammps_summary.add_argument("--last-fraction", type=float, default=0.5)
+
     return parser
 
 
@@ -110,6 +132,22 @@ def main(argv: list[str] | None = None) -> None:
             interval=args.interval,
             once=args.once,
         )
+        return
+
+    if args.subcommand == "lammps-live":
+        plot_lammps_live(
+            logfile=args.logfile,
+            window=args.window,
+            interval=args.interval,
+            once=args.once,
+            stop_on_finish=not args.keep_going,
+        )
+        return
+
+    if args.subcommand == "lammps-summary":
+        rows = read_thermo_rows(args.logfile)
+        summary = summarize_thermo(rows, last_fraction=args.last_fraction)
+        print(format_summary(summary))
         return
 
 

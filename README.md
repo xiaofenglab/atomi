@@ -73,6 +73,30 @@ These commands require `gnuplot` on `PATH`. On an HPC system, that usually means
 module load gnuplot
 ```
 
+## LAMMPS Live Plotting
+
+LAMMPS thermo logs can be monitored in the terminal:
+
+```bash
+atomi lammps-live log.lammps
+atomi lammps-live log.lammps --window 80 --interval 5
+```
+
+For a text summary of thermo data:
+
+```bash
+atomi lammps-summary log.lammps
+atomi lammps-summary log.lammps --last-fraction 0.25
+```
+
+The live plot assumes thermo columns similar to:
+
+```text
+Step Temp PotEng TotEng Press Volume
+```
+
+More flexible column-name parsing can be added as the LAMMPS toolkit grows.
+
 ## Recommended Migration Pattern
 
 1. Put reusable Python logic under `src/atomi/`.

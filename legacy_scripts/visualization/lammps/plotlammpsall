@@ -1,0 +1,321 @@
+#!/bin/bash
+
+# ------------------------------------------------------------
+# plotlammpsall
+#
+# Full LAMMPS thermo monitor with:
+#   - ASCII plots
+#   - running equilibrium statistics
+#   - block averages
+#   - volume drift detection
+#   - simple equilibration flag
+#
+# Assumed thermo columns:
+#   step temp pe etotal press vol lx ly lz
+# or at least:
+#   step temp pe ... press vol
+#
+# Usage:
+#   plotlammpsall log.lammps
+# ------------------------------------------------------------
+
+if [ $# -lt 1 ]; then
+    echo "Usage: plotlammpsall <logfile>"
+    exit 1
+fi
+
+LOGFILE="$1"
+
+if [ ! -f "$LOGFILE" ]; then
+    echo "ERROR: file not found: $LOGFILE"
+    exit 1
+fi
+
+TMPDIR_PLOT="${TMPDIR:-/tmp}/plotlammps_${USER}"
+mkdir -p "$TMPDIR_PLOT"
+
+TMPDATA="$TMPDIR_PLOT/thermo_ascii_all.dat"
+AVGDATA="$TMPDIR_PLOT/avgwindow.dat"
+ANALYSIS="$TMPDIR_PLOT/analysis.txt"
+
+cleanup() {
+    rm -f "$TMPDATA" "$AVGDATA" "$ANALYSIS"
+}
+trap cleanup EXIT
+
+# ------------------------------------------------------------
+# Extract thermo rows
+# ------------------------------------------------------------
+awk '
+BEGIN { inblk=0 }
+/^ *Step/ { inblk=1; next }
+inblk && NF>0 && $1 ~ /^[0-9]/ { print }
+/^Loop time/ { inblk=0 }
+' "$LOGFILE" > "$TMPDATA"
+
+clear
+echo "============================================================"
+echo " Full LAMMPS thermo monitor"
+echo " File    : $LOGFILE"
+echo " Time    : $(date)"
+echo "============================================================"
+
+if [ ! -s "$TMPDATA" ]; then
+    echo
+    echo "No thermo data found."
+    exit 1
+fi
+
+NSTEPS=$(wc -l < "$TMPDATA")
+LASTLINE=$(tail -n 1 "$TMPDATA")
+
+LAST_STEP=$(echo "$LASTLINE" | awk '{print $1}')
+LAST_TEMP=$(echo "$LASTLINE" | awk '{print $2}')
+LAST_PE=$(echo "$LASTLINE"   | awk '{print $3}')
+
+# Assume press=col5, vol=col6 for your current thermo layout
+LAST_PRESS=$(echo "$LASTLINE"| awk '{print $5}')
+LAST_VOL=$(echo "$LASTLINE"  | awk '{print $6}')
+
+echo " Thermo points : $NSTEPS"
+echo " Latest step   : $LAST_STEP"
+echo " Latest T      : $LAST_TEMP K"
+echo " Latest P      : $LAST_PRESS"
+echo " Latest V      : $LAST_VOL"
+echo " Latest PE     : $LAST_PE eV"
+echo "============================================================"
+echo
+
+gnuplot <<EOF
+set terminal dumb ansi 120 40
+set multiplot layout 2,2 title "LAMMPS Thermo (full history): $(basename "$LOGFILE")"
+
+set autoscale
+set key off
+set grid
+
+set title "Temperature"
+plot "$TMPDATA" using 0:2 with lines lc rgb "red"
+
+set title "Pressure"
+plot "$TMPDATA" using 0:5 with lines lc rgb "blue"
+
+set title "Volume"
+plot "$TMPDATA" using 0:6 with lines lc rgb "green"
+
+set title "Potential Energy"
+plot "$TMPDATA" using 0:3 with lines lc rgb "yellow"
+
+unset multiplot
+EOF
+
+echo
+echo "============================================================"
+echo " Running equilibrium statistics"
+echo "============================================================"
+
+# ------------------------------------------------------------
+# Choose averaging window
+# ------------------------------------------------------------
+if [ "$NSTEPS" -lt 200 ]; then
+    cp "$TMPDATA" "$AVGDATA"
+    echo "Using ALL samples for averaging ($NSTEPS points)"
+else
+    NAVG=$(( NSTEPS / 2 ))
+    tail -n "$NAVG" "$TMPDATA" > "$AVGDATA"
+    echo "Using LAST $NAVG samples for averaging"
+fi
+
+# ------------------------------------------------------------
+# Analysis
+# ------------------------------------------------------------
+awk '
+function abs(x){return x<0?-x:x}
+function sqrt_safe(x){return x>0?sqrt(x):0}
+
+BEGIN{
+    nblock_target = 5
+
+    # Heuristic thresholds for solid-state NPT equilibration
+    # Tune later if needed
+    vol_std_good   = 0.10   # percent
+    vol_std_border = 0.20   # percent
+
+    vol_drift_good   = 0.05 # percent
+    vol_drift_border = 0.10 # percent
+
+    pavg_good   = 500.0     # bar
+    pavg_border = 1000.0    # bar
+}
+{
+    n++
+    step[n] = $1
+    T[n]    = $2
+    PE[n]   = $3
+    P[n]    = $5
+    V[n]    = $6
+
+    sumT  += T[n]
+    sumP  += P[n]
+    sumV  += V[n]
+    sumPE += PE[n]
+
+    sumT2 += T[n]*T[n]
+    sumP2 += P[n]*P[n]
+    sumV2 += V[n]*V[n]
+
+    sumI   += n
+    sumI2  += n*n
+    sumIV  += n*V[n]
+}
+END{
+    if(n<2){
+        print "Not enough samples for analysis."
+        exit
+    }
+
+    Tavg  = sumT/n
+    Pavg  = sumP/n
+    Vavg  = sumV/n
+    PEavg = sumPE/n
+
+    Tstd = sqrt_safe(sumT2/n - Tavg*Tavg)
+    Pstd = sqrt_safe(sumP2/n - Pavg*Pavg)
+    Vstd = sqrt_safe(sumV2/n - Vavg*Vavg)
+
+    relVstd = 100.0 * Vstd / Vavg
+
+    # linear slope of V vs sample index
+    denom = n*sumI2 - sumI*sumI
+    if (denom != 0) {
+        slopeV = (n*sumIV - sumI*sumV) / denom
+    } else {
+        slopeV = 0
+    }
+
+    # total predicted drift across the averaging window from fit
+    driftV_fit = slopeV * (n-1)
+    driftV_fit_pct = 100.0 * abs(driftV_fit) / Vavg
+
+    # block analysis
+    nblock = (n >= 50 ? nblock_target : 1)
+    bsize = int(n / nblock)
+    if (bsize < 1) {
+        nblock = 1
+        bsize = n
+    }
+
+    print ""
+    print "Average values"
+    print "------------------------------"
+    printf("Temp      = %.3f K\n", Tavg)
+    printf("Pressure  = %.3f bar\n", Pavg)
+    printf("Volume    = %.3f A^3\n", Vavg)
+    printf("PE        = %.4f eV\n", PEavg)
+
+    print ""
+    print "Std deviations"
+    print "------------------------------"
+    printf("Temp      = %.3f K\n", Tstd)
+    printf("Pressure  = %.3f bar\n", Pstd)
+    printf("Volume    = %.3f A^3\n", Vstd)
+    printf("rel sigma(V) = %.4f %%\n", relVstd)
+
+    a = Vavg^(1.0/3.0)
+    print ""
+    print "Estimated cubic lattice parameter"
+    print "------------------------------"
+    printf("a = %.4f A\n", a)
+
+    print ""
+    print "Block averages"
+    print "------------------------------"
+
+    bcount = 0
+    minBv =  1e99
+    maxBv = -1e99
+
+    for (b=1; b<=nblock; b++) {
+        start = (b-1)*bsize + 1
+        if (b < nblock) {
+            stop = b*bsize
+        } else {
+            stop = n
+        }
+
+        if (start > n) break
+
+        sT = sP = sV = 0
+        cnt = 0
+        for (i=start; i<=stop; i++) {
+            sT += T[i]
+            sP += P[i]
+            sV += V[i]
+            cnt++
+        }
+
+        if (cnt > 0) {
+            bT = sT/cnt
+            bP = sP/cnt
+            bV = sV/cnt
+            bcount++
+
+            if (bV < minBv) minBv = bV
+            if (bV > maxBv) maxBv = bV
+
+            printf("Block %d (%d:%d):  T=%.2f K   P=%.2f bar   V=%.3f A^3\n",
+                   bcount, start, stop, bT, bP, bV)
+        }
+    }
+
+    if (bcount > 1) {
+        blockVdriftPct = 100.0 * (maxBv - minBv) / Vavg
+    } else {
+        blockVdriftPct = 0.0
+    }
+
+    print ""
+    print "Drift metrics"
+    print "------------------------------"
+    printf("Linear-fit V drift across window = %.4f A^3  (%.4f %%)\n", driftV_fit, driftV_fit_pct)
+    printf("Block-mean V spread             = %.4f %%\n", blockVdriftPct)
+
+    # simple verdict scoring
+    score = 0
+
+    if (relVstd <= vol_std_good) score += 2
+    else if (relVstd <= vol_std_border) score += 1
+
+    if (blockVdriftPct <= vol_drift_good) score += 2
+    else if (blockVdriftPct <= vol_drift_border) score += 1
+
+    if (abs(Pavg) <= pavg_good) score += 2
+    else if (abs(Pavg) <= pavg_border) score += 1
+
+    if (driftV_fit_pct <= vol_drift_good) score += 2
+    else if (driftV_fit_pct <= vol_drift_border) score += 1
+
+    print ""
+    print "Equilibration verdict"
+    print "------------------------------"
+    if (score >= 7) {
+        print "LIKELY EQUILIBRATED"
+    } else if (score >= 4) {
+        print "BORDERLINE"
+    } else {
+        print "NOT EQUILIBRATED"
+    }
+
+    print ""
+    print "Criteria used"
+    print "------------------------------"
+    printf("Good if rel sigma(V) <= %.2f %%\n", vol_std_good)
+    printf("Good if block-mean V spread <= %.2f %%\n", vol_drift_good)
+    printf("Good if |Pavg| <= %.0f bar\n", pavg_good)
+    printf("Good if linear-fit V drift <= %.2f %%\n", vol_drift_good)
+}
+' "$AVGDATA" > "$ANALYSIS"
+
+cat "$ANALYSIS"
+echo
+echo "Done."

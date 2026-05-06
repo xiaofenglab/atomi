@@ -1,0 +1,137 @@
+#!/bin/bash
+
+# ------------------------------------------------------------
+# plotlammps_live
+#
+# Live terminal monitor for LAMMPS thermo output
+# - reads user-defined log.* file
+# - extracts thermo data directly from log
+# - plots Temperature / Pressure / Volume / PotEng
+# - 2x2 ASCII dashboard
+# - colored curves
+# - refreshes every 10 s by default
+#
+# Usage:
+#   plotlammps_live log.lammps
+#   plotlammps_live log.lammps 5
+# ------------------------------------------------------------
+
+if [ $# -lt 1 ]; then
+    echo "Usage: plotlammps_live <logfile> [refresh_seconds]"
+    exit 1
+fi
+
+LOGFILE="$1"
+REFRESH="${2:-10}"
+
+if [ ! -f "$LOGFILE" ]; then
+    echo "ERROR: file not found: $LOGFILE"
+    exit 1
+fi
+
+TMPDIR_PLOT="${TMPDIR:-/tmp}/plotlammps_${USER}"
+mkdir -p "$TMPDIR_PLOT"
+TMPDATA="$TMPDIR_PLOT/thermo_ascii.dat"
+
+cleanup() {
+    rm -f "$TMPDATA"
+}
+trap cleanup EXIT
+
+while true; do
+    # Extract numeric thermo rows from all thermo blocks
+    awk '
+    BEGIN { inblk=0 }
+    /^ *Step[[:space:]]/ { inblk=1; next }
+    inblk && NF>0 && $1 ~ /^[-+]?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$/ { print }
+    /^Loop time/ { inblk=0 }
+    ' "$LOGFILE" > "$TMPDATA"
+
+    clear
+    echo "============================================================"
+    echo " Live LAMMPS thermo monitor"
+    echo " File    : $LOGFILE"
+    echo " Refresh : ${REFRESH}s"
+    echo " Time    : $(date)"
+    echo " Ctrl+C to stop"
+    echo "============================================================"
+
+    if [ ! -s "$TMPDATA" ]; then
+        echo
+        echo "No thermo data found yet."
+        sleep "$REFRESH"
+        continue
+    fi
+
+    # Latest values
+    LASTLINE=$(tail -n 1 "$TMPDATA")
+    NSTEPS=$(wc -l < "$TMPDATA")
+
+    # Assumed columns:
+    # 1 Step, 2 Temp, 3 PotEng, 5 Press, 6 Volume
+    LAST_STEP=$(echo "$LASTLINE" | awk '{print $1}')
+    LAST_TEMP=$(echo "$LASTLINE" | awk '{print $2}')
+    LAST_PE=$(echo "$LASTLINE"   | awk '{print $3}')
+    LAST_PRESS=$(echo "$LASTLINE"| awk '{print $5}')
+    LAST_VOL=$(echo "$LASTLINE"  | awk '{print $6}')
+
+    echo " Thermo points : $NSTEPS"
+    echo " Latest step   : $LAST_STEP"
+    echo " Latest T      : $LAST_TEMP K"
+    echo " Latest P      : $LAST_PRESS"
+    echo " Latest V      : $LAST_VOL"
+    echo " Latest PE     : $LAST_PE eV"
+    echo "============================================================"
+    echo
+
+    # Plot in terminal using gnuplot
+    gnuplot <<EOF
+set terminal dumb ansi 120 40
+set multiplot layout 2,2 title "LAMMPS Thermo Monitor: $(basename "$LOGFILE")"
+
+# show last 40 thermo points if possible
+N = $NSTEPS
+xmin = (N > 40) ? N-39 : 1
+xmax = (N > 40) ? N    : 40
+
+set xrange [xmin:xmax]
+set autoscale y
+set key off
+set grid
+
+# Temperature
+set title "Temperature"
+set xlabel ""
+set ylabel "K"
+plot "$TMPDATA" using 0:2 with lines lc rgb "red"
+
+# Pressure
+set title "Pressure"
+set xlabel ""
+set ylabel "Press"
+plot "$TMPDATA" using 0:5 with lines lc rgb "blue"
+
+# Volume
+set title "Volume"
+set xlabel ""
+set ylabel "Vol"
+plot "$TMPDATA" using 0:6 with lines lc rgb "green"
+
+# Potential energy
+set title "Potential Energy"
+set xlabel "Thermo index"
+set ylabel "eV"
+plot "$TMPDATA" using 0:3 with lines lc rgb "yellow"
+
+unset multiplot
+EOF
+
+    # Stop automatically if run finished
+    if grep -q "^Loop time" "$LOGFILE"; then
+        echo
+        echo "Run appears finished (found 'Loop time'). Exiting monitor."
+        break
+    fi
+
+    sleep "$REFRESH"
+done
