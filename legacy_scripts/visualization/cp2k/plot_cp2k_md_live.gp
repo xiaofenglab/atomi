@@ -1,0 +1,287 @@
+# plot_cp2k_md_live.gp
+# Usage:
+#   gnuplot -e "file='cp2k.log'; xyzfile='traj.xyz'; refresh=15; win=300" plot_cp2k_md_live.gp
+#   gnuplot -e "file='cp2k.log'; refresh=15; win=300" plot_cp2k_md_live.gp
+
+if (!exists("file")) {
+    print "Usage: gnuplot -e \"file='cp2k.log'; xyzfile='traj.xyz'; refresh=15; win=300\" plot_cp2k_md_live.gp"
+    exit
+}
+
+if (!exists("xyzfile")) {
+    xyzfile = ""
+}
+
+if (!exists("refresh")) refresh = 15
+if (!exists("win"))     win = 300
+if (win < 1)            win = 300
+
+if (!exists("helper_py")) {
+    helper_py = "cp2k_md_bondtrack.py"
+}
+bond_dat  = "cp2k_md_bonds.dat"
+bond_meta = "cp2k_md_bonds.meta"
+
+if (!exists("eta_py")) {
+    eta_py = "cp2k_md_eta.py"
+}
+eta_hist = "cp2k_md_eta.hist"
+eta_tmp  = "cp2k_md_eta.tmp"
+inpfile  = system("ls *.inp 2>/dev/null | head -n 1")
+
+live_dat  = "cp2k_md_live.dat"
+live_meta = "cp2k_md_live.meta"
+
+# ------------------------------------------------------------
+# Rebuild parsed CP2K live table in ONE pass
+# Columns in live_dat:
+#   1 step
+#   2 time_fs
+#   3 temp_K
+#   4 pot_Ha
+#   5 kin_Ha
+#   6 cons_Ha
+#   7 scf_steps
+# ------------------------------------------------------------
+build_live_cmd = \
+"awk '/MD\\| Step number/ {s=$NF} " . \
+"/MD\\| Time \\[fs\\]/ {t=$NF} " . \
+"/MD\\| Temperature \\[K\\]/ {temp=$(NF-1)} " . \
+"/MD\\| Potential energy \\[hartree\\]/ {pot=$(NF-1)} " . \
+"/MD\\| Kinetic energy \\[hartree\\]/ {kin=$(NF-1)} " . \
+"/MD\\| Conserved quantity \\[hartree\\]/ { " . \
+"cons=$NF; " . \
+"if (s!=\"\") { " . \
+"scf=(last_scf!=\"\" ? last_scf : \"NaN\"); " . \
+"print s, t, temp, pot, kin, cons, scf; " . \
+"} " . \
+"} " . \
+"/\\*\\*\\* SCF run converged in/ {last_scf=$(NF-2)} " . \
+"END { " . \
+"if (s!=\"\") { " . \
+"print \"latest_step=\" s > \"" . live_meta . "\"; " . \
+"print \"latest_time=\" t >> \"" . live_meta . "\"; " . \
+"print \"latest_temp=\" temp >> \"" . live_meta . "\"; " . \
+"print \"latest_pot=\" pot >> \"" . live_meta . "\"; " . \
+"print \"latest_kin=\" kin >> \"" . live_meta . "\"; " . \
+"print \"latest_cons=\" cons >> \"" . live_meta . "\"; " . \
+"print \"latest_scf=\" (last_scf!=\"\" ? last_scf : \"NA\") >> \"" . live_meta . "\"; " . \
+"} " . \
+"}' '" . file . "' > '" . live_dat . "'"
+system(build_live_cmd)
+
+# ------------------------------------------------------------
+# Rebuild helper outputs only if source files changed
+# ------------------------------------------------------------
+if (strlen(xyzfile) > 0) {
+    bond_update_cmd = \
+    "if [ ! -f '" . bond_dat . "' ] || [ '" . file . "' -nt '" . bond_dat . "' ] || [ '" . xyzfile . "' -nt '" . bond_dat . "' ]; then " . \
+    "python3 '" . helper_py . "' '" . file . "' '" . xyzfile . "' '" . bond_dat . "' > cp2k_md_bondtrack.debug 2>&1; fi"
+    system(bond_update_cmd)
+}
+
+if (strlen(inpfile) > 0) {
+    eta_update_cmd = \
+    "if [ ! -f '" . eta_tmp . "' ] || [ '" . file . "' -nt '" . eta_tmp . "' ] || [ '" . inpfile . "' -nt '" . eta_tmp . "' ]; then " . \
+    "python3 '" . eta_py . "' '" . file . "' '" . inpfile . "' '" . eta_hist . "' > '" . eta_tmp . "' 2>/dev/null; fi"
+    system(eta_update_cmd)
+}
+
+system("clear")
+
+set term dumb ansi 170 64
+set multiplot layout 3,2 title sprintf("CP2K AIMD Live Monitor (window=%d, refresh=%ds)", int(win), int(refresh))
+
+set tmargin 8
+set bmargin 3
+set lmargin 10
+set rmargin 5
+
+fname_cmd = "basename " . file
+fname = system(fname_cmd)
+
+# -------- latest summary values from parsed meta --------
+latest_step = "NA"
+latest_time = "NA"
+latest_temp = "NA"
+latest_pot  = "NA"
+latest_kin  = "NA"
+latest_cons = "NA"
+latest_scf  = "NA"
+
+test_live_meta_cmd = "test -f '" . live_meta . "'; echo $?"
+if (int(system(test_live_meta_cmd)) == 0) {
+    latest_step = system("awk -F= '/^latest_step=/{print $2}' " . live_meta)
+    latest_time = system("awk -F= '/^latest_time=/{print $2}' " . live_meta)
+    latest_temp = system("awk -F= '/^latest_temp=/{print $2}' " . live_meta)
+    latest_pot  = system("awk -F= '/^latest_pot=/{print $2}' " . live_meta)
+    latest_kin  = system("awk -F= '/^latest_kin=/{print $2}' " . live_meta)
+    latest_cons = system("awk -F= '/^latest_cons=/{print $2}' " . live_meta)
+    latest_scf  = system("awk -F= '/^latest_scf=/{print $2}' " . live_meta)
+}
+
+# -------- latest summary values from bond helper --------
+metal_sym = "NA"
+coord_n   = "NA"
+lig_types = "NA"
+
+test_bond_meta_cmd = "test -f '" . bond_meta . "'; echo $?"
+if (int(system(test_bond_meta_cmd)) == 0) {
+    metal_sym = system("awk -F= '/^metal_symbol=/{print $2}' " . bond_meta)
+    coord_n   = system("awk -F= '/^coordination_number=/{print $2}' " . bond_meta)
+    lig_types = system("awk -F= '/^ligand_types=/{print $2}' " . bond_meta)
+}
+
+# -------- ETA summary --------
+latest_mps    = "NA"
+latest_spm    = "NA"
+latest_remain = "NA"
+latest_eta    = "NA"
+
+test_eta_tmp_cmd = "test -f '" . eta_tmp . "'; echo $?"
+if (int(system(test_eta_tmp_cmd)) == 0) {
+    latest_mps    = system("awk -F= '/^min_per_step=/{print $2}' " . eta_tmp)
+    latest_spm    = system("awk -F= '/^steps_per_min=/{print $2}' " . eta_tmp)
+    latest_remain = system("awk -F= '/^remaining_steps=/{print $2}' " . eta_tmp)
+    latest_eta    = system("awk -F= '/^eta_hms=/{print $2}' " . eta_tmp)
+}
+
+# -------- x-window handling --------
+nrows_cmd = "awk 'END{print NR+0}' '" . live_dat . "'"
+nrows_str = system(nrows_cmd)
+nrows = int(nrows_str)
+
+xmax = (nrows > win) ? nrows : win
+xmin = (nrows > win) ? (nrows - win + 1) : 1
+
+unset label
+
+set label 1 sprintf("File: %s", fname) at screen 0.02,0.995 left
+set label 2 sprintf("Step: %s", latest_step) at screen 0.30,0.995 left
+set label 3 sprintf("Time(fs): %s", latest_time) at screen 0.46,0.995 left
+set label 4 sprintf("Metal/CN/Lig: %s / %s / %s", metal_sym, coord_n, lig_types) at screen 0.66,0.995 left
+
+set label 5 sprintf("T(K): %s", latest_temp) at screen 0.02,0.970 left
+set label 6 sprintf("Pot(Ha): %s", latest_pot) at screen 0.20,0.970 left
+set label 7 sprintf("Kin(Ha): %s", latest_kin) at screen 0.44,0.970 left
+set label 8 sprintf("Cons(Ha): %s", latest_cons) at screen 0.66,0.970 left
+
+set label 9  sprintf("SCF: %s", latest_scf) at screen 0.02,0.945 left
+set label 10 sprintf("min/step: %s", latest_mps) at screen 0.18,0.945 left
+set label 11 sprintf("step/min: %s", latest_spm) at screen 0.38,0.945 left
+set label 12 sprintf("remain: %s", latest_remain) at screen 0.58,0.945 left
+set label 13 sprintf("ETA: %s", latest_eta) at screen 0.82,0.945 right
+
+# ============================================================
+# PANEL 1 : Temperature
+# ============================================================
+set title "Temperature"
+set xlabel "MD record"
+set ylabel "T (K)"
+set grid
+set key off
+set xrange [xmin:xmax]
+set autoscale y
+plot live_dat using 0:3 with lines
+
+# ============================================================
+# PANEL 2 : Potential / Conserved Energy
+# ============================================================
+set title "Potential / Conserved Energy"
+set xlabel "MD record"
+set ylabel "Energy (Ha)"
+set grid
+set key right
+set xrange [xmin:xmax]
+set autoscale y
+plot \
+live_dat using 0:4 with lines title "Potential", \
+live_dat using 0:6 with lines title "Conserved"
+
+# ============================================================
+# PANEL 3 : Kinetic Energy
+# ============================================================
+set title "Kinetic Energy"
+set xlabel "MD record"
+set ylabel "Kinetic (Ha)"
+set grid
+set key off
+set xrange [xmin:xmax]
+set autoscale y
+plot live_dat using 0:5 with lines
+
+# ============================================================
+# PANEL 4 : SCF effort
+# ============================================================
+set title "SCF effort"
+set xlabel "MD record"
+set ylabel "SCF steps"
+set grid
+set key off
+set xrange [xmin:xmax]
+set autoscale y
+plot live_dat using 0:7 with lines
+
+# ============================================================
+# PANEL 5 : Individual nearest-shell bond distances
+# ============================================================
+set title "Nearest-shell metal-ligand distances"
+set xlabel "Frame"
+set ylabel "Distance (Angstrom)"
+set grid
+set key right
+
+have_bonds = 0
+ncols = 0
+bond_rows = 0
+if (int(system("test -s '" . bond_dat . "'; echo $?")) == 0) {
+    have_bonds = 1
+    ncols_cmd = "awk '!/^#/ {print NF; exit}' '" . bond_dat . "'"
+    bond_rows_cmd = "awk '!/^#/ {n++} END{print n+0}' '" . bond_dat . "'"
+    ncols = int(system(ncols_cmd))
+    bond_rows = int(system(bond_rows_cmd))
+}
+
+bxmax = (bond_rows > win) ? bond_rows : win
+bxmin = (bond_rows > win) ? (bond_rows - win + 1) : 1
+
+if (have_bonds && ncols >= 5) {
+    set xrange [bxmin:bxmax]
+    if (bond_rows <= 1) {
+        plot for [col=5:ncols] bond_dat using 1:col with points title sprintf("d%d", col-4)
+    } else {
+        plot for [col=5:ncols] bond_dat using 1:col with lines title sprintf("d%d", col-4)
+    }
+} else {
+    plot NaN title "no bond-distance data"
+}
+
+# ============================================================
+# PANEL 6 : Bond summary
+# ============================================================
+set title "Bond summary"
+set xlabel "Frame"
+set ylabel "Distance (Angstrom)"
+set grid
+set key right
+if (have_bonds) {
+    set xrange [bxmin:bxmax]
+}
+
+if (!have_bonds) {
+    plot NaN title "no bond-distance data"
+} else if (bond_rows <= 1) {
+    plot \
+    bond_dat using 1:2 with points title "min", \
+    bond_dat using 1:3 with points title "max", \
+    bond_dat using 1:4 with points title "mean"
+} else {
+    plot \
+    bond_dat using 1:2 with lines title "min", \
+    bond_dat using 1:3 with lines title "max", \
+    bond_dat using 1:4 with lines title "mean"
+}
+
+unset multiplot
+pause refresh
+reread
