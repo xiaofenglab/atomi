@@ -32,12 +32,14 @@ plotcp2k = "atomi.cli.compat:plotcp2k"
 plotcp2ck = "atomi.cli.compat:plotcp2k"
 plotcp2kall = "atomi.cli.compat:plotcp2kall"
 plotmace = "atomi.cli.compat:plotmace"
+convertmace = "atomi.ml.mace.convert:main"
 extv = "atomi.cli.vasp:extv"
 mace-build-dataset = "atomi.ml.mace.datasets:main"
 mace-energy-outliers = "atomi.ml.mace.outliers:main"
 mace-update-outliers = "atomi.ml.mace.update_outliers:main"
 mace-check-extxyz = "atomi.ml.mace.check_extxyz:main"
 mace-vasp2extxyz = "atomi.ml.mace.vasp2extxyz:main"
+mace-convert-lammps = "atomi.ml.mace.convert:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

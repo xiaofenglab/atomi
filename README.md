@@ -62,12 +62,14 @@ plotcp2k cp2k.log
 plotcp2k cp2k.log trajectory.xyz
 plotmace mace_train.log
 plotmace mace_train.log 200 5
+convertmace modelname.model
 extv OUTCAR
 mace-build-dataset --neareq neareq_train.extxyz --phonopy phonopy.extxyz --force-spread forces.extxyz --prefail-group prefail=prefail.extxyz
 mace-energy-outliers --extxyz training.extxyz --model model.model --outdir energy_outliers --device cuda --dtype float32 --top-n 30 --write-poscars
 mace-update-outliers --report energy_outliers/report.txt --train-in training.extxyz --valid-in validation.extxyz --train-out training_clean.extxyz --valid-out validation_clean.extxyz
 mace-check-extxyz --train training.extxyz --valid validation.extxyz --show-tags --write-bad-csv
 mace-vasp2extxyz --runlist runlist.txt --out train.extxyz --index index.csv --failed failed.txt
+mace-convert-lammps modelname.model
 ```
 
 For the same MACE dataset builder through the grouped command:
@@ -100,6 +102,14 @@ To collect completed VASP DFT run folders into an extxyz training file:
 
 ```bash
 mace-vasp2extxyz --runlist runlist.txt --out mlacs_550K_train.extxyz --index index_mlacs_550K_train.csv --failed failed_mlacs_550K_train.txt
+```
+
+To convert a trained MACE model for LAMMPS:
+
+```bash
+convertmace modelname.model
+convertmace modelname.model --env ~/m_lammps_env --partition gpu --gres gpu:1
+convertmace modelname.model --local
 ```
 
 `plotcp2ck` is also accepted as an alias for `plotcp2k`.
