@@ -37,6 +37,7 @@ mace-build-dataset = "atomi.ml.mace.datasets:main"
 mace-energy-outliers = "atomi.ml.mace.outliers:main"
 mace-update-outliers = "atomi.ml.mace.update_outliers:main"
 mace-check-extxyz = "atomi.ml.mace.check_extxyz:main"
+mace-vasp2extxyz = "atomi.ml.mace.vasp2extxyz:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

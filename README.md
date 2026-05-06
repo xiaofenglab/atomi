@@ -67,6 +67,7 @@ mace-build-dataset --neareq neareq_train.extxyz --phonopy phonopy.extxyz --force
 mace-energy-outliers --extxyz training.extxyz --model model.model --outdir energy_outliers --device cuda --dtype float32 --top-n 30 --write-poscars
 mace-update-outliers --report energy_outliers/report.txt --train-in training.extxyz --valid-in validation.extxyz --train-out training_clean.extxyz --valid-out validation_clean.extxyz
 mace-check-extxyz --train training.extxyz --valid validation.extxyz --show-tags --write-bad-csv
+mace-vasp2extxyz --runlist runlist.txt --out train.extxyz --index index.csv --failed failed.txt
 ```
 
 For the same MACE dataset builder through the grouped command:
@@ -93,6 +94,12 @@ To QA extxyz labels, plots, and optional MACE-safe key rewriting:
 ```bash
 mace-check-extxyz --train training.extxyz --valid validation.extxyz --show-tags --write-bad-csv
 mace-check-extxyz --train training.extxyz --valid validation.extxyz --rewrite-refkeys --train-out training_ref.extxyz --valid-out validation_ref.extxyz
+```
+
+To collect completed VASP DFT run folders into an extxyz training file:
+
+```bash
+mace-vasp2extxyz --runlist runlist.txt --out mlacs_550K_train.extxyz --index index_mlacs_550K_train.csv --failed failed_mlacs_550K_train.txt
 ```
 
 `plotcp2ck` is also accepted as an alias for `plotcp2k`.
