@@ -33,6 +33,16 @@ To update an existing Atomi install on an HPC system:
 python -m pip install --upgrade --force-reinstall git+https://github.com/xiaofenglab/atomi.git
 ```
 
+Check the installed version after updating:
+
+```bash
+python -m pip show atomi
+atomi --version
+which md-engine
+```
+
+Atomi uses simple patch version bumps for package updates, for example `0.1.0` to `0.1.1`, so an HPC environment can confirm it is using the expected install.
+
 If Atomi was installed in editable mode from a cloned repository:
 
 ```bash

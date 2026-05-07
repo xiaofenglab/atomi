@@ -2,6 +2,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from atomi import __version__
 from atomi.cli.vasp import extv
 from atomi.core.doctor import main as doctor_main
 from atomi.core.project import create_project
@@ -21,6 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="atomi",
         description="HPC automation helpers for atomistic modeling.",
     )
+    parser.add_argument("--version", action="version", version=f"atomi {__version__}")
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
     init_project = subparsers.add_parser(
