@@ -150,6 +150,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vasp_outcar.add_argument("outcar", type=Path, nargs="?", default=Path("OUTCAR"))
 
+    vasp_check = subparsers.add_parser(
+        "vasp-check",
+        help="Check completion state for VASP array runs in runlist.txt.",
+    )
+    vasp_check.add_argument("check_args", nargs=argparse.REMAINDER)
+
+    vasp_check_scf = subparsers.add_parser(
+        "vasp-check-scf",
+        help="Check final DAV SCF convergence for VASP array logs.",
+    )
+    vasp_check_scf.add_argument("check_args", nargs=argparse.REMAINDER)
+
     mace_build_dataset = subparsers.add_parser(
         "mace-build-dataset",
         help="Build adaptive MACE train/validation extxyz datasets.",
@@ -241,6 +253,16 @@ def main(argv: list[str] | None = None) -> None:
         return
     if raw_args and raw_args[0] == "doctor":
         doctor_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "vasp-check":
+        from atomi.vasp.checks import checkvasp
+
+        checkvasp(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "vasp-check-scf":
+        from atomi.vasp.checks import checkscf
+
+        checkscf(raw_args[1:])
         return
 
     parser = build_parser()
@@ -353,6 +375,18 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.subcommand == "vasp-outcar":
         extv([str(args.outcar)])
+        return
+
+    if args.subcommand == "vasp-check":
+        from atomi.vasp.checks import checkvasp
+
+        checkvasp(args.check_args)
+        return
+
+    if args.subcommand == "vasp-check-scf":
+        from atomi.vasp.checks import checkscf
+
+        checkscf(args.check_args)
         return
 
     if args.subcommand == "mace-build-dataset":

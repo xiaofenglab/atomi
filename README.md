@@ -122,6 +122,9 @@ plotmace mace_train.log
 plotmace mace_train.log 200 5
 convertmace modelname.model
 extv OUTCAR
+checkvasp runlist.txt
+checkscf runlist.txt 1e-6
+checkscf runlist.txt 5e-6 --out bad_runs.txt --clean --dry-run
 lammps-md-init my_lammps_md_project
 lammps-md-workflow --config config.json
 lammps-md-workflow --resume --config config.json
@@ -134,6 +137,23 @@ mace-check-extxyz --train training.extxyz --valid validation.extxyz --show-tags 
 mace-vasp2extxyz --runlist runlist.txt --out train.extxyz --index index.csv --failed failed.txt
 mace-convert-lammps modelname.model
 ```
+
+For VASP array DFT checks, `checkvasp` reads a `runlist.txt` whose lines are run directories and reports `DONE`, `RUNNING`, `NOTSTART`, or `MISSING` using `OUTCAR`, `OUTCAR.gz`, and `vasp.out*` files:
+
+```bash
+checkvasp runlist.txt
+atomi vasp-check runlist.txt
+```
+
+For SCF convergence, `checkscf` keeps your original convention where run `N` in `runlist.txt` is checked against `vasp.out*.N` in the current directory:
+
+```bash
+checkscf runlist.txt 1e-6
+checkscf runlist.txt 5e-6 --out bad_runs.txt --clean --dry-run
+checkscf runlist.txt 5e-6 --out bad_runs.txt --clean
+```
+
+Use `--dry-run` first when cleaning. Without `--dry-run`, `--clean` removes `OUTCAR*`, `CONTCAR`, `vasprun.xml`, and `OSZICAR` from runs that fail the threshold or have stale VASP outputs without a matching log.
 
 For the same MACE dataset builder through the grouped command:
 
