@@ -96,15 +96,27 @@ def build_parser() -> argparse.ArgumentParser:
     lammps_summary.add_argument("logfile", type=Path)
     lammps_summary.add_argument("--last-fraction", type=float, default=0.5)
 
+    md_engine_init = subparsers.add_parser(
+        "md-engine-init",
+        help="Copy LAMMPS MD engine templates into a project directory.",
+    )
+    md_engine_init.add_argument("workflow_args", nargs=argparse.REMAINDER)
+
+    md_engine = subparsers.add_parser(
+        "md-engine",
+        help="Run or resume the config-driven LAMMPS MD engine.",
+    )
+    md_engine.add_argument("workflow_args", nargs=argparse.REMAINDER)
+
     lammps_md_init = subparsers.add_parser(
         "lammps-md-init",
-        help="Copy LAMMPS MD workflow templates into a project directory.",
+        help="Compatibility alias for md-engine-init.",
     )
     lammps_md_init.add_argument("workflow_args", nargs=argparse.REMAINDER)
 
     lammps_md_workflow = subparsers.add_parser(
         "lammps-md-workflow",
-        help="Run or resume the config-driven LAMMPS MD workflow.",
+        help="Compatibility alias for md-engine.",
     )
     lammps_md_workflow.add_argument("workflow_args", nargs=argparse.REMAINDER)
 
@@ -231,12 +243,12 @@ def main(argv: list[str] | None = None) -> None:
 
         mace_convert_main(raw_args[1:])
         return
-    if raw_args and raw_args[0] == "lammps-md-init":
+    if raw_args and raw_args[0] in ("md-engine-init", "lammps-md-init"):
         from atomi.lammps.workflow_cli import init_workflow
 
         init_workflow(raw_args[1:])
         return
-    if raw_args and raw_args[0] == "lammps-md-workflow":
+    if raw_args and raw_args[0] in ("md-engine", "lammps-md-workflow"):
         from atomi.lammps.workflow_cli import run_workflow
 
         run_workflow(raw_args[1:])
@@ -334,13 +346,13 @@ def main(argv: list[str] | None = None) -> None:
         print(format_summary(summary))
         return
 
-    if args.subcommand == "lammps-md-init":
+    if args.subcommand in ("md-engine-init", "lammps-md-init"):
         from atomi.lammps.workflow_cli import init_workflow
 
         init_workflow(args.workflow_args)
         return
 
-    if args.subcommand == "lammps-md-workflow":
+    if args.subcommand in ("md-engine", "lammps-md-workflow"):
         from atomi.lammps.workflow_cli import run_workflow
 
         run_workflow(args.workflow_args)

@@ -69,7 +69,7 @@ atomi init-project my_vasp_run --code vasp
 atomi write-submit --scheduler slurm --profile generic_cpu
 atomi inspect .
 atomi doctor
-atomi lammps-md-init my_lammps_md_project
+atomi md-engine-init my_lammps_md_project
 ```
 
 ## HPC Environment Check
@@ -98,7 +98,7 @@ For example, edit the `profiles.mace_lammps` block in `atomi_hpc_config.json` to
 convertmace modelname.model --hpc-config atomi_hpc_config.json
 ```
 
-For LAMMPS MD workflows, also review the `profiles.lammps_md_workflow` block. The project launcher and GPU wrapper use these environment variables when needed:
+For LAMMPS MD engines, also review the `profiles.lammps_md_engine` block. The project launcher and GPU wrapper use these environment variables when needed:
 
 ```text
 ATOMI_LAMMPS_ENV
@@ -126,9 +126,9 @@ extv OUTCAR --mag-lines 80
 checkvasp runlist.txt
 checkscf runlist.txt 1e-6
 checkscf runlist.txt 5e-6 --out bad_runs.txt --clean --dry-run
-lammps-md-init my_lammps_md_project
-lammps-md-workflow --config config.json
-lammps-md-workflow --resume --config config.json
+md-engine-init my_lammps_md_project
+md-engine --config config.json
+md-engine --resume --config config.json
 lammps-postprocess --log stages/npt_prod_1400K/chunk_production/log.in.npt_prod_1400K_production --temperature 1400 --outdir analysis/npt_prod_1400K
 lammps-thermo-series --config config_production.json --outdir analysis/thermo_0_300K_uq
 mace-build-dataset --neareq neareq_train.extxyz --phonopy phonopy.extxyz --force-spread forces.extxyz --prefail-group prefail=prefail.extxyz
@@ -199,12 +199,12 @@ convertmace modelname.model --local
 
 `plotcp2ck` is also accepted as an alias for `plotcp2k`.
 
-## LAMMPS MD Workflow
+## LAMMPS MD Engine
 
 The packaged LAMMPS MD engine runs staged equilibration or production workflows from a JSON config. Create a project skeleton with:
 
 ```bash
-lammps-md-init my_lammps_md_project
+md-engine-init my_lammps_md_project
 cd my_lammps_md_project
 ```
 
@@ -213,10 +213,10 @@ Then edit `config.json` for equilibration or `config_production.json` for produc
 Run directly on a login/interactive workflow allocation:
 
 ```bash
-lammps-md-workflow --config config.json
-lammps-md-workflow --resume --config config.json
-lammps-md-workflow --resume --start-from npt_200K --config config.json
-lammps-md-workflow --resume --only npt_prod_1400K --config config_production.json
+md-engine --config config.json
+md-engine --resume --config config.json
+md-engine --resume --start-from npt_200K --config config.json
+md-engine --resume --only npt_prod_1400K --config config_production.json
 ```
 
 When a regular equilibration workflow finishes, Atomi automatically writes `config_production.json` from completed NPT equilibrium stages. A completed stage must have `stages/<stage>/PASS` plus `<stage>.restart` or `<stage>.data`. The generated production config is flagged with `generated_by`, `source_config`, and `source_equilibration_stage` fields so it is clear it came from the finished `config.json` run.
@@ -224,15 +224,15 @@ When a regular equilibration workflow finishes, Atomi automatically writes `conf
 To change the production length during generation:
 
 ```bash
-lammps-md-workflow --config config.json --production-time-ps 100
-lammps-md-workflow --config config.json --production-steps 1000000
-lammps-md-workflow --config config.json --production-config-out config_production_100ps.json
+md-engine --config config.json --production-time-ps 100
+md-engine --config config.json --production-steps 1000000
+md-engine --config config.json --production-config-out config_production_100ps.json
 ```
 
 To skip production config generation:
 
 ```bash
-lammps-md-workflow --config config.json --no-write-production-config
+md-engine --config config.json --no-write-production-config
 ```
 
 Or submit the orchestrator itself to Slurm:
@@ -244,7 +244,23 @@ sbatch run_workflow.sh resume npt_200K config.json
 sbatch run_workflow.sh resume "" config_production.json
 ```
 
-The workflow submits one LAMMPS chunk at a time using `run_lammps_gpu.sh`, waits for `squeue` to clear, checks wrapper exit status, parses thermo output, writes `summary.txt` and optional `thermo.png`, and stores stage `PASS` markers for resume.
+The MD engine submits one LAMMPS chunk at a time using `run_lammps_gpu.sh`, waits for `squeue` to clear, checks wrapper exit status, parses thermo output, writes `summary.txt` and optional `thermo.png`, and stores stage `PASS` markers for resume.
+
+For a stage with a fixed length, put `fixed_steps` in the stage block:
+
+```json
+{
+  "name": "lc_nvt_ramp_400K",
+  "type": "nvt",
+  "temperature_start": 300,
+  "temperature_end": 400,
+  "fixed_steps": 100000
+}
+```
+
+`md-engine` writes `run 100000` into the generated LAMMPS input and estimates the Slurm wall time from the same step count. Fixed-step stages run one chunk by default; add `max_chunks` only if you intentionally want repeated fixed-size chunks. You can also specify a duration with `time_ps`, `run_time_ps`, or `duration_ps`, which is converted to steps using the config `timestep`.
+
+NPT stages whose names contain `_eqm` keep a constant chunk size from `adaptive_steps.initial_small` or `adaptive_steps.initial_large`, so an equilibrium block can retry convergence with repeated 50,000-step chunks without growing to longer chunks. Set `"adaptive_growth": true` on a stage if you want the old increasing chunk size behavior.
 
 For one temperature or one log file, use the single-run postprocessor:
 

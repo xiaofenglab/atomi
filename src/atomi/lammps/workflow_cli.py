@@ -16,8 +16,8 @@ TEMPLATE_FILES = {
 
 def init_workflow(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        prog="lammps-md-init",
-        description="Copy LAMMPS MD workflow templates into a project directory.",
+        prog="md-engine-init",
+        description="Copy LAMMPS MD engine templates into a project directory.",
     )
     parser.add_argument("path", type=Path, nargs="?", default=Path("."))
     parser.add_argument("--force", action="store_true", help="Overwrite existing template files.")

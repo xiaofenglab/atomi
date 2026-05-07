@@ -2,11 +2,11 @@
 
 """
 
-lammps-md-workflow --config config_600_1200K.json
+md-engine --config config_600_1200K.json
 
-lammps-md-workflow --resume --config config_600_1200K.json
+md-engine --resume --config config_600_1200K.json
 
-lammps-md-workflow --resume --start-from nvt_ramp_700K --config config_600_1200K.json
+md-engine --resume --start-from nvt_ramp_700K --config config_600_1200K.json
 
 
 """
@@ -110,6 +110,58 @@ def hours_to_slurm(hours):
     m = (total % 3600) // 60
     s = total % 60
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def timestep_ps(cfg):
+    return float(cfg.get("timestep_ps", cfg.get("timestep", 0.0001)))
+
+
+def steps_from_time_ps(cfg, time_ps):
+    return int(round(float(time_ps) / timestep_ps(cfg)))
+
+
+def resolve_run_steps(cfg, stage, default_steps=None):
+    for key in ("fixed_steps", "steps", "run_steps", "nsteps"):
+        if key in stage:
+            return int(stage[key])
+
+    for key in ("time_ps", "run_time_ps", "duration_ps", "production_time_ps"):
+        if key in stage:
+            return steps_from_time_ps(cfg, stage[key])
+
+    if default_steps is not None:
+        return int(default_steps)
+
+    raise ValueError(
+        f"Stage {stage['name']} needs fixed_steps/steps or time_ps/run_time_ps."
+    )
+
+
+def stage_uses_fixed_steps(stage):
+    return any(
+        key in stage
+        for key in (
+            "fixed_steps",
+            "steps",
+            "run_steps",
+            "nsteps",
+            "time_ps",
+            "run_time_ps",
+            "duration_ps",
+            "production_time_ps",
+        )
+    )
+
+
+def stage_uses_constant_chunk_steps(stage):
+    if stage.get("constant_chunk_steps", False):
+        return True
+    if stage.get("fixed_chunk_steps", False):
+        return True
+    if stage.get("adaptive_growth", False):
+        return False
+    name = stage.get("name", "").lower()
+    return stage.get("type") == "npt" and "_eqm" in name
 
 
 # ---------------------------------------------------
@@ -562,11 +614,9 @@ def generate_production_input(cfg, stage, structure_path, chunk_tag):
     tdamp = get_tdamp(cfg, stage)
     pdamp = get_pdamp(cfg, stage)
     pressure = stage.get("pressure_bar", cfg.get("pressure_bar", 0.0))
-    timestep = cfg.get("timestep", 0.0001)
+    timestep = cfg.get("timestep", timestep_ps(cfg))
     dump_every = stage.get("dump_every", cfg.get("dump_every", 500))
-    run_steps = stage.get("fixed_steps", stage.get("steps"))
-    if run_steps is None:
-        raise ValueError(f"Production stage {stage['name']} needs fixed_steps or steps.")
+    run_steps = resolve_run_steps(cfg, stage)
 
     dump_name = f"dump.{chunk_tag}.lammpstrj"
     final_restart = f"{chunk_tag}.restart"
@@ -613,12 +663,12 @@ dump            1 all custom {dump_every} {dump_name} id type x y z
 dump_modify     1 sort id
 
 restart         50000 {chunk_tag}.restart1 {chunk_tag}.restart2
-run             {int(run_steps)}
+run             {run_steps}
 
 write_restart   {final_restart}
 write_data      {final_data}
 """
-    return txt, final_data, final_restart, int(run_steps)
+    return txt, final_data, final_restart, run_steps
 
 
 # ---------------------------------------------------
@@ -898,7 +948,7 @@ def write_production_config_from_equilibration(
         return None
 
     production_cfg = {
-        "generated_by": "atomi lammps-md-workflow",
+        "generated_by": "atomi md-engine",
         "source_config": _relative_to_root(Path(cfg["_config_path"])),
         "description": (
             "Generated from completed NPT equilibrium stages. Review HPC paths, "
@@ -977,10 +1027,14 @@ def run_stage(cfg, stage, structure, resume_mode=False):
         initial_steps = steps_cfg["initial_large"]
         max_chunks = cfg["max_chunks_large"]
 
-    if "fixed_steps" in stage:
-        initial_steps = int(stage["fixed_steps"])
+    fixed_step_stage = stage_uses_fixed_steps(stage)
+    constant_chunk_steps = fixed_step_stage or stage_uses_constant_chunk_steps(stage)
+    if fixed_step_stage:
+        initial_steps = resolve_run_steps(cfg, stage, default_steps=initial_steps)
     if "max_chunks" in stage:
         max_chunks = int(stage["max_chunks"])
+    elif fixed_step_stage:
+        max_chunks = 1
 
     start_chunk, resumed_restart = find_latest_chunk_restart(
         stage_dir,
@@ -997,9 +1051,10 @@ def run_stage(cfg, stage, structure, resume_mode=False):
         current_structure = Path(structure).resolve()
 
     run_steps = initial_steps
-    for _ in range(1, start_chunk):
-        run_steps = int(run_steps * steps_cfg["growth_factor"])
-        run_steps = min(run_steps, steps_cfg["max_chunk_steps"])
+    if not constant_chunk_steps:
+        for _ in range(1, start_chunk):
+            run_steps = int(run_steps * steps_cfg["growth_factor"])
+            run_steps = min(run_steps, steps_cfg["max_chunk_steps"])
 
     min_chunks_before_accept = stage.get("min_chunks_before_accept", 1)
     accept_if_stable = stage.get("accept_if_stable", False)
@@ -1019,6 +1074,8 @@ def run_stage(cfg, stage, structure, resume_mode=False):
         wall_hours = estimate_walltime(cfg, stage, run_steps)
         walltime = hours_to_slurm(wall_hours)
         wrapper = create_stage_wrapper(cfg, chunk_dir, walltime)
+
+        print(f"  chunk {chunk}: steps={run_steps} walltime={walltime}", flush=True)
 
         job = submit_job(wrapper, inputfile.name, chunk_dir)
         wait_job(job, cfg["poll_seconds"])
@@ -1093,8 +1150,9 @@ def run_stage(cfg, stage, structure, resume_mode=False):
                 return (stage_dir / f"{stage_name}.restart").resolve()
 
         current_structure = final_restart_path
-        run_steps = int(run_steps * steps_cfg["growth_factor"])
-        run_steps = min(run_steps, steps_cfg["max_chunk_steps"])
+        if not constant_chunk_steps:
+            run_steps = int(run_steps * steps_cfg["growth_factor"])
+            run_steps = min(run_steps, steps_cfg["max_chunk_steps"])
 
     raise RuntimeError(f"stage {stage_name} did not converge")
 
@@ -1104,7 +1162,7 @@ def run_stage(cfg, stage, structure, resume_mode=False):
 # ---------------------------------------------------
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="lammps-md-workflow")
+    parser = argparse.ArgumentParser(prog="md-engine")
     parser.add_argument("--config", default="config.json")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--start-from", default=None)

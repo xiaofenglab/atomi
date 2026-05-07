@@ -48,13 +48,13 @@ HPC_ASSUMPTIONS = [
     },
     {
         "key": "gpu_resource_names",
-        "applies_to": ["convertmace", "mace-energy-outliers", "lammps-md-workflow"],
+        "applies_to": ["convertmace", "mace-energy-outliers", "md-engine"],
         "note": "GPU partitions and gres strings vary by cluster.",
     },
     {
-        "key": "lammps_md_workflow_runtime",
-        "applies_to": ["lammps-md-init", "lammps-md-workflow"],
-        "note": "The MD workflow needs Slurm sbatch/squeue, a LAMMPS executable, GPU modules, and MACE/LAMMPS runtime libraries configured for each HPC.",
+        "key": "lammps_md_engine_runtime",
+        "applies_to": ["md-engine-init", "md-engine"],
+        "note": "The MD engine needs Slurm sbatch/squeue, a LAMMPS executable, GPU modules, and MACE/LAMMPS runtime libraries configured for each HPC.",
     },
 ]
 
@@ -180,7 +180,7 @@ def build_report() -> dict[str, Any]:
                 "gres": "gpu:1",
                 "time": "00:15:00",
             },
-            "lammps_md_workflow": {
+            "lammps_md_engine": {
                 "env_path": "~/m_lammps_env",
                 "partition": "gpu",
                 "gres": "gpu:1",

@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=md_workflow
-#SBATCH --output=logs/workflow_%j.out
-#SBATCH --error=logs/workflow_%j.err
+#SBATCH --job-name=md_engine
+#SBATCH --output=logs/md_engine_%j.out
+#SBATCH --error=logs/md_engine_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
@@ -9,7 +9,7 @@
 #SBATCH --time=48:00:00
 
 # ============================================================
-# MD workflow launcher for lammps-md-workflow
+# MD engine launcher for md-engine
 #
 # USAGE:
 #
@@ -22,12 +22,12 @@
 #   3) Resume and start from a specific stage
 #      sbatch run_workflow.sh resume npt_200K
 #      -> calls:
-#         lammps-md-workflow --resume --start-from npt_200K --config config.json
+#         md-engine --resume --start-from npt_200K --config config.json
 #
 #   4) Fresh start beginning at a specific stage
 #      sbatch run_workflow.sh fresh nvt_300K
 #      -> calls:
-#         lammps-md-workflow --start-from nvt_300K --config config.json
+#         md-engine --start-from nvt_300K --config config.json
 #
 #   5) Resume using a different config file
 #      sbatch run_workflow.sh resume "" config_600_1200K.json
@@ -98,7 +98,7 @@ echo "Directory   : $(pwd)"
 echo "Job ID      : $SLURM_JOB_ID"
 echo "=============================="
 
-CMD=(lammps-md-workflow --config "$CONFIG_FILE")
+CMD=(md-engine --config "$CONFIG_FILE")
 
 if [ "$MODE" = "resume" ]; then
     CMD+=(--resume)
