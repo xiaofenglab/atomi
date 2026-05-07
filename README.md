@@ -122,6 +122,7 @@ plotmace mace_train.log
 plotmace mace_train.log 200 5
 convertmace modelname.model
 extv OUTCAR
+extv OUTCAR --mag-lines 80
 checkvasp runlist.txt
 checkscf runlist.txt 1e-6
 checkscf runlist.txt 5e-6 --out bad_runs.txt --clean --dry-run

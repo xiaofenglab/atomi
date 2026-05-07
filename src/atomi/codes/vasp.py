@@ -20,15 +20,21 @@ class OutcarSummary(NamedTuple):
     max_force: float | None
 
 
-def summarize_outcar(path: Path) -> OutcarSummary:
+def summarize_outcar(path: Path, magnetization_lines: int = 50) -> OutcarSummary:
     """Extract a compact summary from a VASP OUTCAR file."""
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    magnetization_lines = max(0, magnetization_lines)
     return OutcarSummary(
         final_total_energy_line=_last_matching(lines, "free energy    TOTEN"),
         total_energy_changes=_last_n_matching(lines, "total energy-change", 5),
         fermi_energy_line=_last_matching(lines, "E-fermi"),
         final_force_block=_last_block_after(lines, "TOTAL-FORCE (eV/Angst)", after=3, tail=20),
-        final_magnetization_table=_last_block_after(lines, "magnetization", after=50, tail=50),
+        final_magnetization_table=_last_block_after(
+            lines,
+            "magnetization",
+            after=magnetization_lines,
+            tail=magnetization_lines,
+        ),
         final_lattice_vectors=_last_block_after(lines, "direct lattice vectors", after=3, tail=3),
         max_force=_max_force(lines),
     )

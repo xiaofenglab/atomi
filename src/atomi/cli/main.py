@@ -148,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
         "vasp-outcar",
         help="Quick VASP OUTCAR summary.",
     )
-    vasp_outcar.add_argument("outcar", type=Path, nargs="?", default=Path("OUTCAR"))
+    vasp_outcar.add_argument("outcar_args", nargs=argparse.REMAINDER)
 
     vasp_check = subparsers.add_parser(
         "vasp-check",
@@ -253,6 +253,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if raw_args and raw_args[0] == "doctor":
         doctor_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "vasp-outcar":
+        extv(raw_args[1:])
         return
     if raw_args and raw_args[0] == "vasp-check":
         from atomi.vasp.checks import checkvasp
@@ -374,7 +377,7 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.subcommand == "vasp-outcar":
-        extv([str(args.outcar)])
+        extv(args.outcar_args)
         return
 
     if args.subcommand == "vasp-check":

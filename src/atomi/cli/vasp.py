@@ -8,9 +8,15 @@ def extv(argv: list[str] | None = None) -> None:
     """Compatibility command for quick VASP OUTCAR summaries."""
     parser = argparse.ArgumentParser(prog="extv")
     parser.add_argument("outcar", type=Path, nargs="?", default=Path("OUTCAR"))
+    parser.add_argument(
+        "--mag-lines",
+        type=int,
+        default=50,
+        help="Number of final magnetization lines to print. Default: 50.",
+    )
     args = parser.parse_args(argv)
 
     if not args.outcar.is_file():
         raise FileNotFoundError(f"file not found: {args.outcar}")
-    summary = summarize_outcar(args.outcar)
+    summary = summarize_outcar(args.outcar, magnetization_lines=args.mag_lines)
     print(format_outcar_summary(args.outcar, summary))
