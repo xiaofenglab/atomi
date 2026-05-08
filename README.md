@@ -136,6 +136,11 @@ extv OUTCAR --mag-lines 80
 checkvasp runlist.txt
 checkscf runlist.txt 1e-6
 checkscf runlist.txt 5e-6 --out bad_runs.txt --clean --dry-run
+vasp-phonopy-neareq --output-root DFT_PHONOPY_NEAREQ --vasp-template VASP_TEMPLATE --mode both --dim 1 1 1
+vasp-prefail-candidates --config dump_npt_900K.json --output-root DFT_PREFail_CANDIDATES --vasp-template VASP_TEMPLATE
+vasp-stress-force-candidates --output-root DFT_STRESS_FORCE --vasp-template VASP_TEMPLATE --mode both --target-size 80 --bias-species O
+vasp-defect-candidates --output-root DFT_DEFECTS --vasp-template VASP_TEMPLATE --species O U
+vasp-md-snapshot-candidates --config config_production.json --output-root DFT_MD_SNAPSHOTS --vasp-template VASP_TEMPLATE --last-frames 5
 md-engine-init my_lammps_md_project
 md-engine --config config.json
 md-engine --resume --config config.json
@@ -165,6 +170,140 @@ checkscf runlist.txt 5e-6 --out bad_runs.txt --clean
 ```
 
 Use `--dry-run` first when cleaning. Without `--dry-run`, `--clean` removes `OUTCAR*`, `CONTCAR`, `vasprun.xml`, and `OSZICAR` from runs that fail the threshold or have stale VASP outputs without a matching log.
+
+To prepare near-equilibrium phonopy and MLIP VASP datasets from one reference POSCAR:
+
+```bash
+vasp-phonopy-neareq \
+  --output-root DFT_PHONOPY_NEAREQ \
+  --vasp-template VASP_TEMPLATE \
+  --mode both \
+  --dim 1 1 1
+```
+
+For each volume, Atomi writes a base `POSCAR` and can produce two related datasets:
+
+```text
+V1.000/phonopy_001/POSCAR       # from phonopy -d
+V1.000/rd_001/POSCAR            # from phonopy --rd, useful for MLIP
+V1.000/strain_001_hydro_p0p0050/POSCAR
+V1.000/strainrd_001_hydro_p0p0050_001/POSCAR
+```
+
+`--mode phonopy` generates only finite-displacement phonopy folders. `--mode mlip` generates only the compact MLIP near-equilibrium folders. `--mode both` does both and writes one combined:
+
+```text
+DFT_PHONOPY_NEAREQ/runlist.txt
+DFT_PHONOPY_NEAREQ/runlist_phonopy.txt
+DFT_PHONOPY_NEAREQ/runlist_mlip_neareq.txt
+DFT_PHONOPY_NEAREQ/candidate_index.csv
+DFT_PHONOPY_NEAREQ/manifest.csv
+```
+
+For a 2x2x2 UO2 POSCAR, using `--dim 1 1 1` means the `phonopy -d` step can generate the full symmetry-expanded finite-displacement set appropriate for that already-expanded cell. If this creates hundreds of structures, keep them as the phonopy-specific pool and use the random-displacement/strain folders as the MLIP near-equilibrium pool.
+
+For all VASP preparation commands, `VASP_TEMPLATE` can contain:
+
+```text
+VASP_TEMPLATE/POSCAR
+VASP_TEMPLATE/INCAR
+VASP_TEMPLATE/KPOINTS
+VASP_TEMPLATE/POTCAR
+```
+
+`POSCAR` is the template/reference structure used for generating modified structures when `--poscar` or `reference_poscar` is not provided. `INCAR`, `KPOINTS`, and `POTCAR` are copied into each generated VASP run folder. The commands print the POSCAR composition and parsed POTCAR symbols, and warn if POSCAR species order and POTCAR order do not match.
+
+To prepare prefail MD frames for VASP array DFT, use one merged command:
+
+```bash
+vasp-prefail-candidates \
+  --config dump_npt_900K.json \
+  --output-root UO2_V4_r4_ACTIVE/DFT_V4_CANDIDATES \
+  --vasp-template UO2_V4_r4_ACTIVE/VASP_TEMPLATE
+```
+
+The JSON gives the LAMMPS dump, selected timesteps, and atom type map. It can also give `reference_poscar`; if omitted, Atomi uses `VASP_TEMPLATE/POSCAR`. Paths inside the JSON are resolved relative to the JSON file location, so this is portable when the workflow folder moves. The command first writes selected parent structures as:
+
+```text
+MD_SELECT/<label>/md_<timestep>/base/POSCAR
+```
+
+Then it writes 16 VASP candidate folders per parent:
+
+```text
+DFT_V4_CANDIDATES/<label>/md_<timestep>/base/POSCAR
+DFT_V4_CANDIDATES/<label>/md_<timestep>/rd_small_001/POSCAR
+...
+DFT_V4_CANDIDATES/<label>/md_<timestep>/strain_disp_002/POSCAR
+```
+
+Each candidate folder receives `INCAR`, `KPOINTS`, and `POTCAR` from `--vasp-template`. Add `--copy-template-all` to copy every template file except `POSCAR`. The command also writes:
+
+```text
+DFT_V4_CANDIDATES/runlist.txt
+DFT_V4_CANDIDATES/candidate_index.csv
+```
+
+Use the runlist for array DFT, then feed the finished runs into `mace-vasp2extxyz`.
+
+To prepare stress/force backbone structures from one equilibrium POSCAR:
+
+```bash
+vasp-stress-force-candidates \
+  --output-root DFT_STRESS_FORCE \
+  --vasp-template VASP_TEMPLATE \
+  --mode both \
+  --target-size 80 \
+  --bias-species O
+```
+
+This generates a larger stress/force pool, selects a family-balanced set, writes DFT-ready folders, and creates:
+
+```text
+DFT_STRESS_FORCE/runlist.txt
+DFT_STRESS_FORCE/candidate_index.csv
+DFT_STRESS_FORCE/dataset_summary.json
+DFT_STRESS_FORCE/selection_report.json
+```
+
+Each selected run folder contains `POSCAR`, `case_info.json`, and the VASP template files. Use `--mode stress` or `--mode force` to build only one family, and add `--copy-template-all` when the template folder has submit scripts or extra VASP helper files that should be copied into every run.
+
+To add point-defect coverage for MLIP training:
+
+```bash
+vasp-defect-candidates \
+  --output-root DFT_DEFECTS \
+  --vasp-template VASP_TEMPLATE \
+  --species O U \
+  --n-vacancy 6 \
+  --n-interstitial 6 \
+  --n-frenkel 6 \
+  --n-schottky 4
+```
+
+The command reads the template POSCAR species order and writes vacancy, interstitial, Frenkel, Schottky, and antisite candidate folders. Schottky candidates remove one reduced formula unit, so a UO2 POSCAR removes one U and two O per Schottky sample. Use `--no-antisite` for ionic systems where antisites are not physically useful, or `--interstitial-species O` if you only want oxygen interstitials.
+
+To harvest successful thermal MD snapshots from an `md-engine` project:
+
+```bash
+vasp-md-snapshot-candidates \
+  --config config_production.json \
+  --output-root DFT_MD_SNAPSHOTS \
+  --vasp-template VASP_TEMPLATE \
+  --last-frames 5
+```
+
+This command reads the md-engine JSON, searches `stages/<stage>/PASS`, enters the latest chunk for each passed stage, finds `dump.*.lammpstrj`, and converts selected frames into DFT-ready VASP folders. By default it uses the last five frames from each successful latest chunk. Useful filters are:
+
+```bash
+vasp-md-snapshot-candidates --config config_production.json --output-root DFT_MD_900K --vasp-template VASP_TEMPLATE --stage npt_prod_900K --last-frames 10
+vasp-md-snapshot-candidates --config config_production.json --output-root DFT_MD_900K --vasp-template VASP_TEMPLATE -T 900 --last-frames 10
+vasp-md-snapshot-candidates --config config_production.json --output-root DFT_MD_300_1500K --vasp-template VASP_TEMPLATE --temperature-range 300 1500 --last-frames 3
+vasp-md-snapshot-candidates --config config.json --output-root DFT_MD_EQM --vasp-template VASP_TEMPLATE --stage-regex 'npt.*eqm' --last-frames 3
+vasp-md-snapshot-candidates --config config.json --output-root DFT_MD_PICKED --vasp-template VASP_TEMPLATE --timesteps 50000,100000 --atom-type-map 1=O 2=U
+```
+
+Temperature filters read `temperature`, `temperature_end`, or a stage name like `npt_prod_900K`. Use repeated or comma-separated `-T` values for several single points, for example `-T 300 -T 900` or `-T 300,900`. If the md-engine JSON contains `atom_type_map`, Atomi uses it. Otherwise the current U/O md-engine default is inferred from `mass_O` and `mass_U`; on another material, pass `--atom-type-map 1=ElementA 2=ElementB` or add that map to the config. The command writes `runlist.txt`, `candidate_index.csv`, and `dataset_summary.json`.
 
 For the same MACE dataset builder through the grouped command:
 
@@ -271,6 +410,35 @@ For a stage with a fixed length, put `fixed_steps` in the stage block:
 `md-engine` writes `run 100000` into the generated LAMMPS input and estimates the Slurm wall time from the same step count. Fixed-step stages run one chunk by default; add `max_chunks` only if you intentionally want repeated fixed-size chunks. You can also specify a duration with `time_ps`, `run_time_ps`, or `duration_ps`, which is converted to steps using the config `timestep`.
 
 NPT stages whose names contain `_eqm` keep a constant chunk size from `adaptive_steps.initial_small` or `adaptive_steps.initial_large`, so an equilibrium block can retry convergence with repeated 50,000-step chunks without growing to longer chunks. Set `"adaptive_growth": true` on a stage if you want the old increasing chunk size behavior.
+
+The Slurm `#SBATCH --time` value is computational wall time, not MD physical time. By default, it is estimated from:
+
+```text
+reference_hours * atoms/reference_atoms * steps/reference_steps * safety_factor
+```
+
+If `reference_hours` already includes your safety margin, use `reference_walltime_hours` instead. You can also override the request globally or per stage:
+
+```json
+"performance": {
+  "reference_atoms": 768,
+  "reference_steps": 50000,
+  "reference_walltime_hours": 6.0,
+  "atoms_small": 768,
+  "atoms_large": 768
+}
+```
+
+or:
+
+```json
+{
+  "name": "lc_npt_eqm_300K",
+  "type": "npt",
+  "temperature": 300,
+  "walltime_hours": 6.0
+}
+```
 
 For one temperature or one log file, use the single-run postprocessor:
 

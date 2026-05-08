@@ -12,6 +12,7 @@ md-engine --resume --start-from nvt_ramp_700K --config config_600_1200K.json
 """
 
 import json
+import math
 import subprocess
 import time
 import re
@@ -86,11 +87,25 @@ def make_read_command(structure_path):
 # ---------------------------------------------------
 
 def estimate_walltime(cfg, stage, steps):
+    if "walltime_hours" in stage:
+        return max(float(stage["walltime_hours"]), 0.0)
+    if "walltime_minutes" in stage:
+        return max(float(stage["walltime_minutes"]) / 60.0, 0.0)
+
     perf = cfg.get("performance", {})
+    if "walltime_hours" in perf:
+        return max(float(perf["walltime_hours"]), 0.0)
+    if "walltime_minutes" in perf:
+        return max(float(perf["walltime_minutes"]) / 60.0, 0.0)
 
     ref_atoms = perf.get("reference_atoms", 96)
     ref_steps = perf.get("reference_steps", 20000)
-    ref_hours = perf.get("reference_hours", 0.25)
+    if "reference_walltime_hours" in perf:
+        ref_hours = perf["reference_walltime_hours"]
+        safety_factor = 1.0
+    else:
+        ref_hours = perf.get("reference_hours", 0.25)
+        safety_factor = perf.get("safety_factor", 1.5)
 
     atoms = perf.get("atoms_small", ref_atoms)
     if "atoms" in perf:
@@ -99,13 +114,13 @@ def estimate_walltime(cfg, stage, steps):
         atoms = perf.get("atoms_large", ref_atoms)
 
     hours = ref_hours * (atoms / ref_atoms) * (steps / ref_steps)
-    hours *= perf.get("safety_factor", 1.5)
+    hours *= safety_factor
 
     return max(hours, 0.25)
 
 
 def hours_to_slurm(hours):
-    total = int(hours * 3600)
+    total = math.ceil(hours * 3600)
     h = total // 3600
     m = (total % 3600) // 60
     s = total % 60

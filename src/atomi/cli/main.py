@@ -176,6 +176,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vasp_check_scf.add_argument("check_args", nargs=argparse.REMAINDER)
 
+    vasp_phonopy_neareq = subparsers.add_parser(
+        "vasp-phonopy-neareq",
+        help="Prepare phonopy and MLIP near-equilibrium VASP datasets.",
+    )
+    vasp_phonopy_neareq.add_argument("phonopy_args", nargs=argparse.REMAINDER)
+
+    vasp_prefail_candidates = subparsers.add_parser(
+        "vasp-prefail-candidates",
+        help="Extract prefail MD frames and prepare distorted VASP candidate runs.",
+    )
+    vasp_prefail_candidates.add_argument("prefail_args", nargs=argparse.REMAINDER)
+
+    vasp_stress_force_candidates = subparsers.add_parser(
+        "vasp-stress-force-candidates",
+        help="Prepare stress/force VASP candidate runs from an equilibrium POSCAR.",
+    )
+    vasp_stress_force_candidates.add_argument("stress_force_args", nargs=argparse.REMAINDER)
+
+    vasp_defect_candidates = subparsers.add_parser(
+        "vasp-defect-candidates",
+        help="Prepare vacancy/interstitial/Frenkel/Schottky VASP defect runs.",
+    )
+    vasp_defect_candidates.add_argument("defect_args", nargs=argparse.REMAINDER)
+
+    vasp_md_snapshot_candidates = subparsers.add_parser(
+        "vasp-md-snapshot-candidates",
+        help="Harvest successful md-engine LAMMPS frames into VASP-ready folders.",
+    )
+    vasp_md_snapshot_candidates.add_argument("snapshot_args", nargs=argparse.REMAINDER)
+
     mace_build_dataset = subparsers.add_parser(
         "mace-build-dataset",
         help="Build adaptive MACE train/validation extxyz datasets.",
@@ -280,6 +310,31 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.checks import checkscf
 
         checkscf(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "vasp-phonopy-neareq":
+        from atomi.vasp.phonopy_neareq import main as vasp_phonopy_neareq_main
+
+        vasp_phonopy_neareq_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "vasp-prefail-candidates":
+        from atomi.vasp.prefail import main as vasp_prefail_candidates_main
+
+        vasp_prefail_candidates_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "vasp-stress-force-candidates":
+        from atomi.vasp.stress_force import main as vasp_stress_force_candidates_main
+
+        vasp_stress_force_candidates_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "vasp-defect-candidates":
+        from atomi.vasp.defects import main as vasp_defect_candidates_main
+
+        vasp_defect_candidates_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "vasp-md-snapshot-candidates":
+        from atomi.vasp.md_snapshots import main as vasp_md_snapshot_candidates_main
+
+        vasp_md_snapshot_candidates_main(raw_args[1:])
         return
 
     parser = build_parser()
@@ -404,6 +459,24 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.checks import checkscf
 
         checkscf(args.check_args)
+        return
+
+    if args.subcommand == "vasp-phonopy-neareq":
+        from atomi.vasp.phonopy_neareq import main as vasp_phonopy_neareq_main
+
+        vasp_phonopy_neareq_main(args.phonopy_args)
+        return
+
+    if args.subcommand == "vasp-prefail-candidates":
+        from atomi.vasp.prefail import main as vasp_prefail_candidates_main
+
+        vasp_prefail_candidates_main(args.prefail_args)
+        return
+
+    if args.subcommand == "vasp-stress-force-candidates":
+        from atomi.vasp.stress_force import main as vasp_stress_force_candidates_main
+
+        vasp_stress_force_candidates_main(args.stress_force_args)
         return
 
     if args.subcommand == "mace-build-dataset":
