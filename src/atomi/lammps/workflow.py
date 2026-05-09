@@ -16,6 +16,7 @@ import math
 import subprocess
 import time
 import re
+from difflib import get_close_matches
 from pathlib import Path
 from statistics import mean
 import argparse
@@ -1384,8 +1385,16 @@ def main(argv=None):
     if args.only:
         selected = [stage for stage in cfg["stages"] if stage["name"] == args.only]
         if not selected:
-            raise RuntimeError(f"No stage named {args.only}")
+            close = get_close_matches(args.only, [stage["name"] for stage in cfg["stages"]], n=3)
+            hint = f" Did you mean: {', '.join(close)}?" if close else ""
+            parser.error(f"No stage named {args.only}.{hint}")
         cfg["stages"] = selected
+
+    stage_names = [stage["name"] for stage in cfg["stages"]]
+    if args.start_from is not None and args.start_from not in stage_names:
+        close = get_close_matches(args.start_from, stage_names, n=3)
+        hint = f" Did you mean: {', '.join(close)}?" if close else ""
+        parser.error(f"No stage named {args.start_from}.{hint}")
 
     production_only = cfg["stages"] and all(production_stage_selected(stage) for stage in cfg["stages"])
 

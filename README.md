@@ -368,6 +368,8 @@ md-engine --resume --start-from npt_200K --config config.json
 md-engine --resume --only npt_prod_1400K --config config_production.json
 ```
 
+`--start-from` and `--only` must match a stage name in the config exactly. If the stage is misspelled, `md-engine` stops before running anything or generating `config_production.json`, and prints close stage-name suggestions.
+
 When a regular equilibration workflow finishes, Atomi automatically writes `config_production.json` from completed NPT equilibrium stages. A completed stage must have `stages/<stage>/PASS` plus `<stage>.restart` or `<stage>.data`. The generated production config is flagged with `generated_by`, `source_config`, and `source_equilibration_stage` fields so it is clear it came from the finished `config.json` run.
 
 To change the production length during generation:
