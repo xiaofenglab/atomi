@@ -135,6 +135,10 @@ def steps_from_time_ps(cfg, time_ps):
     return int(round(float(time_ps) / timestep_ps(cfg)))
 
 
+def steps_for_time_ps(cfg, time_ps):
+    return max(1, int(round(float(time_ps) / timestep_ps(cfg))))
+
+
 def resolve_run_steps(cfg, stage, default_steps=None):
     for key in ("fixed_steps", "steps", "run_steps", "nsteps"):
         if key in stage:
@@ -177,6 +181,74 @@ def stage_uses_constant_chunk_steps(stage):
         return False
     name = stage.get("name", "").lower()
     return stage.get("type") == "npt" and "_eqm" in name
+
+
+# ---------------------------------------------------
+# RAMP CONTINUATION
+# ---------------------------------------------------
+
+def is_nvt_ramp_stage(stage):
+    if stage.get("type") not in ("nvt", "nvt_replicate"):
+        return False
+    if "temperature_start" not in stage or "temperature_end" not in stage:
+        return False
+    return float(stage["temperature_start"]) != float(stage["temperature_end"])
+
+
+def ramp_rules(cfg, stage):
+    rules = {
+        "tail_average_ps": 2.0,
+        "continue_from_tail_temperature": True,
+        "accept_temperature_tol_min": None,
+        "accept_temperature_tol_fraction": None,
+    }
+    rules.update(cfg.get("ramp_rules", {}))
+    rules.update(stage.get("ramp_override", {}))
+
+    eq = cfg.get("equilibrium_rules", {})
+    if rules["accept_temperature_tol_min"] is None:
+        rules["accept_temperature_tol_min"] = eq.get("temperature_tol_min", 20.0)
+    if rules["accept_temperature_tol_fraction"] is None:
+        rules["accept_temperature_tol_fraction"] = eq.get("temperature_tol_fraction", 0.03)
+    return rules
+
+
+def tail_average_temperature(cfg, steps, temperatures, tail_ps):
+    if not steps or not temperatures:
+        return None
+    tail_steps = steps_for_time_ps(cfg, tail_ps)
+    final_step = steps[-1]
+    selected = [
+        temp
+        for step, temp in zip(steps, temperatures)
+        if step >= final_step - tail_steps
+    ]
+    if not selected:
+        selected = temperatures[-max(1, min(len(temperatures), tail_steps)):]
+    return mean(selected)
+
+
+def ramp_target_reached(cfg, stage, steps, temperatures):
+    if not is_nvt_ramp_stage(stage):
+        return False, "not_ramp"
+    rules = ramp_rules(cfg, stage)
+    target = float(stage["temperature_end"])
+    tail_mean = tail_average_temperature(cfg, steps, temperatures, rules["tail_average_ps"])
+    if tail_mean is None:
+        return False, "no_temperature_tail"
+    tol = max(
+        float(rules["accept_temperature_tol_min"]),
+        abs(target) * float(rules["accept_temperature_tol_fraction"]),
+    )
+    if abs(tail_mean - target) <= tol:
+        return True, (
+            f"ramp target reached: tail_{rules['tail_average_ps']}ps_T="
+            f"{tail_mean:.3f} K target={target:.3f} K tol={tol:.3f} K"
+        )
+    return False, (
+        f"ramp target not reached: tail_{rules['tail_average_ps']}ps_T="
+        f"{tail_mean:.3f} K target={target:.3f} K tol={tol:.3f} K"
+    )
 
 
 # ---------------------------------------------------
@@ -498,7 +570,16 @@ def get_pdamp(cfg, stage):
     return baro_cfg.get("pdamp_small", 5.0)
 
 
-def generate_input(cfg, stage, run_steps, structure_path, stage_name, chunk_idx, resume_mode=False):
+def generate_input(
+    cfg,
+    stage,
+    run_steps,
+    structure_path,
+    stage_name,
+    chunk_idx,
+    resume_mode=False,
+    temperature_start_override=None,
+):
     model = path_for_lammps(cfg["model_file"])
     read_cmd = make_read_command(structure_path)
 
@@ -559,6 +640,8 @@ replicate       {rep[0]} {rep[1]} {rep[2]}
     # Support both fixed-T and ramp-T NVT stages
     Tstart = stage.get("temperature_start", stage.get("temperature", 300.0))
     Tend = stage.get("temperature_end", stage.get("temperature", 300.0))
+    if temperature_start_override is not None and is_nvt_ramp_stage(stage):
+        Tstart = float(temperature_start_override)
     tdamp = get_tdamp(cfg, stage)
 
     p = Path(structure_path).resolve()
@@ -566,10 +649,9 @@ replicate       {rep[0]} {rep[1]} {rep[2]}
     is_restart = (p.suffix.lower() == ".restart") or name.startswith("restart.")
 
     # Rule:
-    # - if input is data file: always create velocity
-    # - if input is restart and workflow is in resume mode: recreate velocity
-    # - otherwise keep restart velocities
-    if (not is_restart) or resume_mode:
+    # - if input is data file: create velocity
+    # - if input is restart: keep the carried velocities unless explicitly requested
+    if (not is_restart) or stage.get("recreate_velocity", False):
         txt += f"""
 velocity        all create {Tstart} {cfg["velocity_seed"]} mom yes rot yes dist gaussian
 """
@@ -745,6 +827,66 @@ def find_latest_chunk_restart(stage_dir, stage_name, chunk_name=None):
         return 1, None
 
     return best_chunk + 1, best_restart
+
+
+def chunk_dir_for_index(stage_dir, stage, chunk):
+    return stage_dir / stage.get("chunk_name", f"chunk_{chunk:02d}")
+
+
+def previous_chunk_log(stage_dir, stage, stage_name, chunk):
+    if chunk <= 1:
+        return None
+    prev_chunk = chunk - 1
+    chunk_dir = chunk_dir_for_index(stage_dir, stage, prev_chunk)
+    log = chunk_dir / f"log.in.{stage_name}_c{prev_chunk:02d}"
+    if log.exists():
+        return log
+    matches = sorted(chunk_dir.glob("log.in.*"))
+    if matches:
+        return matches[-1]
+    return None
+
+
+def ramp_start_temperature_for_chunk(cfg, stage, stage_dir, stage_name, chunk):
+    if chunk <= 1 or not is_nvt_ramp_stage(stage):
+        return None
+
+    rules = ramp_rules(cfg, stage)
+    if not rules.get("continue_from_tail_temperature", True):
+        return None
+
+    log = previous_chunk_log(stage_dir, stage, stage_name, chunk)
+    if log is None:
+        print(
+            f"[warning] Could not find previous chunk log for ramp continuation in {stage_name}; "
+            "using configured temperature_start.",
+            flush=True,
+        )
+        return None
+
+    steps, T, _P, _V, _PE = parse_thermo(log)
+    tail_mean = tail_average_temperature(cfg, steps, T, rules["tail_average_ps"])
+    if tail_mean is None:
+        print(
+            f"[warning] Could not read previous tail temperature from {log}; "
+            "using configured temperature_start.",
+            flush=True,
+        )
+        return None
+
+    target = float(stage["temperature_end"])
+    original_start = float(stage["temperature_start"])
+    if target >= original_start:
+        tail_mean = min(max(tail_mean, original_start), target)
+    else:
+        tail_mean = max(min(tail_mean, original_start), target)
+
+    print(
+        f"  ramp continuation: tail {rules['tail_average_ps']} ps average from "
+        f"{log.parent.name} is {tail_mean:.3f} K; ramping toward {target:.3f} K",
+        flush=True,
+    )
+    return tail_mean
 
 
 def stage_artifact(stage_dir, stage_name):
@@ -1075,14 +1217,22 @@ def run_stage(cfg, stage, structure, resume_mode=False):
     accept_if_stable = stage.get("accept_if_stable", False)
 
     for chunk in range(start_chunk, max_chunks + 1):
-        chunk_dir = stage_dir / stage.get("chunk_name", f"chunk_{chunk:02d}")
+        chunk_dir = chunk_dir_for_index(stage_dir, stage, chunk)
         chunk_dir.mkdir(exist_ok=True)
 
         input_name = f"in.{stage_name}_c{chunk:02d}"
         inputfile = chunk_dir / input_name
+        ramp_Tstart = ramp_start_temperature_for_chunk(cfg, stage, stage_dir, stage_name, chunk)
 
         input_text, final_data_name, final_restart_name = generate_input(
-            cfg, stage, run_steps, current_structure, stage_name, chunk, resume_mode=resume_mode
+            cfg,
+            stage,
+            run_steps,
+            current_structure,
+            stage_name,
+            chunk,
+            resume_mode=resume_mode,
+            temperature_start_override=ramp_Tstart,
         )
         inputfile.write_text(input_text)
 
@@ -1138,6 +1288,17 @@ def run_stage(cfg, stage, structure, resume_mode=False):
                 final_data_path,
                 final_restart_path=final_restart_path,
                 pass_note=f"force_pass at chunk {chunk}"
+            )
+            return (stage_dir / f"{stage_name}.restart").resolve()
+
+        ramp_ok, ramp_msg = ramp_target_reached(cfg, stage, steps, T)
+        if ramp_ok:
+            write_stage_outputs(
+                stage_dir,
+                stage_name,
+                final_data_path,
+                final_restart_path=final_restart_path,
+                pass_note=f"ramp accepted at chunk {chunk}: {ramp_msg}"
             )
             return (stage_dir / f"{stage_name}.restart").resolve()
 

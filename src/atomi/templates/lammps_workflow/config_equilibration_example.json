@@ -91,7 +91,8 @@
       "temperature_start": 50,
       "temperature_end": 100,
       "min_chunks_before_accept": 1,
-      "accept_if_stable": true
+      "accept_if_stable": true,
+      "max_chunks": 3
     },
     {
       "name": "nvt_relax_100K",
@@ -119,7 +120,8 @@
       "temperature_start": 100,
       "temperature_end": 150,
       "min_chunks_before_accept": 1,
-      "accept_if_stable": true
+      "accept_if_stable": true,
+      "max_chunks": 3
     },
     {
       "name": "nvt_relax_150K",
@@ -147,7 +149,8 @@
       "temperature_start": 150,
       "temperature_end": 200,
       "min_chunks_before_accept": 1,
-      "accept_if_stable": true
+      "accept_if_stable": true,
+      "max_chunks": 3
     },
     {
       "name": "nvt_relax_200K",
@@ -175,7 +178,8 @@
       "temperature_start": 200,
       "temperature_end": 250,
       "min_chunks_before_accept": 1,
-      "accept_if_stable": true
+      "accept_if_stable": true,
+      "max_chunks": 3
     },
     {
       "name": "nvt_relax_250K",
@@ -203,7 +207,8 @@
       "temperature_start": 250,
       "temperature_end": 300,
       "min_chunks_before_accept": 1,
-      "accept_if_stable": true
+      "accept_if_stable": true,
+      "max_chunks": 3
     },
     {
       "name": "nvt_relax_300K",
@@ -231,7 +236,8 @@
       "temperature_start": 300,
       "temperature_end": 350,
       "min_chunks_before_accept": 1,
-      "accept_if_stable": true
+      "accept_if_stable": true,
+      "max_chunks": 3
     },
     {
       "name": "nvt_relax_350K",
@@ -259,7 +265,8 @@
       "temperature_start": 350,
       "temperature_end": 400,
       "min_chunks_before_accept": 1,
-      "accept_if_stable": true
+      "accept_if_stable": true,
+      "max_chunks": 3
     },
     {
       "name": "nvt_relax_400K",
@@ -287,7 +294,8 @@
       "temperature_start": 400,
       "temperature_end": 450,
       "min_chunks_before_accept": 1,
-      "accept_if_stable": true
+      "accept_if_stable": true,
+      "max_chunks": 3
     },
     {
       "name": "nvt_relax_450K",
@@ -315,7 +323,8 @@
       "temperature_start": 450,
       "temperature_end": 500,
       "min_chunks_before_accept": 1,
-      "accept_if_stable": true
+      "accept_if_stable": true,
+      "max_chunks": 3
     },
     {
       "name": "nvt_relax_500K",
@@ -352,5 +361,11 @@
       "relative_volume_change_max": 0.08,
       "energy_jump_max": 5.0
     }
+  },
+  "ramp_rules": {
+    "tail_average_ps": 2.0,
+    "continue_from_tail_temperature": true,
+    "accept_temperature_tol_min": 20.0,
+    "accept_temperature_tol_fraction": 0.03
   }
 }

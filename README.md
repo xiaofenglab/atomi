@@ -411,6 +411,19 @@ For a stage with a fixed length, put `fixed_steps` in the stage block:
 
 NPT stages whose names contain `_eqm` keep a constant chunk size from `adaptive_steps.initial_small` or `adaptive_steps.initial_large`, so an equilibrium block can retry convergence with repeated 50,000-step chunks without growing to longer chunks. Set `"adaptive_growth": true` on a stage if you want the old increasing chunk size behavior.
 
+For NVT ramp stages with both `temperature_start` and `temperature_end`, continuation chunks use the previous chunk's tail temperature instead of restarting the ramp schedule from the original start temperature. By default, `md-engine` averages the last `2 ps` of the previous chunk, keeps restart velocities, and ramps from that average toward the target. If the tail average reaches the target within the temperature tolerance, the ramp stage is accepted and marked `PASS`.
+
+Optional ramp controls can be placed globally or in a stage `ramp_override` block:
+
+```json
+"ramp_rules": {
+  "tail_average_ps": 2.0,
+  "continue_from_tail_temperature": true,
+  "accept_temperature_tol_min": 20.0,
+  "accept_temperature_tol_fraction": 0.03
+}
+```
+
 The Slurm `#SBATCH --time` value is computational wall time, not MD physical time. By default, it is estimated from:
 
 ```text
