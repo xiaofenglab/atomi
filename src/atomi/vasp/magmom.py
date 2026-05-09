@@ -530,6 +530,7 @@ def host_magnitude_patterns(
     if mode not in ("enumerate", "near-dopant"):
         raise ValueError(f"Unknown host site mode: {mode}")
 
+    template_pattern = tuple(values)
     majority = max(set(values), key=values.count)
     distances = [
         frac_distance_to_any_dopant(structure, atom_index, dopant_atoms)
@@ -556,12 +557,16 @@ def host_magnitude_patterns(
         next_states.sort(key=lambda item: (item[0], tuple(sorted(item[1].items()))))
         states = next_states[:max_patterns]
 
-    patterns = []
+    patterns = [template_pattern]
     for _score, assignment, _available in states[:max_patterns]:
         pattern = [majority] * len(values)
         for local_index, magnitude in assignment.items():
             pattern[local_index] = magnitude
-        patterns.append(tuple(pattern))
+        pattern = tuple(pattern)
+        if pattern not in patterns:
+            patterns.append(pattern)
+        if len(patterns) >= max_patterns:
+            break
     return patterns
 
 
@@ -705,18 +710,22 @@ def enumerate_spin_configs(args: argparse.Namespace) -> list[SpinRecord]:
 
     combinations = []
     host_items = list(host_sign_patterns)
-    for dopant_pattern in dopant_patterns:
-        host_sign_product = itertools.product(*(host_sign_patterns[element] for element in host_items))
-        for host_sign_values in host_sign_product:
-            host_sign_by_element = {
-                element: pattern for element, pattern in zip(host_items, host_sign_values)
+    host_configs = []
+    host_sign_product = itertools.product(*(host_sign_patterns[element] for element in host_items))
+    for host_sign_values in host_sign_product:
+        host_sign_by_element = {
+            element: pattern for element, pattern in zip(host_items, host_sign_values)
+        }
+        host_mag_product = itertools.product(*(host_mag_patterns[element] for element in host_items))
+        for host_mag_values in host_mag_product:
+            host_mag_by_element = {
+                element: pattern for element, pattern in zip(host_items, host_mag_values)
             }
-            host_mag_product = itertools.product(*(host_mag_patterns[element] for element in host_items))
-            for host_mag_values in host_mag_product:
-                host_mag_by_element = {
-                    element: pattern for element, pattern in zip(host_items, host_mag_values)
-                }
-                combinations.append((dopant_pattern, host_sign_by_element, host_mag_by_element))
+            host_configs.append((host_sign_by_element, host_mag_by_element))
+
+    for host_sign_by_element, host_mag_by_element in host_configs:
+        for dopant_pattern in dopant_patterns:
+            combinations.append((dopant_pattern, host_sign_by_element, host_mag_by_element))
 
     if len(combinations) > args.max_configs:
         if args.truncate:
