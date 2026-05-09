@@ -4,6 +4,7 @@ import argparse
 import csv
 import itertools
 import json
+import math
 import re
 import shutil
 import sys
@@ -512,19 +513,6 @@ def frac_distance_to_any_dopant(
     return float(best or 0.0)
 
 
-def unique_magnitude_permutations(values: list[float], max_patterns: int | None = None):
-    seen = set()
-    count = 0
-    for perm in itertools.permutations(values):
-        if perm in seen:
-            continue
-        seen.add(perm)
-        yield perm
-        count += 1
-        if max_patterns is not None and count >= max_patterns:
-            return
-
-
 def host_magnitude_patterns(
     structure: PoscarStructure,
     element: str,
@@ -542,16 +530,78 @@ def host_magnitude_patterns(
     if mode not in ("enumerate", "near-dopant"):
         raise ValueError(f"Unknown host site mode: {mode}")
 
-    scored = []
     majority = max(set(values), key=values.count)
-    for perm in unique_magnitude_permutations(values):
-        score = 0.0
-        for local_index, magnitude in enumerate(perm):
-            if abs(magnitude - majority) > 1.0e-12:
-                score += frac_distance_to_any_dopant(structure, indices[local_index], dopant_atoms)
-        scored.append((score, perm))
-    scored.sort(key=lambda item: (item[0], item[1]))
-    return [perm for _score, perm in scored[:max_patterns]]
+    distances = [
+        frac_distance_to_any_dopant(structure, atom_index, dopant_atoms)
+        for atom_index in indices
+    ]
+    minority = [
+        (magnitude, values.count(magnitude))
+        for magnitude in sorted(set(values))
+        if abs(magnitude - majority) > 1.0e-12
+    ]
+    minority.sort(key=lambda item: (item[1], item[0]))
+
+    states = [(0.0, {}, tuple(range(len(values))))]
+    for magnitude, count in minority:
+        next_states = []
+        for score, assignment, available in states:
+            for chosen in bounded_position_combinations(available, count, distances, max_patterns):
+                new_assignment = dict(assignment)
+                for local_index in chosen:
+                    new_assignment[local_index] = magnitude
+                new_available = tuple(index for index in available if index not in set(chosen))
+                new_score = score + sum(distances[index] for index in chosen)
+                next_states.append((new_score, new_assignment, new_available))
+        next_states.sort(key=lambda item: (item[0], tuple(sorted(item[1].items()))))
+        states = next_states[:max_patterns]
+
+    patterns = []
+    for _score, assignment, _available in states[:max_patterns]:
+        pattern = [majority] * len(values)
+        for local_index, magnitude in assignment.items():
+            pattern[local_index] = magnitude
+        patterns.append(tuple(pattern))
+    return patterns
+
+
+def bounded_position_combinations(
+    available: tuple[int, ...],
+    count: int,
+    distances: list[float],
+    max_patterns: int,
+) -> list[tuple[int, ...]]:
+    if count <= 0:
+        return [tuple()]
+    if count >= len(available):
+        return [tuple(available)]
+
+    total = math.comb(len(available), count)
+    if total <= max_patterns * 20:
+        combos = list(itertools.combinations(available, count))
+        combos.sort(key=lambda combo: (sum(distances[index] for index in combo), combo))
+        return combos[:max_patterns]
+
+    ranked = sorted(available, key=lambda index: (distances[index], index))
+    candidates: list[tuple[int, ...]] = []
+
+    def add(combo):
+        combo = tuple(sorted(combo))
+        if combo not in candidates:
+            candidates.append(combo)
+
+    add(ranked[:count])
+    add(ranked[-count:])
+    if count < len(ranked):
+        for start in range(0, min(max_patterns * 2, len(ranked) - count + 1)):
+            add(ranked[start : start + count])
+            if len(candidates) >= max_patterns:
+                break
+    stride = max(1, len(ranked) // max(count, 1))
+    add(ranked[::stride][:count])
+
+    candidates.sort(key=lambda combo: (sum(distances[index] for index in combo), combo))
+    return candidates[:max_patterns]
 
 
 def copy_template_files(template_dir: Path, run_dir: Path, incar_text: str) -> None:
