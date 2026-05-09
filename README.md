@@ -138,6 +138,7 @@ checkscf runlist.txt 1e-6
 checkscf runlist.txt 5e-6 --out bad_runs.txt --clean --dry-run
 magit Gd U --dry-run
 magit Gd U
+magit enum --template VASP_TEMPLATE --output-root DFT_SPINS --dopant Gd --host U --moment Gd=7 --moment U=2,1 --host-mode afm
 vasp-phonopy-neareq --output-root DFT_PHONOPY_NEAREQ --vasp-template VASP_TEMPLATE --mode both --dim 1 1 1
 vasp-prefail-candidates --config dump_npt_900K.json --output-root DFT_PREFail_CANDIDATES --vasp-template VASP_TEMPLATE
 vasp-stress-force-candidates --output-root DFT_STRESS_FORCE --vasp-template VASP_TEMPLATE --mode both --target-size 80 --bias-species O
@@ -181,6 +182,21 @@ magit Gd U
 ```
 
 The command reads `OUTCAR`, `POSCAR`, and `INCAR`. It uses the POSCAR species order and counts, copies the final OUTCAR `magnetization (x)` total moments for only the listed elements, and sets unlisted species to zero. For a POSCAR ordered `Gd U O`, the output is written as Gd atom moments, then U atom moments, then a compact oxygen block such as `96*0`. By default it writes `INCAR.bak` before replacing or appending the `MAGMOM` line. Use `--preserve-unselected` to keep existing unlisted-element values instead of zeroing them.
+
+To generate spin-arrangement candidates before array DFT:
+
+```bash
+magit enum \
+  --template VASP_TEMPLATE \
+  --output-root DFT_SPINS \
+  --dopant Gd \
+  --host U \
+  --moment Gd=7 \
+  --moment U=2,1 \
+  --host-mode afm
+```
+
+`magit enum` copies `POSCAR`, `POTCAR`, and `KPOINTS` from the template, writes one modified `INCAR` per spin pattern, and writes `runlist.txt` plus `spin_index.csv`. Moment magnitudes are inferred from template `INCAR/MAGMOM` when possible, so same-element sites such as U with `2` and `1` are preserved as different magnitudes while their signs are varied. Dopants default to all sign combinations, for example two Gd atoms generate `7,7`, `7,-7`, `-7,7`, and `-7,-7`. Hosts default to AFM-like alternating signs in POSCAR atom order; use `--host-mode fm`, `--host-mode both`, or `--host-mode all` if desired. The command stops if more than `--max-configs 50` folders would be generated unless `--truncate` is set.
 
 To prepare near-equilibrium phonopy and MLIP VASP datasets from one reference POSCAR:
 
