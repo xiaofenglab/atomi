@@ -176,6 +176,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vasp_check_scf.add_argument("check_args", nargs=argparse.REMAINDER)
 
+    vasp_update_magmom = subparsers.add_parser(
+        "vasp-update-magmom",
+        help="Update INCAR MAGMOM from final OUTCAR moments for selected elements.",
+    )
+    vasp_update_magmom.add_argument("magmom_args", nargs=argparse.REMAINDER)
+
     vasp_phonopy_neareq = subparsers.add_parser(
         "vasp-phonopy-neareq",
         help="Prepare phonopy and MLIP near-equilibrium VASP datasets.",
@@ -310,6 +316,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.checks import checkscf
 
         checkscf(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "vasp-update-magmom":
+        from atomi.vasp.magmom import main as vasp_update_magmom_main
+
+        vasp_update_magmom_main(raw_args[1:])
         return
     if raw_args and raw_args[0] == "vasp-phonopy-neareq":
         from atomi.vasp.phonopy_neareq import main as vasp_phonopy_neareq_main
@@ -459,6 +470,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.checks import checkscf
 
         checkscf(args.check_args)
+        return
+
+    if args.subcommand == "vasp-update-magmom":
+        from atomi.vasp.magmom import main as vasp_update_magmom_main
+
+        vasp_update_magmom_main(args.magmom_args)
         return
 
     if args.subcommand == "vasp-phonopy-neareq":

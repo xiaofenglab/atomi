@@ -136,6 +136,8 @@ extv OUTCAR --mag-lines 80
 checkvasp runlist.txt
 checkscf runlist.txt 1e-6
 checkscf runlist.txt 5e-6 --out bad_runs.txt --clean --dry-run
+magit Gd U --dry-run
+magit Gd U
 vasp-phonopy-neareq --output-root DFT_PHONOPY_NEAREQ --vasp-template VASP_TEMPLATE --mode both --dim 1 1 1
 vasp-prefail-candidates --config dump_npt_900K.json --output-root DFT_PREFail_CANDIDATES --vasp-template VASP_TEMPLATE
 vasp-stress-force-candidates --output-root DFT_STRESS_FORCE --vasp-template VASP_TEMPLATE --mode both --target-size 80 --bias-species O
@@ -170,6 +172,15 @@ checkscf runlist.txt 5e-6 --out bad_runs.txt --clean
 ```
 
 Use `--dry-run` first when cleaning. Without `--dry-run`, `--clean` removes `OUTCAR*`, `CONTCAR`, `vasprun.xml`, and `OSZICAR` from runs that fail the threshold or have stale VASP outputs without a matching log.
+
+To update `INCAR` magnetic moments from the final `OUTCAR` magnetization table:
+
+```bash
+magit Gd U --dry-run
+magit Gd U
+```
+
+The command reads `OUTCAR`, `POSCAR`, and `INCAR`. It uses the POSCAR species order and counts, copies the final OUTCAR `magnetization (x)` total moments for only the listed elements, and sets unlisted species to zero. For a POSCAR ordered `Gd U O`, the output is written as Gd atom moments, then U atom moments, then a compact oxygen block such as `96*0`. By default it writes `INCAR.bak` before replacing or appending the `MAGMOM` line. Use `--preserve-unselected` to keep existing unlisted-element values instead of zeroing them.
 
 To prepare near-equilibrium phonopy and MLIP VASP datasets from one reference POSCAR:
 
