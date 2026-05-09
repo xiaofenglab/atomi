@@ -22,6 +22,13 @@ class PoscarSpecies:
 
 
 @dataclass
+class PoscarStructure:
+    species: PoscarSpecies
+    cell: list[list[float]]
+    scaled_positions: list[list[float]]
+
+
+@dataclass
 class MagmomUpdate:
     species: PoscarSpecies
     selected_elements: list[str]
@@ -40,10 +47,19 @@ class SpinRecord:
 
 
 def read_poscar_species(poscar: Path) -> PoscarSpecies:
+    return read_poscar_structure(poscar).species
+
+
+def read_poscar_structure(poscar: Path) -> PoscarStructure:
     lines = poscar.read_text(encoding="utf-8", errors="replace").splitlines()
     if len(lines) < 7:
         raise ValueError(f"POSCAR is too short: {poscar}")
 
+    scale = float(lines[1].split()[0])
+    cell = [
+        [float(value) * scale for value in lines[index].split()[:3]]
+        for index in range(2, 5)
+    ]
     line5 = lines[5].split()
     line6 = lines[6].split()
 
@@ -55,7 +71,60 @@ def read_poscar_species(poscar: Path) -> PoscarSpecies:
     if not _all_ints(line6):
         raise ValueError(f"Could not parse POSCAR species counts from line 7 in {poscar}")
 
-    return PoscarSpecies(symbols=line5, counts=[int(value) for value in line6])
+    species = PoscarSpecies(symbols=line5, counts=[int(value) for value in line6])
+    coord_index = 7
+    if lines[coord_index].strip().lower().startswith("s"):
+        coord_index += 1
+    coord_mode = lines[coord_index].strip().lower()
+    coord_index += 1
+
+    scaled_positions = []
+    for line in lines[coord_index : coord_index + species.total_atoms]:
+        parts = line.split()
+        if len(parts) < 3:
+            raise ValueError(f"Could not parse POSCAR coordinate line: {line}")
+        xyz = [float(parts[0]), float(parts[1]), float(parts[2])]
+        if coord_mode.startswith(("c", "k")):
+            xyz = cart_to_frac(xyz, cell)
+        scaled_positions.append([value % 1.0 for value in xyz])
+    if len(scaled_positions) != species.total_atoms:
+        raise ValueError(
+            f"Parsed {len(scaled_positions)} POSCAR positions, expected {species.total_atoms}."
+        )
+    return PoscarStructure(species=species, cell=cell, scaled_positions=scaled_positions)
+
+
+def cart_to_frac(cart: list[float], cell: list[list[float]]) -> list[float]:
+    # Solve row-vector cart = frac @ cell using Cramer's rule via explicit inverse.
+    a, b, c = cell
+    det = (
+        a[0] * (b[1] * c[2] - b[2] * c[1])
+        - a[1] * (b[0] * c[2] - b[2] * c[0])
+        + a[2] * (b[0] * c[1] - b[1] * c[0])
+    )
+    if abs(det) < 1.0e-12:
+        raise ValueError("POSCAR cell is singular.")
+    inv = [
+        [
+            (b[1] * c[2] - b[2] * c[1]) / det,
+            (a[2] * c[1] - a[1] * c[2]) / det,
+            (a[1] * b[2] - a[2] * b[1]) / det,
+        ],
+        [
+            (b[2] * c[0] - b[0] * c[2]) / det,
+            (a[0] * c[2] - a[2] * c[0]) / det,
+            (a[2] * b[0] - a[0] * b[2]) / det,
+        ],
+        [
+            (b[0] * c[1] - b[1] * c[0]) / det,
+            (a[1] * c[0] - a[0] * c[1]) / det,
+            (a[0] * b[1] - a[1] * b[0]) / det,
+        ],
+    ]
+    return [
+        cart[0] * inv[0][j] + cart[1] * inv[1][j] + cart[2] * inv[2][j]
+        for j in range(3)
+    ]
 
 
 def _all_ints(values: list[str]) -> bool:
@@ -380,12 +449,15 @@ def sign_patterns(natoms: int, mode: str) -> list[tuple[int, ...]]:
     if mode == "fm":
         return [tuple([1] * natoms), tuple([-1] * natoms)]
     if mode == "afm":
-        return [tuple(1 if index % 2 == 0 else -1 for index in range(natoms))]
+        pattern = tuple(1 if index % 2 == 0 else -1 for index in range(natoms))
+        inverse = tuple(-value for value in pattern)
+        return [pattern] if inverse == pattern else [pattern, inverse]
     if mode == "both":
         patterns = [tuple([1] * natoms), tuple([-1] * natoms)]
         afm = tuple(1 if index % 2 == 0 else -1 for index in range(natoms))
-        if afm not in patterns:
-            patterns.append(afm)
+        for pattern in (afm, tuple(-value for value in afm)):
+            if pattern not in patterns:
+                patterns.append(pattern)
         return patterns
     if mode == "all":
         return list(itertools.product((1, -1), repeat=natoms))
@@ -399,6 +471,7 @@ def apply_patterns(
     hosts: list[str],
     dopant_pattern: tuple[int, ...],
     host_pattern_by_element: dict[str, tuple[int, ...]],
+    host_magnitudes_by_element: dict[str, tuple[float, ...]],
 ) -> list[float]:
     result = list(base)
     cursor = 0
@@ -408,9 +481,77 @@ def apply_patterns(
             cursor += 1
     for element in hosts:
         pattern = host_pattern_by_element[element]
+        magnitudes = host_magnitudes_by_element[element]
         for local_index, atom_index in enumerate(element_atom_indices(species, element)):
-            result[atom_index] = abs(result[atom_index]) * pattern[local_index]
+            result[atom_index] = abs(magnitudes[local_index]) * pattern[local_index]
     return result
+
+
+def frac_distance_to_any_dopant(
+    structure: PoscarStructure,
+    host_atom: int,
+    dopant_atoms: list[int],
+) -> float:
+    if not dopant_atoms:
+        return 0.0
+    host = structure.scaled_positions[host_atom]
+    best = None
+    for atom in dopant_atoms:
+        dop = structure.scaled_positions[atom]
+        diff = [host[i] - dop[i] for i in range(3)]
+        diff = [value - round(value) for value in diff]
+        cart = [
+            diff[0] * structure.cell[0][j]
+            + diff[1] * structure.cell[1][j]
+            + diff[2] * structure.cell[2][j]
+            for j in range(3)
+        ]
+        dist = sum(value * value for value in cart) ** 0.5
+        if best is None or dist < best:
+            best = dist
+    return float(best or 0.0)
+
+
+def unique_magnitude_permutations(values: list[float], max_patterns: int | None = None):
+    seen = set()
+    count = 0
+    for perm in itertools.permutations(values):
+        if perm in seen:
+            continue
+        seen.add(perm)
+        yield perm
+        count += 1
+        if max_patterns is not None and count >= max_patterns:
+            return
+
+
+def host_magnitude_patterns(
+    structure: PoscarStructure,
+    element: str,
+    magnitudes: list[float],
+    dopant_atoms: list[int],
+    mode: str,
+    max_patterns: int,
+) -> list[tuple[float, ...]]:
+    indices = element_atom_indices(structure.species, element)
+    values = [abs(magnitudes[index]) for index in indices]
+    if not values:
+        return [tuple()]
+    if mode == "fixed" or len(set(values)) <= 1:
+        return [tuple(values)]
+    if mode not in ("enumerate", "near-dopant"):
+        raise ValueError(f"Unknown host site mode: {mode}")
+
+    scored = []
+    majority = max(set(values), key=values.count)
+    for perm in unique_magnitude_permutations(values):
+        score = 0.0
+        for local_index, magnitude in enumerate(perm):
+            if abs(magnitude - majority) > 1.0e-12:
+                score += frac_distance_to_any_dopant(structure, indices[local_index], dopant_atoms)
+        scored.append((score, perm))
+    scored.sort(key=lambda item: (item[0], item[1]))
+    return [perm for _score, perm in scored[:max_patterns]]
 
 
 def copy_template_files(template_dir: Path, run_dir: Path, incar_text: str) -> None:
@@ -465,7 +606,8 @@ def enumerate_spin_configs(args: argparse.Namespace) -> list[SpinRecord]:
     template = args.template.resolve()
     poscar = template / "POSCAR"
     incar = template / "INCAR"
-    species = read_poscar_species(poscar)
+    structure = read_poscar_structure(poscar)
+    species = structure.species
 
     dopants = parse_element_list(args.dopant)
     hosts = parse_element_list(args.host)
@@ -494,21 +636,37 @@ def enumerate_spin_configs(args: argparse.Namespace) -> list[SpinRecord]:
 
     dopant_indices = [index for element in dopants for index in element_atom_indices(species, element)]
     dopant_patterns = sign_patterns(len(dopant_indices), args.dopant_mode)
-    host_patterns = {
+    dopant_atom_indices = [index for element in dopants for index in element_atom_indices(species, element)]
+    host_sign_patterns = {
         element: sign_patterns(len(element_atom_indices(species, element)), args.host_mode)
+        for element in hosts
+    }
+    host_mag_patterns = {
+        element: host_magnitude_patterns(
+            structure,
+            element,
+            magnitudes,
+            dopant_atom_indices,
+            args.host_site_mode,
+            args.max_site_patterns,
+        )
         for element in hosts
     }
 
     combinations = []
-    host_items = list(host_patterns.items())
+    host_items = list(host_sign_patterns)
     for dopant_pattern in dopant_patterns:
-        host_product = itertools.product(*(patterns for _element, patterns in host_items))
-        for host_values in host_product:
-            host_by_element = {
-                element: pattern
-                for (element, _patterns), pattern in zip(host_items, host_values)
+        host_sign_product = itertools.product(*(host_sign_patterns[element] for element in host_items))
+        for host_sign_values in host_sign_product:
+            host_sign_by_element = {
+                element: pattern for element, pattern in zip(host_items, host_sign_values)
             }
-            combinations.append((dopant_pattern, host_by_element))
+            host_mag_product = itertools.product(*(host_mag_patterns[element] for element in host_items))
+            for host_mag_values in host_mag_product:
+                host_mag_by_element = {
+                    element: pattern for element, pattern in zip(host_items, host_mag_values)
+                }
+                combinations.append((dopant_pattern, host_sign_by_element, host_mag_by_element))
 
     if len(combinations) > args.max_configs:
         if args.truncate:
@@ -522,7 +680,10 @@ def enumerate_spin_configs(args: argparse.Namespace) -> list[SpinRecord]:
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     records = []
-    for idx, (dopant_pattern, host_by_element) in enumerate(combinations, start=1):
+    for idx, (dopant_pattern, host_by_element, host_mag_by_element) in enumerate(
+        combinations,
+        start=1,
+    ):
         moments = apply_patterns(
             base_moments,
             species,
@@ -530,6 +691,7 @@ def enumerate_spin_configs(args: argparse.Namespace) -> list[SpinRecord]:
             hosts,
             dopant_pattern,
             host_by_element,
+            host_mag_by_element,
         )
         magmom_line = format_magmom_line(
             species,
@@ -560,6 +722,10 @@ def enumerate_spin_configs(args: argparse.Namespace) -> list[SpinRecord]:
     print(f"POSCAR counts  : {' '.join(str(count) for count in species.counts)}")
     print(f"Dopants        : {' '.join(dopants) if dopants else 'none'}")
     print(f"Hosts          : {' '.join(hosts) if hosts else 'none'}")
+    if hosts:
+        print("Host site pats : " + ", ".join(
+            f"{element}={len(host_mag_patterns[element])}" for element in hosts
+        ))
     print(f"Spin configs   : {len(records)}")
     print(f"Output root    : {output_root}")
     print(f"Runlist        : {runlist}")
@@ -635,7 +801,22 @@ def build_enum_parser() -> argparse.ArgumentParser:
         "--host-mode",
         choices=("afm", "fm", "both", "all"),
         default="afm",
-        help="Host sign patterns. Default afm gives alternating signs by POSCAR order.",
+        help="Host sign patterns. Default afm gives alternating signs and the inverse.",
+    )
+    parser.add_argument(
+        "--host-site-mode",
+        choices=("enumerate", "near-dopant", "fixed"),
+        default="enumerate",
+        help=(
+            "How to place different same-element magnitudes, such as U 2/1, among host sites. "
+            "Default enumerate ranks low-count magnitudes near dopants."
+        ),
+    )
+    parser.add_argument(
+        "--max-site-patterns",
+        type=int,
+        default=6,
+        help="Maximum magnitude-placement patterns per host element before global max-configs.",
     )
     parser.add_argument("--max-configs", type=int, default=50)
     parser.add_argument(
