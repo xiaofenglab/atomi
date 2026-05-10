@@ -128,11 +128,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     lammps_postprocess.add_argument("postprocess_args", nargs=argparse.REMAINDER)
 
-    lammps_thermo_series = subparsers.add_parser(
-        "lammps-thermo-series",
-        help="Postprocess production LAMMPS NPT thermo series with UQ.",
-    )
-    lammps_thermo_series.add_argument("analysis_args", nargs=argparse.REMAINDER)
+    for command_name in ("thermo_lammps", "lammps-thermo-series"):
+        lammps_thermo_series = subparsers.add_parser(
+            command_name,
+            help="Postprocess production LAMMPS NPT thermo series with UQ.",
+        )
+        lammps_thermo_series.add_argument("analysis_args", nargs=argparse.REMAINDER)
 
     cp2k_live = subparsers.add_parser(
         "cp2k-live",
@@ -260,11 +261,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vasp_qha_run.add_argument("qha_args", nargs=argparse.REMAINDER)
 
-    vasp_qha_md_compare = subparsers.add_parser(
-        "vasp-qha-md-compare",
-        help="Overlay VASP QHA and LAMMPS MD thermodynamic functions.",
-    )
-    vasp_qha_md_compare.add_argument("compare_args", nargs=argparse.REMAINDER)
+    for command_name in ("thermo_qha-md", "vasp-qha-md-compare"):
+        vasp_qha_md_compare = subparsers.add_parser(
+            command_name,
+            help="Overlay VASP QHA and LAMMPS MD thermodynamic functions.",
+        )
+        vasp_qha_md_compare.add_argument("compare_args", nargs=argparse.REMAINDER)
 
     mace_build_dataset = subparsers.add_parser(
         "mace-build-dataset",
@@ -350,7 +352,7 @@ def main(argv: list[str] | None = None) -> None:
 
         lammps_postprocess_main(raw_args[1:])
         return
-    if raw_args and raw_args[0] == "lammps-thermo-series":
+    if raw_args and raw_args[0] in ("thermo_lammps", "lammps-thermo-series"):
         from atomi.lammps.thermo_series import main as thermo_series_main
 
         thermo_series_main(raw_args[1:])
@@ -441,7 +443,7 @@ def main(argv: list[str] | None = None) -> None:
 
         vasp_qha_run_main(raw_args[1:])
         return
-    if raw_args and raw_args[0] == "vasp-qha-md-compare":
+    if raw_args and raw_args[0] in ("thermo_qha-md", "vasp-qha-md-compare"):
         from atomi.vasp.qha_md_compare import main as vasp_qha_md_compare_main
 
         vasp_qha_md_compare_main(raw_args[1:])
@@ -531,7 +533,7 @@ def main(argv: list[str] | None = None) -> None:
         lammps_postprocess_main(args.postprocess_args)
         return
 
-    if args.subcommand == "lammps-thermo-series":
+    if args.subcommand in ("thermo_lammps", "lammps-thermo-series"):
         from atomi.lammps.thermo_series import main as thermo_series_main
 
         thermo_series_main(args.analysis_args)
@@ -647,7 +649,7 @@ def main(argv: list[str] | None = None) -> None:
         vasp_qha_run_main(args.qha_args)
         return
 
-    if args.subcommand == "vasp-qha-md-compare":
+    if args.subcommand in ("thermo_qha-md", "vasp-qha-md-compare"):
         from atomi.vasp.qha_md_compare import main as vasp_qha_md_compare_main
 
         vasp_qha_md_compare_main(args.compare_args)

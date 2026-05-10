@@ -177,7 +177,7 @@ md-engine-init my_lammps_md_project
 md-engine --config config.json
 md-engine --resume --config config.json
 lammps-postprocess --log stages/npt_prod_1400K/chunk_production/log.in.npt_prod_1400K_production --temperature 1400 --outdir analysis/npt_prod_1400K
-lammps-thermo-series --config config_production.json --outdir analysis/thermo_0_300K_uq
+thermo_lammps --config config_production.json --outdir analysis/thermo_0_300K_uq
 mace-build-dataset --neareq neareq_train.extxyz --phonopy phonopy.extxyz --force-spread forces.extxyz --prefail-group prefail=prefail.extxyz
 mace-energy-outliers --extxyz training.extxyz --model model.model --outdir energy_outliers --device cuda --dtype float32 --top-n 30 --write-poscars
 mace-update-outliers --report energy_outliers/report.txt --train-in training.extxyz --valid-in validation.extxyz --train-out training_clean.extxyz --valid-out validation_clean.extxyz
@@ -525,19 +525,19 @@ This writes `thermo_summary.json`, `window_summaries.csv/json`, `selected_timese
 After production runs finish, analyze the temperature series from `config_production.json`:
 
 ```bash
-lammps-thermo-series --config config_production.json --outdir analysis/thermo_0_300K_uq --min-window-ps 18 --window-stride-ps 2 --plot-bin-ps 0.5 --raw-decimate 5 --natoms 96 --plot-T-min 0 --plot-T-max 300 --plot-T-step 10 --anchor-zero --n-bootstrap 300
+thermo_lammps --config config_production.json --outdir analysis/thermo_0_300K_uq --min-window-ps 18 --window-stride-ps 2 --plot-bin-ps 0.5 --raw-decimate 5 --natoms 96 --plot-T-min 0 --plot-T-max 300 --plot-T-step 10 --anchor-zero --n-bootstrap 300
 ```
 
 Use `--cp-source dH` to use dH/dT for Cp:
 
 ```bash
-lammps-thermo-series --config config_production.json --outdir analysis/thermo_0_300K_uq_dH --min-window-ps 18 --window-stride-ps 2 --plot-bin-ps 0.5 --natoms 96 --plot-T-min 0 --plot-T-max 300 --plot-T-step 10 --anchor-zero --cp-source dH --n-bootstrap 300
+thermo_lammps --config config_production.json --outdir analysis/thermo_0_300K_uq_dH --min-window-ps 18 --window-stride-ps 2 --plot-bin-ps 0.5 --natoms 96 --plot-T-min 0 --plot-T-max 300 --plot-T-step 10 --anchor-zero --cp-source dH --n-bootstrap 300
 ```
 
 For high-temperature integration anchored at 300 K:
 
 ```bash
-lammps-thermo-series --config config_production.json --outdir analysis/thermo_anchor_300K --min-window-ps 20 --window-stride-ps 2 --plot-bin-ps 0.5 --natoms 96 --plot-T-min 300 --plot-T-max 1500 --plot-T-step 10 --cp-source dH --thermo-anchor-T 300 --thermo-anchor-S 78.0 --thermo-anchor-Cp 64.0 --use-anchor-for-integration --use-anchor-Cp-in-fit --n-bootstrap 100
+thermo_lammps --config config_production.json --outdir analysis/thermo_anchor_300K --min-window-ps 20 --window-stride-ps 2 --plot-bin-ps 0.5 --natoms 96 --plot-T-min 300 --plot-T-max 1500 --plot-T-step 10 --cp-source dH --thermo-anchor-T 300 --thermo-anchor-S 78.0 --thermo-anchor-Cp 64.0 --use-anchor-for-integration --use-anchor-Cp-in-fit --n-bootstrap 100
 ```
 
 Instead of typing experimental or literature anchor values, a phonopy-QHA
@@ -547,7 +547,7 @@ uses QHA Cp at the anchor temperature. Manually supplied `--thermo-anchor-S`,
 `--thermo-anchor-H`, or `--thermo-anchor-Cp` still take priority:
 
 ```bash
-lammps-thermo-series --config config_production.json --outdir analysis/thermo_anchor_qha_300K --natoms 96 --plot-T-min 300 --plot-T-max 1500 --cp-source dH --thermo-anchor-T 300 --qha-anchor-dir ./qha_run --qha-anchor-formula-units 32 --use-anchor-for-integration --use-anchor-Cp-in-fit
+thermo_lammps --config config_production.json --outdir analysis/thermo_anchor_qha_300K --natoms 96 --plot-T-min 300 --plot-T-max 1500 --cp-source dH --thermo-anchor-T 300 --qha-anchor-dir ./qha_run --qha-anchor-formula-units 32 --use-anchor-for-integration --use-anchor-Cp-in-fit
 ```
 
 The QHA Cp unit defaults to `J/mol-cell/K`, matching the phonopy-QHA outputs
@@ -561,7 +561,7 @@ default, blends QHA and MD Cp with a smoothstep interval, and recomputes
 hybrid S/H/G by integrating the hybrid Cp curve:
 
 ```bash
-lammps-thermo-series --config config_production.json --outdir analysis/thermo_qha_splice --natoms 96 --plot-T-min 0 --plot-T-max 1500 --cp-source dH --qha-anchor-dir ./qha_run --qha-anchor-formula-units 32 --qha-low-t-splice
+thermo_lammps --config config_production.json --outdir analysis/thermo_qha_splice --natoms 96 --plot-T-min 0 --plot-T-max 1500 --cp-source dH --qha-anchor-dir ./qha_run --qha-anchor-formula-units 32 --qha-low-t-splice
 ```
 
 Use `--qha-splice-min-switch-temperature` to change the low-temperature guard
@@ -919,13 +919,15 @@ If a thermal YAML is outside the scanned volume folders, pass explicit
 the E-V rows. The command checks that the number of thermal YAML files matches
 the number of valid E-V points before writing the run script.
 
-To compare QHA curves with `lammps-thermo-series` output from `md-engine`, use
-`vasp-qha-md-compare`. For fluorite UO2, `target-z 4` means the comparison
+To compare QHA curves with `thermo_lammps` output from `md-engine`, use
+`thermo_qha-md`. The older names `lammps-thermo-series` and
+`vasp-qha-md-compare` remain as compatibility aliases. For fluorite UO2,
+`target-z 4` means the comparison
 normalizes extensive quantities to one conventional UO2 unit cell with four
 UO2 formula units. A 2x2x2 fluorite QHA or MD cell has 32 UO2 formula units:
 
 ```bash
-vasp-qha-md-compare \
+thermo_qha-md \
   --qha-dir ./qha_run \
   --md-dir ./analysis/thermo_0_1500K_uq \
   --outdir ./qha_md_overlay \
@@ -956,7 +958,7 @@ The compare command also writes `availability_report.csv` in the output
 directory. Check that file first when an expected overlay is missing. For
 example, QHA enthalpy requires both `gibbs-temperature.dat` and
 `entropy-temperature.dat`, while MD entropy/enthalpy can be read from common
-`lammps-thermo-series` column names such as `S_rel_J_per_mol_UO2_K`,
+`thermo_lammps` column names such as `S_rel_J_per_mol_UO2_K`,
 `S_rel_J_mol_K`, `H_rel_J_per_mol_UO2`, or `H_rel_J_mol`.
 
 When both QHA and MD Cp are available, the command also writes a hybrid
