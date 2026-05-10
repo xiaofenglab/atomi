@@ -78,11 +78,15 @@ def md_series(path: Path, column: str, scale: float = 1.0) -> list[tuple[float, 
     return points
 
 
-def reference_value(points: list[tuple[float, float]], args: argparse.Namespace) -> float | None:
+def reference_value(
+    points: list[tuple[float, float]],
+    args: argparse.Namespace,
+    reference_temperature: float | None = None,
+) -> float | None:
     if not points or args.energy_reference == "none":
         return None
-    if args.energy_reference == "temperature" and args.energy_reference_temperature is not None:
-        target = args.energy_reference_temperature
+    if reference_temperature is not None:
+        target = reference_temperature
         return min(points, key=lambda item: abs(item[0] - target))[1]
     return points[0][1]
 
@@ -90,11 +94,30 @@ def reference_value(points: list[tuple[float, float]], args: argparse.Namespace)
 def relative_energy(
     points: list[tuple[float, float]],
     args: argparse.Namespace,
+    reference_temperature: float | None = None,
 ) -> list[tuple[float, float]]:
-    ref = reference_value(points, args)
+    ref = reference_value(points, args, reference_temperature)
     if ref is None:
         return points
     return [(temp, value - ref) for temp, value in points]
+
+
+def overlapping_reference_temperature(qha_points, md_points, args) -> float | None:
+    if args.energy_reference == "none":
+        return None
+    if args.energy_reference == "temperature":
+        return args.energy_reference_temperature
+    if not qha_points or not md_points:
+        return None
+    qha_min = min(temp for temp, _value in qha_points)
+    qha_max = max(temp for temp, _value in qha_points)
+    md_min = min(temp for temp, _value in md_points)
+    md_max = max(temp for temp, _value in md_points)
+    overlap_min = max(qha_min, md_min)
+    overlap_max = min(qha_max, md_max)
+    if overlap_min <= overlap_max:
+        return overlap_min
+    return None
 
 
 def energy_scale(args: argparse.Namespace) -> float:
@@ -295,7 +318,7 @@ def write_metadata(path: Path, args: argparse.Namespace) -> None:
             "phonopy-qha Cp and entropy are treated as J/mol-cell/K by default",
             "lammps-thermo-series molar columns are treated as per mole of formula units",
             "volume is normalized to target_z formula units",
-            "G and H are shifted to a common relative reference unless --energy-reference none",
+            "G/H/F are shifted at the minimal overlapping T unless --energy-reference changes it",
         ],
     }
     path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
@@ -349,8 +372,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--qha-alpha-unit", choices=("1/K", "micro/K"), default="1/K")
     parser.add_argument(
         "--energy-reference",
-        choices=("first", "temperature", "none"),
-        default="first",
+        choices=("overlap-min", "temperature", "none"),
+        default="overlap-min",
         help="Reference used to shift G/H/F curves before overlay.",
     )
     parser.add_argument("--energy-reference-temperature", type=float, default=None)
@@ -384,8 +407,9 @@ def main(argv: list[str] | None = None) -> None:
         qha_points = filter_range(qha_points, args.t_min, args.t_max)
         md_points = filter_range(md_points, args.t_min, args.t_max)
         if item.get("relative_energy"):
-            qha_points = relative_energy(qha_points, args)
-            md_points = relative_energy(md_points, args)
+            ref_t = overlapping_reference_temperature(qha_points, md_points, args)
+            qha_points = relative_energy(qha_points, args, ref_t)
+            md_points = relative_energy(md_points, args, ref_t)
         if not qha_points and not md_points:
             continue
         png = args.outdir / f"{item['name']}_qha_md_overlay.png"

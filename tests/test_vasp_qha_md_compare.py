@@ -80,3 +80,48 @@ def test_qha_md_compare_normalizes_to_target_cell_and_units(tmp_path: Path) -> N
     assert float(enthalpy_rows[3]["value"]) == pytest.approx(3.015166003853438)
     assert (out / "overlay_index.csv").exists()
     assert (out / "normalization_metadata.json").exists()
+
+
+def test_qha_md_compare_shifts_energy_at_minimal_overlap(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+    qha = tmp_path / "qha"
+    md = tmp_path / "md"
+    out = tmp_path / "overlay"
+    qha.mkdir()
+    md.mkdir()
+
+    write_qha_dat(qha / "gibbs-temperature.dat", [(0.0, 10.0), (300.0, 11.0)])
+    (md / "thermo_functions_grid.csv").write_text(
+        "T_K,G_rel_J_per_mol_UO2,H_rel_J_per_mol_UO2\n"
+        "300,0,0\n"
+        "500,1000,1000\n",
+        encoding="utf-8",
+    )
+
+    main(
+        [
+            "--qha-dir",
+            str(qha),
+            "--md-dir",
+            str(md),
+            "--outdir",
+            str(out),
+            "--qha-formula-units",
+            "1",
+            "--md-formula-units",
+            "1",
+            "--target-z",
+            "1",
+            "--t-min",
+            "0",
+            "--t-max",
+            "500",
+        ]
+    )
+
+    rows = list(csv.DictReader((out / "gibbs_qha_md_overlay.csv").open()))
+    assert rows[0]["source"] == "QHA"
+    assert float(rows[0]["value"]) == pytest.approx(-96.48533212331002)
+    assert float(rows[1]["value"]) == pytest.approx(0.0)
+    assert rows[2]["source"] == "MD"
+    assert float(rows[2]["value"]) == pytest.approx(0.0)
