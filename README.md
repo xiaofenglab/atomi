@@ -578,6 +578,16 @@ QHA files and MD columns are available. It also writes
 records the blend interval, Cp mismatch diagnostics, source files, and how the
 MD statistical Cp UQ band was tapered through the blend.
 
+For structural thermodynamics, CTE is not blended directly. The workflow
+blends corrected primary structural curves, `V(T)` and available lattice
+parameters such as `a(T)`, then derives `alpha_V = (1/V) dV/dT` and
+`alpha_L = (1/a) da/dT`. If QHA and MD have an absolute offset, provide a
+reference value and choose `shift` or `scale` correction before the blend:
+
+```bash
+thermo_lammps --config config_production.json --outdir analysis/thermo_qha_splice --natoms 96 --plot-T-min 0 --plot-T-max 1500 --cp-source dH --qha-anchor-dir ./qha_run --qha-anchor-formula-units 32 --qha-low-t-splice --structure-reference-temperature 300 --lattice-reference a=5.47 --structure-correction shift
+```
+
 This command packages the v4 anchor-capable analyzer, which also supports the earlier v3-style fluctuation and dH workflows.
 
 ## VASP Live Plotting
@@ -989,6 +999,16 @@ Override the automatic switch with `--hybrid-switch-temperature <T>`, choose
 the blend with `--hybrid-blend-start <T> --hybrid-blend-end <T>`, change the
 low-T guard with `--hybrid-min-switch-temperature <T>`, or skip these outputs
 with `--no-hybrid-cp-s`.
+
+For structural quantities, the compare command follows the same rule as
+`thermo_lammps`: it does not blend CTE directly. It corrects and blends V/a
+curves first, then derives `hybrid_alpha_V_QHA_MD.png` and
+`hybrid_alpha_L_a_QHA_MD.png` from the final hybrid structural curve. Optional
+baseline correction uses a reference temperature plus either shift or scale:
+
+```bash
+thermo_qha-md --qha-dir ./qha_run --md-dir analysis/thermo_qha_splice --outdir ./qha_md_overlay --qha-formula-units 32 --md-formula-units 32 --target-z 4 --t-min 0 --t-max 1500 --structure-reference-temperature 300 --lattice-reference a=5.47 --structure-correction shift
+```
 
 ## Recommended Migration Pattern
 

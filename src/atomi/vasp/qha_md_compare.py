@@ -824,6 +824,166 @@ def blend_series(qha_points, md_points, blend_start, blend_end) -> tuple[list[di
     return rows, "hybrid"
 
 
+def parse_key_value_refs(items: list[str] | None) -> dict[str, float]:
+    refs = {}
+    for item in items or []:
+        if "=" not in item:
+            raise ValueError(f"Reference must look like key=value, got: {item}")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"Reference key is empty in: {item}")
+        refs[key] = float(value)
+    return refs
+
+
+def should_correct_source(source: str, apply_to: str) -> bool:
+    return apply_to in ("both", source)
+
+
+def correct_series_to_reference(
+    points: list[tuple[float, float]],
+    *,
+    source: str,
+    reference_temperature: float | None,
+    reference_value_target: float | None,
+    correction: str,
+    apply_to: str,
+) -> tuple[list[tuple[float, float]], dict]:
+    metadata = {
+        "source": source,
+        "correction": correction,
+        "apply_to": apply_to,
+        "reference_T_K": reference_temperature,
+        "reference_value": reference_value_target,
+        "applied": False,
+    }
+    if (
+        correction == "none"
+        or reference_temperature is None
+        or reference_value_target is None
+        or not should_correct_source(source, apply_to)
+    ):
+        return points, metadata
+    value_at_ref = interpolate(points, reference_temperature)
+    if value_at_ref is None or not math.isfinite(value_at_ref):
+        metadata["note"] = "No curve value available at reference temperature"
+        return points, metadata
+    metadata["raw_value_at_reference"] = value_at_ref
+    if correction == "shift":
+        delta = reference_value_target - value_at_ref
+        metadata["shift"] = delta
+        metadata["applied"] = True
+        return [(temp, value + delta) for temp, value in points], metadata
+    if correction == "scale":
+        if abs(value_at_ref) <= 1.0e-12:
+            metadata["note"] = "Cannot scale because raw reference value is zero"
+            return points, metadata
+        scale = reference_value_target / value_at_ref
+        metadata["scale"] = scale
+        metadata["applied"] = True
+        return [(temp, value * scale) for temp, value in points], metadata
+    raise ValueError(f"Unsupported structural correction: {correction}")
+
+
+def derive_alpha_rows(rows: list[dict], value_key: str = "value") -> list[dict]:
+    if len(rows) < 2:
+        return []
+    temps = [row["T_K"] for row in rows]
+    values = [row[value_key] for row in rows]
+    alpha_rows = []
+    for idx, (temp, value) in enumerate(zip(temps, values)):
+        if idx == 0:
+            dvalue = values[1] - values[0]
+            dtemp = temps[1] - temps[0]
+        elif idx == len(rows) - 1:
+            dvalue = values[-1] - values[-2]
+            dtemp = temps[-1] - temps[-2]
+        else:
+            dvalue = values[idx + 1] - values[idx - 1]
+            dtemp = temps[idx + 1] - temps[idx - 1]
+        alpha = (dvalue / dtemp) / value if dtemp and value else math.nan
+        alpha_rows.append({"T_K": temp, "alpha_1_per_K": alpha, "alpha_micro_per_K": alpha * 1.0e6})
+    return alpha_rows
+
+
+def plot_structural_quantity(
+    path: Path,
+    *,
+    title: str,
+    ylabel: str,
+    qha_raw,
+    md_raw,
+    qha_corrected,
+    md_corrected,
+    hybrid_rows,
+    blend_start: float,
+    blend_end: float,
+    args,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.8))
+    if qha_raw:
+        x, y = zip(*qha_raw)
+        ax.plot(x, y, ":", color="#1f77b4", linewidth=1.2, alpha=0.55, label="raw QHA")
+    if md_raw:
+        x, y = zip(*md_raw)
+        ax.plot(x, y, ":", color="#d62728", linewidth=1.2, alpha=0.55, label="raw MD")
+    if qha_corrected:
+        x, y = zip(*qha_corrected)
+        ax.plot(x, y, "-.", color="#1f77b4", linewidth=1.4, alpha=0.75, label="corrected QHA")
+    if md_corrected:
+        x, y = zip(*md_corrected)
+        ax.plot(x, y, "--", color="#d62728", linewidth=1.4, alpha=0.75, label="corrected MD")
+    if hybrid_rows:
+        ax.plot(
+            [row["T_K"] for row in hybrid_rows],
+            [row["value"] for row in hybrid_rows],
+            "-",
+            color="#111111",
+            linewidth=2.3,
+            label="hybrid",
+        )
+        apply_hybrid_y_limits(ax, [row["value"] for row in hybrid_rows])
+    if blend_start == blend_end:
+        ax.axvline(blend_start, color="#555555", linestyle=":", linewidth=1.2)
+    else:
+        ax.axvspan(blend_start, blend_end, color="#111111", alpha=0.08, label="blend interval")
+    if args.t_min is not None or args.t_max is not None:
+        ax.set_xlim(left=args.t_min, right=args.t_max)
+    ax.set_xlabel("Temperature (K)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+
+
+def plot_alpha_rows(path: Path, title: str, ylabel: str, alpha_rows, args) -> None:
+    import matplotlib.pyplot as plt
+
+    if not alpha_rows:
+        return
+    fig, ax = plt.subplots(figsize=(7.2, 4.2))
+    ax.plot(
+        [row["T_K"] for row in alpha_rows],
+        [row["alpha_micro_per_K"] for row in alpha_rows],
+        "-",
+        color="#111111",
+        linewidth=2.0,
+    )
+    if args.t_min is not None or args.t_max is not None:
+        ax.set_xlim(left=args.t_min, right=args.t_max)
+    ax.set_xlabel("Temperature (K)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+
+
 def selected_md_records(md_dir: Path) -> list[dict]:
     for name in ("used_stage_records.json", "discovered_stage_records.json"):
         path = md_dir / name
@@ -964,27 +1124,78 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         first_hybrid_t,
     )
 
-    qha_volume = filter_range(
+    lattice_references = parse_key_value_refs(args.lattice_reference)
+    structural_metadata = {
+        "reference_T_K": args.structure_reference_temperature,
+        "volume_reference": args.volume_reference,
+        "lattice_references": lattice_references,
+        "correction_type": args.structure_correction,
+        "apply_to": args.structure_correction_apply_to,
+        "blend_start_K": blend_start,
+        "blend_end_K": blend_end,
+        "note": "CTE is derived from corrected hybrid V/a curves; CTE is not blended directly.",
+    }
+
+    qha_volume_raw = filter_range(
         qha_series(args.qha_dir / "volume-temperature.dat", extensive_qha_scale(args)),
         args.t_min,
         args.t_max,
     )
-    md_volume, md_volume_column = md_series(
+    md_volume_raw, md_volume_column = md_series(
         md_path,
         MD_COLUMN_ALIASES["V"],
         extensive_md_scale(args),
     )
-    md_volume = filter_range(md_volume, args.t_min, args.t_max)
+    md_volume_raw = filter_range(md_volume_raw, args.t_min, args.t_max)
+    qha_volume, qha_volume_correction = correct_series_to_reference(
+        qha_volume_raw,
+        source="qha",
+        reference_temperature=args.structure_reference_temperature,
+        reference_value_target=args.volume_reference,
+        correction=args.structure_correction,
+        apply_to=args.structure_correction_apply_to,
+    )
+    md_volume, md_volume_correction = correct_series_to_reference(
+        md_volume_raw,
+        source="md",
+        reference_temperature=args.structure_reference_temperature,
+        reference_value_target=args.volume_reference,
+        correction=args.structure_correction,
+        apply_to=args.structure_correction_apply_to,
+    )
     volume_rows, volume_mode = blend_series(qha_volume, md_volume, blend_start, blend_end)
+    volume_alpha_rows = derive_alpha_rows(volume_rows)
+    structural_metadata["volume"] = {
+        "qha_correction": qha_volume_correction,
+        "md_correction": md_volume_correction,
+        "source_mode": volume_mode,
+    }
     lattice_hybrids = []
     for spec in LATTICE_PARAMETER_SPECS:
-        qha_lattice, qha_lattice_file = qha_first_available_series(
+        qha_lattice_raw, qha_lattice_file = qha_first_available_series(
             args.qha_dir,
             spec["qha_names"],
         )
-        qha_lattice = filter_range(qha_lattice, args.t_min, args.t_max)
-        md_lattice, md_lattice_column = md_series(md_path, spec["md_aliases"], 1.0)
-        md_lattice = filter_range(md_lattice, args.t_min, args.t_max)
+        qha_lattice_raw = filter_range(qha_lattice_raw, args.t_min, args.t_max)
+        md_lattice_raw, md_lattice_column = md_series(md_path, spec["md_aliases"], 1.0)
+        md_lattice_raw = filter_range(md_lattice_raw, args.t_min, args.t_max)
+        reference_value = lattice_references.get(spec["key"])
+        qha_lattice, qha_lattice_correction = correct_series_to_reference(
+            qha_lattice_raw,
+            source="qha",
+            reference_temperature=args.structure_reference_temperature,
+            reference_value_target=reference_value,
+            correction=args.structure_correction,
+            apply_to=args.structure_correction_apply_to,
+        )
+        md_lattice, md_lattice_correction = correct_series_to_reference(
+            md_lattice_raw,
+            source="md",
+            reference_temperature=args.structure_reference_temperature,
+            reference_value_target=reference_value,
+            correction=args.structure_correction,
+            apply_to=args.structure_correction_apply_to,
+        )
         lattice_rows, lattice_mode = blend_series(
             qha_lattice,
             md_lattice,
@@ -996,14 +1207,24 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
                 {
                     "key": spec["key"],
                     "ylabel": spec["ylabel"],
+                    "qha_raw": qha_lattice_raw,
                     "qha_points": qha_lattice,
                     "qha_file": qha_lattice_file,
+                    "md_raw": md_lattice_raw,
                     "md_points": md_lattice,
                     "md_column": md_lattice_column,
                     "rows": lattice_rows,
                     "mode": lattice_mode,
+                    "alpha_rows": derive_alpha_rows(lattice_rows),
+                    "qha_correction": qha_lattice_correction,
+                    "md_correction": md_lattice_correction,
                 }
             )
+        structural_metadata.setdefault("lattice_parameters", {})[spec["key"]] = {
+            "qha_correction": qha_lattice_correction,
+            "md_correction": md_lattice_correction,
+            "source_mode": lattice_mode,
+        }
     if volume_rows or lattice_hybrids:
         va_csv = args.outdir / "hybrid_volume_lattice.csv"
         with va_csv.open("w", newline="", encoding="utf-8") as handle:
@@ -1041,6 +1262,7 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
     enthalpy_png = args.outdir / "hybrid_H_QHA_MD.png"
     gibbs_png = args.outdir / "hybrid_G_QHA_MD.png"
     volume_png = args.outdir / "hybrid_V_QHA_MD.png"
+    alpha_v_png = args.outdir / "hybrid_alpha_V_QHA_MD.png"
     plot_hybrid_quantity(
         cp_png,
         "Hybrid QHA+MD Cp",
@@ -1094,34 +1316,49 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         args,
     )
     if volume_rows:
-        plot_hybrid_quantity(
+        plot_structural_quantity(
             volume_png,
-            "Hybrid QHA+MD Volume",
-            f"Volume (A3 per Z={args.target_z:g} cell)",
-            qha_volume,
-            md_volume,
-            volume_rows,
-            "value",
-            "Hybrid V" if volume_mode == "hybrid" else "MD V",
-            blend_start,
-            blend_end,
-            args,
+            title="Corrected Hybrid QHA+MD Volume",
+            ylabel=f"Volume (A3 per Z={args.target_z:g} cell)",
+            qha_raw=qha_volume_raw,
+            md_raw=md_volume_raw,
+            qha_corrected=qha_volume,
+            md_corrected=md_volume,
+            hybrid_rows=volume_rows,
+            blend_start=blend_start,
+            blend_end=blend_end,
+            args=args,
+        )
+        plot_alpha_rows(
+            alpha_v_png,
+            "Hybrid Volumetric CTE From V(T)",
+            "alpha_V (10^-6 K^-1)",
+            volume_alpha_rows,
+            args=args,
         )
     for item in lattice_hybrids:
         lattice_png = args.outdir / f"hybrid_{item['key']}_QHA_MD.png"
-        plot_hybrid_quantity(
+        plot_structural_quantity(
             lattice_png,
-            f"Hybrid QHA+MD Lattice {item['key']}",
-            item["ylabel"],
-            item["qha_points"],
-            item["md_points"],
-            item["rows"],
-            "value",
-            f"Hybrid {item['key']}" if item["mode"] == "hybrid" else f"MD {item['key']}",
-            blend_start,
-            blend_end,
-            args,
+            title=f"Corrected Hybrid QHA+MD Lattice {item['key']}",
+            ylabel=item["ylabel"],
+            qha_raw=item["qha_raw"],
+            md_raw=item["md_raw"],
+            qha_corrected=item["qha_points"],
+            md_corrected=item["md_points"],
+            hybrid_rows=item["rows"],
+            blend_start=blend_start,
+            blend_end=blend_end,
+            args=args,
         )
+        if item["key"] in ("a", "b", "c"):
+            plot_alpha_rows(
+                args.outdir / f"hybrid_alpha_L_{item['key']}_QHA_MD.png",
+                f"Hybrid Linear CTE From {item['key']}(T)",
+                f"alpha_{item['key']} (10^-6 K^-1)",
+                item["alpha_rows"],
+                args,
+            )
     metadata = {
         "switch_temperature_K": switch_temp,
         "switch_method": switch_method,
@@ -1133,6 +1370,7 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         "enthalpy_integration": "H(T) = H(T0) + integral_T0^T Cp(T') dT",
         "gibbs_integration": "G(T) = H(T) - T*S(T)",
         "entropy_reference_note": entropy_note,
+        "structural_hybrid": structural_metadata,
         "cp_overlap_diagnostics": {
             key: value
             for key, value in diagnostics.items()
@@ -1210,8 +1448,12 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
     print(gibbs_png)
     if volume_rows:
         print(volume_png)
+        if volume_alpha_rows:
+            print(alpha_v_png)
     for item in lattice_hybrids:
         print(args.outdir / f"hybrid_{item['key']}_QHA_MD.png")
+        if item["key"] in ("a", "b", "c") and item["alpha_rows"]:
+            print(args.outdir / f"hybrid_alpha_L_{item['key']}_QHA_MD.png")
     index = [
         {
             "quantity": "hybrid_cp",
@@ -1262,6 +1504,18 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
                 "comparison_type": volume_mode,
             }
         )
+        if volume_alpha_rows:
+            index.append(
+                {
+                    "quantity": "hybrid_alpha_V",
+                    "plot_png": alpha_v_png.name,
+                    "data_csv": csv_path.name,
+                    "qha_source": "derived from corrected hybrid V(T)",
+                    "md_source": md_path.name,
+                    "md_column": md_volume_column,
+                    "comparison_type": "derived-hybrid",
+                }
+            )
     for item in lattice_hybrids:
         lattice_png = args.outdir / f"hybrid_{item['key']}_QHA_MD.png"
         index.append(
@@ -1275,6 +1529,18 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
                 "comparison_type": item["mode"],
             }
         )
+        if item["key"] in ("a", "b", "c") and item["alpha_rows"]:
+            index.append(
+                {
+                    "quantity": f"hybrid_alpha_L_{item['key']}",
+                    "plot_png": f"hybrid_alpha_L_{item['key']}_QHA_MD.png",
+                    "data_csv": csv_path.name,
+                    "qha_source": f"derived from corrected hybrid {item['key']}(T)",
+                    "md_source": md_path.name,
+                    "md_column": item["md_column"],
+                    "comparison_type": "derived-hybrid",
+                }
+            )
     return index, metadata
 
 
@@ -1417,6 +1683,36 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="End temperature for smooth QHA-to-MD Cp blending in K.",
+    )
+    parser.add_argument(
+        "--structure-reference-temperature",
+        type=float,
+        default=None,
+        help="Reference temperature for optional V/a baseline correction.",
+    )
+    parser.add_argument(
+        "--volume-reference",
+        type=float,
+        default=None,
+        help="Reference volume, in the normalized comparison volume basis, for V(T) correction.",
+    )
+    parser.add_argument(
+        "--lattice-reference",
+        action="append",
+        default=[],
+        help="Reference lattice parameter as key=value, e.g. a=5.47. Repeat for b/c.",
+    )
+    parser.add_argument(
+        "--structure-correction",
+        choices=("none", "shift", "scale"),
+        default="none",
+        help="Baseline correction applied to V/a before structural hybrid and CTE derivation.",
+    )
+    parser.add_argument(
+        "--structure-correction-apply-to",
+        choices=("qha", "md", "both"),
+        default="both",
+        help="Which structural source to correct to the reference value.",
     )
     return parser
 

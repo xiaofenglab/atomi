@@ -483,6 +483,67 @@ def plot_qha_md_overlap(outpath: Path,
     plt.close(fig)
 
 
+def plot_structural_hybrid_detail(outpath: Path,
+                                  *,
+                                  T_grid: np.ndarray,
+                                  hybrid_y: np.ndarray,
+                                  ylabel: str,
+                                  title: str,
+                                  qha_T_raw: Optional[np.ndarray] = None,
+                                  qha_y_raw: Optional[np.ndarray] = None,
+                                  md_T_raw: Optional[np.ndarray] = None,
+                                  md_y_raw: Optional[np.ndarray] = None,
+                                  qha_T_corrected: Optional[np.ndarray] = None,
+                                  qha_y_corrected: Optional[np.ndarray] = None,
+                                  md_T_corrected: Optional[np.ndarray] = None,
+                                  md_y_corrected: Optional[np.ndarray] = None,
+                                  blend_start: Optional[float] = None,
+                                  blend_end: Optional[float] = None) -> None:
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    if qha_T_raw is not None and qha_y_raw is not None:
+        ax.plot(qha_T_raw, qha_y_raw, ":", color="#1f77b4", alpha=0.55, label="raw QHA")
+    if md_T_raw is not None and md_y_raw is not None:
+        ax.plot(md_T_raw, md_y_raw, ":", color="#d62728", alpha=0.55, label="raw MD")
+    if qha_T_corrected is not None and qha_y_corrected is not None:
+        ax.plot(
+            qha_T_corrected,
+            qha_y_corrected,
+            "-.",
+            color="#1f77b4",
+            alpha=0.75,
+            label="corrected QHA",
+        )
+    if md_T_corrected is not None and md_y_corrected is not None:
+        ax.plot(
+            md_T_corrected,
+            md_y_corrected,
+            "--",
+            color="#d62728",
+            alpha=0.75,
+            label="corrected MD",
+        )
+    ax.plot(T_grid, hybrid_y, "-", color="#111111", linewidth=2.3, label="hybrid")
+    if blend_start is not None and blend_end is not None:
+        if abs(blend_end - blend_start) <= 1.0e-12:
+            ax.axvline(blend_start, color="0.25", linestyle=":", linewidth=1.1)
+        else:
+            ax.axvspan(blend_start, blend_end, color="#111111", alpha=0.08, label="blend")
+    finite = hybrid_y[np.isfinite(hybrid_y)]
+    if len(finite):
+        ymin = float(np.min(finite))
+        ymax = float(np.max(finite))
+        pad = max(abs(ymax - ymin) * 0.08, 1.0e-12)
+        ax.set_ylim(ymin - pad, ymax + pad)
+    ax.set_xlabel("T (K)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=180)
+    plt.close(fig)
+
+
 # -----------------------------
 # parsing LAMMPS thermo
 # -----------------------------
@@ -1690,6 +1751,77 @@ def fit_grid_from_series(T: np.ndarray, y: np.ndarray, T_grid: np.ndarray, degre
     return np.full_like(T_grid, np.nan, dtype=float)
 
 
+def parse_lattice_references(items: list[str] | None) -> dict[str, float]:
+    refs = {}
+    for item in items or []:
+        if "=" not in item:
+            raise ValueError(f"Reference must look like key=value, got: {item}")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"Reference key is empty in: {item}")
+        refs[key] = float(value)
+    return refs
+
+
+def should_correct_source(source: str, apply_to: str) -> bool:
+    return apply_to in ("both", source)
+
+
+def correct_array_to_reference(
+    T_values: np.ndarray,
+    y_values: np.ndarray,
+    *,
+    source: str,
+    reference_temperature: Optional[float],
+    reference_value: Optional[float],
+    correction: str,
+    apply_to: str,
+) -> tuple[np.ndarray, dict]:
+    metadata = {
+        "source": source,
+        "correction": correction,
+        "apply_to": apply_to,
+        "reference_T_K": reference_temperature,
+        "reference_value": reference_value,
+        "applied": False,
+    }
+    y_values = np.array(y_values, dtype=float).copy()
+    if (
+        correction == "none"
+        or reference_temperature is None
+        or reference_value is None
+        or not should_correct_source(source, apply_to)
+        or len(T_values) == 0
+    ):
+        return y_values, metadata
+    finite = np.isfinite(T_values) & np.isfinite(y_values)
+    if finite.sum() < 2:
+        metadata["note"] = "Not enough finite values for correction"
+        return y_values, metadata
+    t_finite = T_values[finite]
+    y_finite = y_values[finite]
+    if reference_temperature < np.min(t_finite) or reference_temperature > np.max(t_finite):
+        metadata["note"] = "Reference temperature is outside curve range"
+        return y_values, metadata
+    raw_ref = float(np.interp(reference_temperature, t_finite, y_finite))
+    metadata["raw_value_at_reference"] = raw_ref
+    if correction == "shift":
+        shift = reference_value - raw_ref
+        metadata["shift"] = shift
+        metadata["applied"] = True
+        return y_values + shift, metadata
+    if correction == "scale":
+        if abs(raw_ref) <= 1.0e-12:
+            metadata["note"] = "Cannot scale because raw reference value is zero"
+            return y_values, metadata
+        scale = reference_value / raw_ref
+        metadata["scale"] = scale
+        metadata["applied"] = True
+        return y_values * scale, metadata
+    raise ValueError(f"Unsupported structural correction: {correction}")
+
+
 def fill_missing_anchors_from_qha(
     *,
     thermo_anchor_T: Optional[float],
@@ -1765,7 +1897,12 @@ def build_combined_thermo(summaries: list[dict],
                           qha_splice_switch_temperature: Optional[float] = None,
                           qha_splice_min_switch_temperature: float = 50.0,
                           qha_splice_blend_start: Optional[float] = None,
-                          qha_splice_blend_end: Optional[float] = None) -> list[dict]:
+                          qha_splice_blend_end: Optional[float] = None,
+                          structure_reference_temperature: Optional[float] = None,
+                          volume_reference: Optional[float] = None,
+                          lattice_references: Optional[dict[str, float]] = None,
+                          structure_correction: str = "none",
+                          structure_correction_apply_to: str = "both") -> list[dict]:
     outdir.mkdir(parents=True, exist_ok=True)
 
     T_data_all = np.array([s["target_T_K"] for s in summaries], dtype=float)
@@ -1931,6 +2068,15 @@ def build_combined_thermo(summaries: list[dict],
     V_md_grid = V_grid.copy()
     qha_blend_weights = np.ones_like(T_grid, dtype=float)
     lattice_hybrid = {}
+    lattice_references = lattice_references or {}
+    structural_metadata = {
+        "reference_T_K": structure_reference_temperature,
+        "volume_reference": volume_reference,
+        "lattice_references": lattice_references,
+        "correction_type": structure_correction,
+        "apply_to": structure_correction_apply_to,
+        "note": "CTE is derived from corrected hybrid V/a curves; CTE is not blended directly.",
+    }
     qha_splice_metadata = {}
     if qha_low_t_curve:
         switch_T, switch_method = choose_qha_md_cp_switch(
@@ -1970,39 +2116,90 @@ def build_combined_thermo(summaries: list[dict],
             lattice_hybrid = {}
             if qha_low_t_curve.get("V") is not None and qha_low_t_curve.get("V_T") is not None:
                 qha_V_scaled = qha_low_t_curve["V"] * (nfu / qha_low_t_curve["qha_formula_units"])
+                qha_V_corrected, qha_V_correction = correct_array_to_reference(
+                    qha_low_t_curve["V_T"],
+                    qha_V_scaled,
+                    source="qha",
+                    reference_temperature=structure_reference_temperature,
+                    reference_value=volume_reference,
+                    correction=structure_correction,
+                    apply_to=structure_correction_apply_to,
+                )
+                V_md_corrected, md_V_correction = correct_array_to_reference(
+                    T_grid,
+                    V_md_grid,
+                    source="md",
+                    reference_temperature=structure_reference_temperature,
+                    reference_value=volume_reference,
+                    correction=structure_correction,
+                    apply_to=structure_correction_apply_to,
+                )
                 V_grid, _weights = blend_qha_md_on_grid(
                     T_grid,
                     qha_low_t_curve["V_T"],
-                    qha_V_scaled,
-                    V_md_grid,
+                    qha_V_corrected,
+                    V_md_corrected,
                     blend_start,
                     blend_end,
                 )
                 dVdT_grid = np.gradient(V_grid, T_grid)
                 alpha_V_grid = dVdT_grid / V_grid
                 qha_volume_mode = "hybrid"
+                structural_metadata["volume"] = {
+                    "qha_correction": qha_V_correction,
+                    "md_correction": md_V_correction,
+                    "source_mode": qha_volume_mode,
+                }
             for key, md_item in lattice_md.items():
                 qha_item = qha_low_t_curve.get("lattice_parameters", {}).get(key)
                 qha_lattice_modes[key] = "md-only"
-                hybrid_grid = md_item["grid"].copy()
+                md_grid_corrected, md_correction = correct_array_to_reference(
+                    T_grid,
+                    md_item["grid"],
+                    source="md",
+                    reference_temperature=structure_reference_temperature,
+                    reference_value=lattice_references.get(key),
+                    correction=structure_correction,
+                    apply_to=structure_correction_apply_to,
+                )
+                hybrid_grid = md_grid_corrected.copy()
+                qha_correction = {}
+                qha_values_corrected = None
                 if qha_item is not None:
+                    qha_values_corrected, qha_correction = correct_array_to_reference(
+                        qha_item["T"],
+                        qha_item["values"],
+                        source="qha",
+                        reference_temperature=structure_reference_temperature,
+                        reference_value=lattice_references.get(key),
+                        correction=structure_correction,
+                        apply_to=structure_correction_apply_to,
+                    )
                     hybrid_grid, _weights = blend_qha_md_on_grid(
                         T_grid,
                         qha_item["T"],
-                        qha_item["values"],
-                        md_item["grid"],
+                        qha_values_corrected,
+                        md_grid_corrected,
                         blend_start,
                         blend_end,
                     )
                     qha_lattice_modes[key] = "hybrid"
                 lattice_hybrid[key] = {
                     "hybrid_grid": hybrid_grid,
-                    "md_grid": md_item["grid"],
+                    "md_grid": md_grid_corrected,
+                    "md_grid_raw": md_item["grid"],
                     "md_T": md_item["T"],
                     "md_values": md_item["values"],
+                    "md_values_corrected": np.interp(md_item["T"], T_grid, md_grid_corrected),
                     "qha": qha_item,
+                    "qha_values_corrected": qha_values_corrected,
                     "mode": qha_lattice_modes[key],
                     "ylabel": md_item.get("ylabel", f"Lattice {key}"),
+                }
+                structural_metadata.setdefault("lattice_parameters", {})[key] = {
+                    "qha_correction": qha_correction,
+                    "md_correction": md_correction,
+                    "source_mode": qha_lattice_modes[key],
                 }
             if "a" in lattice_hybrid:
                 a_grid = lattice_hybrid["a"]["hybrid_grid"]
@@ -2031,6 +2228,7 @@ def build_combined_thermo(summaries: list[dict],
                     if key != "rows"
                 },
                 "cp_overlap_diagnostics_rows": diagnostics["rows"],
+                "structural_hybrid": structural_metadata,
                 "qha_volume_mode": qha_volume_mode,
                 "qha_lattice_modes": qha_lattice_modes,
                 "qha_source": {
@@ -2249,8 +2447,28 @@ def build_combined_thermo(summaries: list[dict],
         S_md_rel_grid = trapz_cumulative(T_grid, Cp_over_T_md)
         G_md_rel_grid = H_md_rel_grid - T_grid * S_md_rel_grid
         qha_V_scaled = None
+        qha_V_corrected = None
+        V_md_corrected = V_md_grid
         if qha_low_t_curve.get("V") is not None and qha_low_t_curve.get("V_T") is not None:
             qha_V_scaled = qha_low_t_curve["V"] * (nfu / qha_low_t_curve["qha_formula_units"])
+            qha_V_corrected, _meta = correct_array_to_reference(
+                qha_low_t_curve["V_T"],
+                qha_V_scaled,
+                source="qha",
+                reference_temperature=structure_reference_temperature,
+                reference_value=volume_reference,
+                correction=structure_correction,
+                apply_to=structure_correction_apply_to,
+            )
+            V_md_corrected, _meta = correct_array_to_reference(
+                T_grid,
+                V_md_grid,
+                source="md",
+                reference_temperature=structure_reference_temperature,
+                reference_value=volume_reference,
+                correction=structure_correction,
+                apply_to=structure_correction_apply_to,
+            )
             plot_qha_md_overlap(
                 outdir / "volume_QHA_MD_overlap.png",
                 qha_low_t_curve["V_T"],
@@ -2318,16 +2536,33 @@ def build_combined_thermo(summaries: list[dict],
             qha_splice_metadata["blend_start_K"],
             qha_splice_metadata["blend_end_K"],
         )
-        plot_hybrid_grid(
+        plot_structural_hybrid_detail(
             outdir / "hybrid_V_QHA_MD.png",
+            T_grid=T_grid,
+            hybrid_y=V_grid,
+            ylabel="V (Å$^3$)",
+            title="Corrected Hybrid QHA+MD Volume" if qha_V_scaled is not None else "MD Volume",
+            qha_T_raw=qha_low_t_curve.get("V_T"),
+            qha_y_raw=qha_V_scaled,
+            md_T_raw=T_grid,
+            md_y_raw=V_md_grid,
+            qha_T_corrected=qha_low_t_curve.get("V_T"),
+            qha_y_corrected=qha_V_corrected,
+            md_T_corrected=T_grid,
+            md_y_corrected=V_md_corrected,
+            blend_start=qha_splice_metadata["blend_start_K"],
+            blend_end=qha_splice_metadata["blend_end_K"],
+        )
+        plot_hybrid_grid(
+            outdir / "hybrid_alpha_V_QHA_MD.png",
             T_grid,
-            V_grid,
-            "V (Å$^3$)",
-            "Hybrid QHA+MD Volume" if qha_V_scaled is not None else "MD Volume",
-            qha_low_t_curve.get("V_T"),
-            qha_V_scaled,
-            T_grid,
-            V_md_grid,
+            alpha_V_grid * 1e6,
+            r"$\alpha_V$ ($10^{-6}$ K$^{-1}$)",
+            "Hybrid Volumetric CTE From V(T)",
+            None,
+            None,
+            None,
+            None,
             None,
             qha_splice_metadata["blend_start_K"],
             qha_splice_metadata["blend_end_K"],
@@ -2336,19 +2571,22 @@ def build_combined_thermo(summaries: list[dict],
             qha_item = item.get("qha")
             qha_T = qha_item.get("T") if qha_item is not None else None
             qha_values = qha_item.get("values") if qha_item is not None else None
-            plot_hybrid_grid(
+            plot_structural_hybrid_detail(
                 outdir / f"hybrid_{key}_QHA_MD.png",
-                T_grid,
-                item["hybrid_grid"],
-                item["ylabel"],
-                f"Hybrid QHA+MD Lattice {key}",
-                qha_T,
-                qha_values,
-                T_grid,
-                item["md_grid"],
-                None,
-                qha_splice_metadata["blend_start_K"],
-                qha_splice_metadata["blend_end_K"],
+                T_grid=T_grid,
+                hybrid_y=item["hybrid_grid"],
+                ylabel=item["ylabel"],
+                title=f"Corrected Hybrid QHA+MD Lattice {key}",
+                qha_T_raw=qha_T,
+                qha_y_raw=qha_values,
+                md_T_raw=T_grid,
+                md_y_raw=item["md_grid_raw"],
+                qha_T_corrected=qha_T,
+                qha_y_corrected=item.get("qha_values_corrected"),
+                md_T_corrected=T_grid,
+                md_y_corrected=item["md_grid"],
+                blend_start=qha_splice_metadata["blend_start_K"],
+                blend_end=qha_splice_metadata["blend_end_K"],
             )
             if qha_T is not None and qha_values is not None:
                 plot_qha_md_overlap(
@@ -2359,6 +2597,21 @@ def build_combined_thermo(summaries: list[dict],
                     item["md_grid"],
                     item["ylabel"],
                     f"QHA/MD Lattice {key} Overlap",
+                    qha_splice_metadata["blend_start_K"],
+                    qha_splice_metadata["blend_end_K"],
+                )
+            if key == "a":
+                plot_hybrid_grid(
+                    outdir / "hybrid_alpha_L_QHA_MD.png",
+                    T_grid,
+                    alpha_L_grid * 1e6,
+                    r"$\alpha_L$ ($10^{-6}$ K$^{-1}$)",
+                    "Hybrid Linear CTE From a(T)",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
                     qha_splice_metadata["blend_start_K"],
                     qha_splice_metadata["blend_end_K"],
                 )
@@ -2554,6 +2807,36 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="End temperature for smooth QHA-to-MD Cp blending in K.",
     )
+    ap.add_argument(
+        "--structure-reference-temperature",
+        type=float,
+        default=None,
+        help="Reference temperature for optional V/a baseline correction.",
+    )
+    ap.add_argument(
+        "--volume-reference",
+        type=float,
+        default=None,
+        help="Reference volume in the MD simulation-cell basis for V(T) correction.",
+    )
+    ap.add_argument(
+        "--lattice-reference",
+        action="append",
+        default=[],
+        help="Reference lattice parameter as key=value, e.g. a=5.47. Repeat for b/c.",
+    )
+    ap.add_argument(
+        "--structure-correction",
+        choices=["none", "shift", "scale"],
+        default="none",
+        help="Baseline correction applied to V/a before structural hybrid and CTE derivation.",
+    )
+    ap.add_argument(
+        "--structure-correction-apply-to",
+        choices=["qha", "md", "both"],
+        default="both",
+        help="Which structural source to correct to the reference value.",
+    )
 
     # Speed controls for large log sets.
     ap.add_argument("--skip-per-T-plots", action="store_true", help="Skip individual per-temperature raw/binned diagnostic PNGs")
@@ -2646,6 +2929,7 @@ def main(argv: list[str] | None = None) -> None:
             ap.error(str(exc))
 
     try:
+        lattice_references = parse_lattice_references(args.lattice_reference)
         build_combined_thermo(
             summaries=summaries,
             outdir=outdir,
@@ -2669,6 +2953,11 @@ def main(argv: list[str] | None = None) -> None:
             qha_splice_min_switch_temperature=args.qha_splice_min_switch_temperature,
             qha_splice_blend_start=args.qha_splice_blend_start,
             qha_splice_blend_end=args.qha_splice_blend_end,
+            structure_reference_temperature=args.structure_reference_temperature,
+            volume_reference=args.volume_reference,
+            lattice_references=lattice_references,
+            structure_correction=args.structure_correction,
+            structure_correction_apply_to=args.structure_correction_apply_to,
         )
     except ValueError as exc:
         ap.error(str(exc))

@@ -157,6 +157,10 @@ def test_build_combined_thermo_can_use_qha_low_t_splice(tmp_path) -> None:
         plot_T_step=100,
         n_bootstrap=0,
         qha_low_t_curve=qha_cp_thermo_curve(qha, 1.0),
+        structure_reference_temperature=200.0,
+        volume_reference=104.0,
+        lattice_references={"a": 4.2},
+        structure_correction="shift",
     )
 
     rows = list(csv.DictReader((tmp_path / "out" / "thermo_functions_grid.csv").open()))
@@ -172,9 +176,13 @@ def test_build_combined_thermo_can_use_qha_low_t_splice(tmp_path) -> None:
     assert (tmp_path / "out" / "hybrid_G_QHA_MD.png").exists()
     assert (tmp_path / "out" / "hybrid_V_QHA_MD.png").exists()
     assert (tmp_path / "out" / "hybrid_a_QHA_MD.png").exists()
+    assert (tmp_path / "out" / "hybrid_alpha_V_QHA_MD.png").exists()
+    assert (tmp_path / "out" / "hybrid_alpha_L_QHA_MD.png").exists()
     assert (tmp_path / "out" / "volume_QHA_MD_overlap.png").exists()
     assert (tmp_path / "out" / "lattice_a_QHA_MD_overlap.png").exists()
     metadata = json.loads((tmp_path / "out" / "qha_low_t_splice_metadata.json").read_text())
     assert metadata["blend_function"] == "smoothstep w=3x^2-2x^3"
     assert metadata["qha_volume_mode"] == "hybrid"
     assert metadata["qha_lattice_modes"]["a"] == "hybrid"
+    assert metadata["structural_hybrid"]["correction_type"] == "shift"
+    assert metadata["structural_hybrid"]["lattice_references"]["a"] == 4.2
