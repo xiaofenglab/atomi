@@ -180,6 +180,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cp2k_bond_analysis.add_argument("analysis_args", nargs=argparse.REMAINDER)
 
+    cp2k_clean_run = subparsers.add_parser(
+        "cp2k-clean-run",
+        help="Clean CP2K AIMD run folders while preserving rerun records.",
+    )
+    cp2k_clean_run.add_argument("clean_args", nargs=argparse.REMAINDER)
+
     mace_live = subparsers.add_parser(
         "mace-live",
         help="Live terminal plot for MACE training logs.",
@@ -359,6 +365,11 @@ def main(argv: list[str] | None = None) -> None:
 
         cp2k_bond_analysis_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "cp2k-clean-run":
+        from atomi.cp2k.clean_run import main as cp2k_clean_run_main
+
+        cp2k_clean_run_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "vasp-outcar":
         extv(raw_args[1:])
         return
@@ -535,6 +546,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.cp2k.bond_analysis import main as cp2k_bond_analysis_main
 
         cp2k_bond_analysis_main(args.analysis_args)
+        return
+
+    if args.subcommand == "cp2k-clean-run":
+        from atomi.cp2k.clean_run import main as cp2k_clean_run_main
+
+        cp2k_clean_run_main(args.clean_args)
         return
 
     if args.subcommand == "mace-live":

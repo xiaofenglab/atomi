@@ -154,6 +154,7 @@ cp2k-geoopt-input --xyz ga_cl4_26A_box.xyz --stage cheap --mode start --box 26 -
 cp2k-geoopt-input --xyz ga_cl4_26A-pos-1.xyz --stage refine --mode restart --box 26 --max-iter 150
 cp2k-extract-frames ga_cl4_26A_equil-pos-1.xyz --system chloro --find-good-frames --prefix ga_cl4_good
 cp2k-bond-analysis ga_cl4_26A_equil-pos-1.xyz --inp ga_cl4_26A_nvt.inp --ligand-elements Cl
+cp2k-clean-run . --reduce-trajectory-stride 10
 plotmace mace_train.log
 plotmace mace_train.log 200 5
 convertmace modelname.model
@@ -742,6 +743,39 @@ cp2k-bond-analysis ga_cl4_26A_equil-pos-1.xyz \
   --n-nearest 4 \
   --summary-csv ga_cl4_bonds.csv
 ```
+
+## CP2K AIMD Run Cleanup
+
+`cp2k-clean-run` plans a conservative cleanup of a completed CP2K AIMD run folder.
+It is dry-run by default and writes `atomi_clean_manifest.json`. The default keep
+set is designed for reproducibility and future reruns:
+
+```text
+*.inp
+*.restart
+*-RESTART.wfn
+*-pos.xyz or a reduced *-pos_strideN.xyz
+*.log.gz / *.out.gz
+```
+
+To inspect a plan:
+
+```bash
+cp2k-clean-run . --reduce-trajectory-stride 10
+```
+
+To apply the plan, compress logs, write a reduced trajectory, and move removable
+files into `_atomi_removed`:
+
+```bash
+cp2k-clean-run . \
+  --reduce-trajectory-stride 10 \
+  --replace-trajectory \
+  --execute
+```
+
+Use `--keep-pattern` for project-specific records and `--move-unknown` only after
+reviewing the dry-run manifest.
 
 ## Recommended Migration Pattern
 
