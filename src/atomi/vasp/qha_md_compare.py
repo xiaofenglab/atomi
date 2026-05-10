@@ -10,6 +10,7 @@ EV_TO_KJ_PER_MOL = 96.48533212331002
 
 MD_COLUMN_ALIASES = {
     "V": ("V_fit_A3", "V_mean_A3", "volume_A3"),
+    "a": ("a_fit_A", "a_mean_A", "a_proxy_mean_A"),
     "Cp": (
         "Cp_used_for_integration_J_per_mol_UO2_K",
         "Cp_from_dH_J_per_mol_UO2_K",
@@ -82,6 +83,19 @@ def filter_range(points: list[tuple[float, float]], t_min, t_max) -> list[tuple[
 
 def qha_series(path: Path, scale: float = 1.0) -> list[tuple[float, float]]:
     return [(row[0], row[1] * scale) for row in read_table(path)]
+
+
+def qha_first_available_series(
+    qha_dir: Path,
+    names: tuple[str, ...],
+    scale: float = 1.0,
+) -> tuple[list[tuple[float, float]], str]:
+    for name in names:
+        path = qha_dir / name
+        points = qha_series(path, scale)
+        if points:
+            return points, name
+    return [], ""
 
 
 def interpolate(points: list[tuple[float, float]], temp: float) -> float | None:
@@ -426,41 +440,77 @@ def cp_switch_temperature(
     return None, "no-switch-found"
 
 
+def smoothstep_weight(temp: float, blend_start: float, blend_end: float) -> float:
+    if blend_end <= blend_start:
+        return 1.0 if temp >= blend_end else 0.0
+    x = min(max((temp - blend_start) / (blend_end - blend_start), 0.0), 1.0)
+    return 3.0 * x * x - 2.0 * x * x * x
+
+
+def default_blend_interval(switch_temp: float, qha_points, md_points) -> tuple[float, float]:
+    qha_points = finite_points(qha_points)
+    md_points = finite_points(md_points)
+    if not qha_points or not md_points:
+        return switch_temp, switch_temp
+    qha_min, qha_max = qha_points[0][0], qha_points[-1][0]
+    md_min, md_max = md_points[0][0], md_points[-1][0]
+    overlap_min = max(qha_min, md_min)
+    overlap_max = min(qha_max, md_max)
+    half_width = 50.0
+    if overlap_min <= overlap_max:
+        half_width = min(50.0, max((overlap_max - overlap_min) / 4.0, 1.0))
+        return (
+            max(overlap_min, switch_temp - half_width),
+            min(overlap_max, switch_temp + half_width),
+        )
+    return switch_temp, switch_temp
+
+
 def build_hybrid_cp_rows(
     qha_points: list[tuple[float, float]],
     md_points: list[tuple[float, float]],
-    switch_temp: float,
+    blend_start: float,
+    blend_end: float,
 ) -> list[dict]:
-    rows = [
-        {"T_K": temp, "Cp": value, "Cp_source": "QHA"}
-        for temp, value in finite_points(qha_points)
-        if temp < switch_temp
-    ]
-    switch_values = [
-        value
-        for value in (
-            interpolate(qha_points, switch_temp),
-            interpolate(md_points, switch_temp),
-        )
-        if value is not None and math.isfinite(value)
-    ]
-    if switch_values:
+    temperatures = {
+        temp
+        for temp, _value in finite_points(qha_points) + finite_points(md_points)
+        if (blend_start <= temp <= blend_end)
+        or temp < blend_start
+        or temp > blend_end
+    }
+    temperatures.update({blend_start, blend_end})
+    rows = []
+    for temp in sorted(temperatures):
+        qha_value = interpolate(qha_points, temp)
+        md_value = interpolate(md_points, temp)
+        if temp < blend_start:
+            if qha_value is None:
+                continue
+            cp_value = qha_value
+            source = "QHA"
+            weight = 0.0
+        elif temp > blend_end:
+            if md_value is None:
+                continue
+            cp_value = md_value
+            source = "MD"
+            weight = 1.0
+        else:
+            if qha_value is None or md_value is None:
+                continue
+            weight = smoothstep_weight(temp, blend_start, blend_end)
+            cp_value = (1.0 - weight) * qha_value + weight * md_value
+            source = "blend"
         rows.append(
             {
-                "T_K": switch_temp,
-                "Cp": sum(switch_values) / len(switch_values),
-                "Cp_source": "switch-average",
+                "T_K": temp,
+                "Cp": cp_value,
+                "Cp_source": source,
+                "blend_weight": weight,
             }
         )
-    rows.extend(
-        {"T_K": temp, "Cp": value, "Cp_source": "MD"}
-        for temp, value in finite_points(md_points)
-        if temp > switch_temp
-    )
-    deduped = {}
-    for row in rows:
-        deduped[round(row["T_K"], 10)] = row
-    return sorted(deduped.values(), key=lambda row: row["T_K"])
+    return rows
 
 
 def cp_over_t(cp_value: float, temp: float) -> float:
@@ -472,19 +522,34 @@ def cp_over_t(cp_value: float, temp: float) -> float:
 def add_integrated_thermo(
     rows: list[dict],
     qha_entropy: list[tuple[float, float]],
+    qha_enthalpy: list[tuple[float, float]],
+    blend_start: float,
 ) -> tuple[list[dict], str]:
     if not rows:
         return rows, "no-hybrid-cp"
-    first_temp = rows[0]["T_K"]
-    reference = interpolate(qha_entropy, first_temp)
-    if reference is None or not math.isfinite(reference):
-        reference = 0.0
-        note = "S starts at 0 because QHA entropy was unavailable at first hybrid T"
+    ref_temp = blend_start
+    entropy_reference = interpolate(qha_entropy, ref_temp)
+    if entropy_reference is None and qha_entropy:
+        ref_temp, entropy_reference = min(qha_entropy, key=lambda item: abs(item[0] - blend_start))
+    if entropy_reference is None or not math.isfinite(entropy_reference):
+        entropy_reference = 0.0
+        note = "S starts at 0 because QHA entropy was unavailable near blend_start"
     else:
-        note = "S starts from QHA entropy at first hybrid T"
-    rows[0]["S_integrated"] = reference
-    rows[0]["H_integrated_kJ_mol"] = 0.0
-    for previous, current in zip(rows, rows[1:]):
+        note = "S starts from QHA entropy near blend_start"
+    enthalpy_reference = interpolate(qha_enthalpy, ref_temp)
+    if enthalpy_reference is None and qha_enthalpy:
+        _temp, enthalpy_reference = min(qha_enthalpy, key=lambda item: abs(item[0] - ref_temp))
+    enthalpy_note = "QHA H reference at blend_start"
+    if enthalpy_reference is None or not math.isfinite(enthalpy_reference):
+        enthalpy_reference = 0.0
+        enthalpy_note = "H_rel(blend_start)=0 because QHA H was unavailable"
+    for row in rows:
+        row["S_integrated"] = math.nan
+        row["H_integrated_kJ_mol"] = math.nan
+    ref_idx = min(range(len(rows)), key=lambda idx: abs(rows[idx]["T_K"] - ref_temp))
+    rows[ref_idx]["S_integrated"] = entropy_reference
+    rows[ref_idx]["H_integrated_kJ_mol"] = enthalpy_reference
+    for previous, current in zip(rows[ref_idx:], rows[ref_idx + 1:]):
         delta_h = 0.5 * (previous["Cp"] + current["Cp"]) * (
             current["T_K"] - previous["T_K"]
         )
@@ -494,14 +559,24 @@ def add_integrated_thermo(
         ) * (current["T_K"] - previous["T_K"])
         current["H_integrated_kJ_mol"] = previous["H_integrated_kJ_mol"] + delta_h / 1000.0
         current["S_integrated"] = previous["S_integrated"] + delta_s
+    for current, previous in zip(reversed(rows[:ref_idx]), reversed(rows[1 : ref_idx + 1])):
+        delta_h = 0.5 * (previous["Cp"] + current["Cp"]) * (
+            previous["T_K"] - current["T_K"]
+        )
+        delta_s = 0.5 * (
+            cp_over_t(previous["Cp"], previous["T_K"])
+            + cp_over_t(current["Cp"], current["T_K"])
+        ) * (previous["T_K"] - current["T_K"])
+        current["H_integrated_kJ_mol"] = previous["H_integrated_kJ_mol"] - delta_h / 1000.0
+        current["S_integrated"] = previous["S_integrated"] - delta_s
     for row in rows:
         row["G_integrated_kJ_mol"] = (
             row["H_integrated_kJ_mol"] - row["T_K"] * row["S_integrated"] / 1000.0
         )
-    g0 = rows[0]["G_integrated_kJ_mol"]
+    g0 = rows[ref_idx]["G_integrated_kJ_mol"]
     for row in rows:
         row["G_relative_kJ_mol"] = row["G_integrated_kJ_mol"] - g0
-    return rows, note
+    return rows, f"{note}; {enthalpy_note}; reference_T={rows[ref_idx]['T_K']} K"
 
 
 def relative_to_temperature(points, ref_t: float) -> list[tuple[float, float]]:
@@ -533,7 +608,8 @@ def plot_hybrid_quantity(
     hybrid_rows,
     hybrid_key: str,
     hybrid_label: str,
-    switch_temp,
+    blend_start,
+    blend_end,
     args,
 ) -> None:
     import matplotlib.pyplot as plt
@@ -555,7 +631,10 @@ def plot_hybrid_quantity(
             label=hybrid_label,
         )
         apply_hybrid_y_limits(ax, [row[hybrid_key] for row in hybrid_rows])
-    ax.axvline(switch_temp, color="#555555", linestyle=":", linewidth=1.2)
+    if blend_start == blend_end:
+        ax.axvline(blend_start, color="#555555", linestyle=":", linewidth=1.2)
+    else:
+        ax.axvspan(blend_start, blend_end, color="#111111", alpha=0.08, label="blend interval")
     if args.t_min is not None or args.t_max is not None:
         ax.set_xlim(left=args.t_min, right=args.t_max)
     ax.set_xlabel("Temperature (K)")
@@ -565,6 +644,130 @@ def plot_hybrid_quantity(
     fig.tight_layout()
     fig.savefig(path, dpi=300)
     plt.close(fig)
+
+
+def cp_overlap_diagnostics(qha_cp, md_cp, blend_start: float, blend_end: float) -> dict:
+    temps = sorted(
+        {
+            temp
+            for temp, _value in finite_points(qha_cp) + finite_points(md_cp)
+            if blend_start <= temp <= blend_end
+        }
+        | {blend_start, blend_end}
+    )
+    rows = []
+    deltas = []
+    rels = []
+    signs = []
+    for temp in temps:
+        qha_value = interpolate(qha_cp, temp)
+        md_value = interpolate(md_cp, temp)
+        if qha_value is None or md_value is None:
+            continue
+        delta = md_value - qha_value
+        denom = max(abs(qha_value), 1.0e-12)
+        rel = abs(delta) / denom
+        rows.append((temp, qha_value, md_value, delta, rel))
+        deltas.append(delta)
+        rels.append(rel)
+        signs.append(0 if abs(delta) <= 1.0e-12 else (1 if delta > 0 else -1))
+    crossing = any(a * b < 0 for a, b in zip(signs, signs[1:]))
+    if any(sign == 0 for sign in signs):
+        crossing = True
+    start_qha = interpolate(qha_cp, blend_start)
+    start_md = interpolate(md_cp, blend_start)
+    end_qha = interpolate(qha_cp, blend_end)
+    end_md = interpolate(md_cp, blend_end)
+
+    def relative_mismatch(qha_value, md_value):
+        if qha_value is None or md_value is None:
+            return None
+        return abs(md_value - qha_value) / max(abs(qha_value), 1.0e-12)
+
+    mean_abs = sum(abs(delta) for delta in deltas) / len(deltas) if deltas else math.nan
+    rms = math.sqrt(sum(delta * delta for delta in deltas) / len(deltas)) if deltas else math.nan
+    mean_rel = sum(rels) / len(rels) if rels else math.nan
+    warning = any(value > 0.10 for value in rels)
+    return {
+        "rows": rows,
+        "mean_absolute_cp_mismatch": mean_abs,
+        "rms_cp_mismatch": rms,
+        "mean_relative_cp_mismatch": mean_rel,
+        "relative_mismatch_at_blend_start": relative_mismatch(start_qha, start_md),
+        "relative_mismatch_at_blend_end": relative_mismatch(end_qha, end_md),
+        "cp_curves_cross_in_blend_interval": crossing,
+        "warning_cp_mismatch_exceeds_10_percent": warning,
+    }
+
+
+def plot_overlap_mismatch(path: Path, diagnostics: dict, args) -> None:
+    import matplotlib.pyplot as plt
+
+    rows = diagnostics.get("rows", [])
+    if not rows:
+        return
+    temps = [row[0] for row in rows]
+    rels = [row[4] * 100.0 for row in rows]
+    fig, ax = plt.subplots(figsize=(7.2, 4.2))
+    ax.plot(temps, rels, "o-", color="#111111", linewidth=1.8, markersize=3.5)
+    ax.axhline(10.0, color="#b00020", linestyle="--", linewidth=1.2, label="10% warning")
+    if args.t_min is not None or args.t_max is not None:
+        ax.set_xlim(left=args.t_min, right=args.t_max)
+    ax.set_xlabel("Temperature (K)")
+    ax.set_ylabel("|Cp_MD - Cp_QHA| / |Cp_QHA| (%)")
+    ax.set_title("QHA/MD Cp Mismatch In Blend Region")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+
+
+def blend_series(qha_points, md_points, blend_start, blend_end) -> tuple[list[dict], str]:
+    if not md_points:
+        return [], "missing-md"
+    if not qha_points:
+        return [
+            {"T_K": temp, "value": value, "source": "MD", "blend_weight": 1.0}
+            for temp, value in finite_points(md_points)
+        ], "md-only"
+    temps = sorted(
+        {temp for temp, _value in finite_points(qha_points) + finite_points(md_points)}
+        | {blend_start, blend_end}
+    )
+    rows = []
+    for temp in temps:
+        qha_value = interpolate(qha_points, temp)
+        md_value = interpolate(md_points, temp)
+        if temp < blend_start:
+            if qha_value is None:
+                continue
+            rows.append({"T_K": temp, "value": qha_value, "source": "QHA", "blend_weight": 0.0})
+        elif temp > blend_end:
+            if md_value is None:
+                continue
+            rows.append({"T_K": temp, "value": md_value, "source": "MD", "blend_weight": 1.0})
+        elif qha_value is not None and md_value is not None:
+            weight = smoothstep_weight(temp, blend_start, blend_end)
+            rows.append(
+                {
+                    "T_K": temp,
+                    "value": (1.0 - weight) * qha_value + weight * md_value,
+                    "source": "blend",
+                    "blend_weight": weight,
+                }
+            )
+    return rows, "hybrid"
+
+
+def selected_md_records(md_dir: Path) -> list[dict]:
+    for name in ("used_stage_records.json", "discovered_stage_records.json"):
+        path = md_dir / name
+        if path.exists():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                return []
+    return []
 
 
 def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
@@ -596,6 +799,15 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
             "note": "Hybrid Cp/S skipped because QHA and MD Cp were unavailable",
             "md_cp_column": md_cp_column,
         }
+    if args.hybrid_blend_start is None and args.hybrid_blend_end is None:
+        blend_start, blend_end = default_blend_interval(switch_temp, qha_cp, md_cp)
+    elif args.hybrid_blend_start is not None and args.hybrid_blend_end is not None:
+        blend_start = args.hybrid_blend_start
+        blend_end = args.hybrid_blend_end
+    else:
+        raise ValueError("--hybrid-blend-start and --hybrid-blend-end must be used together")
+    if blend_end < blend_start:
+        raise ValueError("--hybrid-blend-end must be >= --hybrid-blend-start")
 
     qha_entropy = filter_range(
         qha_series(args.qha_dir / "entropy-temperature.dat", entropy_qha_scale(args)),
@@ -608,8 +820,14 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         md_cp_scale(args),
     )
     md_entropy = filter_range(md_entropy, args.t_min, args.t_max)
-    hybrid_rows = build_hybrid_cp_rows(qha_cp, md_cp, switch_temp)
-    hybrid_rows, entropy_note = add_integrated_thermo(hybrid_rows, qha_entropy)
+    qha_enthalpy = filter_range(qha_derived_enthalpy(args), args.t_min, args.t_max)
+    hybrid_rows = build_hybrid_cp_rows(qha_cp, md_cp, blend_start, blend_end)
+    hybrid_rows, entropy_note = add_integrated_thermo(
+        hybrid_rows,
+        qha_entropy,
+        qha_enthalpy,
+        blend_start,
+    )
     if not hybrid_rows:
         return [], {
             "note": "Hybrid Cp/S skipped because no points survived the switch",
@@ -622,6 +840,7 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         fields = [
             "T_K",
             "Cp_source",
+            "blend_weight",
             "Cp",
             "S_integrated",
             "H_integrated_kJ_mol",
@@ -635,6 +854,7 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
                 {
                     "T_K": row["T_K"],
                     "Cp_source": row["Cp_source"],
+                    "blend_weight": row["blend_weight"],
                     "Cp": row["Cp"],
                     "S_integrated": row["S_integrated"],
                     "H_integrated_kJ_mol": row["H_integrated_kJ_mol"],
@@ -643,9 +863,13 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
                 }
             )
 
-    first_hybrid_t = hybrid_rows[0]["T_K"]
+    diagnostics = cp_overlap_diagnostics(qha_cp, md_cp, blend_start, blend_end)
+    mismatch_png = args.outdir / "overlap_mismatch_Cp.png"
+    plot_overlap_mismatch(mismatch_png, diagnostics, args)
+
+    first_hybrid_t = blend_start
     qha_enthalpy = relative_to_temperature(
-        filter_range(qha_derived_enthalpy(args), args.t_min, args.t_max),
+        qha_enthalpy,
         first_hybrid_t,
     )
     md_enthalpy, md_enthalpy_column = md_series(
@@ -675,12 +899,54 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         first_hybrid_t,
     )
 
+    qha_volume = filter_range(
+        qha_series(args.qha_dir / "volume-temperature.dat", extensive_qha_scale(args)),
+        args.t_min,
+        args.t_max,
+    )
+    md_volume, md_volume_column = md_series(
+        md_path,
+        MD_COLUMN_ALIASES["V"],
+        extensive_md_scale(args),
+    )
+    md_volume = filter_range(md_volume, args.t_min, args.t_max)
+    qha_lattice, qha_lattice_file = qha_first_available_series(
+        args.qha_dir,
+        ("a-temperature.dat", "lattice-temperature.dat", "lattice_a-temperature.dat"),
+    )
+    qha_lattice = filter_range(qha_lattice, args.t_min, args.t_max)
+    md_lattice, md_lattice_column = md_series(md_path, MD_COLUMN_ALIASES["a"], 1.0)
+    md_lattice = filter_range(md_lattice, args.t_min, args.t_max)
+    volume_rows, volume_mode = blend_series(qha_volume, md_volume, blend_start, blend_end)
+    lattice_rows, lattice_mode = blend_series(qha_lattice, md_lattice, blend_start, blend_end)
+    if volume_rows or lattice_rows:
+        va_csv = args.outdir / "hybrid_volume_lattice.csv"
+        with va_csv.open("w", newline="", encoding="utf-8") as handle:
+            fields = ["quantity", "T_K", "value", "source", "blend_weight"]
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            for quantity, rows in (("V_A3", volume_rows), ("a_A", lattice_rows)):
+                for row in rows:
+                    writer.writerow(
+                        {
+                            "quantity": quantity,
+                            "T_K": row["T_K"],
+                            "value": row["value"],
+                            "source": row["source"],
+                            "blend_weight": row["blend_weight"],
+                        }
+                    )
+    else:
+        va_csv = None
+
     cp_label = "J/mol-target-cell/K" if args.energy_basis == "target-cell" else "J/mol-formula/K"
     energy_label = "kJ/mol-target-cell" if args.energy_basis == "target-cell" else "kJ/mol-formula"
-    cp_png = args.outdir / "hybrid_cp_qha_md.png"
-    entropy_png = args.outdir / "hybrid_entropy_integrated_qha_md.png"
-    enthalpy_png = args.outdir / "hybrid_enthalpy_integrated_qha_md.png"
-    gibbs_png = args.outdir / "hybrid_gibbs_integrated_qha_md.png"
+    cp_png = args.outdir / "hybrid_Cp_QHA_MD.png"
+    entropy_png = args.outdir / "hybrid_S_QHA_MD.png"
+    enthalpy_png = args.outdir / "hybrid_H_QHA_MD.png"
+    gibbs_png = args.outdir / "hybrid_G_QHA_MD.png"
+    volume_png = args.outdir / "hybrid_V_QHA_MD.png"
+    lattice_png = args.outdir / "hybrid_a_QHA_MD.png"
     plot_hybrid_quantity(
         cp_png,
         "Hybrid QHA+MD Cp",
@@ -690,7 +956,8 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         hybrid_rows,
         "Cp",
         "Hybrid Cp",
-        switch_temp,
+        blend_start,
+        blend_end,
         args,
     )
     plot_hybrid_quantity(
@@ -702,7 +969,8 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         hybrid_rows,
         "S_integrated",
         "Integrated hybrid S",
-        switch_temp,
+        blend_start,
+        blend_end,
         args,
     )
     plot_hybrid_quantity(
@@ -714,7 +982,8 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         hybrid_rows,
         "H_integrated_kJ_mol",
         "Integrated hybrid H",
-        switch_temp,
+        blend_start,
+        blend_end,
         args,
     )
     plot_hybrid_quantity(
@@ -726,17 +995,75 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         hybrid_rows,
         "G_relative_kJ_mol",
         "Hybrid G = H - TS",
-        switch_temp,
+        blend_start,
+        blend_end,
         args,
     )
+    if volume_rows:
+        plot_hybrid_quantity(
+            volume_png,
+            "Hybrid QHA+MD Volume",
+            f"Volume (A3 per Z={args.target_z:g} cell)",
+            qha_volume,
+            md_volume,
+            volume_rows,
+            "value",
+            "Hybrid V" if volume_mode == "hybrid" else "MD V",
+            blend_start,
+            blend_end,
+            args,
+        )
+    if lattice_rows:
+        plot_hybrid_quantity(
+            lattice_png,
+            "Hybrid QHA+MD Lattice",
+            "Lattice a (A)",
+            qha_lattice,
+            md_lattice,
+            lattice_rows,
+            "value",
+            "Hybrid a" if lattice_mode == "hybrid" else "MD a",
+            blend_start,
+            blend_end,
+            args,
+        )
     metadata = {
         "switch_temperature_K": switch_temp,
         "switch_method": switch_method,
         "minimum_switch_temperature_K": args.hybrid_min_switch_temperature,
+        "blend_start_K": blend_start,
+        "blend_end_K": blend_end,
+        "blend_function": "smoothstep w=3x^2-2x^3",
         "entropy_integration": "S(T) = S(T0) + integral_T0^T Cp(T')/T' dT'",
+        "enthalpy_integration": "H(T) = H(T0) + integral_T0^T Cp(T') dT",
+        "gibbs_integration": "G(T) = H(T) - T*S(T)",
         "entropy_reference_note": entropy_note,
+        "cp_overlap_diagnostics": {
+            key: value
+            for key, value in diagnostics.items()
+            if key != "rows"
+        },
+        "cp_overlap_diagnostics_rows": [
+            {
+                "T_K": row[0],
+                "Cp_QHA": row[1],
+                "Cp_MD": row[2],
+                "Cp_MD_minus_QHA": row[3],
+                "relative_mismatch": row[4],
+            }
+            for row in diagnostics.get("rows", [])
+        ],
         "qha_cp_points": len(qha_cp),
         "md_cp_points": len(md_cp),
+        "qha_file_paths": {
+            "Cp": str((args.qha_dir / "Cp-temperature.dat").resolve()),
+            "S": str((args.qha_dir / "entropy-temperature.dat").resolve()),
+            "G": str((args.qha_dir / "gibbs-temperature.dat").resolve()),
+            "V": str((args.qha_dir / "volume-temperature.dat").resolve()),
+            "a": str((args.qha_dir / qha_lattice_file).resolve()) if qha_lattice_file else None,
+        },
+        "md_dir": str(args.md_dir),
+        "selected_md_configs_logs": selected_md_records(args.md_dir),
         "actual_md_temperature_min_K": actual_md_bounds[0] if actual_md_bounds else None,
         "actual_md_temperature_max_K": actual_md_bounds[1] if actual_md_bounds else None,
         "qha_entropy_points": len(qha_entropy),
@@ -745,11 +1072,24 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         "md_entropy_column": md_entropy_column,
         "md_enthalpy_column": md_enthalpy_column,
         "md_gibbs_column": md_gibbs_column,
-        "enthalpy_reference": (
-            "Hybrid H is integrated from Cp and starts at 0 at the first hybrid T."
+        "md_volume_column": md_volume_column,
+        "md_lattice_column": md_lattice_column,
+        "volume_source_mode": volume_mode,
+        "lattice_source_mode": lattice_mode,
+        "volume_note": (
+            "V(T) used the same QHA+MD smooth blend."
+            if volume_mode == "hybrid"
+            else "V(T) is MD-only because QHA volume was unavailable."
         ),
+        "lattice_note": (
+            "a(T) used the same QHA+MD smooth blend."
+            if lattice_mode == "hybrid"
+            else "a(T) is MD-only because QHA lattice-a was unavailable."
+        ),
+        "enthalpy_reference": entropy_note,
         "gibbs_reference": (
-            "Hybrid/QHA/MD G curves are shifted to 0 at the first hybrid T for plotting."
+            "Hybrid G is recomputed from integrated H and S; QHA/MD references are "
+            "shifted at blend_start for plotting."
         ),
         "basis": args.energy_basis,
         "cp_entropy_units": (
@@ -766,7 +1106,11 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
     print(entropy_png)
     print(enthalpy_png)
     print(gibbs_png)
-    return [
+    if volume_rows:
+        print(volume_png)
+    if lattice_rows:
+        print(lattice_png)
+    index = [
         {
             "quantity": "hybrid_cp",
             "plot_png": cp_png.name,
@@ -803,7 +1147,32 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
             "md_column": md_gibbs_column,
             "comparison_type": "integrated-hybrid",
         },
-    ], metadata
+    ]
+    if volume_rows:
+        index.append(
+            {
+                "quantity": "hybrid_volume",
+                "plot_png": volume_png.name,
+                "data_csv": va_csv.name if va_csv else "",
+                "qha_source": "volume-temperature.dat",
+                "md_source": md_path.name,
+                "md_column": md_volume_column,
+                "comparison_type": volume_mode,
+            }
+        )
+    if lattice_rows:
+        index.append(
+            {
+                "quantity": "hybrid_lattice",
+                "plot_png": lattice_png.name,
+                "data_csv": va_csv.name if va_csv else "",
+                "qha_source": qha_lattice_file,
+                "md_source": md_path.name,
+                "md_column": md_lattice_column,
+                "comparison_type": lattice_mode,
+            }
+        )
+    return index, metadata
 
 
 def write_overlay_csv(path: Path, qha_points, md_points) -> None:
@@ -934,6 +1303,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=50.0,
         help="Reject automatic QHA-to-MD Cp switches below this temperature in K.",
     )
+    parser.add_argument(
+        "--hybrid-blend-start",
+        type=float,
+        default=None,
+        help="Start temperature for smooth QHA-to-MD Cp blending in K.",
+    )
+    parser.add_argument(
+        "--hybrid-blend-end",
+        type=float,
+        default=None,
+        help="End temperature for smooth QHA-to-MD Cp blending in K.",
+    )
     return parser
 
 
@@ -1021,13 +1402,18 @@ def main(argv: list[str] | None = None) -> None:
         print(png)
 
     if not args.no_hybrid_cp_s:
-        hybrid_index_rows, hybrid_metadata = write_hybrid_outputs(args)
+        try:
+            hybrid_index_rows, hybrid_metadata = write_hybrid_outputs(args)
+        except ValueError as exc:
+            parser.error(str(exc))
         index_rows.extend(hybrid_index_rows)
         hybrid_note = hybrid_metadata.get("note", "")
         if hybrid_metadata and "switch_temperature_K" in hybrid_metadata:
             hybrid_note = (
                 f"switch={hybrid_metadata['switch_temperature_K']} K "
                 f"({hybrid_metadata['switch_method']}); "
+                f"blend={hybrid_metadata.get('blend_start_K')}--"
+                f"{hybrid_metadata.get('blend_end_K')} K; "
                 f"{hybrid_metadata['entropy_reference_note']}"
             )
         availability_rows.append(

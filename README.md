@@ -557,15 +557,23 @@ QHA Cp has already been normalized per formula unit.
 To use QHA as the full low-temperature branch instead of just one anchor point,
 add `--qha-low-t-splice`. The command then picks a QHA-to-MD Cp switch where
 the two Cp curves are closest, rejects automatic switches below 50 K by
-default, uses QHA Cp/S/H before the switch, and integrates the MD Cp branch
-after the switch:
+default, blends QHA and MD Cp with a smoothstep interval, and recomputes
+hybrid S/H/G by integrating the hybrid Cp curve:
 
 ```bash
 lammps-thermo-series --config config_production.json --outdir analysis/thermo_qha_splice --natoms 96 --plot-T-min 0 --plot-T-max 1500 --cp-source dH --qha-anchor-dir ./qha_run --qha-anchor-formula-units 32 --qha-low-t-splice
 ```
 
 Use `--qha-splice-min-switch-temperature` to change the low-temperature guard
-or `--qha-splice-switch-temperature` to force a specific switch.
+or `--qha-splice-switch-temperature` to force a specific switch. Use
+`--qha-splice-blend-start` and `--qha-splice-blend-end` to choose the blend
+interval explicitly. The QHA-low-T workflow writes hybrid diagnostic plots
+named `hybrid_Cp_QHA_MD.png`, `hybrid_S_QHA_MD.png`,
+`hybrid_H_QHA_MD.png`, `hybrid_G_QHA_MD.png`, plus hybrid `V`/`a` plots when
+QHA volume or lattice files are present. It also writes
+`overlap_mismatch_Cp.png` and `qha_low_t_splice_metadata.json`; the metadata
+records the blend interval, Cp mismatch diagnostics, source files, and how the
+MD statistical Cp UQ band was tapered through the blend.
 
 This command packages the v4 anchor-capable analyzer, which also supports the earlier v3-style fluctuation and dH workflows.
 
@@ -945,26 +953,33 @@ example, QHA enthalpy requires both `gibbs-temperature.dat` and
 `lammps-thermo-series` column names such as `S_rel_J_per_mol_UO2_K`,
 `S_rel_J_mol_K`, `H_rel_J_per_mol_UO2`, or `H_rel_J_mol`.
 
-When both QHA and MD Cp are available, the command also writes integrated
-hybrid Cp/S outputs: `hybrid_cp_qha_md.png`,
-`hybrid_entropy_integrated_qha_md.png`,
-`hybrid_enthalpy_integrated_qha_md.png`,
-`hybrid_gibbs_integrated_qha_md.png`, `hybrid_cp_entropy.csv`, and
-`hybrid_cp_entropy_metadata.json`. The automatic switch temperature is chosen
-where QHA and MD Cp are closest inside their overlapping temperature range; if
-there is no overlap, it uses the midpoint between the QHA and MD temperature
-windows. When `all_T_summary.csv` is present in the MD analysis folder, the
-switch search uses that actual MD temperature range so extrapolated low-T grid
-points do not cause an immediate switch to MD. Automatic switches below 50 K
-are rejected by default, which avoids accepting an extreme low-T Cp match as
-the QHA-to-MD splice point. The hybrid entropy is integrated from the hybrid Cp
-curve using `dS = Cp/T dT`, starting from QHA entropy at the first hybrid
-temperature when available. Hybrid enthalpy is integrated from Cp, and hybrid
-Gibbs energy is computed as `G = H - TS`; those H/G hybrid plots include QHA
-and MD reference curves in faint gray so the hybrid curve controls the y-axis
-scale. Override the automatic switch with `--hybrid-switch-temperature <T>`,
-change the low-T guard with `--hybrid-min-switch-temperature <T>`, or skip
-these outputs with `--no-hybrid-cp-s`.
+When both QHA and MD Cp are available, the command also writes a hybrid
+QHA+MD thermodynamics set: `hybrid_Cp_QHA_MD.png`,
+`hybrid_S_QHA_MD.png`, `hybrid_H_QHA_MD.png`,
+`hybrid_G_QHA_MD.png`, `hybrid_cp_entropy.csv`, and
+`hybrid_cp_entropy_metadata.json`. If QHA volume or lattice-a files are
+available, it also writes `hybrid_V_QHA_MD.png`, `hybrid_a_QHA_MD.png`, and
+`hybrid_volume_lattice.csv`; otherwise V/a remain MD-only and the metadata says
+so. The automatic switch temperature is chosen where QHA and MD Cp are closest
+inside their overlapping temperature range; if there is no overlap, it uses the
+midpoint between the QHA and MD temperature windows. When `all_T_summary.csv`
+is present in the MD analysis folder, the switch search uses that actual MD
+temperature range so extrapolated low-T grid points do not cause an immediate
+switch to MD.
+
+The hybrid method uses QHA Cp below the blend, MD Cp above it, and a smoothstep
+blend between `blend_start` and `blend_end`. It does not blend S/H/G directly:
+entropy and enthalpy are integrated from the hybrid Cp curve, and Gibbs energy
+is recomputed as `G = H - TS`. The entropy reference comes from QHA entropy at
+the blend start or the nearest QHA grid point; if QHA H can be derived from
+`gibbs-temperature.dat` and entropy, it is used as the H reference, otherwise
+`H_rel(blend_start)=0`. The metadata and `overlap_mismatch_Cp.png` record mean
+absolute Cp mismatch, RMS mismatch, relative endpoint mismatch, whether the
+curves cross in the blend interval, and a warning when mismatch exceeds 10%.
+Override the automatic switch with `--hybrid-switch-temperature <T>`, choose
+the blend with `--hybrid-blend-start <T> --hybrid-blend-end <T>`, change the
+low-T guard with `--hybrid-min-switch-temperature <T>`, or skip these outputs
+with `--no-hybrid-cp-s`.
 
 ## Recommended Migration Pattern
 

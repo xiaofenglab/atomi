@@ -1,4 +1,5 @@
 import csv
+import json
 
 import numpy as np
 
@@ -117,6 +118,14 @@ def test_build_combined_thermo_can_use_qha_low_t_splice(tmp_path) -> None:
         "0 0\n100 20\n200 40\n",
         encoding="utf-8",
     )
+    (qha / "volume-temperature.dat").write_text(
+        "0 99\n100 100\n200 101\n",
+        encoding="utf-8",
+    )
+    (qha / "a-temperature.dat").write_text(
+        "0 3.9\n100 4.0\n200 4.1\n",
+        encoding="utf-8",
+    )
     summaries = [
         {
             "target_T_K": 300.0,
@@ -155,4 +164,14 @@ def test_build_combined_thermo_can_use_qha_low_t_splice(tmp_path) -> None:
     assert float(by_t[100.0]["Cp_used_for_integration_J_per_mol_UO2_K"]) == 20.0
     assert float(by_t[200.0]["Cp_used_for_integration_J_per_mol_UO2_K"]) == 40.0
     assert float(by_t[300.0]["Cp_used_for_integration_J_per_mol_UO2_K"]) == 100.0
+    assert float(by_t[100.0]["qha_md_blend_weight"]) == 0.0
     assert (tmp_path / "out" / "qha_low_t_splice_metadata.json").exists()
+    assert (tmp_path / "out" / "hybrid_Cp_QHA_MD.png").exists()
+    assert (tmp_path / "out" / "hybrid_S_QHA_MD.png").exists()
+    assert (tmp_path / "out" / "hybrid_H_QHA_MD.png").exists()
+    assert (tmp_path / "out" / "hybrid_G_QHA_MD.png").exists()
+    assert (tmp_path / "out" / "hybrid_V_QHA_MD.png").exists()
+    assert (tmp_path / "out" / "hybrid_a_QHA_MD.png").exists()
+    metadata = json.loads((tmp_path / "out" / "qha_low_t_splice_metadata.json").read_text())
+    assert metadata["blend_function"] == "smoothstep w=3x^2-2x^3"
+    assert metadata["qha_volume_mode"] == "hybrid"

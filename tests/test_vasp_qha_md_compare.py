@@ -186,10 +186,12 @@ def test_qha_md_compare_writes_hybrid_cp_entropy(tmp_path: Path) -> None:
 
     write_qha_dat(qha / "Cp-temperature.dat", [(300.0, 10.0), (500.0, 20.0)])
     write_qha_dat(qha / "entropy-temperature.dat", [(300.0, 1.0), (500.0, 8.0)])
+    write_qha_dat(qha / "volume-temperature.dat", [(300.0, 100.0), (500.0, 110.0)])
+    write_qha_dat(qha / "a-temperature.dat", [(300.0, 4.0), (500.0, 4.1)])
     (md / "thermo_functions_grid.csv").write_text(
-        "T_K,Cp_used_for_integration_J_per_mol_UO2_K,S_rel_J_mol_K\n"
-        "500,22,9\n"
-        "700,40,18\n",
+        "T_K,Cp_used_for_integration_J_per_mol_UO2_K,S_rel_J_mol_K,V_fit_A3,a_fit_A\n"
+        "500,22,9,111,4.11\n"
+        "700,40,18,130,4.3\n",
         encoding="utf-8",
     )
 
@@ -215,19 +217,25 @@ def test_qha_md_compare_writes_hybrid_cp_entropy(tmp_path: Path) -> None:
     )
 
     rows = list(csv.DictReader((out / "hybrid_cp_entropy.csv").open()))
-    assert [row["Cp_source"] for row in rows] == ["QHA", "switch-average", "MD"]
+    assert [row["Cp_source"] for row in rows] == ["QHA", "blend", "MD"]
     assert float(rows[1]["T_K"]) == pytest.approx(500.0)
-    assert float(rows[1]["Cp"]) == pytest.approx(21.0)
+    assert float(rows[1]["Cp"]) == pytest.approx(22.0)
+    assert "blend_weight" in rows[1]
     assert float(rows[2]["S_integrated"]) > float(rows[1]["S_integrated"])
     assert float(rows[2]["H_integrated_kJ_mol"]) > float(rows[1]["H_integrated_kJ_mol"])
     assert "G_relative_kJ_mol" in rows[0]
     metadata = json.loads((out / "hybrid_cp_entropy_metadata.json").read_text())
     assert metadata["switch_method"] == "overlap-closest-cp"
     assert metadata["switch_temperature_K"] == pytest.approx(500.0)
-    assert (out / "hybrid_cp_qha_md.png").exists()
-    assert (out / "hybrid_entropy_integrated_qha_md.png").exists()
-    assert (out / "hybrid_enthalpy_integrated_qha_md.png").exists()
-    assert (out / "hybrid_gibbs_integrated_qha_md.png").exists()
+    assert metadata["blend_function"] == "smoothstep w=3x^2-2x^3"
+    assert "cp_overlap_diagnostics" in metadata
+    assert (out / "hybrid_Cp_QHA_MD.png").exists()
+    assert (out / "hybrid_S_QHA_MD.png").exists()
+    assert (out / "hybrid_H_QHA_MD.png").exists()
+    assert (out / "hybrid_G_QHA_MD.png").exists()
+    assert (out / "hybrid_V_QHA_MD.png").exists()
+    assert (out / "hybrid_a_QHA_MD.png").exists()
+    assert (out / "overlap_mismatch_Cp.png").exists()
 
 
 def test_hybrid_cp_switch_ignores_extrapolated_low_t_md_grid(tmp_path: Path) -> None:

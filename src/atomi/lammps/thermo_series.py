@@ -372,6 +372,51 @@ def plot_function_with_band(outpath: Path, T_data: np.ndarray, y_data: np.ndarra
     plt.close(fig)
 
 
+def plot_hybrid_grid(outpath: Path,
+                     T_grid: np.ndarray,
+                     hybrid_y: np.ndarray,
+                     ylabel: str,
+                     title: str,
+                     qha_T: Optional[np.ndarray] = None,
+                     qha_y: Optional[np.ndarray] = None,
+                     md_T: Optional[np.ndarray] = None,
+                     md_y: Optional[np.ndarray] = None,
+                     band: Optional[tuple[np.ndarray, np.ndarray]] = None,
+                     blend_start: Optional[float] = None,
+                     blend_end: Optional[float] = None) -> None:
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    if qha_T is not None and qha_y is not None and len(qha_T) and len(qha_y):
+        ax.plot(qha_T, qha_y, "-.", color="0.45", alpha=0.45, linewidth=1.4, label="QHA reference")
+    if md_T is not None and md_y is not None and len(md_T) and len(md_y):
+        ax.plot(md_T, md_y, "--", color="0.35", alpha=0.45, linewidth=1.3, label="MD reference")
+    if band is not None:
+        lo, hi = band
+        ax.fill_between(T_grid, lo, hi, color="#111111", alpha=0.12, label="hybrid MD UQ")
+    ax.plot(T_grid, hybrid_y, color="#111111", linewidth=2.3, label="hybrid")
+    if blend_start is not None and blend_end is not None:
+        if abs(blend_end - blend_start) <= 1.0e-12:
+            ax.axvline(blend_start, color="0.25", linestyle=":", linewidth=1.1)
+        else:
+            ax.axvspan(blend_start, blend_end, color="#111111", alpha=0.08, label="blend interval")
+    finite = hybrid_y[np.isfinite(hybrid_y)]
+    if len(finite):
+        ymin = float(np.min(finite))
+        ymax = float(np.max(finite))
+        if abs(ymax - ymin) <= 1.0e-12:
+            pad = max(1.0, 0.08 * abs(ymax - ymin))
+        else:
+            pad = 0.08 * (ymax - ymin)
+        ax.set_ylim(ymin - pad, ymax + pad)
+    ax.set_xlabel("T (K)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=180)
+    plt.close(fig)
+
+
 # -----------------------------
 # parsing LAMMPS thermo
 # -----------------------------
@@ -1265,6 +1310,22 @@ def read_qha_temperature_dat(path: Path) -> tuple[np.ndarray, np.ndarray]:
     )
 
 
+def read_optional_qha_temperature_dat(
+    qha_dir: Path,
+    names: list[str],
+) -> tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[str]]:
+    for name in names:
+        path = qha_dir / name
+        if not path.exists():
+            continue
+        try:
+            T, y = read_qha_temperature_dat(path)
+        except (FileNotFoundError, ValueError):
+            continue
+        return T, y, str(path.resolve())
+    return None, None, None
+
+
 def qha_cp_scale_to_j_mol_formula(unit: str, qha_formula_units: float) -> float:
     if qha_formula_units <= 0:
         raise ValueError("--qha-anchor-formula-units must be positive")
@@ -1293,18 +1354,148 @@ def qha_cp_thermo_curve(
     mask = T_qha > 1.0e-12
     Cp_over_T[mask] = Cp_qha[mask] / T_qha[mask]
     S_qha = trapz_cumulative(T_qha, Cp_over_T)
+    T_volume, V_qha, qha_volume_file = read_optional_qha_temperature_dat(
+        qha_dir,
+        ["volume-temperature.dat"],
+    )
+    T_lattice, a_qha, qha_lattice_file = read_optional_qha_temperature_dat(
+        qha_dir,
+        ["a-temperature.dat", "lattice-temperature.dat", "lattice_a-temperature.dat"],
+    )
     return {
         "T": T_qha,
         "Cp": Cp_qha,
         "H": H_qha,
         "S": S_qha,
+        "V_T": T_volume,
+        "V": V_qha,
+        "a_T": T_lattice,
+        "a": a_qha,
         "qha_dir": str(qha_dir),
         "qha_cp_file": str((qha_dir / "Cp-temperature.dat").resolve()),
+        "qha_volume_file": qha_volume_file,
+        "qha_lattice_file": qha_lattice_file,
         "qha_cp_unit": qha_cp_unit,
         "qha_formula_units": qha_formula_units,
         "temperature_min_K": float(T_qha[0]),
         "temperature_max_K": float(T_qha[-1]),
     }
+
+
+def smoothstep_weights(T: np.ndarray, blend_start: float, blend_end: float) -> np.ndarray:
+    T = np.asarray(T, dtype=float)
+    if blend_end <= blend_start:
+        return np.where(T >= blend_end, 1.0, 0.0)
+    x = np.clip((T - blend_start) / (blend_end - blend_start), 0.0, 1.0)
+    return 3.0 * x * x - 2.0 * x * x * x
+
+
+def default_qha_md_blend_interval(
+    switch_T: float,
+    qha_T: np.ndarray,
+    md_T: np.ndarray,
+) -> tuple[float, float]:
+    overlap_min = max(float(np.min(qha_T)), float(np.min(md_T)))
+    overlap_max = min(float(np.max(qha_T)), float(np.max(md_T)))
+    if overlap_min <= overlap_max:
+        half_width = min(50.0, max((overlap_max - overlap_min) / 4.0, 1.0))
+        return max(overlap_min, switch_T - half_width), min(overlap_max, switch_T + half_width)
+    return float(switch_T), float(switch_T)
+
+
+def blend_qha_md_on_grid(
+    T_grid: np.ndarray,
+    qha_T: np.ndarray,
+    qha_y: np.ndarray,
+    md_y_grid: np.ndarray,
+    blend_start: float,
+    blend_end: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    weights = smoothstep_weights(T_grid, blend_start, blend_end)
+    qha_interp = np.interp(T_grid, qha_T, qha_y)
+    out = md_y_grid.copy()
+    out[T_grid < blend_start] = qha_interp[T_grid < blend_start]
+    blend_mask = (T_grid >= blend_start) & (T_grid <= blend_end)
+    out[blend_mask] = (
+        (1.0 - weights[blend_mask]) * qha_interp[blend_mask]
+        + weights[blend_mask] * md_y_grid[blend_mask]
+    )
+    return out, weights
+
+
+def cp_overlap_diagnostics_np(
+    qha_T: np.ndarray,
+    qha_Cp: np.ndarray,
+    md_T: np.ndarray,
+    md_Cp: np.ndarray,
+    blend_start: float,
+    blend_end: float,
+) -> dict:
+    temps = sorted(
+        {
+            float(t)
+            for t in np.concatenate([qha_T, md_T, np.array([blend_start, blend_end])])
+            if blend_start <= float(t) <= blend_end
+        }
+    )
+    rows = []
+    deltas = []
+    rels = []
+    signs = []
+    for temp in temps:
+        if temp < qha_T[0] or temp > qha_T[-1] or temp < md_T[0] or temp > md_T[-1]:
+            continue
+        qha_value = float(np.interp(temp, qha_T, qha_Cp))
+        md_value = float(np.interp(temp, md_T, md_Cp))
+        delta = md_value - qha_value
+        rel = abs(delta) / max(abs(qha_value), 1.0e-12)
+        rows.append({
+            "T_K": temp,
+            "Cp_QHA": qha_value,
+            "Cp_MD": md_value,
+            "Cp_MD_minus_QHA": delta,
+            "relative_mismatch": rel,
+        })
+        deltas.append(delta)
+        rels.append(rel)
+        signs.append(0 if abs(delta) <= 1.0e-12 else (1 if delta > 0 else -1))
+    crossing = any(a * b < 0 for a, b in zip(signs, signs[1:])) or any(sign == 0 for sign in signs)
+    mean_abs = float(np.mean(np.abs(deltas))) if deltas else float("nan")
+    rms = float(np.sqrt(np.mean(np.square(deltas)))) if deltas else float("nan")
+    mean_rel = float(np.mean(rels)) if rels else float("nan")
+    return {
+        "rows": rows,
+        "mean_absolute_cp_mismatch": mean_abs,
+        "rms_cp_mismatch": rms,
+        "mean_relative_cp_mismatch": mean_rel,
+        "relative_mismatch_at_blend_start": rows[0]["relative_mismatch"] if rows else None,
+        "relative_mismatch_at_blend_end": rows[-1]["relative_mismatch"] if rows else None,
+        "cp_curves_cross_in_blend_interval": bool(crossing),
+        "warning_cp_mismatch_exceeds_10_percent": bool(any(rel > 0.10 for rel in rels)),
+    }
+
+
+def plot_overlap_mismatch_np(outpath: Path, diagnostics: dict) -> None:
+    rows = diagnostics.get("rows", [])
+    if not rows:
+        return
+    fig, ax = plt.subplots(figsize=(7, 4.2))
+    ax.plot(
+        [row["T_K"] for row in rows],
+        [row["relative_mismatch"] * 100.0 for row in rows],
+        "o-",
+        color="#111111",
+        linewidth=1.8,
+        markersize=3.5,
+    )
+    ax.axhline(10.0, color="#b00020", linestyle="--", linewidth=1.2, label="10% warning")
+    ax.set_xlabel("T (K)")
+    ax.set_ylabel("|Cp_MD - Cp_QHA| / |Cp_QHA| (%)")
+    ax.set_title("QHA/MD Cp Mismatch In Blend Region")
+    ax.legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=180)
+    plt.close(fig)
 
 
 def integrate_qha_cp_anchor(
@@ -1479,7 +1670,9 @@ def build_combined_thermo(summaries: list[dict],
                           anchor_metadata: Optional[dict] = None,
                           qha_low_t_curve: Optional[dict] = None,
                           qha_splice_switch_temperature: Optional[float] = None,
-                          qha_splice_min_switch_temperature: float = 50.0) -> list[dict]:
+                          qha_splice_min_switch_temperature: float = 50.0,
+                          qha_splice_blend_start: Optional[float] = None,
+                          qha_splice_blend_end: Optional[float] = None) -> list[dict]:
     outdir.mkdir(parents=True, exist_ok=True)
 
     T_data_all = np.array([s["target_T_K"] for s in summaries], dtype=float)
@@ -1613,6 +1806,10 @@ def build_combined_thermo(summaries: list[dict],
     elif anchor_zero and abs(T_grid[0]) < 1e-12:
         Cp_grid[0] = 0.0
 
+    Cp_md_grid = Cp_grid.copy()
+    V_md_grid = V_grid.copy()
+    a_md_grid = a_grid.copy()
+    qha_blend_weights = np.ones_like(T_grid, dtype=float)
     qha_splice_metadata = {}
     if qha_low_t_curve:
         switch_T, switch_method = choose_qha_md_cp_switch(
@@ -1624,24 +1821,98 @@ def build_combined_thermo(summaries: list[dict],
             minimum=qha_splice_min_switch_temperature,
         )
         if switch_T is not None:
-            low_mask = T_grid <= switch_T
-            Cp_grid[low_mask] = np.interp(
-                T_grid[low_mask],
+            if (qha_splice_blend_start is None) != (qha_splice_blend_end is None):
+                raise ValueError(
+                    "--qha-splice-blend-start and --qha-splice-blend-end must be used together"
+                )
+            if qha_splice_blend_start is None:
+                blend_start, blend_end = default_qha_md_blend_interval(
+                    switch_T,
+                    qha_low_t_curve["T"],
+                    T,
+                )
+            else:
+                blend_start = float(qha_splice_blend_start)
+                blend_end = float(qha_splice_blend_end)
+            if blend_end < blend_start:
+                raise ValueError("--qha-splice-blend-end must be >= --qha-splice-blend-start")
+            Cp_grid, qha_blend_weights = blend_qha_md_on_grid(
+                T_grid,
                 qha_low_t_curve["T"],
                 qha_low_t_curve["Cp"],
+                Cp_md_grid,
+                blend_start,
+                blend_end,
             )
+            qha_volume_mode = "md-only"
+            qha_lattice_mode = "md-only"
+            if qha_low_t_curve.get("V") is not None and qha_low_t_curve.get("V_T") is not None:
+                qha_V_scaled = qha_low_t_curve["V"] * (nfu / qha_low_t_curve["qha_formula_units"])
+                V_grid, _weights = blend_qha_md_on_grid(
+                    T_grid,
+                    qha_low_t_curve["V_T"],
+                    qha_V_scaled,
+                    V_md_grid,
+                    blend_start,
+                    blend_end,
+                )
+                dVdT_grid = np.gradient(V_grid, T_grid)
+                alpha_V_grid = dVdT_grid / V_grid
+                qha_volume_mode = "hybrid"
+            if qha_low_t_curve.get("a") is not None and qha_low_t_curve.get("a_T") is not None:
+                a_grid, _weights = blend_qha_md_on_grid(
+                    T_grid,
+                    qha_low_t_curve["a_T"],
+                    qha_low_t_curve["a"],
+                    a_md_grid,
+                    blend_start,
+                    blend_end,
+                )
+                dadT_grid = np.gradient(a_grid, T_grid)
+                alpha_L_grid = dadT_grid / a_grid
+                qha_lattice_mode = "hybrid"
+            diagnostics = cp_overlap_diagnostics_np(
+                qha_low_t_curve["T"],
+                qha_low_t_curve["Cp"],
+                T,
+                Cp_for_integral_data,
+                blend_start,
+                blend_end,
+            )
+            plot_overlap_mismatch_np(outdir / "overlap_mismatch_Cp.png", diagnostics)
             qha_splice_metadata = {
                 "enabled": True,
                 "switch_temperature_K": float(switch_T),
                 "switch_method": switch_method,
                 "minimum_switch_temperature_K": qha_splice_min_switch_temperature,
+                "blend_start_K": float(blend_start),
+                "blend_end_K": float(blend_end),
+                "blend_function": "smoothstep w=3x^2-2x^3",
+                "cp_overlap_diagnostics": {
+                    key: value
+                    for key, value in diagnostics.items()
+                    if key != "rows"
+                },
+                "cp_overlap_diagnostics_rows": diagnostics["rows"],
+                "qha_volume_mode": qha_volume_mode,
+                "qha_lattice_mode": qha_lattice_mode,
                 "qha_source": {
                     "qha_dir": qha_low_t_curve["qha_dir"],
                     "qha_cp_file": qha_low_t_curve["qha_cp_file"],
+                    "qha_volume_file": qha_low_t_curve.get("qha_volume_file"),
+                    "qha_lattice_file": qha_low_t_curve.get("qha_lattice_file"),
                     "qha_cp_unit": qha_low_t_curve["qha_cp_unit"],
                     "qha_formula_units": qha_low_t_curve["qha_formula_units"],
                 },
-                "note": "QHA supplies Cp/S/H at T <= switch; MD Cp is integrated above switch.",
+                "uq_note": (
+                    "Cp UQ band is tapered by smoothstep weight: zero-width in the QHA-only "
+                    "region, partial MD statistical width in the blend, full MD statistical "
+                    "width above blend_end."
+                ),
+                "note": (
+                    "QHA supplies low-T Cp; QHA and MD Cp are smoothstep-blended "
+                    "before integrating S/H/G."
+                ),
             }
         else:
             qha_splice_metadata = {
@@ -1674,28 +1945,27 @@ def build_combined_thermo(summaries: list[dict],
         G_rel_J_mol_grid = H_rel_J_mol_grid - T_grid * S_rel_J_mol_K_grid
 
     if qha_splice_metadata.get("enabled"):
-        switch_T = qha_splice_metadata["switch_temperature_K"]
-        switch_S = float(np.interp(switch_T, qha_low_t_curve["T"], qha_low_t_curve["S"]))
-        switch_H = float(np.interp(switch_T, qha_low_t_curve["T"], qha_low_t_curve["H"]))
+        reference_T = qha_splice_metadata["blend_start_K"]
+        switch_S = float(np.interp(reference_T, qha_low_t_curve["T"], qha_low_t_curve["S"]))
+        switch_H = float(np.interp(reference_T, qha_low_t_curve["T"], qha_low_t_curve["H"]))
         H_rel_J_mol_grid, S_rel_J_mol_K_grid, G_rel_J_mol_grid = integrate_from_reference(
             T_grid=T_grid,
             Cp_grid=Cp_grid,
-            T_ref=switch_T,
+            T_ref=reference_T,
             S_ref_J_mol_K=switch_S,
             H_ref_J_mol=switch_H,
         )
-        low_mask = T_grid <= switch_T
-        H_rel_J_mol_grid[low_mask] = np.interp(
-            T_grid[low_mask],
-            qha_low_t_curve["T"],
-            qha_low_t_curve["H"],
-        )
-        S_rel_J_mol_K_grid[low_mask] = np.interp(
-            T_grid[low_mask],
-            qha_low_t_curve["T"],
-            qha_low_t_curve["S"],
-        )
         G_rel_J_mol_grid = H_rel_J_mol_grid - T_grid * S_rel_J_mol_K_grid
+        qha_splice_metadata["entropy_reference"] = {
+            "T_K": float(reference_T),
+            "S_J_mol_formula_K": switch_S,
+            "source": "QHA S integrated from QHA Cp at blend_start",
+        }
+        qha_splice_metadata["enthalpy_reference"] = {
+            "T_K": float(reference_T),
+            "H_J_mol_formula": switch_H,
+            "source": "QHA H integrated from QHA Cp at blend_start",
+        }
 
     # Interpolate grid relative functions back to MD T for the summary table.
     H_rel_J_mol = np.interp(T, T_grid, H_rel_J_mol_grid)
@@ -1713,6 +1983,11 @@ def build_combined_thermo(summaries: list[dict],
             nfu=nfu, anchor_zero=anchor_zero,
             n_boot=n_bootstrap, seed=bootstrap_seed,
         )
+    if qha_splice_metadata.get("enabled") and "Cp_grid" in uq_bands:
+        lo, hi = uq_bands["Cp_grid"]
+        half_width = 0.5 * np.abs(hi - lo)
+        half_width = qha_blend_weights * half_width
+        uq_bands["Cp_grid"] = (Cp_grid - half_width, Cp_grid + half_width)
 
     combined = []
     for i, s in enumerate(summaries):
@@ -1761,6 +2036,7 @@ def build_combined_thermo(summaries: list[dict],
             "H_abs_kJ_per_mol_UO2": float(H_abs_kJ_per_mol_UO2_grid[i]),
             "Cp_from_dH_J_per_mol_UO2_K": float(Cp_from_H_grid[i]),
             "Cp_used_for_integration_J_per_mol_UO2_K": float(Cp_grid[i]),
+            "qha_md_blend_weight": float(qha_blend_weights[i]),
             "H_rel_J_per_mol_UO2": float(H_rel_J_mol_grid[i]),
             "S_rel_J_per_mol_UO2_K": float(S_rel_J_mol_K_grid[i]),
             "G_rel_J_per_mol_UO2": float(G_rel_J_mol_grid[i]),
@@ -1824,6 +2100,101 @@ def build_combined_thermo(summaries: list[dict],
     plot_xy(outdir / "Cp_function_grid.png", T_grid, Cp_grid, "T (K)", "Cp used (J/mol-UO$_2$/K)", "Cp function")
     plot_xy(outdir / "S_function_grid.png", T_grid, S_rel_J_mol_K_grid, "T (K)", "S-S$_0$ (J/mol/K)", "Relative entropy function")
     plot_xy(outdir / "G_function_grid.png", T_grid, G_rel_J_mol_grid / 1000.0, "T (K)", "G-G$_0$ (kJ/mol)", "Relative Gibbs function")
+
+    if qha_splice_metadata.get("enabled"):
+        Cp_over_T_md = np.zeros_like(Cp_md_grid, dtype=float)
+        md_nonzero = T_grid > 1.0e-12
+        Cp_over_T_md[md_nonzero] = Cp_md_grid[md_nonzero] / T_grid[md_nonzero]
+        H_md_rel_grid = trapz_cumulative(T_grid, Cp_md_grid)
+        S_md_rel_grid = trapz_cumulative(T_grid, Cp_over_T_md)
+        G_md_rel_grid = H_md_rel_grid - T_grid * S_md_rel_grid
+        qha_V_scaled = None
+        if qha_low_t_curve.get("V") is not None and qha_low_t_curve.get("V_T") is not None:
+            qha_V_scaled = qha_low_t_curve["V"] * (nfu / qha_low_t_curve["qha_formula_units"])
+        plot_hybrid_grid(
+            outdir / "hybrid_Cp_QHA_MD.png",
+            T_grid,
+            Cp_grid,
+            "Cp (J/mol-UO$_2$/K)",
+            "Hybrid QHA+MD Cp",
+            qha_low_t_curve["T"],
+            qha_low_t_curve["Cp"],
+            T_grid,
+            Cp_md_grid,
+            uq_bands.get("Cp_grid"),
+            qha_splice_metadata["blend_start_K"],
+            qha_splice_metadata["blend_end_K"],
+        )
+        plot_hybrid_grid(
+            outdir / "hybrid_S_QHA_MD.png",
+            T_grid,
+            S_rel_J_mol_K_grid,
+            "S (J/mol/K)",
+            "Integrated Hybrid QHA+MD Entropy",
+            qha_low_t_curve["T"],
+            qha_low_t_curve["S"],
+            T_grid,
+            S_md_rel_grid,
+            None,
+            qha_splice_metadata["blend_start_K"],
+            qha_splice_metadata["blend_end_K"],
+        )
+        plot_hybrid_grid(
+            outdir / "hybrid_H_QHA_MD.png",
+            T_grid,
+            H_rel_J_mol_grid / 1000.0,
+            "H (kJ/mol)",
+            "Integrated Hybrid QHA+MD Enthalpy",
+            qha_low_t_curve["T"],
+            qha_low_t_curve["H"] / 1000.0,
+            T_grid,
+            H_md_rel_grid / 1000.0,
+            None,
+            qha_splice_metadata["blend_start_K"],
+            qha_splice_metadata["blend_end_K"],
+        )
+        plot_hybrid_grid(
+            outdir / "hybrid_G_QHA_MD.png",
+            T_grid,
+            G_rel_J_mol_grid / 1000.0,
+            "G (kJ/mol)",
+            "Hybrid G = H - TS",
+            qha_low_t_curve["T"],
+            (qha_low_t_curve["H"] - qha_low_t_curve["T"] * qha_low_t_curve["S"]) / 1000.0,
+            T_grid,
+            G_md_rel_grid / 1000.0,
+            None,
+            qha_splice_metadata["blend_start_K"],
+            qha_splice_metadata["blend_end_K"],
+        )
+        plot_hybrid_grid(
+            outdir / "hybrid_V_QHA_MD.png",
+            T_grid,
+            V_grid,
+            "V (Å$^3$)",
+            "Hybrid QHA+MD Volume" if qha_V_scaled is not None else "MD Volume",
+            qha_low_t_curve.get("V_T"),
+            qha_V_scaled,
+            T_grid,
+            V_md_grid,
+            None,
+            qha_splice_metadata["blend_start_K"],
+            qha_splice_metadata["blend_end_K"],
+        )
+        plot_hybrid_grid(
+            outdir / "hybrid_a_QHA_MD.png",
+            T_grid,
+            a_grid,
+            "a (Å)",
+            "Hybrid QHA+MD Lattice" if qha_low_t_curve.get("a") is not None else "MD Lattice",
+            qha_low_t_curve.get("a_T"),
+            qha_low_t_curve.get("a"),
+            T_grid,
+            a_md_grid,
+            None,
+            qha_splice_metadata["blend_start_K"],
+            qha_splice_metadata["blend_end_K"],
+        )
 
 
     # UQ-band plots. Bands are MD processing/statistical bands from block SEM + bootstrap.
@@ -1990,7 +2361,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument(
         "--qha-low-t-splice",
         action="store_true",
-        help="Use QHA Cp/S/H below the automatic QHA-to-MD Cp switch temperature.",
+        help="Build smooth QHA+MD hybrid Cp/S/H/G using QHA as the low-T branch.",
     )
     ap.add_argument(
         "--qha-splice-switch-temperature",
@@ -2003,6 +2374,18 @@ def main(argv: list[str] | None = None) -> None:
         type=float,
         default=50.0,
         help="Reject automatic QHA-to-MD low-T splice switches below this temperature in K.",
+    )
+    ap.add_argument(
+        "--qha-splice-blend-start",
+        type=float,
+        default=None,
+        help="Start temperature for smooth QHA-to-MD Cp blending in K.",
+    )
+    ap.add_argument(
+        "--qha-splice-blend-end",
+        type=float,
+        default=None,
+        help="End temperature for smooth QHA-to-MD Cp blending in K.",
     )
 
     # Speed controls for large log sets.
@@ -2095,28 +2478,33 @@ def main(argv: list[str] | None = None) -> None:
         except (FileNotFoundError, ValueError) as exc:
             ap.error(str(exc))
 
-    build_combined_thermo(
-        summaries=summaries,
-        outdir=outdir,
-        fit_degree=args.fit_degree,
-        cp_source=args.cp_source,
-        plot_T_min=args.plot_T_min,
-        plot_T_max=args.plot_T_max,
-        plot_T_step=args.plot_T_step,
-        anchor_zero=args.anchor_zero,
-        n_bootstrap=args.n_bootstrap,
-        bootstrap_seed=args.bootstrap_seed,
-        thermo_anchor_T=thermo_anchor_T,
-        thermo_anchor_S_J_mol_K=thermo_anchor_S,
-        thermo_anchor_Cp_J_mol_K=thermo_anchor_Cp,
-        thermo_anchor_H_J_mol=thermo_anchor_H,
-        use_anchor_for_integration=args.use_anchor_for_integration,
-        use_anchor_Cp_in_fit=args.use_anchor_Cp_in_fit,
-        anchor_metadata=anchor_metadata,
-        qha_low_t_curve=qha_low_t_curve,
-        qha_splice_switch_temperature=args.qha_splice_switch_temperature,
-        qha_splice_min_switch_temperature=args.qha_splice_min_switch_temperature,
-    )
+    try:
+        build_combined_thermo(
+            summaries=summaries,
+            outdir=outdir,
+            fit_degree=args.fit_degree,
+            cp_source=args.cp_source,
+            plot_T_min=args.plot_T_min,
+            plot_T_max=args.plot_T_max,
+            plot_T_step=args.plot_T_step,
+            anchor_zero=args.anchor_zero,
+            n_bootstrap=args.n_bootstrap,
+            bootstrap_seed=args.bootstrap_seed,
+            thermo_anchor_T=thermo_anchor_T,
+            thermo_anchor_S_J_mol_K=thermo_anchor_S,
+            thermo_anchor_Cp_J_mol_K=thermo_anchor_Cp,
+            thermo_anchor_H_J_mol=thermo_anchor_H,
+            use_anchor_for_integration=args.use_anchor_for_integration,
+            use_anchor_Cp_in_fit=args.use_anchor_Cp_in_fit,
+            anchor_metadata=anchor_metadata,
+            qha_low_t_curve=qha_low_t_curve,
+            qha_splice_switch_temperature=args.qha_splice_switch_temperature,
+            qha_splice_min_switch_temperature=args.qha_splice_min_switch_temperature,
+            qha_splice_blend_start=args.qha_splice_blend_start,
+            qha_splice_blend_end=args.qha_splice_blend_end,
+        )
+    except ValueError as exc:
+        ap.error(str(exc))
 
     print(f"Done. Outputs written to: {outdir.resolve()}")
 
