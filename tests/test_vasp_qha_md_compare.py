@@ -306,6 +306,59 @@ def test_hybrid_cp_switch_ignores_extrapolated_low_t_md_grid(tmp_path: Path) -> 
     assert metadata["switch_temperature_K"] == pytest.approx(600.0)
 
 
+def test_qha_md_compare_derives_cubic_lattice_a_from_volume(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+    qha = tmp_path / "qha"
+    md = tmp_path / "md"
+    out = tmp_path / "overlay"
+    qha.mkdir()
+    md.mkdir()
+
+    write_qha_dat(qha / "Cp-temperature.dat", [(300.0, 10.0), (500.0, 20.0)])
+    write_qha_dat(qha / "entropy-temperature.dat", [(300.0, 1.0), (500.0, 8.0)])
+    write_qha_dat(qha / "volume-temperature.dat", [(300.0, 3200.0), (500.0, 3456.0)])
+    (md / "thermo_functions_grid.csv").write_text(
+        "T_K,Cp_used_for_integration_J_per_mol_UO2_K,S_rel_J_mol_K,V_fit_A3,a_fit_A\n"
+        "500,22,9,432,4.2\n"
+        "700,40,18,500,4.4\n",
+        encoding="utf-8",
+    )
+
+    main(
+        [
+            "--qha-dir",
+            str(qha),
+            "--md-dir",
+            str(md),
+            "--outdir",
+            str(out),
+            "--qha-formula-units",
+            "32",
+            "--md-formula-units",
+            "4",
+            "--target-z",
+            "4",
+            "--t-min",
+            "300",
+            "--t-max",
+            "700",
+        ]
+    )
+
+    lattice_rows = list(csv.DictReader((out / "lattice_a_qha_md_overlay.csv").open()))
+    qha_rows = [row for row in lattice_rows if row["source"] == "QHA"]
+    assert qha_rows
+    assert float(qha_rows[0]["value"]) == pytest.approx(400.0 ** (1.0 / 3.0))
+    metadata = json.loads((out / "hybrid_cp_entropy_metadata.json").read_text())
+    assert (
+        metadata["qha_file_paths"]["lattice_parameter_sources"]["a"]
+        == "derived_from_volume_cubic"
+    )
+    assert metadata["structural_hybrid"]["lattice_parameters"]["a"]["qha_source"] == (
+        "derived_from_volume_cubic"
+    )
+
+
 def test_hybrid_cp_switch_rejects_extreme_low_t_match(tmp_path: Path) -> None:
     pytest.importorskip("matplotlib")
     qha = tmp_path / "qha"

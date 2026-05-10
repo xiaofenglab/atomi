@@ -502,7 +502,7 @@ def plot_structural_hybrid_detail(outpath: Path,
     outpath.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(7, 5))
     if qha_T_raw is not None and qha_y_raw is not None:
-        ax.plot(qha_T_raw, qha_y_raw, ":", color="#1f77b4", alpha=0.55, label="raw QHA")
+        ax.plot(qha_T_raw, qha_y_raw, "--", color="#1f77b4", alpha=0.65, label="raw QHA")
     if md_T_raw is not None and md_y_raw is not None:
         ax.plot(md_T_raw, md_y_raw, ":", color="#d62728", alpha=0.55, label="raw MD")
     if qha_T_corrected is not None and qha_y_corrected is not None:
@@ -1494,8 +1494,25 @@ def qha_cp_thermo_curve(
             "T": param_T,
             "values": param_y,
             "file": param_file,
+            "source": "file",
             "ylabel": spec["ylabel"],
         }
+    if (
+        "a" not in lattice_parameters
+        and T_volume is not None
+        and V_qha is not None
+        and qha_formula_units > 0
+    ):
+        conventional_volume = V_qha * (4.0 / qha_formula_units)
+        valid = conventional_volume > 0.0
+        if np.any(valid):
+            lattice_parameters["a"] = {
+                "T": T_volume[valid],
+                "values": conventional_volume[valid] ** (1.0 / 3.0),
+                "file": qha_volume_file,
+                "source": "derived_from_volume_cubic_z4",
+                "ylabel": "Lattice a (Å)",
+            }
     a_param = lattice_parameters.get("a", {})
     return {
         "T": T_qha,
@@ -2237,6 +2254,10 @@ def build_combined_thermo(summaries: list[dict],
                     "qha_volume_file": qha_low_t_curve.get("qha_volume_file"),
                     "qha_lattice_files": {
                         key: item.get("file")
+                        for key, item in qha_low_t_curve.get("lattice_parameters", {}).items()
+                    },
+                    "qha_lattice_sources": {
+                        key: item.get("source", "file")
                         for key, item in qha_low_t_curve.get("lattice_parameters", {}).items()
                     },
                     "qha_cp_unit": qha_low_t_curve["qha_cp_unit"],

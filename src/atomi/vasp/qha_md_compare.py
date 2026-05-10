@@ -125,6 +125,14 @@ def filter_range(points: list[tuple[float, float]], t_min, t_max) -> list[tuple[
     return kept
 
 
+def derive_cubic_lattice_from_volume(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    derived = []
+    for temp, volume in points:
+        if volume > 0.0:
+            derived.append((temp, volume ** (1.0 / 3.0)))
+    return derived
+
+
 def qha_series(path: Path, scale: float = 1.0) -> list[tuple[float, float]]:
     return [(row[0], row[1] * scale) for row in read_table(path)]
 
@@ -329,9 +337,13 @@ def alpha_qha_scale(args: argparse.Namespace) -> float:
 
 def lattice_parameter_definitions(args: argparse.Namespace) -> list[dict]:
     md_grid = args.md_dir / "thermo_functions_grid.csv"
+    qha_volume_points = qha_series(args.qha_dir / "volume-temperature.dat", extensive_qha_scale(args))
     definitions = []
     for spec in LATTICE_PARAMETER_SPECS:
         qha_points, qha_name = qha_first_available_series(args.qha_dir, spec["qha_names"])
+        if spec["key"] == "a" and not qha_points and qha_volume_points:
+            qha_points = derive_cubic_lattice_from_volume(qha_volume_points)
+            qha_name = "volume-temperature.dat"
         md_column = resolve_column(md_grid, spec["md_aliases"])
         if not qha_points and not md_column:
             continue
@@ -340,6 +352,7 @@ def lattice_parameter_definitions(args: argparse.Namespace) -> list[dict]:
                 "name": spec["name"],
                 "ylabel": spec["ylabel"],
                 "qha": ((args.qha_dir / qha_name) if qha_name else None, 1.0),
+                "qha_points": qha_points if spec["key"] == "a" else None,
                 "md": (md_grid, spec["md_aliases"], 1.0),
             }
         )
@@ -926,7 +939,7 @@ def plot_structural_quantity(
     fig, ax = plt.subplots(figsize=(7.2, 4.8))
     if qha_raw:
         x, y = zip(*qha_raw)
-        ax.plot(x, y, ":", color="#1f77b4", linewidth=1.2, alpha=0.55, label="raw QHA")
+        ax.plot(x, y, "--", color="#1f77b4", linewidth=1.3, alpha=0.65, label="raw QHA")
     if md_raw:
         x, y = zip(*md_raw)
         ax.plot(x, y, ":", color="#d62728", linewidth=1.2, alpha=0.55, label="raw MD")
@@ -1177,6 +1190,11 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
             spec["qha_names"],
         )
         qha_lattice_raw = filter_range(qha_lattice_raw, args.t_min, args.t_max)
+        qha_lattice_source = "file" if qha_lattice_raw else "missing"
+        if spec["key"] == "a" and not qha_lattice_raw and qha_volume_raw:
+            qha_lattice_raw = derive_cubic_lattice_from_volume(qha_volume_raw)
+            qha_lattice_file = "volume-temperature.dat"
+            qha_lattice_source = "derived_from_volume_cubic"
         md_lattice_raw, md_lattice_column = md_series(md_path, spec["md_aliases"], 1.0)
         md_lattice_raw = filter_range(md_lattice_raw, args.t_min, args.t_max)
         reference_value = lattice_references.get(spec["key"])
@@ -1210,6 +1228,7 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
                     "qha_raw": qha_lattice_raw,
                     "qha_points": qha_lattice,
                     "qha_file": qha_lattice_file,
+                    "qha_source": qha_lattice_source,
                     "md_raw": md_lattice_raw,
                     "md_points": md_lattice,
                     "md_column": md_lattice_column,
@@ -1224,6 +1243,7 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
             "qha_correction": qha_lattice_correction,
             "md_correction": md_lattice_correction,
             "source_mode": lattice_mode,
+            "qha_source": qha_lattice_source,
         }
     if volume_rows or lattice_hybrids:
         va_csv = args.outdir / "hybrid_volume_lattice.csv"
@@ -1397,6 +1417,10 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
                 item["key"]: str((args.qha_dir / item["qha_file"]).resolve())
                 if item["qha_file"]
                 else None
+                for item in lattice_hybrids
+            },
+            "lattice_parameter_sources": {
+                item["key"]: item["qha_source"]
                 for item in lattice_hybrids
             },
         },
@@ -1740,7 +1764,10 @@ def main(argv: list[str] | None = None) -> None:
             qha_points = qha_derived_enthalpy(args)
         else:
             qha_path, qha_scale = item["qha"]
-            qha_points = qha_series(qha_path, qha_scale) if qha_path is not None else []
+            if item.get("qha_points") is not None:
+                qha_points = item["qha_points"]
+            else:
+                qha_points = qha_series(qha_path, qha_scale) if qha_path is not None else []
         md_path, md_aliases, md_scale = item["md"]
         if md_path is None:
             md_points, md_column = [], ""

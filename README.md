@@ -1004,7 +1004,10 @@ For structural quantities, the compare command follows the same rule as
 `thermo_lammps`: it does not blend CTE directly. It corrects and blends V/a
 curves first, then derives `hybrid_alpha_V_QHA_MD.png` and
 `hybrid_alpha_L_a_QHA_MD.png` from the final hybrid structural curve. Optional
-baseline correction uses a reference temperature plus either shift or scale:
+baseline correction uses a reference temperature plus either shift or scale.
+If QHA has `volume-temperature.dat` but no explicit `a-temperature.dat`,
+Atomi derives cubic QHA lattice `a(T)` from the normalized volume so the
+hybrid lattice diagnostic plot still shows a dashed QHA reference:
 
 ```bash
 thermo_qha_md --qha-dir ./qha_run --md-dir analysis/thermo_qha_splice --outdir ./qha_md_overlay --qha-formula-units 32 --md-formula-units 32 --target-z 4 --t-min 0 --t-max 1500 --structure-reference-temperature 300 --lattice-reference a=5.47 --structure-correction shift

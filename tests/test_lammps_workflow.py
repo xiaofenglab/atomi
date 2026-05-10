@@ -111,6 +111,19 @@ def test_qha_md_cp_switch_rejects_low_temperature_match() -> None:
     assert method == "overlap-closest-cp"
 
 
+def test_qha_curve_derives_cubic_lattice_a_from_volume(tmp_path) -> None:
+    qha = tmp_path / "qha"
+    qha.mkdir()
+    (qha / "Cp-temperature.dat").write_text("0 0\n100 20\n", encoding="utf-8")
+    (qha / "volume-temperature.dat").write_text("0 256\n100 500\n", encoding="utf-8")
+
+    curve = qha_cp_thermo_curve(qha, 4.0)
+    a_param = curve["lattice_parameters"]["a"]
+
+    assert a_param["source"] == "derived_from_volume_cubic_z4"
+    assert np.isclose(a_param["values"][0], 256.0 ** (1.0 / 3.0))
+
+
 def test_build_combined_thermo_can_use_qha_low_t_splice(tmp_path) -> None:
     qha = tmp_path / "qha"
     qha.mkdir()
