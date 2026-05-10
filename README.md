@@ -598,9 +598,11 @@ If no trajectory is found, the MD monitor still plots energy/temperature/SCF dat
 ## CP2K AIMD Box Builder
 
 Use `cp2k-rotate-seed` first when a bare metal-ligand XYZ should be oriented before
-solvation. It translates `--atom1` to the origin and rotates the `atom1 -> atom2`
-vector onto a target axis. If a point-charge file is provided, it applies the same
-coordinate transform and writes the rotation matrix for reproducibility.
+solvation. By default it translates `--atom1` to the origin and rotates the
+`atom1 -> atom2` vector onto a target axis. Use `--origin geometric-center` to
+remove the geometric center instead, or `--no-rotate` for center-only cleanup.
+Extra XYZ columns are preserved. If a point-charge file is provided, it applies
+the same coordinate transform and writes the rotation matrix for reproducibility.
 
 ```bash
 cp2k-rotate-seed ga_cl4.xyz \
@@ -608,6 +610,11 @@ cp2k-rotate-seed ga_cl4.xyz \
   --atom2 2 \
   --axis z \
   -o ga_cl4_rot.xyz
+
+cp2k-rotate-seed ga_cl4.xyz \
+  --origin geometric-center \
+  --no-rotate \
+  -o ga_cl4_centered.xyz
 ```
 
 `cp2k-build-acid-box` builds an explicit-water CP2K AIMD starting box from a metal-ligand

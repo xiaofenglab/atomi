@@ -48,7 +48,7 @@ def test_rotate_seed_writes_xyz_matrix_and_pointcharges(tmp_path: Path) -> None:
         ]
     )
 
-    _, coords, _ = read_xyz(out)
+    _, coords, _, _ = read_xyz(out)
     assert np.allclose(coords[0], [0.0, 0.0, 0.0], atol=1.0e-10)
     assert np.allclose(coords[1], [0.0, 0.0, 1.0], atol=1.0e-10)
     assert mat.is_file()
@@ -58,3 +58,22 @@ def test_rotate_seed_writes_xyz_matrix_and_pointcharges(tmp_path: Path) -> None:
         "2",
         "source",
     ]
+
+
+def test_rotate_seed_can_center_only_and_preserve_extra_xyz_columns(tmp_path: Path) -> None:
+    xyz = tmp_path / "seed.xyz"
+    xyz.write_text(
+        "2\n"
+        "seed\n"
+        "Ga 1.0 1.0 1.0 fixed\n"
+        "Cl 3.0 1.0 1.0 mobile\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "centered.xyz"
+
+    main([str(xyz), "--origin", "geometric-center", "--no-rotate", "--output", str(out)])
+
+    _, coords, _, extras = read_xyz(out)
+    assert np.allclose(coords.mean(axis=0), [0.0, 0.0, 0.0], atol=1.0e-10)
+    assert np.allclose(coords[:, 0], [-1.0, 1.0], atol=1.0e-10)
+    assert extras == [["fixed"], ["mobile"]]

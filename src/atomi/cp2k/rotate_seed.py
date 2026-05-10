@@ -44,7 +44,7 @@ def rotation_matrix(source: np.ndarray, target: np.ndarray) -> np.ndarray:
     return np.eye(3) + vx + vx @ vx * ((1.0 - dot) / (np.linalg.norm(cross) ** 2))
 
 
-def read_xyz(path: Path) -> tuple[list[str], np.ndarray, str]:
+def read_xyz(path: Path) -> tuple[list[str], np.ndarray, str, list[list[str]]]:
     lines = path.read_text(encoding="utf-8").splitlines()
     if len(lines) < 2:
         raise ValueError(f"not enough lines for XYZ file: {path}")
@@ -55,27 +55,47 @@ def read_xyz(path: Path) -> tuple[list[str], np.ndarray, str]:
     comment = lines[1]
     symbols = []
     coords = []
+    extras = []
     for line in lines[2 : 2 + natoms]:
         parts = line.split()
         if len(parts) < 4:
             raise ValueError(f"bad XYZ atom line in {path}: {line!r}")
         symbols.append(parts[0])
         coords.append([float(parts[1]), float(parts[2]), float(parts[3])])
+        extras.append(parts[4:])
     if len(symbols) != natoms:
         raise ValueError(f"XYZ atom count mismatch in {path}")
-    return symbols, np.array(coords, dtype=float), comment
+    return symbols, np.array(coords, dtype=float), comment, extras
 
 
-def write_xyz(path: Path, symbols: list[str], coords: np.ndarray, comment: str) -> None:
+def write_xyz(
+    path: Path,
+    symbols: list[str],
+    coords: np.ndarray,
+    comment: str,
+    extras: list[list[str]] | None = None,
+) -> None:
+    extras = extras or [[] for _ in symbols]
     with path.open("w", encoding="utf-8") as handle:
         handle.write(f"{len(symbols)}\n")
         handle.write(f"{comment}\n")
-        for symbol, coord in zip(symbols, coords):
-            handle.write(f"{symbol:2s}  {coord[0]: .10f}  {coord[1]: .10f}  {coord[2]: .10f}\n")
+        for symbol, coord, extra in zip(symbols, coords, extras):
+            line = f"{symbol:2s}  {coord[0]: .10f}  {coord[1]: .10f}  {coord[2]: .10f}"
+            if extra:
+                line += "  " + " ".join(extra)
+            handle.write(line + "\n")
 
 
 def rotate_coords(coords: np.ndarray, matrix: np.ndarray, origin: np.ndarray) -> np.ndarray:
     return (matrix @ (coords - origin).T).T
+
+
+def resolve_origin(coords: np.ndarray, atom_index: int, mode: str) -> np.ndarray:
+    if mode == "atom1":
+        return coords[atom_index].copy()
+    if mode == "geometric-center":
+        return coords.mean(axis=0)
+    raise ValueError(f"unknown origin mode: {mode}")
 
 
 def rotate_pointcharges(infile: Path, outfile: Path, matrix: np.ndarray, origin: np.ndarray) -> int:
@@ -144,6 +164,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pointcharges", type=Path, default=None)
     parser.add_argument("--pointcharges-out", type=Path, default=None)
     parser.add_argument("--matrix-out", type=Path, default=None)
+    parser.add_argument(
+        "--origin",
+        choices=("atom1", "geometric-center"),
+        default="atom1",
+        help="Coordinate origin to remove before rotation.",
+    )
+    parser.add_argument(
+        "--no-rotate",
+        action="store_true",
+        help="Only center/translate coordinates; do not align atom1 -> atom2.",
+    )
     return parser
 
 
@@ -155,25 +186,30 @@ def main(argv: list[str] | None = None) -> None:
     if args.pointcharges is not None and not args.pointcharges.is_file():
         parser.error(f"point charge file not found: {args.pointcharges}")
 
-    symbols, coords, old_comment = read_xyz(args.xyz)
+    symbols, coords, old_comment, extras = read_xyz(args.xyz)
     i = args.atom1 - 1
     j = args.atom2 - 1
     if i < 0 or i >= len(coords) or j < 0 or j >= len(coords):
         parser.error("--atom1/--atom2 are 1-based and must be inside the XYZ atom range")
-    if i == j:
+    if i == j and not args.no_rotate:
         parser.error("--atom1 and --atom2 must be different")
 
-    origin = coords[i].copy()
+    origin = resolve_origin(coords, i, args.origin)
     vector = coords[j] - coords[i]
-    matrix = rotation_matrix(vector, AXES[args.axis])
+    matrix = np.eye(3) if args.no_rotate else rotation_matrix(vector, AXES[args.axis])
     rotated = rotate_coords(coords, matrix, origin)
-    output = args.output or args.xyz.with_name(f"{args.xyz.stem}_rot.xyz")
+    suffix = "centered" if args.no_rotate else "rot"
+    output = args.output or args.xyz.with_name(f"{args.xyz.stem}_{suffix}.xyz")
     matrix_out = args.matrix_out or args.xyz.with_name(f"{args.xyz.stem}_rotation_matrix.txt")
-    comment = (
-        f"Rotated from {args.xyz.name}; atom{args.atom1}->{args.atom2} aligned to {args.axis}; "
-        f"old_comment={old_comment}"
+    action = "Centered" if args.no_rotate else "Rotated"
+    alignment = (
+        "no rotation" if args.no_rotate else f"atom{args.atom1}->{args.atom2} to {args.axis}"
     )
-    write_xyz(output, symbols, rotated, comment)
+    comment = (
+        f"{action} from {args.xyz.name}; origin={args.origin}; "
+        f"{alignment}; old_comment={old_comment}"
+    )
+    write_xyz(output, symbols, rotated, comment, extras)
     write_rotation_matrix(matrix_out, matrix, origin)
 
     pc_count = None
@@ -182,19 +218,22 @@ def main(argv: list[str] | None = None) -> None:
         pc_out = pc_out or args.pointcharges.with_name(f"{args.pointcharges.stem}_rot.dat")
         pc_count = rotate_pointcharges(args.pointcharges, pc_out, matrix, origin)
 
-    print(f"Wrote rotated XYZ: {output}")
+    print(f"Wrote XYZ: {output}")
     print(f"Wrote rotation matrix: {matrix_out}")
     if pc_count is not None:
         print(f"Wrote rotated point charges: {pc_out} ({pc_count} rows)")
-    rotated_vector = matrix @ vector
-    print(
-        f"Aligned atom {args.atom1} ({symbols[i]}) -> "
-        f"atom {args.atom2} ({symbols[j]}) to {args.axis}"
-    )
-    print(
-        "Rotated vector: "
-        f"{rotated_vector[0]:.8f} {rotated_vector[1]:.8f} {rotated_vector[2]:.8f}"
-    )
+    print(f"Origin mode: {args.origin}")
+    print(f"Origin removed: {origin[0]:.8f} {origin[1]:.8f} {origin[2]:.8f}")
+    if not args.no_rotate:
+        rotated_vector = matrix @ vector
+        print(
+            f"Aligned atom {args.atom1} ({symbols[i]}) -> "
+            f"atom {args.atom2} ({symbols[j]}) to {args.axis}"
+        )
+        print(
+            "Rotated vector: "
+            f"{rotated_vector[0]:.8f} {rotated_vector[1]:.8f} {rotated_vector[2]:.8f}"
+        )
 
 
 if __name__ == "__main__":
