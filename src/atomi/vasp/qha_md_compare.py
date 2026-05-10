@@ -663,6 +663,136 @@ def thermo_db_plot_points(args: argparse.Namespace, record: dict) -> dict[str, l
     }
 
 
+def entropy_anchor_to_j_per_basis(
+    value: float,
+    unit: str,
+    energy_basis: str,
+    target_z: float,
+) -> float:
+    out = float(value)
+    if unit.startswith("kJ/"):
+        out *= 1000.0
+    if "mol-formula" in unit and energy_basis == "target-cell":
+        out *= target_z
+    elif "mol-target-cell" in unit and energy_basis == "per-formula":
+        out /= target_z
+    return out
+
+
+def resolve_entropy_anchor(args: argparse.Namespace, record: dict) -> tuple[float | None, float | None, dict]:
+    if args.entropy_anchor_temperature is not None and args.entropy_anchor_value is not None:
+        value = entropy_anchor_to_j_per_basis(
+            args.entropy_anchor_value,
+            args.entropy_anchor_unit,
+            args.energy_basis,
+            args.target_z,
+        )
+        return args.entropy_anchor_temperature, value, {
+            "source": "user",
+            "T_K": args.entropy_anchor_temperature,
+            "value_input": args.entropy_anchor_value,
+            "unit_input": args.entropy_anchor_unit,
+            "value_J_mol_basis_K": value,
+            "basis": args.energy_basis,
+        }
+    if record:
+        factor = args.target_z if args.energy_basis == "target-cell" else 1.0
+        value = record["S_J_mol_formula_K"] * factor
+        return record["temperature_value_K"], value, {
+            "source": record["database"],
+            "formula": record["formula"],
+            "phase": record["phase"],
+            "T_K": record["temperature_value_K"],
+            "value_J_mol_basis_K": value,
+            "basis": args.energy_basis,
+        }
+    return None, None, {"source": None}
+
+
+def entropy_at_temperature_from_cp_rows(
+    rows: list[dict],
+    temperature: float,
+) -> float | None:
+    trial_rows = [dict(row) for row in rows]
+    trial_rows, _note = add_integrated_thermo(trial_rows, [], [], trial_rows[0]["T_K"] if trial_rows else 0.0)
+    return interpolate(
+        [(row["T_K"], row["S_integrated"]) for row in trial_rows],
+        temperature,
+    )
+
+
+def calibrate_blend_start_for_entropy(
+    qha_cp: list[tuple[float, float]],
+    md_cp: list[tuple[float, float]],
+    original_start: float,
+    blend_end: float,
+    entropy_temperature: float | None,
+    entropy_target: float | None,
+    minimum_start: float,
+) -> tuple[float, dict]:
+    metadata = {
+        "enabled": False,
+        "reason": "no experimental entropy anchor",
+        "original_blend_start_K": original_start,
+        "calibrated_blend_start_K": original_start,
+        "blend_end_K": blend_end,
+        "minimum_allowed_blend_start_K": minimum_start,
+        "entropy_anchor_temperature_K": entropy_temperature,
+        "entropy_anchor_target_J_mol_basis_K": entropy_target,
+    }
+    if entropy_temperature is None or entropy_target is None:
+        return original_start, metadata
+    if entropy_temperature >= blend_end:
+        metadata["reason"] = "entropy anchor is not below the blend end"
+        return original_start, metadata
+    qha_min = min(temp for temp, _value in qha_cp)
+    md_min = min(temp for temp, _value in md_cp)
+    lower_bound = max(float(minimum_start), qha_min, md_min)
+    upper_bound = min(float(original_start), float(entropy_temperature))
+    if upper_bound <= lower_bound:
+        metadata["reason"] = "no allowed lower blend-start interval reaches the entropy anchor"
+        return original_start, metadata
+
+    def entropy_with_start(start: float) -> float | None:
+        rows = build_hybrid_cp_rows(qha_cp, md_cp, start, blend_end)
+        return entropy_at_temperature_from_cp_rows(rows, entropy_temperature)
+
+    current = entropy_with_start(original_start)
+    low = entropy_with_start(lower_bound)
+    if current is None or low is None:
+        metadata["reason"] = "entropy could not be interpolated at the anchor temperature"
+        return original_start, metadata
+    metadata["S_at_original_blend_start_J_mol_basis_K"] = current
+    metadata["S_at_minimum_blend_start_J_mol_basis_K"] = low
+    lo_value, hi_value = sorted((current, low))
+    if entropy_target < lo_value or entropy_target > hi_value:
+        metadata["reason"] = "entropy anchor is outside the reachable calibration range"
+        metadata["target_clipped_to_reachable_range"] = True
+        entropy_target = min(max(entropy_target, lo_value), hi_value)
+    direction = 1.0 if low >= current else -1.0
+    lo_t, hi_t = lower_bound, upper_bound
+    for _idx in range(40):
+        mid = 0.5 * (lo_t + hi_t)
+        mid_value = entropy_with_start(mid)
+        if mid_value is None:
+            break
+        if direction * (mid_value - entropy_target) >= 0.0:
+            lo_t = mid
+        else:
+            hi_t = mid
+    calibrated = 0.5 * (lo_t + hi_t)
+    final_value = entropy_with_start(calibrated)
+    metadata.update(
+        {
+            "enabled": True,
+            "reason": "blend_start calibrated to experimental/database entropy anchor",
+            "calibrated_blend_start_K": calibrated,
+            "S_at_calibrated_blend_start_J_mol_basis_K": final_value,
+        }
+    )
+    return calibrated, metadata
+
+
 def add_integrated_thermo(
     rows: list[dict],
     qha_entropy: list[tuple[float, float]],
@@ -825,8 +955,9 @@ def plot_hybrid_quantity(
             "o",
             color="#111111",
             markeredgecolor="#111111",
-            markerfacecolor="#111111",
-            markersize=5.5,
+            markerfacecolor="none",
+            markeredgewidth=1.8,
+            markersize=7.0,
             label=db_points[0].get("label", "database"),
         )
     if blend_start == blend_end:
@@ -1181,6 +1312,19 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
     qha_enthalpy = filter_range(qha_derived_enthalpy(args), args.t_min, args.t_max)
     enthalpy_anchor_kj_mol, thermo_db_anchor = resolve_enthalpy_anchor(args)
     db_plot_points = thermo_db_plot_points(args, thermo_db_anchor)
+    entropy_anchor_t, entropy_anchor_value, entropy_anchor_metadata = resolve_entropy_anchor(
+        args,
+        thermo_db_anchor,
+    )
+    blend_start, entropy_blend_calibration = calibrate_blend_start_for_entropy(
+        qha_cp,
+        md_cp,
+        blend_start,
+        blend_end,
+        entropy_anchor_t,
+        entropy_anchor_value,
+        args.entropy_anchor_min_blend_start,
+    )
     hybrid_rows = build_hybrid_cp_rows(qha_cp, md_cp, blend_start, blend_end)
     hybrid_rows, entropy_note = add_integrated_thermo(
         hybrid_rows,
@@ -1526,6 +1670,8 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
             "thermo_db_anchor": thermo_db_anchor,
             "thermo_db_plot_points": db_plot_points,
         },
+        "entropy_anchor": entropy_anchor_metadata,
+        "entropy_anchor_blend_calibration": entropy_blend_calibration,
         "structural_hybrid": structural_metadata,
         "cp_overlap_diagnostics": {
             key: value
@@ -1845,6 +1991,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="End temperature for smooth QHA-to-MD Cp blending in K.",
     )
     parser.add_argument(
+        "--entropy-anchor-temperature",
+        type=float,
+        default=None,
+        help="Experimental entropy anchor temperature used to calibrate the low side of the Cp blend.",
+    )
+    parser.add_argument(
+        "--entropy-anchor-value",
+        type=float,
+        default=None,
+        help="Experimental entropy value used to calibrate the integrated hybrid S curve.",
+    )
+    parser.add_argument(
+        "--entropy-anchor-unit",
+        choices=(
+            "J/mol-formula/K",
+            "kJ/mol-formula/K",
+            "J/mol-target-cell/K",
+            "kJ/mol-target-cell/K",
+        ),
+        default="J/mol-formula/K",
+        help="Unit/basis of --entropy-anchor-value.",
+    )
+    parser.add_argument(
+        "--entropy-anchor-min-blend-start",
+        type=float,
+        default=200.0,
+        help="Lowest allowed blend-start temperature when calibrating S to an experimental/database anchor.",
+    )
+    parser.add_argument(
         "--structure-reference-temperature",
         type=float,
         default=None,
@@ -1938,6 +2113,10 @@ def main(argv: list[str] | None = None) -> None:
     if (args.enthalpy_anchor_temperature is None) != (args.enthalpy_anchor_value is None):
         if args.thermo_db is None or args.enthalpy_anchor_temperature is None:
             parser.error("--enthalpy-anchor-temperature and --enthalpy-anchor-value must be used together")
+    if (args.entropy_anchor_temperature is None) != (args.entropy_anchor_value is None):
+        parser.error("--entropy-anchor-temperature and --entropy-anchor-value must be used together")
+    if args.entropy_anchor_min_blend_start < 0.0:
+        parser.error("--entropy-anchor-min-blend-start must be non-negative")
     if not args.qha_dir.is_dir():
         parser.error(f"QHA directory not found: {args.qha_dir}")
     if not args.md_dir.is_dir():

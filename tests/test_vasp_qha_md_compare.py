@@ -254,6 +254,26 @@ def test_qha_md_compare_writes_hybrid_cp_entropy(tmp_path: Path) -> None:
     assert metadata["structural_hybrid"]["lattice_references"]["a"] == 4.2
 
 
+def test_qha_md_entropy_anchor_calibrates_blend_start() -> None:
+    qha_cp = [(0.0, 0.0), (300.0, 30.0), (600.0, 40.0), (700.0, 50.0)]
+    md_cp = [(0.0, 0.0), (300.0, 300.0), (600.0, 300.0), (700.0, 300.0)]
+
+    blend_start, metadata = qha_md_compare.calibrate_blend_start_for_entropy(
+        qha_cp,
+        md_cp,
+        original_start=550.0,
+        blend_end=650.0,
+        entropy_temperature=300.0,
+        entropy_target=22.0,
+        minimum_start=200.0,
+    )
+
+    assert metadata["enabled"] is True
+    assert blend_start < 550.0
+    assert blend_start >= 200.0
+    assert metadata["S_at_calibrated_blend_start_J_mol_basis_K"] == pytest.approx(22.0, abs=0.2)
+
+
 def test_hybrid_cp_switch_ignores_extrapolated_low_t_md_grid(tmp_path: Path) -> None:
     pytest.importorskip("matplotlib")
     qha = tmp_path / "qha"

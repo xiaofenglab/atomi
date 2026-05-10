@@ -584,7 +584,12 @@ thermo_lammps --config config_production.json --outdir analysis/thermo_qha_splic
 Use `--qha-splice-min-switch-temperature` to change the low-temperature guard
 or `--qha-splice-switch-temperature` to force a specific switch. Use
 `--qha-splice-blend-start` and `--qha-splice-blend-end` to choose the blend
-interval explicitly. The QHA-low-T workflow writes hybrid diagnostic plots
+interval explicitly. When experimental/database S is available from
+`--thermo-anchor-S` or `--thermo-db jaea`, the splice can extend the blend
+start downward, bounded by `--entropy-anchor-min-blend-start` (default 200 K),
+so the integrated hybrid entropy passes through the anchor without pulling the
+blend into the very-low-temperature region. The QHA-low-T workflow writes
+hybrid diagnostic plots
 named `hybrid_Cp_QHA_MD.png`, `hybrid_S_QHA_MD.png`,
 `hybrid_H_QHA_MD.png`, `hybrid_G_QHA_MD.png`, plus hybrid `V`/`a` plots when
 QHA volume or lattice files are present. It also writes explicit overlap plots
@@ -1020,8 +1025,12 @@ the blend with `--hybrid-blend-start <T> --hybrid-blend-end <T>`, change the
 low-T guard with `--hybrid-min-switch-temperature <T>`, or skip these outputs
 with `--no-hybrid-cp-s`. `thermo_qha_md` also supports `--thermo-db jaea
 --thermo-formula UO2` to fill the H anchor automatically before recomputing
-hybrid G from anchored H and third-law S; add `--plot-thermo-db-points` to
-overlay the database S/H/G points as black circular markers.
+hybrid G from anchored H and third-law S. Database S is also used to calibrate
+the low side of the blend, bounded by `--entropy-anchor-min-blend-start`
+(default 200 K); manual entropy anchors can be supplied with
+`--entropy-anchor-temperature`, `--entropy-anchor-value`, and
+`--entropy-anchor-unit`. Add `--plot-thermo-db-points` to overlay database
+S/H/G points as larger hollow black circles.
 
 For structural quantities, the compare command follows the same rule as
 `thermo_lammps`: it does not blend CTE directly. It corrects and blends V/a

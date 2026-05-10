@@ -275,3 +275,27 @@ def test_build_combined_thermo_can_use_qha_low_t_splice(tmp_path) -> None:
     assert metadata["structural_hybrid"]["lattice_references"]["a"] == 4.2
     assert metadata["entropy_reference"]["S_J_mol_formula_K"] == 0.0
     assert metadata["enthalpy_anchor_shift"]["anchor_H_J_mol_formula"] == -1084490.0
+
+
+def test_lammps_entropy_anchor_calibrates_qha_splice_blend_start() -> None:
+    T_grid = np.array([0.0, 100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0])
+    qha_T = np.array([0.0, 300.0, 600.0, 700.0])
+    qha_Cp = np.array([0.0, 30.0, 40.0, 50.0])
+    md_Cp = np.array([0.0, 250.0, 280.0, 300.0, 300.0, 300.0, 300.0, 300.0])
+
+    blend_start, metadata = thermo_series.calibrate_blend_start_for_entropy_grid(
+        T_grid,
+        qha_T,
+        qha_Cp,
+        md_Cp,
+        original_start=550.0,
+        blend_end=650.0,
+        entropy_temperature=300.0,
+        entropy_target=28.0,
+        minimum_start=200.0,
+    )
+
+    assert metadata["enabled"] is True
+    assert blend_start < 550.0
+    assert blend_start >= 200.0
+    assert metadata["S_at_calibrated_blend_start_J_mol_formula_K"] == pytest.approx(28.0, abs=0.5)

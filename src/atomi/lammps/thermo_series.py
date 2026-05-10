@@ -443,8 +443,9 @@ def plot_hybrid_grid(outpath: Path,
             "o",
             color="#111111",
             markeredgecolor="#111111",
-            markerfacecolor="#111111",
-            markersize=5.5,
+            markerfacecolor="none",
+            markeredgewidth=1.8,
+            markersize=7.0,
             label=db_points[0].get("label", "database"),
         )
     if blend_start is not None and blend_end is not None:
@@ -1590,6 +1591,89 @@ def blend_qha_md_on_grid(
     return out, weights
 
 
+def calibrate_blend_start_for_entropy_grid(
+    T_grid: np.ndarray,
+    qha_T: np.ndarray,
+    qha_Cp: np.ndarray,
+    md_Cp_grid: np.ndarray,
+    original_start: float,
+    blend_end: float,
+    entropy_temperature: Optional[float],
+    entropy_target: Optional[float],
+    minimum_start: float,
+) -> tuple[float, dict]:
+    metadata = {
+        "enabled": False,
+        "reason": "no experimental entropy anchor",
+        "original_blend_start_K": original_start,
+        "calibrated_blend_start_K": original_start,
+        "blend_end_K": blend_end,
+        "minimum_allowed_blend_start_K": minimum_start,
+        "entropy_anchor_temperature_K": entropy_temperature,
+        "entropy_anchor_target_J_mol_formula_K": entropy_target,
+    }
+    if entropy_temperature is None or entropy_target is None:
+        return original_start, metadata
+    if entropy_temperature < float(np.min(T_grid)) or entropy_temperature > float(np.max(T_grid)):
+        metadata["reason"] = "entropy anchor is outside the plotting/integration grid"
+        return original_start, metadata
+    if entropy_temperature >= blend_end:
+        metadata["reason"] = "entropy anchor is not below the blend end"
+        return original_start, metadata
+    lower_bound = max(float(minimum_start), float(np.min(qha_T)), float(np.min(T_grid)))
+    upper_bound = min(float(original_start), float(entropy_temperature))
+    if upper_bound <= lower_bound:
+        metadata["reason"] = "no allowed lower blend-start interval reaches the entropy anchor"
+        return original_start, metadata
+
+    def entropy_with_start(start: float) -> float:
+        cp_grid, _weights = blend_qha_md_on_grid(
+            T_grid,
+            qha_T,
+            qha_Cp,
+            md_Cp_grid,
+            start,
+            blend_end,
+        )
+        Cp_over_T = np.divide(
+            cp_grid,
+            T_grid,
+            out=np.zeros_like(cp_grid),
+            where=T_grid > 0.0,
+        )
+        S_grid = trapz_cumulative(T_grid, Cp_over_T)
+        return float(np.interp(entropy_temperature, T_grid, S_grid))
+
+    current = entropy_with_start(original_start)
+    low = entropy_with_start(lower_bound)
+    metadata["S_at_original_blend_start_J_mol_formula_K"] = current
+    metadata["S_at_minimum_blend_start_J_mol_formula_K"] = low
+    lo_value, hi_value = sorted((current, low))
+    if entropy_target < lo_value or entropy_target > hi_value:
+        metadata["reason"] = "entropy anchor is outside the reachable calibration range"
+        metadata["target_clipped_to_reachable_range"] = True
+        entropy_target = min(max(entropy_target, lo_value), hi_value)
+    direction = 1.0 if low >= current else -1.0
+    lo_t, hi_t = lower_bound, upper_bound
+    for _idx in range(40):
+        mid = 0.5 * (lo_t + hi_t)
+        mid_value = entropy_with_start(mid)
+        if direction * (mid_value - entropy_target) >= 0.0:
+            lo_t = mid
+        else:
+            hi_t = mid
+    calibrated = 0.5 * (lo_t + hi_t)
+    metadata.update(
+        {
+            "enabled": True,
+            "reason": "blend_start calibrated to experimental/database entropy anchor",
+            "calibrated_blend_start_K": calibrated,
+            "S_at_calibrated_blend_start_J_mol_formula_K": entropy_with_start(calibrated),
+        }
+    )
+    return calibrated, metadata
+
+
 def cp_overlap_diagnostics_np(
     qha_T: np.ndarray,
     qha_Cp: np.ndarray,
@@ -1960,6 +2044,9 @@ def build_combined_thermo(summaries: list[dict],
                           qha_splice_min_switch_temperature: float = 50.0,
                           qha_splice_blend_start: Optional[float] = None,
                           qha_splice_blend_end: Optional[float] = None,
+                          entropy_anchor_blend_T: Optional[float] = None,
+                          entropy_anchor_blend_S_J_mol_K: Optional[float] = None,
+                          entropy_anchor_min_blend_start: float = 200.0,
                           structure_reference_temperature: Optional[float] = None,
                           volume_reference: Optional[float] = None,
                           lattice_references: Optional[dict[str, float]] = None,
@@ -2176,6 +2263,17 @@ def build_combined_thermo(summaries: list[dict],
                 blend_end = float(qha_splice_blend_end)
             if blend_end < blend_start:
                 raise ValueError("--qha-splice-blend-end must be >= --qha-splice-blend-start")
+            blend_start, entropy_blend_calibration = calibrate_blend_start_for_entropy_grid(
+                T_grid,
+                qha_low_t_curve["T"],
+                qha_low_t_curve["Cp"],
+                Cp_md_grid,
+                blend_start,
+                blend_end,
+                entropy_anchor_blend_T,
+                entropy_anchor_blend_S_J_mol_K,
+                entropy_anchor_min_blend_start,
+            )
             Cp_grid, qha_blend_weights = blend_qha_md_on_grid(
                 T_grid,
                 qha_low_t_curve["T"],
@@ -2295,6 +2393,7 @@ def build_combined_thermo(summaries: list[dict],
                 "blend_start_K": float(blend_start),
                 "blend_end_K": float(blend_end),
                 "blend_function": "smoothstep w=3x^2-2x^3",
+                "entropy_anchor_blend_calibration": entropy_blend_calibration,
                 "cp_overlap_diagnostics": {
                     key: value
                     for key, value in diagnostics.items()
@@ -2930,6 +3029,15 @@ def main(argv: list[str] | None = None) -> None:
         help="End temperature for smooth QHA-to-MD Cp blending in K.",
     )
     ap.add_argument(
+        "--entropy-anchor-min-blend-start",
+        type=float,
+        default=200.0,
+        help=(
+            "Lowest allowed QHA-to-MD blend-start temperature when experimental/database "
+            "S is used to calibrate the integrated hybrid entropy."
+        ),
+    )
+    ap.add_argument(
         "--structure-reference-temperature",
         type=float,
         default=None,
@@ -3066,6 +3174,18 @@ def main(argv: list[str] | None = None) -> None:
             )
         except (FileNotFoundError, ValueError) as exc:
             ap.error(str(exc))
+    if args.entropy_anchor_min_blend_start < 0.0:
+        ap.error("--entropy-anchor-min-blend-start must be non-negative")
+
+    entropy_anchor_blend_T = None
+    entropy_anchor_blend_S = None
+    if args.thermo_anchor_T is not None and args.thermo_anchor_S is not None:
+        entropy_anchor_blend_T = args.thermo_anchor_T
+        entropy_anchor_blend_S = args.thermo_anchor_S
+    db_anchor = (anchor_metadata or {}).get("thermo_db_anchor")
+    if db_anchor:
+        entropy_anchor_blend_T = db_anchor["temperature_value_K"]
+        entropy_anchor_blend_S = db_anchor["S_J_mol_formula_K"]
 
     try:
         lattice_references = parse_lattice_references(args.lattice_reference)
@@ -3092,6 +3212,9 @@ def main(argv: list[str] | None = None) -> None:
             qha_splice_min_switch_temperature=args.qha_splice_min_switch_temperature,
             qha_splice_blend_start=args.qha_splice_blend_start,
             qha_splice_blend_end=args.qha_splice_blend_end,
+            entropy_anchor_blend_T=entropy_anchor_blend_T,
+            entropy_anchor_blend_S_J_mol_K=entropy_anchor_blend_S,
+            entropy_anchor_min_blend_start=args.entropy_anchor_min_blend_start,
             structure_reference_temperature=args.structure_reference_temperature,
             volume_reference=args.volume_reference,
             lattice_references=lattice_references,
