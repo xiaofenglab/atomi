@@ -149,6 +149,8 @@ plotcp2k cp2k.log
 plotcp2k cp2k.log trajectory.xyz
 cp2k-build-acid-box ga_cl4.xyz --box 26 --density-preset regular --charge 0 --cl 0 --h3o 0
 cp2k-build-acid-box ga_cl4.xyz --box 26 --water-density 0.75 --project ga_cl4_26A
+cp2k-geoopt-input --xyz ga_cl4_26A_box.xyz --stage cheap --mode start --box 26 --charge 0
+cp2k-geoopt-input --xyz ga_cl4_26A-pos-1.xyz --stage refine --mode restart --box 26 --max-iter 150
 plotmace mace_train.log
 plotmace mace_train.log 200 5
 convertmace modelname.model
@@ -623,6 +625,44 @@ ga_cl4_26A_restraints.tsv
 By default it auto-detects the first metal atom and restrains nearby non-H ligands within
 `--ligand-cutoff` using the seed metal-ligand distances as targets. Review `CHARGE`, `KIND`
 potentials, and the CP2K data paths before production runs on a new cluster.
+
+## CP2K Staged GEO_OPT Inputs
+
+`cp2k-geoopt-input` writes a CP2K GEO_OPT input from an existing XYZ. It is useful after
+the initial box build when you want staged geometry optimization inputs for cheap, refine,
+or final passes.
+
+```bash
+cp2k-geoopt-input \
+  --xyz ga_cl4_26A_box.xyz \
+  --stage cheap \
+  --mode start \
+  --box 26 \
+  --charge 0 \
+  --project ga_cl4_26A_cheap
+```
+
+For restarts, `--max-iter` means additional optimization steps. Atomi reads
+`STEP_START_VAL` from the restart file and writes `MAX_ITER = STEP_START_VAL + additional`.
+
+```bash
+cp2k-geoopt-input \
+  --xyz ga_cl4_26A-pos-1.xyz \
+  --stage refine \
+  --mode restart \
+  --restart-file ga_cl4_26A-1.restart \
+  --max-iter 150 \
+  --box 26 \
+  --charge 0
+```
+
+The command can also inline restraint snippets from `cp2k-build-acid-box`:
+
+```bash
+cp2k-geoopt-input --xyz ga_cl4_26A_box.xyz --stage refine --mode start --box 26 \
+  --colvar-file ga_cl4_26A_restraints_colvar.inc \
+  --constraint-file ga_cl4_26A_restraints_constraint.inc
+```
 
 ## Recommended Migration Pattern
 
