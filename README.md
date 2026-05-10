@@ -172,6 +172,7 @@ vasp-stress-force-candidates --output-root DFT_STRESS_FORCE --vasp-template VASP
 vasp-defect-candidates --output-root DFT_DEFECTS --vasp-template VASP_TEMPLATE --species O U
 vasp-md-snapshot-candidates --config config_production.json --output-root DFT_MD_SNAPSHOTS --vasp-template VASP_TEMPLATE --last-frames 5
 vasp-qha-summary --root ./2x2x2 --outdir ./summary --phonopy-module phys/phonopy/2.38.1
+vasp-qha-run --root ./2x2x2 --outdir ./qha_run --phonopy-module phys/phonopy/2.38.1
 md-engine-init my_lammps_md_project
 md-engine --config config.json
 md-engine --resume --config config.json
@@ -798,6 +799,32 @@ vasp-qha-summary \
 
 `--phonopy-module` is recorded in the report as an HPC-specific hint. On another
 cluster, pass that site’s module name or omit the option.
+
+After the volume folders have `thermal_properties.yaml` files, use
+`vasp-qha-run` to generate the `e-v.dat`, an input manifest, and a reusable
+`run_phonopy_qha.sh` script:
+
+```bash
+vasp-qha-run \
+  --root ./2x2x2 \
+  --outdir ./qha_run \
+  --phonopy-module phys/phonopy/2.38.1
+```
+
+The generated script is equivalent to:
+
+```bash
+module load phys/phonopy/2.38.1
+phonopy-qha e-v.dat \
+  ../2x2x2/V0.980/thermal_properties.yaml \
+  ../2x2x2/V1.000/thermal_properties.yaml \
+  ../2x2x2/V1.020/thermal_properties.yaml
+```
+
+If a thermal YAML is outside the scanned volume folders, pass explicit
+`--thermal-yaml path/to/thermal_properties.yaml` options in the same order as
+the E-V rows. The command checks that the number of thermal YAML files matches
+the number of valid E-V points before writing the run script.
 
 ## Recommended Migration Pattern
 
