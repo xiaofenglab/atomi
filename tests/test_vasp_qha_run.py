@@ -1,4 +1,5 @@
 import csv
+import py_compile
 from pathlib import Path
 
 import pytest
@@ -51,6 +52,8 @@ def test_qha_run_writes_ev_manifest_and_script(tmp_path: Path) -> None:
     assert "phonopy-qha e-v.dat" in script
     assert "../2x2x2/V0.980/thermal_properties.yaml" in script
     assert "../2x2x2/V1.000/thermal_properties.yaml" in script
+    assert (outdir / "plot_qha_results.py").exists()
+    py_compile.compile(str(outdir / "plot_qha_results.py"), doraise=True)
 
 
 def test_qha_run_accepts_explicit_volume_folders(tmp_path: Path) -> None:
@@ -115,6 +118,32 @@ def test_qha_run_uses_explicit_thermal_yaml_order(tmp_path: Path) -> None:
     manifest = (tmp_path / "qha" / "qha_inputs.csv").read_text(encoding="utf-8")
     assert "../manual-b.yaml" in manifest
     assert "../manual-a.yaml" in manifest
+
+
+def test_qha_run_can_append_plot_command(tmp_path: Path) -> None:
+    root = tmp_path / "2x2x2"
+    outdir = tmp_path / "qha_run"
+    parent = root / "V1.000" / "parent_static"
+    parent.mkdir(parents=True)
+    write_outcar(parent / "OUTCAR", energy=-10.0, volume=100.0, natoms=12)
+    (root / "V1.000" / "thermal_properties.yaml").write_text("thermal\n", encoding="utf-8")
+
+    main(
+        [
+            "--root",
+            str(root),
+            "--outdir",
+            str(outdir),
+            "--plot-after-qha",
+            "--plot-t-min",
+            "300",
+            "--plot-t-max",
+            "1500",
+        ]
+    )
+
+    script = (outdir / "run_phonopy_qha.sh").read_text(encoding="utf-8")
+    assert "python plot_qha_results.py --outdir qha_plots --t-min 300.0 --t-max 1500.0" in script
 
 
 def test_qha_run_rejects_thermal_yaml_count_mismatch(tmp_path: Path) -> None:

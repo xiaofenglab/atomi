@@ -847,6 +847,35 @@ phonopy-qha e-v.dat \
   ../2x2x2/V1.020/thermal_properties.yaml
 ```
 
+`vasp-qha-run` also writes `plot_qha_results.py`. After `phonopy-qha` finishes,
+run it in the QHA output folder:
+
+```bash
+cd qha_run
+python plot_qha_results.py
+```
+
+By default, the plotter uses the full temperature range present in each
+phonopy-QHA `.dat` file and writes PNGs plus `qha_plots/plot_index.csv`.
+Limit the visualized temperature range when you want a specific window:
+
+```bash
+python plot_qha_results.py --t-min 300 --t-max 1500
+```
+
+To have the generated shell script run plotting immediately after
+`phonopy-qha`, add the plot options when preparing the QHA run:
+
+```bash
+vasp-qha-run \
+  --root ./2x2x2 \
+  --outdir ./qha_run \
+  --phonopy-module phys/phonopy/2.38.1 \
+  --plot-after-qha \
+  --plot-t-min 300 \
+  --plot-t-max 1500
+```
+
 If a thermal YAML is outside the scanned volume folders, pass explicit
 `--thermal-yaml path/to/thermal_properties.yaml` options in the same order as
 the E-V rows. The command checks that the number of thermal YAML files matches
