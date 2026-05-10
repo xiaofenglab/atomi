@@ -304,14 +304,19 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
-def write_report(path: Path, root: Path, rows: list[dict], phonopy_module: str | None) -> None:
+def write_report(
+    path: Path,
+    source_label: str,
+    rows: list[dict],
+    phonopy_module: str | None,
+) -> None:
     valid = [
         row for row in rows if is_finite(row.get("energy_eV")) and is_finite(row.get("volume_A3"))
     ]
     with path.open("w", encoding="utf-8") as handle:
         handle.write("VASP phonopy QHA summary report\n")
         handle.write("=" * 40 + "\n")
-        handle.write(f"Root: {root}\n")
+        handle.write(f"Source: {source_label}\n")
         if phonopy_module:
             handle.write(f"Phonopy module hint: module load {phonopy_module}\n")
         handle.write(f"Volume folders scanned: {len(rows)}\n")
@@ -354,12 +359,40 @@ def maybe_plot(path: Path, rows: list[dict]) -> bool:
     return True
 
 
+def selected_volume_dirs(args: argparse.Namespace, parser: argparse.ArgumentParser) -> list[Path]:
+    if args.volume_folder:
+        dirs = [path.resolve() for path in args.volume_folder]
+        missing = [path for path in dirs if not path.is_dir()]
+        if missing:
+            parser.error("volume folder not found: " + ", ".join(str(path) for path in missing))
+        return dirs
+
+    root = args.root.resolve()
+    if not root.is_dir():
+        parser.error(f"root directory not found: {root}")
+    dirs = volume_dirs(root, args.volume_pattern)
+    return dirs if dirs else [root]
+
+
+def source_label(args: argparse.Namespace) -> str:
+    if args.volume_folder:
+        return "explicit volume folders: " + ", ".join(str(path) for path in args.volume_folder)
+    return str(args.root.resolve())
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vasp-qha-summary",
         description="Summarize VASP/phonopy QHA volume folders and displacement coverage.",
     )
-    parser.add_argument("--root", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--root", type=Path)
+    source.add_argument(
+        "--volume-folder",
+        type=Path,
+        action="append",
+        help="Explicit QHA volume folder. Repeat in any order; rows are sorted later.",
+    )
     parser.add_argument("--outdir", type=Path, required=True)
     parser.add_argument("--volume-pattern", default="V*")
     parser.add_argument("--disp-pattern", default="disp-*")
@@ -373,16 +406,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
-    root = args.root.resolve()
     outdir = args.outdir.resolve()
-    if not root.is_dir():
-        parser.error(f"root directory not found: {root}")
     if args.atoms_per_fu <= 0:
         parser.error("--atoms-per-fu must be positive")
     outdir.mkdir(parents=True, exist_ok=True)
-    dirs = volume_dirs(root, args.volume_pattern)
-    if not dirs:
-        dirs = [root]
+    dirs = selected_volume_dirs(args, parser)
     rows = [summarize_volume(directory, args) for directory in dirs]
     rows.sort(
         key=lambda row: (
@@ -395,7 +423,7 @@ def main(argv: list[str] | None = None) -> None:
     report_path = outdir / "qha_summary_report.txt"
     plot_path = outdir / "qha_parent_energy_vs_volume.png"
     write_csv(csv_path, rows)
-    write_report(report_path, root, rows, args.phonopy_module)
+    write_report(report_path, source_label(args), rows, args.phonopy_module)
     print(csv_path)
     print(report_path)
     if not args.no_plot and maybe_plot(plot_path, rows):

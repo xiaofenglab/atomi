@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from atomi.vasp.qha_summary import is_finite, summarize_volume, volume_dirs
+from atomi.vasp.qha_summary import is_finite, selected_volume_dirs, summarize_volume
 
 
 def as_float(value) -> float:
@@ -22,13 +22,11 @@ def load_summary_csv(path: Path) -> list[dict]:
         return list(csv.DictReader(handle))
 
 
-def scan_volume_rows(args: argparse.Namespace) -> list[dict]:
-    root = args.root.resolve()
-    if not root.is_dir():
-        raise ValueError(f"root directory not found: {root}")
-    dirs = volume_dirs(root, args.volume_pattern)
-    if not dirs:
-        dirs = [root]
+def scan_volume_rows(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+) -> list[dict]:
+    dirs = selected_volume_dirs(args, parser)
     summary_args = argparse.Namespace(
         parent_pattern=args.parent_pattern,
         disp_pattern=args.disp_pattern,
@@ -37,12 +35,10 @@ def scan_volume_rows(args: argparse.Namespace) -> list[dict]:
     return [summarize_volume(directory, summary_args) for directory in dirs]
 
 
-def source_rows(args: argparse.Namespace) -> list[dict]:
+def source_rows(args: argparse.Namespace, parser: argparse.ArgumentParser) -> list[dict]:
     if args.summary_csv:
         return load_summary_csv(args.summary_csv.resolve())
-    if args.root:
-        return scan_volume_rows(args)
-    raise ValueError("provide either --root or --summary-csv")
+    return scan_volume_rows(args, parser)
 
 
 def sort_key(row: dict, sort_by: str) -> tuple:
@@ -158,6 +154,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--root", type=Path, help="Folder containing QHA volume subfolders.")
+    source.add_argument(
+        "--volume-folder",
+        type=Path,
+        action="append",
+        help="Explicit QHA volume folder. Repeat once per volume.",
+    )
     source.add_argument("--summary-csv", type=Path, help="CSV from vasp-qha-summary.")
     parser.add_argument("--outdir", type=Path, required=True)
     parser.add_argument("--volume-pattern", default="V*")
@@ -187,7 +189,7 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--atoms-per-fu must be positive")
 
     try:
-        rows = qha_rows(source_rows(args), args.sort_by)
+        rows = qha_rows(source_rows(args, parser), args.sort_by)
     except ValueError as exc:
         parser.error(str(exc))
     if not rows:

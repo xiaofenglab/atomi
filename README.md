@@ -803,6 +803,18 @@ vasp-qha-summary \
 `--phonopy-module` is recorded in the report as an HPC-specific hint. On another
 cluster, pass that site’s module name or omit the option.
 
+If one or more volumes live outside the common root, provide the folders
+explicitly instead of using `--root`:
+
+```bash
+vasp-qha-summary \
+  --volume-folder ./2x2x2/V1.000 \
+  --volume-folder ../../phonon_eq/V1.002_run \
+  --volume-folder ./2x2x2/V1.005 \
+  --outdir ./summary \
+  --phonopy-module phys/phonopy/2.38.1
+```
+
 After the volume folders have `thermal_properties.yaml` files, use
 `vasp-qha-run` to generate the `e-v.dat`, an input manifest, and a reusable
 `run_phonopy_qha.sh` script:
@@ -810,6 +822,17 @@ After the volume folders have `thermal_properties.yaml` files, use
 ```bash
 vasp-qha-run \
   --root ./2x2x2 \
+  --outdir ./qha_run \
+  --phonopy-module phys/phonopy/2.38.1
+```
+
+`vasp-qha-run` accepts the same explicit volume folder style:
+
+```bash
+vasp-qha-run \
+  --volume-folder ./2x2x2/V1.000 \
+  --volume-folder ../../phonon_eq/V1.002_run \
+  --volume-folder ./2x2x2/V1.005 \
   --outdir ./qha_run \
   --phonopy-module phys/phonopy/2.38.1
 ```

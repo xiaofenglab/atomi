@@ -53,6 +53,39 @@ def test_qha_run_writes_ev_manifest_and_script(tmp_path: Path) -> None:
     assert "../2x2x2/V1.000/thermal_properties.yaml" in script
 
 
+def test_qha_run_accepts_explicit_volume_folders(tmp_path: Path) -> None:
+    root = tmp_path / "2x2x2"
+    outside = tmp_path / "phonon_eq" / "V1.002_run"
+    outdir = tmp_path / "qha_run"
+    for folder, energy, volume in (
+        (root / "V1.000", -10.0, 100.0),
+        (outside, -9.95, 100.2),
+    ):
+        parent = folder / "parent_static"
+        parent.mkdir(parents=True)
+        write_outcar(parent / "OUTCAR", energy=energy, volume=volume, natoms=12)
+        (folder / "thermal_properties.yaml").write_text("thermal\n", encoding="utf-8")
+
+    main(
+        [
+            "--volume-folder",
+            str(outside),
+            "--volume-folder",
+            str(root / "V1.000"),
+            "--outdir",
+            str(outdir),
+        ]
+    )
+
+    assert (outdir / "e-v.dat").read_text(encoding="utf-8").splitlines() == [
+        "100.0000000000  -10.0000000000",
+        "100.2000000000  -9.9500000000",
+    ]
+    script = (outdir / "run_phonopy_qha.sh").read_text(encoding="utf-8")
+    assert "../2x2x2/V1.000/thermal_properties.yaml" in script
+    assert "../phonon_eq/V1.002_run/thermal_properties.yaml" in script
+
+
 def test_qha_run_uses_explicit_thermal_yaml_order(tmp_path: Path) -> None:
     summary = tmp_path / "summary.csv"
     summary.write_text(

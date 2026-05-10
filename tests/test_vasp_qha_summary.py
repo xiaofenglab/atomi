@@ -98,3 +98,33 @@ def test_qha_summary_scans_volume_folders(tmp_path: Path) -> None:
     assert "phys/phonopy/2.38.1" in (outdir / "qha_summary_report.txt").read_text(
         encoding="utf-8"
     )
+
+
+def test_qha_summary_accepts_explicit_volume_folders(tmp_path: Path) -> None:
+    root = tmp_path / "2x2x2"
+    outside = tmp_path / "phonon_eq" / "V1.002_run"
+    outdir = tmp_path / "summary"
+    for folder, energy, volume in (
+        (root / "V1.000", -10.0, 100.0),
+        (outside, -9.95, 100.2),
+    ):
+        parent = folder / "parent_static"
+        parent.mkdir(parents=True)
+        write_outcar(parent / "OUTCAR", energy=energy, volume=volume, natoms=12)
+        (folder / "thermal_properties.yaml").write_text("thermal\n", encoding="utf-8")
+
+    main(
+        [
+            "--volume-folder",
+            str(root / "V1.000"),
+            "--volume-folder",
+            str(outside),
+            "--outdir",
+            str(outdir),
+            "--no-plot",
+        ]
+    )
+
+    rows = list(csv.DictReader((outdir / "qha_volume_summary.csv").open(encoding="utf-8")))
+    assert [row["volume_folder"] for row in rows] == ["V1.000", "V1.002_run"]
+    assert rows[1]["root"] == str(outside.resolve())
