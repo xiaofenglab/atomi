@@ -435,17 +435,17 @@ def check_equilibrium(cfg, stage, steps, T, V, PE):
         )
 
         if abs(summary["T_mean"] - target) > tol:
-            return False, f"T_mean_outside_tol ({summary['T_mean']:.3f} vs {target})"
+            return False, f"T_mean_outside_tol ({summary['T_mean']:.3f} vs {target}; tol={tol:.3f})"
 
         if summary["T_max"] > target * rules["runaway_temperature_factor"]:
             raise RuntimeError("Thermal runaway detected")
 
     if stage["type"] == "npt":
         if abs(summary["V_slope"]) > rules["volume_slope_tol"]:
-            return False, f"V_slope_too_large ({summary['V_slope']:.6e})"
+            return False, f"V_slope_too_large ({summary['V_slope']:.6e}; tol={rules['volume_slope_tol']:.6e})"
 
     if abs(summary["PE_slope"]) > rules["energy_slope_tol"]:
-        return False, f"PE_slope_too_large ({summary['PE_slope']:.6e})"
+        return False, f"PE_slope_too_large ({summary['PE_slope']:.6e}; tol={rules['energy_slope_tol']:.6e})"
 
     return True, "strict_equilibrium"
 
@@ -471,17 +471,17 @@ def check_stable_enough(cfg, stage, steps, T, V, PE):
         tol = max(loose_temp_min, target * loose_temp_fraction)
 
         if abs(summary["T_mean"] - target) > tol:
-            return False, f"stable_T_mean_outside_tol ({summary['T_mean']:.3f} vs {target})"
+            return False, f"stable_T_mean_outside_tol ({summary['T_mean']:.3f} vs {target}; tol={tol:.3f})"
 
         if summary["T_max"] > target * stable_runaway_factor:
             raise RuntimeError("Thermal runaway detected in stable check")
 
     if stage["type"] == "npt":
         if abs(summary["V_slope"]) > loose_v_slope:
-            return False, f"stable_V_slope_too_large ({summary['V_slope']:.6e})"
+            return False, f"stable_V_slope_too_large ({summary['V_slope']:.6e}; tol={loose_v_slope:.6e})"
 
     if abs(summary["PE_slope"]) > loose_pe_slope:
-        return False, f"stable_PE_slope_too_large ({summary['PE_slope']:.6e})"
+        return False, f"stable_PE_slope_too_large ({summary['PE_slope']:.6e}; tol={loose_pe_slope:.6e})"
 
     return True, "stable_enough"
 
@@ -526,6 +526,10 @@ def write_chunk_summary(chunk_dir, stage, steps, T, P, V, PE, note=""):
             lines.append(f"{k}: {v}")
 
     (chunk_dir / "summary.txt").write_text("\n".join(lines) + "\n")
+
+
+def write_decision(chunk_dir, lines):
+    (chunk_dir / "decision.txt").write_text("\n".join(lines) + "\n")
 
 
 def write_production_chunk_summary(chunk_dir, stage, steps, T, P, V, PE, note=""):
@@ -1283,6 +1287,15 @@ def run_stage(cfg, stage, structure, resume_mode=False):
             raise RuntimeError(f"Expected output restart file not found: {final_restart_path}")
 
         if stage_force_pass_requested(stage_dir):
+            write_decision(
+                chunk_dir,
+                [
+                    f"stage: {stage_name}",
+                    f"chunk: {chunk}",
+                    "decision: PASS",
+                    "reason: force_pass requested",
+                ],
+            )
             write_stage_outputs(
                 stage_dir,
                 stage_name,
@@ -1292,8 +1305,17 @@ def run_stage(cfg, stage, structure, resume_mode=False):
             )
             return (stage_dir / f"{stage_name}.restart").resolve()
 
+        decision_lines = [
+            f"stage: {stage_name}",
+            f"chunk: {chunk}",
+            f"accept_if_stable: {accept_if_stable}",
+            f"min_chunks_before_accept: {min_chunks_before_accept}",
+        ]
+
         ramp_ok, ramp_msg = ramp_target_reached(cfg, stage, steps, T)
+        decision_lines.append(f"ramp_check: {ramp_msg}")
         if ramp_ok:
+            write_decision(chunk_dir, decision_lines + ["decision: PASS", f"reason: {ramp_msg}"])
             write_stage_outputs(
                 stage_dir,
                 stage_name,
@@ -1304,7 +1326,9 @@ def run_stage(cfg, stage, structure, resume_mode=False):
             return (stage_dir / f"{stage_name}.restart").resolve()
 
         strict_ok, strict_msg = check_equilibrium(cfg, stage, steps, T, V, PE)
+        decision_lines.append(f"strict_check: {strict_msg}")
         if strict_ok:
+            write_decision(chunk_dir, decision_lines + ["decision: PASS", f"reason: {strict_msg}"])
             write_stage_outputs(
                 stage_dir,
                 stage_name,
@@ -1316,7 +1340,9 @@ def run_stage(cfg, stage, structure, resume_mode=False):
 
         if accept_if_stable and chunk >= min_chunks_before_accept:
             stable_ok, stable_msg = check_stable_enough(cfg, stage, steps, T, V, PE)
+            decision_lines.append(f"stable_check: {stable_msg}")
             if stable_ok:
+                write_decision(chunk_dir, decision_lines + ["decision: PASS", f"reason: {stable_msg}"])
                 write_stage_outputs(
                     stage_dir,
                     stage_name,
@@ -1325,7 +1351,14 @@ def run_stage(cfg, stage, structure, resume_mode=False):
                     pass_note=f"accepted stable enough at chunk {chunk}: {stable_msg}"
                 )
                 return (stage_dir / f"{stage_name}.restart").resolve()
+        elif accept_if_stable:
+            decision_lines.append(f"stable_check: skipped until chunk >= {min_chunks_before_accept}")
+        else:
+            decision_lines.append("stable_check: disabled")
 
+        decision_lines.append("decision: CONTINUE")
+        write_decision(chunk_dir, decision_lines)
+        print("  decision: " + "; ".join(decision_lines[4:]), flush=True)
         current_structure = final_restart_path
         if not constant_chunk_steps:
             run_steps = int(run_steps * steps_cfg["growth_factor"])
