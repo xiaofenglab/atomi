@@ -64,6 +64,25 @@ For an offline update, rebuild the wheel from the latest repository checkout, co
 python -m pip install --upgrade --force-reinstall dist/atomi-*.whl
 ```
 
+## Shared Google Drive Development
+
+If this repository is edited from a Google Drive shared folder by more than one Codex session or computer, use the guard script before changing files:
+
+```bash
+python tools/codex_sync_guard.py status --probe-wait 2
+python tools/codex_sync_guard.py acquire --note "short description of planned edit"
+```
+
+After committing and pushing, release the edit lock:
+
+```bash
+git status
+git push origin main
+python tools/codex_sync_guard.py release --note "pushed latest changes"
+```
+
+The guard writes root-level `CODEX_EDIT_LOCK.json`, `CODEX_SYNC_STATUS.json`, and `CODEX_SYNC_PROBE.txt` files. These files are synced by Google Drive but ignored by Git. A clean status with no lock means another Codex can proceed. This is a practical coordination flag, not a perfect proof that every Google Drive client has finished downloading.
+
 ## Command Line
 
 After installation, the main command is:

@@ -12,3 +12,8 @@ dist/
 
 # Local-only raw script archive
 legacy_scripts/
+
+# Google Drive / multi-Codex local coordination flags
+CODEX_EDIT_LOCK.json
+CODEX_SYNC_STATUS.json
+CODEX_SYNC_PROBE.txt
