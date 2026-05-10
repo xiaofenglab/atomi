@@ -224,3 +224,56 @@ def test_qha_md_compare_writes_hybrid_cp_entropy(tmp_path: Path) -> None:
     assert metadata["switch_temperature_K"] == pytest.approx(500.0)
     assert (out / "hybrid_cp_qha_md.png").exists()
     assert (out / "hybrid_entropy_integrated_qha_md.png").exists()
+
+
+def test_hybrid_cp_switch_ignores_extrapolated_low_t_md_grid(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+    qha = tmp_path / "qha"
+    md = tmp_path / "md"
+    out = tmp_path / "overlay"
+    qha.mkdir()
+    md.mkdir()
+
+    write_qha_dat(qha / "Cp-temperature.dat", [(0.0, 0.0), (300.0, 60.0), (600.0, 70.0)])
+    write_qha_dat(qha / "entropy-temperature.dat", [(0.0, 0.0), (300.0, 20.0), (600.0, 30.0)])
+    (md / "thermo_functions_grid.csv").write_text(
+        "T_K,Cp_used_for_integration_J_per_mol_UO2_K,S_rel_J_mol_K\n"
+        "0,0,0\n"
+        "300,90,20\n"
+        "600,72,30\n"
+        "900,80,40\n",
+        encoding="utf-8",
+    )
+    (md / "all_T_summary.csv").write_text(
+        "target_T_K\n300\n600\n900\n",
+        encoding="utf-8",
+    )
+
+    main(
+        [
+            "--qha-dir",
+            str(qha),
+            "--md-dir",
+            str(md),
+            "--outdir",
+            str(out),
+            "--qha-formula-units",
+            "1",
+            "--md-formula-units",
+            "1",
+            "--target-z",
+            "1",
+            "--t-min",
+            "0",
+            "--t-max",
+            "900",
+        ]
+    )
+
+    rows = list(csv.DictReader((out / "hybrid_cp_entropy.csv").open()))
+    assert rows[0]["Cp_source"] == "QHA"
+    assert float(rows[1]["T_K"]) == pytest.approx(300.0)
+    assert rows[1]["Cp_source"] == "QHA"
+    metadata = json.loads((out / "hybrid_cp_entropy_metadata.json").read_text())
+    assert metadata["switch_method"] == "actual-md-overlap-closest-cp"
+    assert metadata["switch_temperature_K"] == pytest.approx(600.0)

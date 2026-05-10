@@ -938,9 +938,11 @@ hybrid Cp/S outputs: `hybrid_cp_qha_md.png`,
 `hybrid_cp_entropy_metadata.json`. The automatic switch temperature is chosen
 where QHA and MD Cp are closest inside their overlapping temperature range; if
 there is no overlap, it uses the midpoint between the QHA and MD temperature
-windows. The hybrid entropy is integrated from the hybrid Cp curve using
-`dS = Cp/T dT`, starting from QHA entropy at the first hybrid temperature when
-available. Override the automatic switch with
+windows. When `all_T_summary.csv` is present in the MD analysis folder, the
+switch search uses that actual MD temperature range so extrapolated low-T grid
+points do not cause an immediate switch to MD. The hybrid entropy is integrated
+from the hybrid Cp curve using `dS = Cp/T dT`, starting from QHA entropy at the
+first hybrid temperature when available. Override the automatic switch with
 `--hybrid-switch-temperature <T>` or skip these outputs with
 `--no-hybrid-cp-s`.
 

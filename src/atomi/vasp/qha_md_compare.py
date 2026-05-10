@@ -138,6 +138,18 @@ def md_series(
     return points, column
 
 
+def md_actual_temperature_bounds(md_dir: Path) -> tuple[float, float] | None:
+    rows = read_csv_rows(md_dir / "all_T_summary.csv")
+    temperatures = []
+    for row in rows:
+        temp = finite_float(row.get("T_K", row.get("target_T_K")))
+        if math.isfinite(temp):
+            temperatures.append(temp)
+    if not temperatures:
+        return None
+    return min(temperatures), max(temperatures)
+
+
 def finite_points(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
     return sorted(
         (temp, value)
@@ -355,6 +367,7 @@ def cp_switch_temperature(
     qha_points: list[tuple[float, float]],
     md_points: list[tuple[float, float]],
     requested: float | None = None,
+    md_temperature_bounds: tuple[float, float] | None = None,
 ) -> tuple[float | None, str]:
     qha_points = finite_points(qha_points)
     md_points = finite_points(md_points)
@@ -367,6 +380,11 @@ def cp_switch_temperature(
     qha_max = qha_points[-1][0]
     md_min = md_points[0][0]
     md_max = md_points[-1][0]
+    if md_temperature_bounds is not None:
+        md_min = max(md_min, md_temperature_bounds[0])
+        md_max = min(md_max, md_temperature_bounds[1])
+        if md_min > md_max:
+            return None, "no-actual-md-grid-overlap"
     overlap_min = max(qha_min, md_min)
     overlap_max = min(qha_max, md_max)
     if overlap_min <= overlap_max:
@@ -388,6 +406,8 @@ def cp_switch_temperature(
             return abs(qha_value - md_value)
 
         best = min(candidates, key=cp_delta)
+        if md_temperature_bounds is not None:
+            return best, "actual-md-overlap-closest-cp"
         return best, "overlap-closest-cp"
 
     if qha_max < md_min:
@@ -548,10 +568,12 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
             "md_cp_points": len(md_cp),
             "md_cp_column": md_cp_column,
         }
+    actual_md_bounds = md_actual_temperature_bounds(args.md_dir)
     switch_temp, switch_method = cp_switch_temperature(
         qha_cp,
         md_cp,
         args.hybrid_switch_temperature,
+        actual_md_bounds,
     )
     if switch_temp is None:
         return [], {
@@ -614,6 +636,8 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         "entropy_reference_note": entropy_note,
         "qha_cp_points": len(qha_cp),
         "md_cp_points": len(md_cp),
+        "actual_md_temperature_min_K": actual_md_bounds[0] if actual_md_bounds else None,
+        "actual_md_temperature_max_K": actual_md_bounds[1] if actual_md_bounds else None,
         "qha_entropy_points": len(qha_entropy),
         "md_entropy_points": len(md_entropy),
         "md_cp_column": md_cp_column,
