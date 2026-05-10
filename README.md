@@ -613,8 +613,9 @@ than a direct entropy anchor, avoiding double counting. The output metadata
 reports `S(300 K)` before and after the correction, the JAEA UO2 300 K entropy
 reference when available, the remaining entropy gap, and whether the selected
 Neel entropy explains that gap. Corrected S/H/G columns are written to the
-thermo grid, and corrected plots such as
-`hybrid_S_QHA_MD_neel_corrected.png` are added.
+thermo grid. When the correction is enabled, `hybrid_S_QHA_MD.png` is the
+Neel-corrected entropy curve for direct comparison with the experimental point,
+and `hybrid_S_QHA_MD_phonon_only.png` keeps the pre-correction diagnostic.
 
 For structural thermodynamics, CTE is not blended directly. The workflow
 blends corrected primary structural curves, `V(T)` and available lattice
@@ -1058,8 +1059,10 @@ thermo_qha_md --qha-dir ./qha_run --md-dir analysis/thermo_qha_splice --outdir .
 In this mode JAEA S/H/G points are plotted and used for diagnostics, but the
 entropy-anchor blend calibration is suppressed so the explicit Neel correction
 is not counted twice. The corrected S/H/G columns are added to
-`hybrid_cp_entropy.csv`, with corrected plots such as
-`hybrid_S_QHA_MD_neel_corrected.png`.
+`hybrid_cp_entropy.csv`. When the correction is enabled,
+`hybrid_S_QHA_MD.png` is the Neel-corrected entropy curve for direct comparison
+with JAEA, and `hybrid_S_QHA_MD_phonon_only.png` keeps the pre-correction
+diagnostic.
 
 For structural quantities, the compare command follows the same rule as
 `thermo_lammps`: it does not blend CTE directly. It corrects and blends V/a

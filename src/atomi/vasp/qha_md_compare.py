@@ -1773,13 +1773,13 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
     )
     plot_hybrid_quantity(
         entropy_png,
-        "Integrated Hybrid QHA+MD Entropy",
+        "Hybrid QHA+MD Entropy",
         f"S ({cp_label})",
         qha_entropy,
         md_entropy,
         hybrid_rows,
-        "S_integrated",
-        "Integrated hybrid S",
+        "S_neel_corrected" if neel_metadata.get("applied") else "S_integrated",
+        "Hybrid S with Neel correction" if neel_metadata.get("applied") else "Integrated hybrid S",
         blend_start,
         blend_end,
         args,
@@ -1788,14 +1788,14 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
     )
     if neel_metadata.get("applied"):
         plot_hybrid_quantity(
-            args.outdir / "hybrid_S_QHA_MD_neel_corrected.png",
-            "Neel-Corrected Hybrid QHA+MD Entropy",
+            args.outdir / "hybrid_S_QHA_MD_phonon_only.png",
+            "Phonon-Only Hybrid QHA+MD Entropy",
             f"S ({cp_label})",
             qha_entropy,
             md_entropy,
             hybrid_rows,
-            "S_neel_corrected",
-            "Neel-corrected hybrid S",
+            "S_integrated",
+            "Phonon-only hybrid S",
             blend_start,
             blend_end,
             args,
