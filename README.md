@@ -147,6 +147,7 @@ plotvasp4 vasp.outA vasp.outB vasp.outC vasp.outD 200
 plotlammps log.lammps
 plotcp2k cp2k.log
 plotcp2k cp2k.log trajectory.xyz
+cp2k-rotate-seed ga_cl4.xyz --atom1 1 --atom2 2 --axis z -o ga_cl4_rot.xyz
 cp2k-build-acid-box ga_cl4.xyz --box 26 --density-preset regular --charge 0 --cl 0 --h3o 0
 cp2k-build-acid-box ga_cl4.xyz --box 26 --water-density 0.75 --project ga_cl4_26A
 cp2k-geoopt-input --xyz ga_cl4_26A_box.xyz --stage cheap --mode start --box 26 --charge 0
@@ -595,6 +596,19 @@ For MD logs, `plotcp2k` calls the packaged bond-tracking and ETA helpers when us
 If no trajectory is found, the MD monitor still plots energy/temperature/SCF data and skips bond panels.
 
 ## CP2K AIMD Box Builder
+
+Use `cp2k-rotate-seed` first when a bare metal-ligand XYZ should be oriented before
+solvation. It translates `--atom1` to the origin and rotates the `atom1 -> atom2`
+vector onto a target axis. If a point-charge file is provided, it applies the same
+coordinate transform and writes the rotation matrix for reproducibility.
+
+```bash
+cp2k-rotate-seed ga_cl4.xyz \
+  --atom1 1 \
+  --atom2 2 \
+  --axis z \
+  -o ga_cl4_rot.xyz
+```
 
 `cp2k-build-acid-box` builds an explicit-water CP2K AIMD starting box from a metal-ligand
 XYZ seed. Seed atoms are kept first, so generated metal-ligand restraint indices remain stable.

@@ -168,6 +168,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cp2k_extract_frames.add_argument("extract_args", nargs=argparse.REMAINDER)
 
+    cp2k_rotate_seed = subparsers.add_parser(
+        "cp2k-rotate-seed",
+        help="Rotate a metal-ligand XYZ seed before CP2K box building.",
+    )
+    cp2k_rotate_seed.add_argument("rotate_args", nargs=argparse.REMAINDER)
+
     mace_live = subparsers.add_parser(
         "mace-live",
         help="Live terminal plot for MACE training logs.",
@@ -337,6 +343,11 @@ def main(argv: list[str] | None = None) -> None:
 
         cp2k_extract_frames_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "cp2k-rotate-seed":
+        from atomi.cp2k.rotate_seed import main as cp2k_rotate_seed_main
+
+        cp2k_rotate_seed_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "vasp-outcar":
         extv(raw_args[1:])
         return
@@ -501,6 +512,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.cp2k.extract_frames import main as cp2k_extract_frames_main
 
         cp2k_extract_frames_main(args.extract_args)
+        return
+
+    if args.subcommand == "cp2k-rotate-seed":
+        from atomi.cp2k.rotate_seed import main as cp2k_rotate_seed_main
+
+        cp2k_rotate_seed_main(args.rotate_args)
         return
 
     if args.subcommand == "mace-live":
