@@ -2315,6 +2315,11 @@ def build_combined_thermo(summaries: list[dict],
         )
         if len(T_grid) and abs(T_grid[0]) <= 1.0e-12:
             S_rel_J_mol_K_grid = trapz_cumulative(T_grid, Cp_over_T)
+        enthalpy_shift = 0.0
+        if thermo_anchor_T is not None and thermo_anchor_H_J_mol is not None:
+            current_anchor_H = float(np.interp(thermo_anchor_T, T_grid, H_rel_J_mol_grid))
+            enthalpy_shift = float(thermo_anchor_H_J_mol) - current_anchor_H
+            H_rel_J_mol_grid = H_rel_J_mol_grid + enthalpy_shift
         G_rel_J_mol_grid = H_rel_J_mol_grid - T_grid * S_rel_J_mol_K_grid
         qha_splice_metadata["entropy_reference"] = {
             "T_K": 0.0 if len(T_grid) and abs(T_grid[0]) <= 1.0e-12 else float(reference_T),
@@ -2325,6 +2330,12 @@ def build_combined_thermo(summaries: list[dict],
             "T_K": float(reference_T),
             "H_J_mol_formula": switch_H,
             "source": "QHA H integrated from QHA Cp at blend_start",
+        }
+        qha_splice_metadata["enthalpy_anchor_shift"] = {
+            "anchor_T_K": thermo_anchor_T,
+            "anchor_H_J_mol_formula": thermo_anchor_H_J_mol,
+            "shift_J_mol_formula": enthalpy_shift,
+            "source": "manual --thermo-anchor-H" if thermo_anchor_H_J_mol is not None else None,
         }
 
     # Interpolate grid relative functions back to MD T for the summary table.

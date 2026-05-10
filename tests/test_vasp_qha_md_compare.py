@@ -411,6 +411,63 @@ def test_qha_md_hybrid_entropy_is_zero_at_zero_kelvin(tmp_path: Path) -> None:
     assert "S(0 K)=0" in metadata["entropy_reference_note"]
 
 
+def test_qha_md_hybrid_enthalpy_anchor_shifts_gibbs(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+    qha = tmp_path / "qha"
+    md = tmp_path / "md"
+    out = tmp_path / "overlay"
+    qha.mkdir()
+    md.mkdir()
+
+    write_qha_dat(qha / "Cp-temperature.dat", [(0.0, 0.0), (300.0, 60.0), (600.0, 70.0)])
+    write_qha_dat(qha / "entropy-temperature.dat", [(0.0, 0.0), (300.0, 20.0), (600.0, 30.0)])
+    (md / "thermo_functions_grid.csv").write_text(
+        "T_K,Cp_used_for_integration_J_per_mol_UO2_K,S_rel_J_mol_K\n"
+        "0,0,0\n"
+        "300,60,20\n"
+        "600,70,30\n",
+        encoding="utf-8",
+    )
+    (md / "all_T_summary.csv").write_text("target_T_K\n300\n600\n", encoding="utf-8")
+
+    main(
+        [
+            "--qha-dir",
+            str(qha),
+            "--md-dir",
+            str(md),
+            "--outdir",
+            str(out),
+            "--qha-formula-units",
+            "1",
+            "--md-formula-units",
+            "1",
+            "--target-z",
+            "1",
+            "--t-min",
+            "0",
+            "--t-max",
+            "600",
+            "--enthalpy-anchor-temperature",
+            "300",
+            "--enthalpy-anchor-value",
+            "-1084.49",
+            "--enthalpy-anchor-unit",
+            "kJ/mol-formula",
+        ]
+    )
+
+    rows = list(csv.DictReader((out / "hybrid_cp_entropy.csv").open()))
+    by_t = {float(row["T_K"]): row for row in rows}
+    h_300 = float(by_t[300.0]["H_integrated_kJ_mol"])
+    s_300 = float(by_t[300.0]["S_integrated"])
+    g_300 = float(by_t[300.0]["G_integrated_kJ_mol"])
+    assert h_300 == pytest.approx(-1084.49)
+    assert g_300 == pytest.approx(h_300 - 300.0 * s_300 / 1000.0)
+    metadata = json.loads((out / "hybrid_cp_entropy_metadata.json").read_text())
+    assert metadata["enthalpy_anchor"]["value_kJ_mol_basis"] == pytest.approx(-1084.49)
+
+
 def test_hybrid_cp_switch_rejects_extreme_low_t_match(tmp_path: Path) -> None:
     pytest.importorskip("matplotlib")
     qha = tmp_path / "qha"

@@ -540,6 +540,15 @@ For high-temperature integration anchored at 300 K:
 thermo_lammps --config config_production.json --outdir analysis/thermo_anchor_300K --min-window-ps 20 --window-stride-ps 2 --plot-bin-ps 0.5 --natoms 96 --plot-T-min 300 --plot-T-max 1500 --plot-T-step 10 --cp-source dH --thermo-anchor-T 300 --thermo-anchor-S 78.0 --thermo-anchor-Cp 64.0 --use-anchor-for-integration --use-anchor-Cp-in-fit --n-bootstrap 100
 ```
 
+For absolute/reference H and G, provide an enthalpy anchor such as an
+experimental standard formation enthalpy. With QHA low-T splice, `S(0 K)=0`
+is preserved, H is shifted to match `--thermo-anchor-H` at
+`--thermo-anchor-T`, and G is recomputed from `G = H - TS`:
+
+```bash
+thermo_lammps --config config_production.json --outdir analysis/thermo_qha_absH --natoms 96 --plot-T-min 0 --plot-T-max 1500 --cp-source dH --qha-anchor-dir ./qha_run --qha-anchor-formula-units 32 --qha-low-t-splice --thermo-anchor-T 300 --thermo-anchor-H -1084490
+```
+
 Instead of typing experimental or literature anchor values, a phonopy-QHA
 folder can provide missing anchor values from `Cp-temperature.dat`. This
 integrates QHA Cp to get `S(T_anchor)` and relative `H(T_anchor)`, and also
@@ -1011,7 +1020,7 @@ Atomi derives cubic QHA lattice `a(T)` from the normalized volume so the
 hybrid lattice diagnostic plot still shows a dashed QHA reference:
 
 ```bash
-thermo_qha_md --qha-dir ./qha_run --md-dir analysis/thermo_qha_splice --outdir ./qha_md_overlay --qha-formula-units 32 --md-formula-units 32 --target-z 4 --t-min 0 --t-max 1500 --structure-reference-temperature 300 --lattice-reference a=5.47 --structure-correction shift
+thermo_qha_md --qha-dir ./qha_run --md-dir analysis/thermo_qha_splice --outdir ./qha_md_overlay --qha-formula-units 32 --md-formula-units 32 --target-z 4 --t-min 0 --t-max 1500 --structure-reference-temperature 300 --lattice-reference a=5.47 --structure-correction shift --enthalpy-anchor-temperature 300 --enthalpy-anchor-value -1084.49 --enthalpy-anchor-unit kJ/mol-formula
 ```
 
 ## Recommended Migration Pattern

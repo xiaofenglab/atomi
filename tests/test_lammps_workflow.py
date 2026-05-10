@@ -2,6 +2,7 @@ import csv
 import json
 
 import numpy as np
+import pytest
 
 from atomi.lammps.workflow import effective_max_chunks, is_nvt_ramp_stage
 from atomi.lammps.thermo_series import (
@@ -174,6 +175,8 @@ def test_build_combined_thermo_can_use_qha_low_t_splice(tmp_path) -> None:
         volume_reference=104.0,
         lattice_references={"a": 4.2},
         structure_correction="shift",
+        thermo_anchor_T=300.0,
+        thermo_anchor_H_J_mol=-1084490.0,
     )
 
     rows = list(csv.DictReader((tmp_path / "out" / "thermo_functions_grid.csv").open()))
@@ -184,6 +187,10 @@ def test_build_combined_thermo_can_use_qha_low_t_splice(tmp_path) -> None:
     assert float(by_t[100.0]["qha_md_blend_weight"]) == 0.0
     assert float(by_t[0.0]["S_rel_J_per_mol_UO2_K"]) == 0.0
     assert min(float(row["S_rel_J_per_mol_UO2_K"]) for row in rows) >= -1.0e-12
+    assert float(by_t[300.0]["H_rel_J_per_mol_UO2"]) == -1084490.0
+    assert float(by_t[300.0]["G_rel_J_per_mol_UO2"]) == pytest.approx(
+        -1084490.0 - 300.0 * float(by_t[300.0]["S_rel_J_per_mol_UO2_K"])
+    )
     assert (tmp_path / "out" / "qha_low_t_splice_metadata.json").exists()
     assert (tmp_path / "out" / "hybrid_Cp_QHA_MD.png").exists()
     assert (tmp_path / "out" / "hybrid_S_QHA_MD.png").exists()
@@ -202,3 +209,4 @@ def test_build_combined_thermo_can_use_qha_low_t_splice(tmp_path) -> None:
     assert metadata["structural_hybrid"]["correction_type"] == "shift"
     assert metadata["structural_hybrid"]["lattice_references"]["a"] == 4.2
     assert metadata["entropy_reference"]["S_J_mol_formula_K"] == 0.0
+    assert metadata["enthalpy_anchor_shift"]["anchor_H_J_mol_formula"] == -1084490.0

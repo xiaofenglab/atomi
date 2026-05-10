@@ -597,11 +597,28 @@ def cp_over_t(cp_value: float, temp: float) -> float:
     return cp_value / temp
 
 
+def enthalpy_anchor_to_kj_per_basis(args: argparse.Namespace) -> float | None:
+    if args.enthalpy_anchor_value is None:
+        return None
+    value = float(args.enthalpy_anchor_value)
+    if args.enthalpy_anchor_unit == "J/mol-formula":
+        value /= 1000.0
+    elif args.enthalpy_anchor_unit == "J/mol-target-cell":
+        value /= 1000.0
+    if args.enthalpy_anchor_unit.endswith("mol-formula") and args.energy_basis == "target-cell":
+        value *= args.target_z
+    elif args.enthalpy_anchor_unit.endswith("mol-target-cell") and args.energy_basis == "per-formula":
+        value /= args.target_z
+    return value
+
+
 def add_integrated_thermo(
     rows: list[dict],
     qha_entropy: list[tuple[float, float]],
     qha_enthalpy: list[tuple[float, float]],
     blend_start: float,
+    enthalpy_anchor_temperature: float | None = None,
+    enthalpy_anchor_kj_mol: float | None = None,
 ) -> tuple[list[dict], str]:
     if not rows:
         return rows, "no-hybrid-cp"
@@ -664,6 +681,25 @@ def add_integrated_thermo(
             previous["T_K"] - current["T_K"]
         )
         current["H_integrated_kJ_mol"] = previous["H_integrated_kJ_mol"] - delta_h / 1000.0
+    anchor_note = "no external H anchor"
+    if enthalpy_anchor_temperature is not None and enthalpy_anchor_kj_mol is not None:
+        current_anchor = interpolate(
+            [(row["T_K"], row["H_integrated_kJ_mol"]) for row in rows],
+            enthalpy_anchor_temperature,
+        )
+        if current_anchor is None and rows:
+            current_anchor = min(
+                rows,
+                key=lambda row: abs(row["T_K"] - enthalpy_anchor_temperature),
+            )["H_integrated_kJ_mol"]
+        if current_anchor is not None and math.isfinite(current_anchor):
+            shift = enthalpy_anchor_kj_mol - current_anchor
+            for row in rows:
+                row["H_integrated_kJ_mol"] += shift
+            anchor_note = (
+                f"H shifted by {shift:g} kJ/mol-basis to match "
+                f"H({enthalpy_anchor_temperature:g} K)={enthalpy_anchor_kj_mol:g}"
+            )
     for row in rows:
         row["G_integrated_kJ_mol"] = (
             row["H_integrated_kJ_mol"] - row["T_K"] * row["S_integrated"] / 1000.0
@@ -673,7 +709,7 @@ def add_integrated_thermo(
         row["G_relative_kJ_mol"] = row["G_integrated_kJ_mol"] - g0
     return rows, (
         f"{note}; entropy_reference_T={entropy_ref_temp} K; "
-        f"{enthalpy_note}; enthalpy_reference_T={rows[ref_idx]['T_K']} K"
+        f"{enthalpy_note}; enthalpy_reference_T={rows[ref_idx]['T_K']} K; {anchor_note}"
     )
 
 
@@ -1079,12 +1115,15 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
     )
     md_entropy = filter_range(md_entropy, args.t_min, args.t_max)
     qha_enthalpy = filter_range(qha_derived_enthalpy(args), args.t_min, args.t_max)
+    enthalpy_anchor_kj_mol = enthalpy_anchor_to_kj_per_basis(args)
     hybrid_rows = build_hybrid_cp_rows(qha_cp, md_cp, blend_start, blend_end)
     hybrid_rows, entropy_note = add_integrated_thermo(
         hybrid_rows,
         qha_entropy,
         qha_enthalpy,
         blend_start,
+        enthalpy_anchor_temperature=args.enthalpy_anchor_temperature,
+        enthalpy_anchor_kj_mol=enthalpy_anchor_kj_mol,
     )
     if not hybrid_rows:
         return [], {
@@ -1410,6 +1449,13 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         "enthalpy_integration": "H(T) = H(T0) + integral_T0^T Cp(T') dT",
         "gibbs_integration": "G(T) = H(T) - T*S(T)",
         "entropy_reference_note": entropy_note,
+        "enthalpy_anchor": {
+            "T_K": args.enthalpy_anchor_temperature,
+            "value_input": args.enthalpy_anchor_value,
+            "unit_input": args.enthalpy_anchor_unit,
+            "value_kJ_mol_basis": enthalpy_anchor_kj_mol,
+            "basis": args.energy_basis,
+        },
         "structural_hybrid": structural_metadata,
         "cp_overlap_diagnostics": {
             key: value
@@ -1758,6 +1804,29 @@ def build_parser() -> argparse.ArgumentParser:
         default="both",
         help="Which structural source to correct to the reference value.",
     )
+    parser.add_argument(
+        "--enthalpy-anchor-temperature",
+        type=float,
+        default=None,
+        help="Temperature where hybrid H should match an external absolute/reference value.",
+    )
+    parser.add_argument(
+        "--enthalpy-anchor-value",
+        type=float,
+        default=None,
+        help="External H value used to shift hybrid H/G, e.g. standard formation enthalpy.",
+    )
+    parser.add_argument(
+        "--enthalpy-anchor-unit",
+        choices=(
+            "kJ/mol-formula",
+            "J/mol-formula",
+            "kJ/mol-target-cell",
+            "J/mol-target-cell",
+        ),
+        default="kJ/mol-formula",
+        help="Unit/basis of --enthalpy-anchor-value.",
+    )
     return parser
 
 
@@ -1769,6 +1838,8 @@ def main(argv: list[str] | None = None) -> None:
     args.outdir = args.outdir.resolve()
     if args.qha_formula_units <= 0 or args.md_formula_units <= 0 or args.target_z <= 0:
         parser.error("formula-unit counts and --target-z must be positive")
+    if (args.enthalpy_anchor_temperature is None) != (args.enthalpy_anchor_value is None):
+        parser.error("--enthalpy-anchor-temperature and --enthalpy-anchor-value must be used together")
     if not args.qha_dir.is_dir():
         parser.error(f"QHA directory not found: {args.qha_dir}")
     if not args.md_dir.is_dir():
