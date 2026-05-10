@@ -185,7 +185,7 @@ def stage_uses_constant_chunk_steps(stage):
 
 
 # ---------------------------------------------------
-# RAMP CONTINUATION
+# RAMP ACCEPTANCE
 # ---------------------------------------------------
 
 def is_nvt_ramp_stage(stage):
@@ -196,10 +196,23 @@ def is_nvt_ramp_stage(stage):
     return float(stage["temperature_start"]) != float(stage["temperature_end"])
 
 
+def effective_max_chunks(cfg, stage, fixed_step_stage=None):
+    if is_nvt_ramp_stage(stage):
+        return 1
+    if fixed_step_stage is None:
+        fixed_step_stage = stage_uses_fixed_steps(stage)
+    if "max_chunks" in stage:
+        return int(stage["max_chunks"])
+    if fixed_step_stage:
+        return 1
+    if stage.get("large_cell", False):
+        return int(cfg["max_chunks_large"])
+    return int(cfg["max_chunks_small"])
+
+
 def ramp_rules(cfg, stage):
     rules = {
         "tail_average_ps": 2.0,
-        "continue_from_tail_temperature": True,
         "accept_temperature_tol_min": None,
         "accept_temperature_tol_fraction": None,
     }
@@ -838,62 +851,6 @@ def chunk_dir_for_index(stage_dir, stage, chunk):
     return stage_dir / stage.get("chunk_name", f"chunk_{chunk:02d}")
 
 
-def previous_chunk_log(stage_dir, stage, stage_name, chunk):
-    if chunk <= 1:
-        return None
-    prev_chunk = chunk - 1
-    chunk_dir = chunk_dir_for_index(stage_dir, stage, prev_chunk)
-    log = chunk_dir / f"log.in.{stage_name}_c{prev_chunk:02d}"
-    if log.exists():
-        return log
-    matches = sorted(chunk_dir.glob("log.in.*"))
-    if matches:
-        return matches[-1]
-    return None
-
-
-def ramp_start_temperature_for_chunk(cfg, stage, stage_dir, stage_name, chunk):
-    if chunk <= 1 or not is_nvt_ramp_stage(stage):
-        return None
-
-    rules = ramp_rules(cfg, stage)
-    if not rules.get("continue_from_tail_temperature", True):
-        return None
-
-    log = previous_chunk_log(stage_dir, stage, stage_name, chunk)
-    if log is None:
-        print(
-            f"[warning] Could not find previous chunk log for ramp continuation in {stage_name}; "
-            "using configured temperature_start.",
-            flush=True,
-        )
-        return None
-
-    steps, T, _P, _V, _PE = parse_thermo(log)
-    tail_mean = tail_average_temperature(cfg, steps, T, rules["tail_average_ps"])
-    if tail_mean is None:
-        print(
-            f"[warning] Could not read previous tail temperature from {log}; "
-            "using configured temperature_start.",
-            flush=True,
-        )
-        return None
-
-    target = float(stage["temperature_end"])
-    original_start = float(stage["temperature_start"])
-    if target >= original_start:
-        tail_mean = min(max(tail_mean, original_start), target)
-    else:
-        tail_mean = max(min(tail_mean, original_start), target)
-
-    print(
-        f"  ramp continuation: tail {rules['tail_average_ps']} ps average from "
-        f"{log.parent.name} is {tail_mean:.3f} K; ramping toward {target:.3f} K",
-        flush=True,
-    )
-    return tail_mean
-
-
 def stage_artifact(stage_dir, stage_name):
     restart_candidate = stage_dir / f"{stage_name}.restart"
     data_candidate = stage_dir / f"{stage_name}.data"
@@ -1183,20 +1140,15 @@ def run_stage(cfg, stage, structure, resume_mode=False):
     steps_cfg = cfg["adaptive_steps"]
 
     initial_steps = steps_cfg["initial_small"]
-    max_chunks = cfg["max_chunks_small"]
 
     if stage.get("large_cell", False):
         initial_steps = steps_cfg["initial_large"]
-        max_chunks = cfg["max_chunks_large"]
 
     fixed_step_stage = stage_uses_fixed_steps(stage)
     constant_chunk_steps = fixed_step_stage or stage_uses_constant_chunk_steps(stage)
     if fixed_step_stage:
         initial_steps = resolve_run_steps(cfg, stage, default_steps=initial_steps)
-    if "max_chunks" in stage:
-        max_chunks = int(stage["max_chunks"])
-    elif fixed_step_stage:
-        max_chunks = 1
+    max_chunks = effective_max_chunks(cfg, stage, fixed_step_stage=fixed_step_stage)
 
     start_chunk, resumed_restart = find_latest_chunk_restart(
         stage_dir,
@@ -1221,13 +1173,20 @@ def run_stage(cfg, stage, structure, resume_mode=False):
     min_chunks_before_accept = stage.get("min_chunks_before_accept", 1)
     accept_if_stable = stage.get("accept_if_stable", False)
 
+    if is_nvt_ramp_stage(stage) and start_chunk > max_chunks:
+        raise RuntimeError(
+            f"ramp stage {stage_name} is limited to chunk_01 and has no PASS marker. "
+            "Remove or force-pass the stage directory, or rerun chunk_01 with a longer "
+            "time_ps/run_steps so the final tail reaches the target temperature."
+        )
+
     for chunk in range(start_chunk, max_chunks + 1):
         chunk_dir = chunk_dir_for_index(stage_dir, stage, chunk)
         chunk_dir.mkdir(exist_ok=True)
 
         input_name = f"in.{stage_name}_c{chunk:02d}"
         inputfile = chunk_dir / input_name
-        ramp_Tstart = ramp_start_temperature_for_chunk(cfg, stage, stage_dir, stage_name, chunk)
+        ramp_Tstart = None
 
         input_text, final_data_name, final_restart_name = generate_input(
             cfg,
@@ -1355,6 +1314,14 @@ def run_stage(cfg, stage, structure, resume_mode=False):
             decision_lines.append(f"stable_check: skipped until chunk >= {min_chunks_before_accept}")
         else:
             decision_lines.append("stable_check: disabled")
+
+        if is_nvt_ramp_stage(stage):
+            reason = (
+                "ramp stage limited to one chunk; rerun chunk_01 with longer "
+                "time_ps/run_steps if the target temperature was not reached"
+            )
+            write_decision(chunk_dir, decision_lines + ["decision: FAIL", f"reason: {reason}"])
+            raise RuntimeError(f"stage {stage_name} did not reach ramp target in chunk_01")
 
         decision_lines.append("decision: CONTINUE")
         write_decision(chunk_dir, decision_lines)
