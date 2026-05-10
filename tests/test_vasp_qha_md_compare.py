@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import atomi.vasp.qha_md_compare as qha_md_compare
 from atomi.vasp.qha_md_compare import main
 
 
@@ -466,6 +467,74 @@ def test_qha_md_hybrid_enthalpy_anchor_shifts_gibbs(tmp_path: Path) -> None:
     assert g_300 == pytest.approx(h_300 - 300.0 * s_300 / 1000.0)
     metadata = json.loads((out / "hybrid_cp_entropy_metadata.json").read_text())
     assert metadata["enthalpy_anchor"]["value_kJ_mol_basis"] == pytest.approx(-1084.49)
+
+
+def test_qha_md_can_fill_enthalpy_anchor_from_jaea(tmp_path: Path, monkeypatch) -> None:
+    pytest.importorskip("matplotlib")
+    qha = tmp_path / "qha"
+    md = tmp_path / "md"
+    out = tmp_path / "overlay"
+    qha.mkdir()
+    md.mkdir()
+
+    write_qha_dat(qha / "Cp-temperature.dat", [(0.0, 0.0), (300.0, 60.0), (600.0, 70.0)])
+    write_qha_dat(qha / "entropy-temperature.dat", [(0.0, 0.0), (300.0, 20.0), (600.0, 30.0)])
+    (md / "thermo_functions_grid.csv").write_text(
+        "T_K,Cp_used_for_integration_J_per_mol_UO2_K,S_rel_J_mol_K\n"
+        "0,0,0\n"
+        "300,60,20\n"
+        "600,70,30\n",
+        encoding="utf-8",
+    )
+    (md / "all_T_summary.csv").write_text("target_T_K\n300\n600\n", encoding="utf-8")
+
+    def fake_jaea_anchor(formula, temperature, *, phase="solid"):
+        return {
+            "database": "jaea",
+            "formula": formula,
+            "phase": phase,
+            "temperature_value_K": temperature,
+            "H_J_mol_formula": -1084490.0,
+            "S_J_mol_formula_K": 77.8,
+            "G_J_mol_formula": -1107840.0,
+            "Cp_J_mol_formula_K": 64.0,
+            "url": "https://example.test/UO2.html",
+        }
+
+    monkeypatch.setattr(qha_md_compare, "jaea_anchor", fake_jaea_anchor)
+    main(
+        [
+            "--qha-dir",
+            str(qha),
+            "--md-dir",
+            str(md),
+            "--outdir",
+            str(out),
+            "--qha-formula-units",
+            "1",
+            "--md-formula-units",
+            "1",
+            "--target-z",
+            "1",
+            "--t-min",
+            "0",
+            "--t-max",
+            "600",
+            "--thermo-db",
+            "jaea",
+            "--thermo-formula",
+            "UO2",
+            "--thermo-phase",
+            "solid",
+        ]
+    )
+
+    rows = list(csv.DictReader((out / "hybrid_cp_entropy.csv").open()))
+    by_t = {float(row["T_K"]): row for row in rows}
+    assert float(by_t[300.0]["H_integrated_kJ_mol"]) == pytest.approx(-1084.49)
+    metadata = json.loads((out / "hybrid_cp_entropy_metadata.json").read_text())
+    assert metadata["enthalpy_anchor"]["thermo_db_anchor"]["database"] == "jaea"
+    assert metadata["enthalpy_anchor"]["thermo_db_anchor"]["formula"] == "UO2"
 
 
 def test_hybrid_cp_switch_rejects_extreme_low_t_match(tmp_path: Path) -> None:

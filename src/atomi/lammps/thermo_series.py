@@ -146,6 +146,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from atomi.thermo_db import jaea_anchor
+
 
 # -----------------------------
 # constants
@@ -1893,6 +1895,37 @@ def fill_missing_anchors_from_qha(
     )
 
 
+def fill_enthalpy_anchor_from_thermo_db(
+    *,
+    thermo_db: Optional[str],
+    thermo_formula: Optional[str],
+    thermo_phase: str,
+    thermo_db_temperature: Optional[float],
+    thermo_anchor_T: Optional[float],
+    thermo_anchor_H_J_mol: Optional[float],
+    anchor_metadata: Optional[dict],
+) -> tuple[Optional[float], Optional[float], dict]:
+    if thermo_db is None:
+        return thermo_anchor_T, thermo_anchor_H_J_mol, anchor_metadata or {}
+    if thermo_db != "jaea":
+        raise ValueError(f"Unsupported thermodynamic database: {thermo_db}")
+    if not thermo_formula:
+        raise ValueError("--thermo-formula is required with --thermo-db")
+    anchor_t = thermo_anchor_T
+    if anchor_t is None:
+        anchor_t = thermo_db_temperature if thermo_db_temperature is not None else 300.0
+    db_anchor = jaea_anchor(thermo_formula, anchor_t, phase=thermo_phase)
+    filled_fields = []
+    qha_filled_h = "thermo_anchor_H_J_mol" in (anchor_metadata or {}).get("filled_fields", [])
+    if thermo_anchor_H_J_mol is None or qha_filled_h:
+        thermo_anchor_H_J_mol = db_anchor["H_J_mol_formula"]
+        filled_fields.append("thermo_anchor_H_J_mol")
+    metadata = dict(anchor_metadata or {})
+    metadata["thermo_db_anchor"] = db_anchor
+    metadata["thermo_db_filled_fields"] = filled_fields
+    return anchor_t, thermo_anchor_H_J_mol, metadata
+
+
 def build_combined_thermo(summaries: list[dict],
                           outdir: Path,
                           fit_degree: int = 3,
@@ -2788,6 +2821,28 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--use-anchor-Cp-in-fit", action="store_true",
                     help="Add/replace Cp(T_anchor) in the Cp fit used for S/H/G integration")
     ap.add_argument(
+        "--thermo-db",
+        choices=["jaea"],
+        default=None,
+        help="Thermodynamic database used to fill --thermo-anchor-H automatically.",
+    )
+    ap.add_argument(
+        "--thermo-formula",
+        default=None,
+        help="Formula key for --thermo-db, e.g. UO2 for the JAEA UO2 page.",
+    )
+    ap.add_argument(
+        "--thermo-phase",
+        default="solid",
+        help="Phase label recorded in metadata for database anchors.",
+    )
+    ap.add_argument(
+        "--thermo-db-temperature",
+        type=float,
+        default=None,
+        help="Database lookup temperature. Defaults to --thermo-anchor-T, or 300 K.",
+    )
+    ap.add_argument(
         "--qha-anchor-dir",
         type=Path,
         default=None,
@@ -2934,13 +2989,30 @@ def main(argv: list[str] | None = None) -> None:
         )
     except (FileNotFoundError, ValueError) as exc:
         ap.error(str(exc))
+    try:
+        thermo_anchor_T, thermo_anchor_H, anchor_metadata = fill_enthalpy_anchor_from_thermo_db(
+            thermo_db=args.thermo_db,
+            thermo_formula=args.thermo_formula,
+            thermo_phase=args.thermo_phase,
+            thermo_db_temperature=args.thermo_db_temperature,
+            thermo_anchor_T=thermo_anchor_T,
+            thermo_anchor_H_J_mol=thermo_anchor_H,
+            anchor_metadata=anchor_metadata,
+        )
+    except (OSError, ValueError) as exc:
+        ap.error(str(exc))
     if anchor_metadata:
-        print("QHA thermodynamic anchor:")
-        qha_anchor = anchor_metadata["qha_anchor"]
-        print(f"  T = {qha_anchor['T_K']:.6g} K")
-        print(f"  Cp = {qha_anchor['Cp_J_mol_formula_K']:.6g} J/mol-formula/K")
-        print(f"  S = {qha_anchor['S_J_mol_formula_K']:.6g} J/mol-formula/K")
-        print(f"  H = {qha_anchor['H_J_mol_formula']:.6g} J/mol-formula")
+        print("Thermodynamic anchor:")
+        qha_anchor = anchor_metadata.get("qha_anchor")
+        if qha_anchor:
+            print(f"  T = {qha_anchor['T_K']:.6g} K")
+            print(f"  Cp = {qha_anchor['Cp_J_mol_formula_K']:.6g} J/mol-formula/K")
+            print(f"  S = {qha_anchor['S_J_mol_formula_K']:.6g} J/mol-formula/K")
+            print(f"  H = {qha_anchor['H_J_mol_formula']:.6g} J/mol-formula")
+        db_anchor = anchor_metadata.get("thermo_db_anchor")
+        if db_anchor:
+            print(f"  DB = {db_anchor['database']} {db_anchor['formula']} {db_anchor['phase']}")
+            print(f"  DB H = {db_anchor['H_J_mol_formula']:.6g} J/mol-formula")
         if not args.use_anchor_for_integration:
             print("  note: add --use-anchor-for-integration to use QHA S/H in S/H/G curves")
         if not args.use_anchor_Cp_in_fit:

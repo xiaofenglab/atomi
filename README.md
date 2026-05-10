@@ -549,6 +549,14 @@ is preserved, H is shifted to match `--thermo-anchor-H` at
 thermo_lammps --config config_production.json --outdir analysis/thermo_qha_absH --natoms 96 --plot-T-min 0 --plot-T-max 1500 --cp-source dH --qha-anchor-dir ./qha_run --qha-anchor-formula-units 32 --qha-low-t-splice --thermo-anchor-T 300 --thermo-anchor-H -1084490
 ```
 
+For UO2, the same H anchor can be pulled from the JAEA thermodynamic database.
+When `--thermo-db jaea` is used, Atomi fills missing `--thermo-anchor-H` by
+default at `--thermo-anchor-T` or 300 K and records the source URL in metadata:
+
+```bash
+thermo_lammps --config config_production.json --outdir analysis/thermo_qha_jaeaH --natoms 96 --plot-T-min 0 --plot-T-max 1500 --cp-source dH --qha-anchor-dir ./qha_run --qha-anchor-formula-units 32 --qha-low-t-splice --thermo-db jaea --thermo-formula UO2 --thermo-phase solid
+```
+
 Instead of typing experimental or literature anchor values, a phonopy-QHA
 folder can provide missing anchor values from `Cp-temperature.dat`. This
 integrates QHA Cp to get `S(T_anchor)` and relative `H(T_anchor)`, and also
@@ -1008,7 +1016,9 @@ curves cross in the blend interval, and a warning when mismatch exceeds 10%.
 Override the automatic switch with `--hybrid-switch-temperature <T>`, choose
 the blend with `--hybrid-blend-start <T> --hybrid-blend-end <T>`, change the
 low-T guard with `--hybrid-min-switch-temperature <T>`, or skip these outputs
-with `--no-hybrid-cp-s`.
+with `--no-hybrid-cp-s`. `thermo_qha_md` also supports `--thermo-db jaea
+--thermo-formula UO2` to fill the H anchor automatically before recomputing
+hybrid G from anchored H and third-law S.
 
 For structural quantities, the compare command follows the same rule as
 `thermo_lammps`: it does not blend CTE directly. It corrects and blends V/a
@@ -1020,7 +1030,7 @@ Atomi derives cubic QHA lattice `a(T)` from the normalized volume so the
 hybrid lattice diagnostic plot still shows a dashed QHA reference:
 
 ```bash
-thermo_qha_md --qha-dir ./qha_run --md-dir analysis/thermo_qha_splice --outdir ./qha_md_overlay --qha-formula-units 32 --md-formula-units 32 --target-z 4 --t-min 0 --t-max 1500 --structure-reference-temperature 300 --lattice-reference a=5.47 --structure-correction shift --enthalpy-anchor-temperature 300 --enthalpy-anchor-value -1084.49 --enthalpy-anchor-unit kJ/mol-formula
+thermo_qha_md --qha-dir ./qha_run --md-dir analysis/thermo_qha_splice --outdir ./qha_md_overlay --qha-formula-units 32 --md-formula-units 32 --target-z 4 --t-min 0 --t-max 1500 --structure-reference-temperature 300 --lattice-reference a=5.47 --structure-correction shift --thermo-db jaea --thermo-formula UO2 --thermo-phase solid
 ```
 
 ## Recommended Migration Pattern

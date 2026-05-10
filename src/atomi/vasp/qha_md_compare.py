@@ -5,6 +5,8 @@ import math
 import sys
 from pathlib import Path
 
+from atomi.thermo_db import jaea_anchor
+
 
 EV_TO_KJ_PER_MOL = 96.48533212331002
 
@@ -612,6 +614,24 @@ def enthalpy_anchor_to_kj_per_basis(args: argparse.Namespace) -> float | None:
     return value
 
 
+def resolve_enthalpy_anchor(args: argparse.Namespace) -> tuple[float | None, dict]:
+    if args.thermo_db is None:
+        return enthalpy_anchor_to_kj_per_basis(args), {}
+    if args.thermo_db != "jaea":
+        raise ValueError(f"Unsupported thermodynamic database: {args.thermo_db}")
+    if not args.thermo_formula:
+        raise ValueError("--thermo-formula is required with --thermo-db")
+    anchor_t = args.enthalpy_anchor_temperature
+    if anchor_t is None:
+        anchor_t = args.thermo_db_temperature if args.thermo_db_temperature is not None else 300.0
+        args.enthalpy_anchor_temperature = anchor_t
+    record = jaea_anchor(args.thermo_formula, anchor_t, phase=args.thermo_phase)
+    if args.enthalpy_anchor_value is None:
+        args.enthalpy_anchor_value = record["H_J_mol_formula"]
+        args.enthalpy_anchor_unit = "J/mol-formula"
+    return enthalpy_anchor_to_kj_per_basis(args), record
+
+
 def add_integrated_thermo(
     rows: list[dict],
     qha_entropy: list[tuple[float, float]],
@@ -1115,7 +1135,7 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
     )
     md_entropy = filter_range(md_entropy, args.t_min, args.t_max)
     qha_enthalpy = filter_range(qha_derived_enthalpy(args), args.t_min, args.t_max)
-    enthalpy_anchor_kj_mol = enthalpy_anchor_to_kj_per_basis(args)
+    enthalpy_anchor_kj_mol, thermo_db_anchor = resolve_enthalpy_anchor(args)
     hybrid_rows = build_hybrid_cp_rows(qha_cp, md_cp, blend_start, blend_end)
     hybrid_rows, entropy_note = add_integrated_thermo(
         hybrid_rows,
@@ -1455,6 +1475,7 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
             "unit_input": args.enthalpy_anchor_unit,
             "value_kJ_mol_basis": enthalpy_anchor_kj_mol,
             "basis": args.energy_basis,
+            "thermo_db_anchor": thermo_db_anchor,
         },
         "structural_hybrid": structural_metadata,
         "cp_overlap_diagnostics": {
@@ -1827,6 +1848,28 @@ def build_parser() -> argparse.ArgumentParser:
         default="kJ/mol-formula",
         help="Unit/basis of --enthalpy-anchor-value.",
     )
+    parser.add_argument(
+        "--thermo-db",
+        choices=("jaea",),
+        default=None,
+        help="Thermodynamic database used to fill the H anchor automatically.",
+    )
+    parser.add_argument(
+        "--thermo-formula",
+        default=None,
+        help="Formula key for --thermo-db, e.g. UO2 for the JAEA UO2 page.",
+    )
+    parser.add_argument(
+        "--thermo-phase",
+        default="solid",
+        help="Phase label recorded in metadata for database anchors.",
+    )
+    parser.add_argument(
+        "--thermo-db-temperature",
+        type=float,
+        default=None,
+        help="Database lookup temperature. Defaults to the H anchor temperature, or 300 K.",
+    )
     return parser
 
 
@@ -1839,7 +1882,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.qha_formula_units <= 0 or args.md_formula_units <= 0 or args.target_z <= 0:
         parser.error("formula-unit counts and --target-z must be positive")
     if (args.enthalpy_anchor_temperature is None) != (args.enthalpy_anchor_value is None):
-        parser.error("--enthalpy-anchor-temperature and --enthalpy-anchor-value must be used together")
+        if args.thermo_db is None or args.enthalpy_anchor_temperature is None:
+            parser.error("--enthalpy-anchor-temperature and --enthalpy-anchor-value must be used together")
     if not args.qha_dir.is_dir():
         parser.error(f"QHA directory not found: {args.qha_dir}")
     if not args.md_dir.is_dir():

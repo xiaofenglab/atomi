@@ -4,6 +4,7 @@ import json
 import numpy as np
 import pytest
 
+import atomi.lammps.thermo_series as thermo_series
 from atomi.lammps.workflow import effective_max_chunks, is_nvt_ramp_stage
 from atomi.lammps.thermo_series import (
     build_combined_thermo,
@@ -97,6 +98,59 @@ def test_qha_anchor_fills_only_missing_manual_values(tmp_path) -> None:
     assert Cp == 30.0
     assert H == 4500.0
     assert "thermo_anchor_S_J_mol_K" not in metadata["filled_fields"]
+
+
+def test_jaea_anchor_can_fill_lammps_enthalpy_anchor(monkeypatch) -> None:
+    def fake_jaea_anchor(formula, temperature, *, phase="solid"):
+        return {
+            "database": "jaea",
+            "formula": formula,
+            "phase": phase,
+            "temperature_value_K": temperature,
+            "H_J_mol_formula": -1084490.0,
+            "S_J_mol_formula_K": 77.8,
+            "G_J_mol_formula": -1107840.0,
+            "Cp_J_mol_formula_K": 64.0,
+            "url": "https://example.test/UO2.html",
+        }
+
+    monkeypatch.setattr(thermo_series, "jaea_anchor", fake_jaea_anchor)
+    anchor_t, anchor_h, metadata = thermo_series.fill_enthalpy_anchor_from_thermo_db(
+        thermo_db="jaea",
+        thermo_formula="UO2",
+        thermo_phase="solid",
+        thermo_db_temperature=None,
+        thermo_anchor_T=None,
+        thermo_anchor_H_J_mol=None,
+        anchor_metadata=None,
+    )
+
+    assert anchor_t == 300.0
+    assert anchor_h == -1084490.0
+    assert metadata["thermo_db_filled_fields"] == ["thermo_anchor_H_J_mol"]
+    assert metadata["thermo_db_anchor"]["formula"] == "UO2"
+
+    anchor_t, anchor_h, metadata = thermo_series.fill_enthalpy_anchor_from_thermo_db(
+        thermo_db="jaea",
+        thermo_formula="UO2",
+        thermo_phase="solid",
+        thermo_db_temperature=None,
+        thermo_anchor_T=300.0,
+        thermo_anchor_H_J_mol=4500.0,
+        anchor_metadata={"filled_fields": ["thermo_anchor_H_J_mol"]},
+    )
+    assert anchor_h == -1084490.0
+
+    anchor_t, anchor_h, metadata = thermo_series.fill_enthalpy_anchor_from_thermo_db(
+        thermo_db="jaea",
+        thermo_formula="UO2",
+        thermo_phase="solid",
+        thermo_db_temperature=None,
+        thermo_anchor_T=300.0,
+        thermo_anchor_H_J_mol=123.0,
+        anchor_metadata={"filled_fields": []},
+    )
+    assert anchor_h == 123.0
 
 
 def test_qha_md_cp_switch_rejects_low_temperature_match() -> None:
