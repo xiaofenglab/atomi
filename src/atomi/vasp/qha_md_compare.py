@@ -8,6 +8,33 @@ from pathlib import Path
 
 EV_TO_KJ_PER_MOL = 96.48533212331002
 
+MD_COLUMN_ALIASES = {
+    "V": ("V_fit_A3", "V_mean_A3", "volume_A3"),
+    "Cp": (
+        "Cp_used_for_integration_J_per_mol_UO2_K",
+        "Cp_from_dH_J_per_mol_UO2_K",
+        "Cp_fluct_J_per_mol_UO2_K",
+        "Cp_J_per_mol_formula_K",
+    ),
+    "S": (
+        "S_rel_J_per_mol_UO2_K",
+        "S_rel_J_mol_K",
+        "S_rel_J_per_mol_formula_K",
+    ),
+    "G": (
+        "G_rel_J_per_mol_UO2",
+        "G_rel_J_mol",
+        "G_rel_J_per_mol_formula",
+    ),
+    "H": (
+        "H_rel_J_per_mol_UO2",
+        "H_rel_J_mol",
+        "H_rel_J_per_mol_formula",
+    ),
+    "alpha_V": ("alpha_V_micro_per_K", "alpha_V_1_per_K"),
+    "K": ("KT_GPa_from_V_fluct", "bulk_modulus_GPa", "K_GPa"),
+}
+
 
 def finite_float(value, default=math.nan) -> float:
     try:
@@ -57,25 +84,58 @@ def qha_series(path: Path, scale: float = 1.0) -> list[tuple[float, float]]:
     return [(row[0], row[1] * scale) for row in read_table(path)]
 
 
+def interpolate(points: list[tuple[float, float]], temp: float) -> float | None:
+    if not points:
+        return None
+    points = sorted(points)
+    if temp < points[0][0] or temp > points[-1][0]:
+        return None
+    for point_temp, value in points:
+        if abs(point_temp - temp) <= 1.0e-8:
+            return value
+    for (t0, v0), (t1, v1) in zip(points, points[1:]):
+        if t0 <= temp <= t1 and t1 != t0:
+            frac = (temp - t0) / (t1 - t0)
+            return v0 + frac * (v1 - v0)
+    return None
+
+
 def qha_derived_enthalpy(args: argparse.Namespace) -> list[tuple[float, float]]:
     gibbs = qha_series(args.qha_dir / "gibbs-temperature.dat", energy_scale(args))
     entropy = qha_series(args.qha_dir / "entropy-temperature.dat", entropy_qha_scale(args) / 1000.0)
-    entropy_by_t = {round(temp, 10): value for temp, value in entropy}
     points = []
     for temp, gibbs_value in gibbs:
-        entropy_value = entropy_by_t.get(round(temp, 10))
+        entropy_value = interpolate(entropy, temp)
         if entropy_value is not None:
             points.append((temp, gibbs_value + temp * entropy_value))
     return points
 
 
-def md_series(path: Path, column: str, scale: float = 1.0) -> list[tuple[float, float]]:
+def resolve_column(path: Path, aliases: tuple[str, ...]) -> str | None:
+    rows = read_csv_rows(path)
+    if not rows:
+        return None
+    columns = set(rows[0])
+    for column in aliases:
+        if column in columns:
+            return column
+    return None
+
+
+def md_series(
+    path: Path,
+    aliases: tuple[str, ...],
+    scale: float = 1.0,
+) -> tuple[list[tuple[float, float]], str]:
+    column = resolve_column(path, aliases)
+    if column is None:
+        return [], ""
     points = []
     for row in read_csv_rows(path):
         temp = finite_float(row.get("T_K", row.get("target_T_K")))
         value = finite_float(row.get(column))
         points.append((temp, value * scale))
-    return points
+    return points, column
 
 
 def reference_value(
@@ -201,32 +261,32 @@ def make_definitions(args: argparse.Namespace) -> list[dict]:
             "name": "volume",
             "ylabel": f"Volume (A3 per Z={args.target_z:g} cell)",
             "qha": (qha / "volume-temperature.dat", extensive_qha_scale(args)),
-            "md": (md_grid, "V_fit_A3", extensive_md_scale(args)),
+            "md": (md_grid, MD_COLUMN_ALIASES["V"], extensive_md_scale(args)),
         },
         {
             "name": "cp",
             "ylabel": f"Cp ({cp_label})",
             "qha": (qha / "Cp-temperature.dat", cp_qha_scale(args)),
-            "md": (md_grid, "Cp_used_for_integration_J_per_mol_UO2_K", md_cp_scale(args)),
+            "md": (md_grid, MD_COLUMN_ALIASES["Cp"], md_cp_scale(args)),
         },
         {
             "name": "entropy",
             "ylabel": f"Entropy ({s_label})",
             "qha": (qha / "entropy-temperature.dat", entropy_qha_scale(args)),
-            "md": (md_grid, "S_rel_J_per_mol_UO2_K", md_cp_scale(args)),
+            "md": (md_grid, MD_COLUMN_ALIASES["S"], md_cp_scale(args)),
         },
         {
             "name": "gibbs",
             "ylabel": f"Gibbs energy, relative ({energy_label})",
             "qha": (qha / "gibbs-temperature.dat", energy_scale(args)),
-            "md": (md_grid, "G_rel_J_per_mol_UO2", md_energy_scale(args)),
+            "md": (md_grid, MD_COLUMN_ALIASES["G"], md_energy_scale(args)),
             "relative_energy": True,
         },
         {
             "name": "enthalpy",
             "ylabel": f"Enthalpy, relative ({energy_label})",
             "qha_derived": "enthalpy",
-            "md": (md_grid, "H_rel_J_per_mol_UO2", md_energy_scale(args)),
+            "md": (md_grid, MD_COLUMN_ALIASES["H"], md_energy_scale(args)),
             "relative_energy": True,
         },
         {
@@ -240,13 +300,13 @@ def make_definitions(args: argparse.Namespace) -> list[dict]:
             "name": "cte",
             "ylabel": "Volumetric CTE (10^-6 K^-1)",
             "qha": (qha / "thermal_expansion.dat", alpha_qha_scale(args)),
-            "md": (md_grid, "alpha_V_micro_per_K", 1.0),
+            "md": (md_grid, MD_COLUMN_ALIASES["alpha_V"], 1.0),
         },
         {
             "name": "bulk_modulus",
             "ylabel": "Bulk modulus (GPa)",
             "qha": (qha / "bulk_modulus-temperature.dat", 1.0),
-            "md": (md_summary, "KT_GPa_from_V_fluct", 1.0),
+            "md": (md_summary, MD_COLUMN_ALIASES["K"], 1.0),
         },
     ]
 
@@ -324,6 +384,23 @@ def write_metadata(path: Path, args: argparse.Namespace) -> None:
     path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
 
+def write_availability_report(path: Path, rows: list[dict]) -> None:
+    fields = [
+        "quantity",
+        "comparison_type",
+        "qha_source",
+        "qha_points",
+        "md_source",
+        "md_column",
+        "md_points",
+        "note",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vasp-qha-md-compare",
@@ -395,21 +472,48 @@ def main(argv: list[str] | None = None) -> None:
     args.outdir.mkdir(parents=True, exist_ok=True)
 
     index_rows = []
+    availability_rows = []
     for item in make_definitions(args):
         qha_path = None
         if item.get("qha_derived") == "enthalpy":
+            qha_path = args.qha_dir / "gibbs-temperature.dat"
             qha_points = qha_derived_enthalpy(args)
         else:
             qha_path, qha_scale = item["qha"]
             qha_points = qha_series(qha_path, qha_scale)
-        md_path, md_column, md_scale = item["md"]
-        md_points = [] if md_path is None else md_series(md_path, md_column, md_scale)
+        md_path, md_aliases, md_scale = item["md"]
+        if md_path is None:
+            md_points, md_column = [], ""
+        else:
+            md_points, md_column = md_series(md_path, md_aliases, md_scale)
         qha_points = filter_range(qha_points, args.t_min, args.t_max)
         md_points = filter_range(md_points, args.t_min, args.t_max)
         if item.get("relative_energy"):
             ref_t = overlapping_reference_temperature(qha_points, md_points, args)
             qha_points = relative_energy(qha_points, args, ref_t)
             md_points = relative_energy(md_points, args, ref_t)
+        comparison_type = "overlay" if qha_points and md_points else "single-source"
+        note = ""
+        if item.get("qha_derived") == "enthalpy" and not qha_points:
+            note = "QHA H requires gibbs-temperature.dat and entropy-temperature.dat"
+        elif not qha_points and not md_points:
+            note = "No QHA data or matching MD column found"
+        elif not qha_points:
+            note = "QHA source missing or empty"
+        elif not md_points:
+            note = "MD source missing or no matching MD column"
+        availability_rows.append(
+            {
+                "quantity": item["name"],
+                "comparison_type": comparison_type if (qha_points or md_points) else "missing",
+                "qha_source": qha_path.name if qha_path is not None else "G+T*S",
+                "qha_points": len(qha_points),
+                "md_source": md_path.name if md_path is not None else "",
+                "md_column": md_column,
+                "md_points": len(md_points),
+                "note": note,
+            }
+        )
         if not qha_points and not md_points:
             continue
         png = args.outdir / f"{item['name']}_qha_md_overlay.png"
@@ -431,7 +535,7 @@ def main(argv: list[str] | None = None) -> None:
                 "qha_source": qha_path.name if qha_path is not None else "G+T*S",
                 "md_source": md_path.name if md_path is not None else "",
                 "md_column": md_column,
-                "comparison_type": "overlay" if qha_points and md_points else "single-source",
+                "comparison_type": comparison_type,
             }
         )
         print(png)
@@ -450,6 +554,7 @@ def main(argv: list[str] | None = None) -> None:
         writer.writeheader()
         writer.writerows(index_rows)
     write_metadata(args.outdir / "normalization_metadata.json", args)
+    write_availability_report(args.outdir / "availability_report.csv", availability_rows)
     if not index_rows:
         print("No matching QHA/MD quantities found to plot.")
 

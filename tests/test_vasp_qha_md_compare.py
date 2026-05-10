@@ -80,6 +80,7 @@ def test_qha_md_compare_normalizes_to_target_cell_and_units(tmp_path: Path) -> N
     assert float(enthalpy_rows[3]["value"]) == pytest.approx(3.015166003853438)
     assert (out / "overlay_index.csv").exists()
     assert (out / "normalization_metadata.json").exists()
+    assert (out / "availability_report.csv").exists()
 
 
 def test_qha_md_compare_shifts_energy_at_minimal_overlap(tmp_path: Path) -> None:
@@ -125,3 +126,50 @@ def test_qha_md_compare_shifts_energy_at_minimal_overlap(tmp_path: Path) -> None
     assert float(rows[1]["value"]) == pytest.approx(0.0)
     assert rows[2]["source"] == "MD"
     assert float(rows[2]["value"]) == pytest.approx(0.0)
+
+
+def test_qha_md_compare_uses_md_column_aliases_and_interpolates_entropy(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+    qha = tmp_path / "qha"
+    md = tmp_path / "md"
+    out = tmp_path / "overlay"
+    qha.mkdir()
+    md.mkdir()
+
+    write_qha_dat(qha / "gibbs-temperature.dat", [(300.0, 10.0), (400.0, 11.0)])
+    write_qha_dat(qha / "entropy-temperature.dat", [(300.0, 0.0), (500.0, 64.0)])
+    (md / "thermo_functions_grid.csv").write_text(
+        "T_K,S_rel_J_mol_K,H_rel_J_mol,G_rel_J_mol\n"
+        "300,0,0,0\n"
+        "400,32,1000,1000\n",
+        encoding="utf-8",
+    )
+
+    main(
+        [
+            "--qha-dir",
+            str(qha),
+            "--md-dir",
+            str(md),
+            "--outdir",
+            str(out),
+            "--qha-formula-units",
+            "32",
+            "--md-formula-units",
+            "32",
+            "--target-z",
+            "4",
+            "--t-min",
+            "300",
+            "--t-max",
+            "400",
+        ]
+    )
+
+    enthalpy_rows = list(csv.DictReader((out / "enthalpy_qha_md_overlay.csv").open()))
+    assert len(enthalpy_rows) == 4
+    assert float(enthalpy_rows[1]["value"]) > 0.0
+    report = list(csv.DictReader((out / "availability_report.csv").open()))
+    entropy_row = next(row for row in report if row["quantity"] == "entropy")
+    assert entropy_row["md_column"] == "S_rel_J_mol_K"
+    assert entropy_row["comparison_type"] == "overlay"

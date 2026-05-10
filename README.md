@@ -911,6 +911,13 @@ with markers. If your phonopy-QHA `.dat` files are already normalized, use
 options such as `--qha-energy-unit kJ/mol-formula` or
 `--qha-cp-unit J/mol-formula/K`.
 
+The compare command also writes `availability_report.csv` in the output
+directory. Check that file first when an expected overlay is missing. For
+example, QHA enthalpy requires both `gibbs-temperature.dat` and
+`entropy-temperature.dat`, while MD entropy/enthalpy can be read from common
+`lammps-thermo-series` column names such as `S_rel_J_per_mol_UO2_K`,
+`S_rel_J_mol_K`, `H_rel_J_per_mol_UO2`, or `H_rel_J_mol`.
+
 ## Recommended Migration Pattern
 
 1. Put reusable Python logic under `src/atomi/`.
