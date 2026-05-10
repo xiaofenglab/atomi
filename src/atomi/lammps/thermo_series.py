@@ -1281,6 +1281,32 @@ def qha_cp_scale_to_j_mol_formula(unit: str, qha_formula_units: float) -> float:
     raise ValueError(f"Unsupported QHA Cp unit: {unit}")
 
 
+def qha_cp_thermo_curve(
+    qha_dir: Path,
+    qha_formula_units: float,
+    qha_cp_unit: str = "J/mol-cell/K",
+) -> dict:
+    T_qha, Cp_raw = read_qha_temperature_dat(qha_dir / "Cp-temperature.dat")
+    Cp_qha = Cp_raw * qha_cp_scale_to_j_mol_formula(qha_cp_unit, qha_formula_units)
+    H_qha = trapz_cumulative(T_qha, Cp_qha)
+    Cp_over_T = np.zeros_like(Cp_qha, dtype=float)
+    mask = T_qha > 1.0e-12
+    Cp_over_T[mask] = Cp_qha[mask] / T_qha[mask]
+    S_qha = trapz_cumulative(T_qha, Cp_over_T)
+    return {
+        "T": T_qha,
+        "Cp": Cp_qha,
+        "H": H_qha,
+        "S": S_qha,
+        "qha_dir": str(qha_dir),
+        "qha_cp_file": str((qha_dir / "Cp-temperature.dat").resolve()),
+        "qha_cp_unit": qha_cp_unit,
+        "qha_formula_units": qha_formula_units,
+        "temperature_min_K": float(T_qha[0]),
+        "temperature_max_K": float(T_qha[-1]),
+    }
+
+
 def integrate_qha_cp_anchor(
     qha_dir: Path,
     anchor_T: float,
@@ -1294,43 +1320,90 @@ def integrate_qha_cp_anchor(
     H is relative to the first QHA temperature. S is integrated as Cp/T from
     the first QHA temperature, using 0 for the endpoint integrand at T=0.
     """
-    T_qha, Cp_raw = read_qha_temperature_dat(qha_dir / "Cp-temperature.dat")
-    Cp_qha = Cp_raw * qha_cp_scale_to_j_mol_formula(qha_cp_unit, qha_formula_units)
+    curve = qha_cp_thermo_curve(qha_dir, qha_formula_units, qha_cp_unit)
+    T_qha = curve["T"]
     if anchor_T < T_qha[0] or anchor_T > T_qha[-1]:
         raise ValueError(
             f"QHA anchor T={anchor_T:g} K is outside Cp-temperature.dat range "
             f"{T_qha[0]:g}-{T_qha[-1]:g} K"
         )
-    grid = np.array(T_qha, dtype=float)
-    if not np.any(np.isclose(grid, anchor_T, rtol=0.0, atol=1.0e-12)):
-        grid = np.sort(np.append(grid, anchor_T))
-    Cp_grid = np.interp(grid, T_qha, Cp_qha)
-    H_grid = trapz_cumulative(grid, Cp_grid)
-    Cp_over_T = np.zeros_like(Cp_grid, dtype=float)
-    mask = grid > 1.0e-12
-    Cp_over_T[mask] = Cp_grid[mask] / grid[mask]
-    S_grid = trapz_cumulative(grid, Cp_over_T)
     anchor = {
         "source": "qha-cp-integration",
-        "qha_dir": str(qha_dir),
-        "qha_cp_file": str((qha_dir / "Cp-temperature.dat").resolve()),
-        "qha_cp_unit": qha_cp_unit,
-        "qha_formula_units": qha_formula_units,
+        "qha_dir": curve["qha_dir"],
+        "qha_cp_file": curve["qha_cp_file"],
+        "qha_cp_unit": curve["qha_cp_unit"],
+        "qha_formula_units": curve["qha_formula_units"],
         "T_K": float(anchor_T),
-        "Cp_J_mol_formula_K": float(np.interp(anchor_T, grid, Cp_grid)),
-        "H_J_mol_formula": float(np.interp(anchor_T, grid, H_grid)),
-        "S_J_mol_formula_K": float(np.interp(anchor_T, grid, S_grid)),
-        "integration_reference_T_K": float(grid[0]),
-        "temperature_min_K": float(T_qha[0]),
-        "temperature_max_K": float(T_qha[-1]),
+        "Cp_J_mol_formula_K": float(np.interp(anchor_T, curve["T"], curve["Cp"])),
+        "H_J_mol_formula": float(np.interp(anchor_T, curve["T"], curve["H"])),
+        "S_J_mol_formula_K": float(np.interp(anchor_T, curve["T"], curve["S"])),
+        "integration_reference_T_K": float(T_qha[0]),
+        "temperature_min_K": curve["temperature_min_K"],
+        "temperature_max_K": curve["temperature_max_K"],
         "note": "S and H were numerically integrated from QHA Cp(T).",
     }
-    if grid[0] > 1.0e-12:
+    if T_qha[0] > 1.0e-12:
         anchor["note"] += (
             " QHA Cp data did not start at 0 K, so S/H are relative "
             "to the first QHA T."
         )
     return anchor
+
+
+def choose_qha_md_cp_switch(
+    qha_T: np.ndarray,
+    qha_Cp: np.ndarray,
+    md_T: np.ndarray,
+    md_Cp: np.ndarray,
+    requested: Optional[float] = None,
+    minimum: Optional[float] = 50.0,
+) -> tuple[Optional[float], str]:
+    if requested is not None:
+        return float(requested), "manual"
+    qha_mask = np.isfinite(qha_T) & np.isfinite(qha_Cp)
+    md_mask = np.isfinite(md_T) & np.isfinite(md_Cp)
+    qha_T = qha_T[qha_mask]
+    qha_Cp = qha_Cp[qha_mask]
+    md_T = md_T[md_mask]
+    md_Cp = md_Cp[md_mask]
+    if len(qha_T) == 0 or len(md_T) == 0:
+        return None, "missing-cp-source"
+    qha_order = np.argsort(qha_T)
+    md_order = np.argsort(md_T)
+    qha_T = qha_T[qha_order]
+    qha_Cp = qha_Cp[qha_order]
+    md_T = md_T[md_order]
+    md_Cp = md_Cp[md_order]
+    overlap_min = max(float(qha_T[0]), float(md_T[0]))
+    overlap_max = min(float(qha_T[-1]), float(md_T[-1]))
+    if minimum is not None:
+        overlap_min = max(overlap_min, float(minimum))
+    if overlap_min <= overlap_max:
+        candidates = sorted(
+            {
+                float(temp)
+                for temp in np.concatenate([qha_T, md_T])
+                if overlap_min <= temp <= overlap_max
+            }
+        )
+        if not candidates:
+            candidates = [overlap_min, overlap_max]
+
+        def delta(temp: float) -> float:
+            return abs(np.interp(temp, qha_T, qha_Cp) - np.interp(temp, md_T, md_Cp))
+
+        return min(candidates, key=delta), "overlap-closest-cp"
+    if qha_T[-1] < md_T[0]:
+        switch = 0.5 * (float(qha_T[-1]) + float(md_T[0]))
+        if minimum is not None:
+            switch = max(switch, float(minimum))
+        return switch, "gap-midpoint-qha-low-md-high"
+    if md_T[-1] < qha_T[0]:
+        switch = 0.5 * (float(md_T[-1]) + float(qha_T[0]))
+        if minimum is not None and switch < float(minimum):
+            return None, "gap-switch-below-minimum"
+        return switch, "gap-midpoint-md-low-qha-high"
+    return None, "no-switch-found"
 
 
 def fill_missing_anchors_from_qha(
@@ -1403,7 +1476,10 @@ def build_combined_thermo(summaries: list[dict],
                           thermo_anchor_H_J_mol: Optional[float] = None,
                           use_anchor_for_integration: bool = False,
                           use_anchor_Cp_in_fit: bool = False,
-                          anchor_metadata: Optional[dict] = None) -> list[dict]:
+                          anchor_metadata: Optional[dict] = None,
+                          qha_low_t_curve: Optional[dict] = None,
+                          qha_splice_switch_temperature: Optional[float] = None,
+                          qha_splice_min_switch_temperature: float = 50.0) -> list[dict]:
     outdir.mkdir(parents=True, exist_ok=True)
 
     T_data_all = np.array([s["target_T_K"] for s in summaries], dtype=float)
@@ -1537,6 +1613,44 @@ def build_combined_thermo(summaries: list[dict],
     elif anchor_zero and abs(T_grid[0]) < 1e-12:
         Cp_grid[0] = 0.0
 
+    qha_splice_metadata = {}
+    if qha_low_t_curve:
+        switch_T, switch_method = choose_qha_md_cp_switch(
+            qha_low_t_curve["T"],
+            qha_low_t_curve["Cp"],
+            T,
+            Cp_for_integral_data,
+            requested=qha_splice_switch_temperature,
+            minimum=qha_splice_min_switch_temperature,
+        )
+        if switch_T is not None:
+            low_mask = T_grid <= switch_T
+            Cp_grid[low_mask] = np.interp(
+                T_grid[low_mask],
+                qha_low_t_curve["T"],
+                qha_low_t_curve["Cp"],
+            )
+            qha_splice_metadata = {
+                "enabled": True,
+                "switch_temperature_K": float(switch_T),
+                "switch_method": switch_method,
+                "minimum_switch_temperature_K": qha_splice_min_switch_temperature,
+                "qha_source": {
+                    "qha_dir": qha_low_t_curve["qha_dir"],
+                    "qha_cp_file": qha_low_t_curve["qha_cp_file"],
+                    "qha_cp_unit": qha_low_t_curve["qha_cp_unit"],
+                    "qha_formula_units": qha_low_t_curve["qha_formula_units"],
+                },
+                "note": "QHA supplies Cp/S/H at T <= switch; MD Cp is integrated above switch.",
+            }
+        else:
+            qha_splice_metadata = {
+                "enabled": False,
+                "switch_method": switch_method,
+                "minimum_switch_temperature_K": qha_splice_min_switch_temperature,
+                "note": "QHA low-T splice skipped because no acceptable Cp switch was found.",
+            }
+
     # Avoid division by zero in Cp/T integral. At T=0, use integrand 0 for the endpoint.
     Cp_over_T = np.zeros_like(Cp_grid, dtype=float)
     nonzero_T = T_grid > 1.0e-12
@@ -1557,6 +1671,30 @@ def build_combined_thermo(summaries: list[dict],
     else:
         H_rel_J_mol_grid = trapz_cumulative(T_grid, Cp_grid)
         S_rel_J_mol_K_grid = trapz_cumulative(T_grid, Cp_over_T)
+        G_rel_J_mol_grid = H_rel_J_mol_grid - T_grid * S_rel_J_mol_K_grid
+
+    if qha_splice_metadata.get("enabled"):
+        switch_T = qha_splice_metadata["switch_temperature_K"]
+        switch_S = float(np.interp(switch_T, qha_low_t_curve["T"], qha_low_t_curve["S"]))
+        switch_H = float(np.interp(switch_T, qha_low_t_curve["T"], qha_low_t_curve["H"]))
+        H_rel_J_mol_grid, S_rel_J_mol_K_grid, G_rel_J_mol_grid = integrate_from_reference(
+            T_grid=T_grid,
+            Cp_grid=Cp_grid,
+            T_ref=switch_T,
+            S_ref_J_mol_K=switch_S,
+            H_ref_J_mol=switch_H,
+        )
+        low_mask = T_grid <= switch_T
+        H_rel_J_mol_grid[low_mask] = np.interp(
+            T_grid[low_mask],
+            qha_low_t_curve["T"],
+            qha_low_t_curve["H"],
+        )
+        S_rel_J_mol_K_grid[low_mask] = np.interp(
+            T_grid[low_mask],
+            qha_low_t_curve["T"],
+            qha_low_t_curve["S"],
+        )
         G_rel_J_mol_grid = H_rel_J_mol_grid - T_grid * S_rel_J_mol_K_grid
 
     # Interpolate grid relative functions back to MD T for the summary table.
@@ -1659,10 +1797,13 @@ def build_combined_thermo(summaries: list[dict],
         "use_anchor_for_integration": use_anchor_for_integration,
         "use_anchor_Cp_in_fit": use_anchor_Cp_in_fit,
         "anchor_metadata": anchor_metadata or {},
+        "qha_low_t_splice": qha_splice_metadata,
     }
     dump_json(outdir / "temperature_range_metadata.json", range_meta)
     if anchor_metadata:
         dump_json(outdir / "thermo_anchor_metadata.json", anchor_metadata)
+    if qha_splice_metadata:
+        dump_json(outdir / "qha_low_t_splice_metadata.json", qha_splice_metadata)
 
     # plots
     plot_xy(outdir / "V_vs_T.png", T, V, "T (K)", "V (Å$^3$)", "Volume vs T", y2=V_fit, y2label="V fit")
@@ -1846,6 +1987,23 @@ def main(argv: list[str] | None = None) -> None:
         default="J/mol-cell/K",
         help="Unit of QHA Cp-temperature.dat values",
     )
+    ap.add_argument(
+        "--qha-low-t-splice",
+        action="store_true",
+        help="Use QHA Cp/S/H below the automatic QHA-to-MD Cp switch temperature.",
+    )
+    ap.add_argument(
+        "--qha-splice-switch-temperature",
+        type=float,
+        default=None,
+        help="Override the automatic QHA-to-MD low-T splice switch temperature in K.",
+    )
+    ap.add_argument(
+        "--qha-splice-min-switch-temperature",
+        type=float,
+        default=50.0,
+        help="Reject automatic QHA-to-MD low-T splice switches below this temperature in K.",
+    )
 
     # Speed controls for large log sets.
     ap.add_argument("--skip-per-T-plots", action="store_true", help="Skip individual per-temperature raw/binned diagnostic PNGs")
@@ -1922,6 +2080,21 @@ def main(argv: list[str] | None = None) -> None:
         if not args.use_anchor_Cp_in_fit:
             print("  note: add --use-anchor-Cp-in-fit to add QHA Cp to the Cp fit")
 
+    qha_low_t_curve = None
+    if args.qha_low_t_splice:
+        if args.qha_anchor_dir is None:
+            ap.error("--qha-low-t-splice requires --qha-anchor-dir")
+        if args.qha_anchor_formula_units is None:
+            ap.error("--qha-low-t-splice requires --qha-anchor-formula-units")
+        try:
+            qha_low_t_curve = qha_cp_thermo_curve(
+                args.qha_anchor_dir,
+                args.qha_anchor_formula_units,
+                args.qha_anchor_cp_unit,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            ap.error(str(exc))
+
     build_combined_thermo(
         summaries=summaries,
         outdir=outdir,
@@ -1940,6 +2113,9 @@ def main(argv: list[str] | None = None) -> None:
         use_anchor_for_integration=args.use_anchor_for_integration,
         use_anchor_Cp_in_fit=args.use_anchor_Cp_in_fit,
         anchor_metadata=anchor_metadata,
+        qha_low_t_curve=qha_low_t_curve,
+        qha_splice_switch_temperature=args.qha_splice_switch_temperature,
+        qha_splice_min_switch_temperature=args.qha_splice_min_switch_temperature,
     )
 
     print(f"Done. Outputs written to: {outdir.resolve()}")

@@ -1,7 +1,14 @@
+import csv
+
+import numpy as np
+
 from atomi.lammps.workflow import effective_max_chunks, is_nvt_ramp_stage
 from atomi.lammps.thermo_series import (
+    build_combined_thermo,
+    choose_qha_md_cp_switch,
     fill_missing_anchors_from_qha,
     integrate_qha_cp_anchor,
+    qha_cp_thermo_curve,
 )
 
 
@@ -88,3 +95,64 @@ def test_qha_anchor_fills_only_missing_manual_values(tmp_path) -> None:
     assert Cp == 30.0
     assert H == 4500.0
     assert "thermo_anchor_S_J_mol_K" not in metadata["filled_fields"]
+
+
+def test_qha_md_cp_switch_rejects_low_temperature_match() -> None:
+    switch, method = choose_qha_md_cp_switch(
+        qha_T=np.array([0.0, 40.0, 200.0]),
+        qha_Cp=np.array([0.0, 10.0, 50.0]),
+        md_T=np.array([0.0, 40.0, 200.0]),
+        md_Cp=np.array([0.0, 10.0, 52.0]),
+        minimum=50.0,
+    )
+
+    assert switch >= 50.0
+    assert method == "overlap-closest-cp"
+
+
+def test_build_combined_thermo_can_use_qha_low_t_splice(tmp_path) -> None:
+    qha = tmp_path / "qha"
+    qha.mkdir()
+    (qha / "Cp-temperature.dat").write_text(
+        "0 0\n100 20\n200 40\n",
+        encoding="utf-8",
+    )
+    summaries = [
+        {
+            "target_T_K": 300.0,
+            "n_formula_units": 1.0,
+            "V_mean_A3": 100.0,
+            "a_mean_A": 4.0,
+            "density_mean_g_cm3": 10.0,
+            "H_mean_eV_cell": 1.0,
+            "Cp_fluct_J_per_mol_UO2_K": 100.0,
+            "KT_GPa_from_V_fluct": 200.0,
+        },
+        {
+            "target_T_K": 400.0,
+            "n_formula_units": 1.0,
+            "V_mean_A3": 101.0,
+            "a_mean_A": 4.01,
+            "density_mean_g_cm3": 9.9,
+            "H_mean_eV_cell": 2.0,
+            "Cp_fluct_J_per_mol_UO2_K": 120.0,
+            "KT_GPa_from_V_fluct": 190.0,
+        },
+    ]
+
+    build_combined_thermo(
+        summaries=summaries,
+        outdir=tmp_path / "out",
+        plot_T_min=0,
+        plot_T_max=400,
+        plot_T_step=100,
+        n_bootstrap=0,
+        qha_low_t_curve=qha_cp_thermo_curve(qha, 1.0),
+    )
+
+    rows = list(csv.DictReader((tmp_path / "out" / "thermo_functions_grid.csv").open()))
+    by_t = {float(row["T_K"]): row for row in rows}
+    assert float(by_t[100.0]["Cp_used_for_integration_J_per_mol_UO2_K"]) == 20.0
+    assert float(by_t[200.0]["Cp_used_for_integration_J_per_mol_UO2_K"]) == 40.0
+    assert float(by_t[300.0]["Cp_used_for_integration_J_per_mol_UO2_K"]) == 100.0
+    assert (tmp_path / "out" / "qha_low_t_splice_metadata.json").exists()

@@ -554,6 +554,19 @@ The QHA Cp unit defaults to `J/mol-cell/K`, matching the phonopy-QHA outputs
 used elsewhere in Atomi. Use `--qha-anchor-cp-unit J/mol-formula/K` if your
 QHA Cp has already been normalized per formula unit.
 
+To use QHA as the full low-temperature branch instead of just one anchor point,
+add `--qha-low-t-splice`. The command then picks a QHA-to-MD Cp switch where
+the two Cp curves are closest, rejects automatic switches below 50 K by
+default, uses QHA Cp/S/H before the switch, and integrates the MD Cp branch
+after the switch:
+
+```bash
+lammps-thermo-series --config config_production.json --outdir analysis/thermo_qha_splice --natoms 96 --plot-T-min 0 --plot-T-max 1500 --cp-source dH --qha-anchor-dir ./qha_run --qha-anchor-formula-units 32 --qha-low-t-splice
+```
+
+Use `--qha-splice-min-switch-temperature` to change the low-temperature guard
+or `--qha-splice-switch-temperature` to force a specific switch.
+
 This command packages the v4 anchor-capable analyzer, which also supports the earlier v3-style fluctuation and dH workflows.
 
 ## VASP Live Plotting
@@ -940,10 +953,13 @@ where QHA and MD Cp are closest inside their overlapping temperature range; if
 there is no overlap, it uses the midpoint between the QHA and MD temperature
 windows. When `all_T_summary.csv` is present in the MD analysis folder, the
 switch search uses that actual MD temperature range so extrapolated low-T grid
-points do not cause an immediate switch to MD. The hybrid entropy is integrated
-from the hybrid Cp curve using `dS = Cp/T dT`, starting from QHA entropy at the
-first hybrid temperature when available. Override the automatic switch with
-`--hybrid-switch-temperature <T>` or skip these outputs with
+points do not cause an immediate switch to MD. Automatic switches below 50 K
+are rejected by default, which avoids accepting an extreme low-T Cp match as
+the QHA-to-MD splice point. The hybrid entropy is integrated from the hybrid Cp
+curve using `dS = Cp/T dT`, starting from QHA entropy at the first hybrid
+temperature when available. Override the automatic switch with
+`--hybrid-switch-temperature <T>`, change the low-T guard with
+`--hybrid-min-switch-temperature <T>`, or skip these outputs with
 `--no-hybrid-cp-s`.
 
 ## Recommended Migration Pattern

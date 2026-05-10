@@ -368,6 +368,7 @@ def cp_switch_temperature(
     md_points: list[tuple[float, float]],
     requested: float | None = None,
     md_temperature_bounds: tuple[float, float] | None = None,
+    min_switch_temperature: float | None = 50.0,
 ) -> tuple[float | None, str]:
     qha_points = finite_points(qha_points)
     md_points = finite_points(md_points)
@@ -387,6 +388,8 @@ def cp_switch_temperature(
             return None, "no-actual-md-grid-overlap"
     overlap_min = max(qha_min, md_min)
     overlap_max = min(qha_max, md_max)
+    if min_switch_temperature is not None:
+        overlap_min = max(overlap_min, float(min_switch_temperature))
     if overlap_min <= overlap_max:
         candidates = sorted(
             {
@@ -411,9 +414,15 @@ def cp_switch_temperature(
         return best, "overlap-closest-cp"
 
     if qha_max < md_min:
-        return 0.5 * (qha_max + md_min), "gap-midpoint-qha-low-md-high"
+        switch = 0.5 * (qha_max + md_min)
+        if min_switch_temperature is not None:
+            switch = max(switch, float(min_switch_temperature))
+        return switch, "gap-midpoint-qha-low-md-high"
     if md_max < qha_min:
-        return 0.5 * (md_max + qha_min), "gap-midpoint-md-low-qha-high"
+        switch = 0.5 * (md_max + qha_min)
+        if min_switch_temperature is not None and switch < float(min_switch_temperature):
+            return None, "gap-switch-below-minimum"
+        return switch, "gap-midpoint-md-low-qha-high"
     return None, "no-switch-found"
 
 
@@ -574,6 +583,7 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         md_cp,
         args.hybrid_switch_temperature,
         actual_md_bounds,
+        args.hybrid_min_switch_temperature,
     )
     if switch_temp is None:
         return [], {
@@ -632,6 +642,7 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
     metadata = {
         "switch_temperature_K": switch_temp,
         "switch_method": switch_method,
+        "minimum_switch_temperature_K": args.hybrid_min_switch_temperature,
         "entropy_integration": "S(T) = S(T0) + integral_T0^T Cp(T')/T' dT'",
         "entropy_reference_note": entropy_note,
         "qha_cp_points": len(qha_cp),
@@ -798,6 +809,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Override the automatic QHA-to-MD Cp switch temperature in K.",
+    )
+    parser.add_argument(
+        "--hybrid-min-switch-temperature",
+        type=float,
+        default=50.0,
+        help="Reject automatic QHA-to-MD Cp switches below this temperature in K.",
     )
     return parser
 

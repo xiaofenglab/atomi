@@ -277,3 +277,49 @@ def test_hybrid_cp_switch_ignores_extrapolated_low_t_md_grid(tmp_path: Path) -> 
     metadata = json.loads((out / "hybrid_cp_entropy_metadata.json").read_text())
     assert metadata["switch_method"] == "actual-md-overlap-closest-cp"
     assert metadata["switch_temperature_K"] == pytest.approx(600.0)
+
+
+def test_hybrid_cp_switch_rejects_extreme_low_t_match(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+    qha = tmp_path / "qha"
+    md = tmp_path / "md"
+    out = tmp_path / "overlay"
+    qha.mkdir()
+    md.mkdir()
+
+    write_qha_dat(qha / "Cp-temperature.dat", [(0.0, 0.0), (40.0, 10.0), (200.0, 50.0)])
+    write_qha_dat(qha / "entropy-temperature.dat", [(0.0, 0.0), (40.0, 3.0), (200.0, 20.0)])
+    (md / "thermo_functions_grid.csv").write_text(
+        "T_K,Cp_used_for_integration_J_per_mol_UO2_K,S_rel_J_mol_K\n"
+        "0,0,0\n"
+        "40,10,3\n"
+        "100,30,10\n"
+        "200,52,20\n",
+        encoding="utf-8",
+    )
+    (md / "all_T_summary.csv").write_text("target_T_K\n40\n100\n200\n", encoding="utf-8")
+
+    main(
+        [
+            "--qha-dir",
+            str(qha),
+            "--md-dir",
+            str(md),
+            "--outdir",
+            str(out),
+            "--qha-formula-units",
+            "1",
+            "--md-formula-units",
+            "1",
+            "--target-z",
+            "1",
+            "--t-min",
+            "0",
+            "--t-max",
+            "200",
+        ]
+    )
+
+    metadata = json.loads((out / "hybrid_cp_entropy_metadata.json").read_text())
+    assert metadata["switch_temperature_K"] >= 50.0
+    assert metadata["minimum_switch_temperature_K"] == 50.0
