@@ -901,9 +901,14 @@ vasp-qha-md-compare \
 The command overlays matching temperature functions, including volume, Cp,
 entropy, Gibbs/Helmholtz-style energy functions, thermal expansion, and bulk
 modulus when the matching source files are present. It converts QHA energies
-from `eV` per QHA cell to `kJ/mol-formula` by default and normalizes volume to
-the requested target cell. If your phonopy-QHA `.dat` files are already in
-`kJ/mol-formula`, use `--qha-energy-unit kJ/mol-formula`.
+from `eV` per QHA cell to `kJ/mol-formula` by default, treats QHA Cp and
+entropy as `J/mol-cell/K`, and normalizes volume to the requested target cell.
+The `G` and derived `H = G + TS` overlays are shifted to a shared relative
+reference by default because the MD series reports relative thermodynamic
+functions. QHA curves are solid blue lines; MD curves are dashed red lines
+with markers. If your phonopy-QHA `.dat` files are already normalized, use
+options such as `--qha-energy-unit kJ/mol-formula` or
+`--qha-cp-unit J/mol-formula/K`.
 
 ## Recommended Migration Pattern
 

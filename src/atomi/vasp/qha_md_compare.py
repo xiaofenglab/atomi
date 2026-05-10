@@ -1,5 +1,6 @@
 import argparse
 import csv
+import json
 import math
 import sys
 from pathlib import Path
@@ -56,6 +57,18 @@ def qha_series(path: Path, scale: float = 1.0) -> list[tuple[float, float]]:
     return [(row[0], row[1] * scale) for row in read_table(path)]
 
 
+def qha_derived_enthalpy(args: argparse.Namespace) -> list[tuple[float, float]]:
+    gibbs = qha_series(args.qha_dir / "gibbs-temperature.dat", energy_scale(args))
+    entropy = qha_series(args.qha_dir / "entropy-temperature.dat", entropy_qha_scale(args) / 1000.0)
+    entropy_by_t = {round(temp, 10): value for temp, value in entropy}
+    points = []
+    for temp, gibbs_value in gibbs:
+        entropy_value = entropy_by_t.get(round(temp, 10))
+        if entropy_value is not None:
+            points.append((temp, gibbs_value + temp * entropy_value))
+    return points
+
+
 def md_series(path: Path, column: str, scale: float = 1.0) -> list[tuple[float, float]]:
     points = []
     for row in read_csv_rows(path):
@@ -63,6 +76,25 @@ def md_series(path: Path, column: str, scale: float = 1.0) -> list[tuple[float, 
         value = finite_float(row.get(column))
         points.append((temp, value * scale))
     return points
+
+
+def reference_value(points: list[tuple[float, float]], args: argparse.Namespace) -> float | None:
+    if not points or args.energy_reference == "none":
+        return None
+    if args.energy_reference == "temperature" and args.energy_reference_temperature is not None:
+        target = args.energy_reference_temperature
+        return min(points, key=lambda item: abs(item[0] - target))[1]
+    return points[0][1]
+
+
+def relative_energy(
+    points: list[tuple[float, float]],
+    args: argparse.Namespace,
+) -> list[tuple[float, float]]:
+    ref = reference_value(points, args)
+    if ref is None:
+        return points
+    return [(temp, value - ref) for temp, value in points]
 
 
 def energy_scale(args: argparse.Namespace) -> float:
@@ -98,8 +130,12 @@ def cp_qha_scale(args: argparse.Namespace) -> float:
         per_formula = EV_TO_KJ_PER_MOL * 1000.0 / args.qha_formula_units
     elif args.qha_cp_unit == "J/mol-formula/K":
         per_formula = 1.0
-    else:
+    elif args.qha_cp_unit == "kJ/mol-formula/K":
         per_formula = 1000.0
+    elif args.qha_cp_unit == "J/mol-cell/K":
+        per_formula = 1.0 / args.qha_formula_units
+    else:
+        per_formula = 1000.0 / args.qha_formula_units
     if args.energy_basis == "target-cell":
         return per_formula * args.target_z
     return per_formula
@@ -115,8 +151,12 @@ def entropy_qha_scale(args: argparse.Namespace) -> float:
         per_formula = EV_TO_KJ_PER_MOL * 1000.0 / args.qha_formula_units
     elif args.qha_entropy_unit == "J/mol-formula/K":
         per_formula = 1.0
-    else:
+    elif args.qha_entropy_unit == "kJ/mol-formula/K":
         per_formula = 1000.0
+    elif args.qha_entropy_unit == "J/mol-cell/K":
+        per_formula = 1.0 / args.qha_formula_units
+    else:
+        per_formula = 1000.0 / args.qha_formula_units
     if args.energy_basis == "target-cell":
         return per_formula * args.target_z
     return per_formula
@@ -154,15 +194,24 @@ def make_definitions(args: argparse.Namespace) -> list[dict]:
         },
         {
             "name": "gibbs",
-            "ylabel": f"Gibbs energy ({energy_label})",
+            "ylabel": f"Gibbs energy, relative ({energy_label})",
             "qha": (qha / "gibbs-temperature.dat", energy_scale(args)),
             "md": (md_grid, "G_rel_J_per_mol_UO2", md_energy_scale(args)),
+            "relative_energy": True,
+        },
+        {
+            "name": "enthalpy",
+            "ylabel": f"Enthalpy, relative ({energy_label})",
+            "qha_derived": "enthalpy",
+            "md": (md_grid, "H_rel_J_per_mol_UO2", md_energy_scale(args)),
+            "relative_energy": True,
         },
         {
             "name": "helmholtz",
-            "ylabel": f"Helmholtz/enthalpy ({energy_label})",
+            "ylabel": f"Helmholtz free energy, relative ({energy_label})",
             "qha": (qha / "helmholtz-temperature.dat", energy_scale(args)),
-            "md": (md_grid, "H_rel_J_per_mol_UO2", md_energy_scale(args)),
+            "md": (None, "", 1.0),
+            "relative_energy": True,
         },
         {
             "name": "cte",
@@ -179,7 +228,7 @@ def make_definitions(args: argparse.Namespace) -> list[dict]:
     ]
 
 
-def plot_overlay(path: Path, title: str, ylabel: str, qha_points, md_points) -> bool:
+def plot_overlay(path: Path, title: str, ylabel: str, qha_points, md_points, args) -> bool:
     if not qha_points and not md_points:
         return False
     import matplotlib.pyplot as plt
@@ -187,10 +236,20 @@ def plot_overlay(path: Path, title: str, ylabel: str, qha_points, md_points) -> 
     plt.figure(figsize=(7.2, 4.8))
     if qha_points:
         x, y = zip(*qha_points)
-        plt.plot(x, y, "-", linewidth=1.8, label="QHA")
+        plt.plot(x, y, "-", color="#1f77b4", linewidth=2.0, label="QHA")
     if md_points:
         x, y = zip(*md_points)
-        plt.plot(x, y, "o-", markersize=3.5, linewidth=1.4, label="MD")
+        plt.plot(
+            x,
+            y,
+            "o--",
+            color="#d62728",
+            markersize=3.5,
+            linewidth=1.5,
+            label="MD",
+        )
+    if args.t_min is not None or args.t_max is not None:
+        plt.xlim(left=args.t_min, right=args.t_max)
     plt.xlabel("Temperature (K)")
     plt.ylabel(ylabel)
     plt.title(title)
@@ -201,12 +260,45 @@ def plot_overlay(path: Path, title: str, ylabel: str, qha_points, md_points) -> 
     return True
 
 
-def write_overlay_csv(path: Path, source: str, points: list[tuple[float, float]]) -> None:
+def write_overlay_csv(path: Path, qha_points, md_points) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(["source", "T_K", "value"])
-        for temp, value in points:
-            writer.writerow([source, temp, value])
+        for temp, value in qha_points:
+            writer.writerow(["QHA", temp, value])
+        for temp, value in md_points:
+            writer.writerow(["MD", temp, value])
+
+
+def write_metadata(path: Path, args: argparse.Namespace) -> None:
+    metadata = {
+        "qha_dir": str(args.qha_dir),
+        "md_dir": str(args.md_dir),
+        "target_z_formula_units": args.target_z,
+        "qha_formula_units": args.qha_formula_units,
+        "md_formula_units": args.md_formula_units,
+        "temperature_min_requested_K": args.t_min,
+        "temperature_max_requested_K": args.t_max,
+        "energy_basis": args.energy_basis,
+        "energy_reference": args.energy_reference,
+        "energy_reference_temperature_K": args.energy_reference_temperature,
+        "qha_energy_unit": args.qha_energy_unit,
+        "qha_cp_unit": args.qha_cp_unit,
+        "qha_entropy_unit": args.qha_entropy_unit,
+        "qha_alpha_unit": args.qha_alpha_unit,
+        "plot_style": {
+            "QHA": "solid blue line",
+            "MD": "red dashed line with circle markers",
+        },
+        "unit_notes": [
+            "phonopy-qha energies are eV per QHA cell by default",
+            "phonopy-qha Cp and entropy are treated as J/mol-cell/K by default",
+            "lammps-thermo-series molar columns are treated as per mole of formula units",
+            "volume is normalized to target_z formula units",
+            "G and H are shifted to a common relative reference unless --energy-reference none",
+        ],
+    }
+    path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -234,15 +326,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--qha-cp-unit",
-        choices=("J/mol-formula/K", "kJ/mol-formula/K", "eV-cell/K"),
-        default="J/mol-formula/K",
+        choices=(
+            "J/mol-cell/K",
+            "kJ/mol-cell/K",
+            "J/mol-formula/K",
+            "kJ/mol-formula/K",
+            "eV-cell/K",
+        ),
+        default="J/mol-cell/K",
     )
     parser.add_argument(
         "--qha-entropy-unit",
-        choices=("J/mol-formula/K", "kJ/mol-formula/K", "eV-cell/K"),
-        default="J/mol-formula/K",
+        choices=(
+            "J/mol-cell/K",
+            "kJ/mol-cell/K",
+            "J/mol-formula/K",
+            "kJ/mol-formula/K",
+            "eV-cell/K",
+        ),
+        default="J/mol-cell/K",
     )
     parser.add_argument("--qha-alpha-unit", choices=("1/K", "micro/K"), default="1/K")
+    parser.add_argument(
+        "--energy-reference",
+        choices=("first", "temperature", "none"),
+        default="first",
+        help="Reference used to shift G/H/F curves before overlay.",
+    )
+    parser.add_argument("--energy-reference-temperature", type=float, default=None)
     return parser
 
 
@@ -262,10 +373,19 @@ def main(argv: list[str] | None = None) -> None:
 
     index_rows = []
     for item in make_definitions(args):
-        qha_path, qha_scale = item["qha"]
+        qha_path = None
+        if item.get("qha_derived") == "enthalpy":
+            qha_points = qha_derived_enthalpy(args)
+        else:
+            qha_path, qha_scale = item["qha"]
+            qha_points = qha_series(qha_path, qha_scale)
         md_path, md_column, md_scale = item["md"]
-        qha_points = filter_range(qha_series(qha_path, qha_scale), args.t_min, args.t_max)
-        md_points = filter_range(md_series(md_path, md_column, md_scale), args.t_min, args.t_max)
+        md_points = [] if md_path is None else md_series(md_path, md_column, md_scale)
+        qha_points = filter_range(qha_points, args.t_min, args.t_max)
+        md_points = filter_range(md_points, args.t_min, args.t_max)
+        if item.get("relative_energy"):
+            qha_points = relative_energy(qha_points, args)
+            md_points = relative_energy(md_points, args)
         if not qha_points and not md_points:
             continue
         png = args.outdir / f"{item['name']}_qha_md_overlay.png"
@@ -276,29 +396,36 @@ def main(argv: list[str] | None = None) -> None:
             item["ylabel"],
             qha_points,
             md_points,
+            args,
         )
-        write_overlay_csv(csv_path, "QHA", qha_points)
-        with csv_path.open("a", newline="", encoding="utf-8") as handle:
-            writer = csv.writer(handle)
-            for temp, value in md_points:
-                writer.writerow(["MD", temp, value])
+        write_overlay_csv(csv_path, qha_points, md_points)
         index_rows.append(
             {
                 "quantity": item["name"],
                 "plot_png": png.name,
                 "data_csv": csv_path.name,
-                "qha_source": qha_path.name,
-                "md_source": md_path.name,
+                "qha_source": qha_path.name if qha_path is not None else "G+T*S",
+                "md_source": md_path.name if md_path is not None else "",
                 "md_column": md_column,
+                "comparison_type": "overlay" if qha_points and md_points else "single-source",
             }
         )
         print(png)
 
     with (args.outdir / "overlay_index.csv").open("w", newline="", encoding="utf-8") as handle:
-        fields = ["quantity", "plot_png", "data_csv", "qha_source", "md_source", "md_column"]
+        fields = [
+            "quantity",
+            "plot_png",
+            "data_csv",
+            "qha_source",
+            "md_source",
+            "md_column",
+            "comparison_type",
+        ]
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(index_rows)
+    write_metadata(args.outdir / "normalization_metadata.json", args)
     if not index_rows:
         print("No matching QHA/MD quantities found to plot.")
 
