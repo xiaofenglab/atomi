@@ -881,6 +881,30 @@ If a thermal YAML is outside the scanned volume folders, pass explicit
 the E-V rows. The command checks that the number of thermal YAML files matches
 the number of valid E-V points before writing the run script.
 
+To compare QHA curves with `lammps-thermo-series` output from `md-engine`, use
+`vasp-qha-md-compare`. For fluorite UO2, `target-z 4` means the comparison
+normalizes extensive quantities to one conventional UO2 unit cell with four
+UO2 formula units. A 2x2x2 fluorite QHA or MD cell has 32 UO2 formula units:
+
+```bash
+vasp-qha-md-compare \
+  --qha-dir ./qha_run \
+  --md-dir ./analysis/thermo_0_1500K_uq \
+  --outdir ./qha_md_overlay \
+  --qha-formula-units 32 \
+  --md-formula-units 32 \
+  --target-z 4 \
+  --t-min 0 \
+  --t-max 1500
+```
+
+The command overlays matching temperature functions, including volume, Cp,
+entropy, Gibbs/Helmholtz-style energy functions, thermal expansion, and bulk
+modulus when the matching source files are present. It converts QHA energies
+from `eV` per QHA cell to `kJ/mol-formula` by default and normalizes volume to
+the requested target cell. If your phonopy-QHA `.dat` files are already in
+`kJ/mol-formula`, use `--qha-energy-unit kJ/mol-formula`.
+
 ## Recommended Migration Pattern
 
 1. Put reusable Python logic under `src/atomi/`.

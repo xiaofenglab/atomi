@@ -260,6 +260,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vasp_qha_run.add_argument("qha_args", nargs=argparse.REMAINDER)
 
+    vasp_qha_md_compare = subparsers.add_parser(
+        "vasp-qha-md-compare",
+        help="Overlay VASP QHA and LAMMPS MD thermodynamic functions.",
+    )
+    vasp_qha_md_compare.add_argument("compare_args", nargs=argparse.REMAINDER)
+
     mace_build_dataset = subparsers.add_parser(
         "mace-build-dataset",
         help="Build adaptive MACE train/validation extxyz datasets.",
@@ -434,6 +440,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.qha_run import main as vasp_qha_run_main
 
         vasp_qha_run_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "vasp-qha-md-compare":
+        from atomi.vasp.qha_md_compare import main as vasp_qha_md_compare_main
+
+        vasp_qha_md_compare_main(raw_args[1:])
         return
 
     parser = build_parser()
@@ -634,6 +645,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.qha_run import main as vasp_qha_run_main
 
         vasp_qha_run_main(args.qha_args)
+        return
+
+    if args.subcommand == "vasp-qha-md-compare":
+        from atomi.vasp.qha_md_compare import main as vasp_qha_md_compare_main
+
+        vasp_qha_md_compare_main(args.compare_args)
         return
 
     if args.subcommand == "mace-energy-outliers":
