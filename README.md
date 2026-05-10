@@ -540,6 +540,20 @@ For high-temperature integration anchored at 300 K:
 lammps-thermo-series --config config_production.json --outdir analysis/thermo_anchor_300K --min-window-ps 20 --window-stride-ps 2 --plot-bin-ps 0.5 --natoms 96 --plot-T-min 300 --plot-T-max 1500 --plot-T-step 10 --cp-source dH --thermo-anchor-T 300 --thermo-anchor-S 78.0 --thermo-anchor-Cp 64.0 --use-anchor-for-integration --use-anchor-Cp-in-fit --n-bootstrap 100
 ```
 
+Instead of typing experimental or literature anchor values, a phonopy-QHA
+folder can provide missing anchor values from `Cp-temperature.dat`. This
+integrates QHA Cp to get `S(T_anchor)` and relative `H(T_anchor)`, and also
+uses QHA Cp at the anchor temperature. Manually supplied `--thermo-anchor-S`,
+`--thermo-anchor-H`, or `--thermo-anchor-Cp` still take priority:
+
+```bash
+lammps-thermo-series --config config_production.json --outdir analysis/thermo_anchor_qha_300K --natoms 96 --plot-T-min 300 --plot-T-max 1500 --cp-source dH --thermo-anchor-T 300 --qha-anchor-dir ./qha_run --qha-anchor-formula-units 32 --use-anchor-for-integration --use-anchor-Cp-in-fit
+```
+
+The QHA Cp unit defaults to `J/mol-cell/K`, matching the phonopy-QHA outputs
+used elsewhere in Atomi. Use `--qha-anchor-cp-unit J/mol-formula/K` if your
+QHA Cp has already been normalized per formula unit.
+
 This command packages the v4 anchor-capable analyzer, which also supports the earlier v3-style fluctuation and dH workflows.
 
 ## VASP Live Plotting

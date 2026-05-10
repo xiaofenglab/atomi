@@ -1241,6 +1241,152 @@ def integrate_from_reference(T_grid: np.ndarray,
     return H_out, S_out, G_out
 
 
+def read_qha_temperature_dat(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    rows = []
+    if not path.exists():
+        raise FileNotFoundError(f"QHA file not found: {path}")
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        if len(parts) < 2:
+            continue
+        try:
+            rows.append((float(parts[0]), float(parts[1])))
+        except ValueError:
+            continue
+    if not rows:
+        raise ValueError(f"No numeric temperature/value rows found in {path}")
+    rows.sort(key=lambda item: item[0])
+    return (
+        np.array([row[0] for row in rows], dtype=float),
+        np.array([row[1] for row in rows], dtype=float),
+    )
+
+
+def qha_cp_scale_to_j_mol_formula(unit: str, qha_formula_units: float) -> float:
+    if qha_formula_units <= 0:
+        raise ValueError("--qha-anchor-formula-units must be positive")
+    if unit == "J/mol-cell/K":
+        return 1.0 / qha_formula_units
+    if unit == "kJ/mol-cell/K":
+        return 1000.0 / qha_formula_units
+    if unit == "J/mol-formula/K":
+        return 1.0
+    if unit == "kJ/mol-formula/K":
+        return 1000.0
+    if unit == "eV-cell/K":
+        return EV_TO_J * NA / qha_formula_units
+    raise ValueError(f"Unsupported QHA Cp unit: {unit}")
+
+
+def integrate_qha_cp_anchor(
+    qha_dir: Path,
+    anchor_T: float,
+    qha_formula_units: float,
+    qha_cp_unit: str = "J/mol-cell/K",
+) -> dict:
+    """
+    Derive Cp, S, and relative H anchor values from QHA Cp(T).
+
+    Outputs are per mole of formula units, matching lammps-thermo-series.
+    H is relative to the first QHA temperature. S is integrated as Cp/T from
+    the first QHA temperature, using 0 for the endpoint integrand at T=0.
+    """
+    T_qha, Cp_raw = read_qha_temperature_dat(qha_dir / "Cp-temperature.dat")
+    Cp_qha = Cp_raw * qha_cp_scale_to_j_mol_formula(qha_cp_unit, qha_formula_units)
+    if anchor_T < T_qha[0] or anchor_T > T_qha[-1]:
+        raise ValueError(
+            f"QHA anchor T={anchor_T:g} K is outside Cp-temperature.dat range "
+            f"{T_qha[0]:g}-{T_qha[-1]:g} K"
+        )
+    grid = np.array(T_qha, dtype=float)
+    if not np.any(np.isclose(grid, anchor_T, rtol=0.0, atol=1.0e-12)):
+        grid = np.sort(np.append(grid, anchor_T))
+    Cp_grid = np.interp(grid, T_qha, Cp_qha)
+    H_grid = trapz_cumulative(grid, Cp_grid)
+    Cp_over_T = np.zeros_like(Cp_grid, dtype=float)
+    mask = grid > 1.0e-12
+    Cp_over_T[mask] = Cp_grid[mask] / grid[mask]
+    S_grid = trapz_cumulative(grid, Cp_over_T)
+    anchor = {
+        "source": "qha-cp-integration",
+        "qha_dir": str(qha_dir),
+        "qha_cp_file": str((qha_dir / "Cp-temperature.dat").resolve()),
+        "qha_cp_unit": qha_cp_unit,
+        "qha_formula_units": qha_formula_units,
+        "T_K": float(anchor_T),
+        "Cp_J_mol_formula_K": float(np.interp(anchor_T, grid, Cp_grid)),
+        "H_J_mol_formula": float(np.interp(anchor_T, grid, H_grid)),
+        "S_J_mol_formula_K": float(np.interp(anchor_T, grid, S_grid)),
+        "integration_reference_T_K": float(grid[0]),
+        "temperature_min_K": float(T_qha[0]),
+        "temperature_max_K": float(T_qha[-1]),
+        "note": "S and H were numerically integrated from QHA Cp(T).",
+    }
+    if grid[0] > 1.0e-12:
+        anchor["note"] += (
+            " QHA Cp data did not start at 0 K, so S/H are relative "
+            "to the first QHA T."
+        )
+    return anchor
+
+
+def fill_missing_anchors_from_qha(
+    *,
+    thermo_anchor_T: Optional[float],
+    thermo_anchor_S_J_mol_K: Optional[float],
+    thermo_anchor_Cp_J_mol_K: Optional[float],
+    thermo_anchor_H_J_mol: Optional[float],
+    qha_anchor_dir: Optional[Path],
+    qha_anchor_formula_units: Optional[float],
+    qha_anchor_cp_unit: str,
+) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float], dict]:
+    if qha_anchor_dir is None:
+        return (
+            thermo_anchor_T,
+            thermo_anchor_S_J_mol_K,
+            thermo_anchor_Cp_J_mol_K,
+            thermo_anchor_H_J_mol,
+            {},
+        )
+    if qha_anchor_formula_units is None:
+        raise ValueError("--qha-anchor-formula-units is required with --qha-anchor-dir")
+    anchor_T = 300.0 if thermo_anchor_T is None else float(thermo_anchor_T)
+    qha_anchor = integrate_qha_cp_anchor(
+        qha_dir=qha_anchor_dir,
+        anchor_T=anchor_T,
+        qha_formula_units=qha_anchor_formula_units,
+        qha_cp_unit=qha_anchor_cp_unit,
+    )
+    filled = {
+        "source": qha_anchor["source"],
+        "manual_values_take_priority": True,
+        "qha_anchor": qha_anchor,
+        "filled_fields": [],
+    }
+    if thermo_anchor_T is None:
+        thermo_anchor_T = qha_anchor["T_K"]
+        filled["filled_fields"].append("thermo_anchor_T")
+    if thermo_anchor_Cp_J_mol_K is None:
+        thermo_anchor_Cp_J_mol_K = qha_anchor["Cp_J_mol_formula_K"]
+        filled["filled_fields"].append("thermo_anchor_Cp_J_mol_K")
+    if thermo_anchor_S_J_mol_K is None:
+        thermo_anchor_S_J_mol_K = qha_anchor["S_J_mol_formula_K"]
+        filled["filled_fields"].append("thermo_anchor_S_J_mol_K")
+    if thermo_anchor_H_J_mol is None:
+        thermo_anchor_H_J_mol = qha_anchor["H_J_mol_formula"]
+        filled["filled_fields"].append("thermo_anchor_H_J_mol")
+    return (
+        thermo_anchor_T,
+        thermo_anchor_S_J_mol_K,
+        thermo_anchor_Cp_J_mol_K,
+        thermo_anchor_H_J_mol,
+        filled,
+    )
+
+
 def build_combined_thermo(summaries: list[dict],
                           outdir: Path,
                           fit_degree: int = 3,
@@ -1256,7 +1402,8 @@ def build_combined_thermo(summaries: list[dict],
                           thermo_anchor_Cp_J_mol_K: Optional[float] = None,
                           thermo_anchor_H_J_mol: Optional[float] = None,
                           use_anchor_for_integration: bool = False,
-                          use_anchor_Cp_in_fit: bool = False) -> list[dict]:
+                          use_anchor_Cp_in_fit: bool = False,
+                          anchor_metadata: Optional[dict] = None) -> list[dict]:
     outdir.mkdir(parents=True, exist_ok=True)
 
     T_data_all = np.array([s["target_T_K"] for s in summaries], dtype=float)
@@ -1511,8 +1658,11 @@ def build_combined_thermo(summaries: list[dict],
         "thermo_anchor_H_J_mol": thermo_anchor_H_J_mol,
         "use_anchor_for_integration": use_anchor_for_integration,
         "use_anchor_Cp_in_fit": use_anchor_Cp_in_fit,
+        "anchor_metadata": anchor_metadata or {},
     }
     dump_json(outdir / "temperature_range_metadata.json", range_meta)
+    if anchor_metadata:
+        dump_json(outdir / "thermo_anchor_metadata.json", anchor_metadata)
 
     # plots
     plot_xy(outdir / "V_vs_T.png", T, V, "T (K)", "V (Å$^3$)", "Volume vs T", y2=V_fit, y2label="V fit")
@@ -1672,6 +1822,30 @@ def main(argv: list[str] | None = None) -> None:
                     help="Use the external anchor for S/H/G integration instead of integrating from 0 K")
     ap.add_argument("--use-anchor-Cp-in-fit", action="store_true",
                     help="Add/replace Cp(T_anchor) in the Cp fit used for S/H/G integration")
+    ap.add_argument(
+        "--qha-anchor-dir",
+        type=Path,
+        default=None,
+        help="QHA output folder with Cp-temperature.dat for deriving missing Cp/S/H anchors",
+    )
+    ap.add_argument(
+        "--qha-anchor-formula-units",
+        type=float,
+        default=None,
+        help="Formula units in the QHA cell, used to normalize QHA Cp to per formula unit",
+    )
+    ap.add_argument(
+        "--qha-anchor-cp-unit",
+        choices=[
+            "J/mol-cell/K",
+            "kJ/mol-cell/K",
+            "J/mol-formula/K",
+            "kJ/mol-formula/K",
+            "eV-cell/K",
+        ],
+        default="J/mol-cell/K",
+        help="Unit of QHA Cp-temperature.dat values",
+    )
 
     # Speed controls for large log sets.
     ap.add_argument("--skip-per-T-plots", action="store_true", help="Skip individual per-temperature raw/binned diagnostic PNGs")
@@ -1718,6 +1892,36 @@ def main(argv: list[str] | None = None) -> None:
     else:
         summaries = process_from_manual(Path(args.manual_analysis_root))
 
+    try:
+        (
+            thermo_anchor_T,
+            thermo_anchor_S,
+            thermo_anchor_Cp,
+            thermo_anchor_H,
+            anchor_metadata,
+        ) = fill_missing_anchors_from_qha(
+            thermo_anchor_T=args.thermo_anchor_T,
+            thermo_anchor_S_J_mol_K=args.thermo_anchor_S,
+            thermo_anchor_Cp_J_mol_K=args.thermo_anchor_Cp,
+            thermo_anchor_H_J_mol=args.thermo_anchor_H,
+            qha_anchor_dir=args.qha_anchor_dir,
+            qha_anchor_formula_units=args.qha_anchor_formula_units,
+            qha_anchor_cp_unit=args.qha_anchor_cp_unit,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        ap.error(str(exc))
+    if anchor_metadata:
+        print("QHA thermodynamic anchor:")
+        qha_anchor = anchor_metadata["qha_anchor"]
+        print(f"  T = {qha_anchor['T_K']:.6g} K")
+        print(f"  Cp = {qha_anchor['Cp_J_mol_formula_K']:.6g} J/mol-formula/K")
+        print(f"  S = {qha_anchor['S_J_mol_formula_K']:.6g} J/mol-formula/K")
+        print(f"  H = {qha_anchor['H_J_mol_formula']:.6g} J/mol-formula")
+        if not args.use_anchor_for_integration:
+            print("  note: add --use-anchor-for-integration to use QHA S/H in S/H/G curves")
+        if not args.use_anchor_Cp_in_fit:
+            print("  note: add --use-anchor-Cp-in-fit to add QHA Cp to the Cp fit")
+
     build_combined_thermo(
         summaries=summaries,
         outdir=outdir,
@@ -1729,12 +1933,13 @@ def main(argv: list[str] | None = None) -> None:
         anchor_zero=args.anchor_zero,
         n_bootstrap=args.n_bootstrap,
         bootstrap_seed=args.bootstrap_seed,
-        thermo_anchor_T=args.thermo_anchor_T,
-        thermo_anchor_S_J_mol_K=args.thermo_anchor_S,
-        thermo_anchor_Cp_J_mol_K=args.thermo_anchor_Cp,
-        thermo_anchor_H_J_mol=args.thermo_anchor_H,
+        thermo_anchor_T=thermo_anchor_T,
+        thermo_anchor_S_J_mol_K=thermo_anchor_S,
+        thermo_anchor_Cp_J_mol_K=thermo_anchor_Cp,
+        thermo_anchor_H_J_mol=thermo_anchor_H,
         use_anchor_for_integration=args.use_anchor_for_integration,
         use_anchor_Cp_in_fit=args.use_anchor_Cp_in_fit,
+        anchor_metadata=anchor_metadata,
     )
 
     print(f"Done. Outputs written to: {outdir.resolve()}")
