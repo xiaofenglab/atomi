@@ -151,6 +151,7 @@ cp2k-build-acid-box ga_cl4.xyz --box 26 --density-preset regular --charge 0 --cl
 cp2k-build-acid-box ga_cl4.xyz --box 26 --water-density 0.75 --project ga_cl4_26A
 cp2k-geoopt-input --xyz ga_cl4_26A_box.xyz --stage cheap --mode start --box 26 --charge 0
 cp2k-geoopt-input --xyz ga_cl4_26A-pos-1.xyz --stage refine --mode restart --box 26 --max-iter 150
+cp2k-extract-frames ga_cl4_26A_equil-pos-1.xyz --system chloro --find-good-frames --prefix ga_cl4_good
 plotmace mace_train.log
 plotmace mace_train.log 200 5
 convertmace modelname.model
@@ -663,6 +664,46 @@ cp2k-geoopt-input --xyz ga_cl4_26A_box.xyz --stage refine --mode start --box 26 
   --colvar-file ga_cl4_26A_restraints_colvar.inc \
   --constraint-file ga_cl4_26A_restraints_constraint.inc
 ```
+
+## CP2K AIMD Frame Extraction
+
+`cp2k-extract-frames` extracts one or more CP2K AIMD trajectory frames into:
+
+```text
+extracted/<prefix>/f<frame>/
+  frame_<frame>.xyz
+  qm.xyz
+  embed.xyz
+  pointcharges.dat
+  report.txt
+```
+
+For manual frame extraction:
+
+```bash
+cp2k-extract-frames ga_cl4_26A_equil-pos-1.xyz \
+  --frame -1 \
+  --system chloro \
+  --prefix ga_cl4_last
+```
+
+For GaCl4-like AIMD, the command can scan the late trajectory for stable frames,
+rank by first-shell geometry, and write restart-history guidance:
+
+```bash
+cp2k-extract-frames ga_cl4_26A_equil-pos-1.xyz \
+  --system chloro \
+  --find-good-frames \
+  --prefix ga_cl4_good_frames \
+  --top-good-frames 6 \
+  --min-frame-separation 200 \
+  --ga-cl-cut 2.80 \
+  --traj-every 10 \
+  --restart-every 100
+```
+
+Use `--last-fraction`, `--last-frames`, and `--allow-nearest-restart` to tune which
+frames are considered after MD equilibration.
 
 ## Recommended Migration Pattern
 

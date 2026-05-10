@@ -162,6 +162,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cp2k_geoopt_input.add_argument("geoopt_args", nargs=argparse.REMAINDER)
 
+    cp2k_extract_frames = subparsers.add_parser(
+        "cp2k-extract-frames",
+        help="Extract CP2K AIMD frames into QM, embedding, and point-charge files.",
+    )
+    cp2k_extract_frames.add_argument("extract_args", nargs=argparse.REMAINDER)
+
     mace_live = subparsers.add_parser(
         "mace-live",
         help="Live terminal plot for MACE training logs.",
@@ -326,6 +332,11 @@ def main(argv: list[str] | None = None) -> None:
 
         cp2k_geoopt_input_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "cp2k-extract-frames":
+        from atomi.cp2k.extract_frames import main as cp2k_extract_frames_main
+
+        cp2k_extract_frames_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "vasp-outcar":
         extv(raw_args[1:])
         return
@@ -484,6 +495,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.cp2k.geoopt_input import main as cp2k_geoopt_input_main
 
         cp2k_geoopt_input_main(args.geoopt_args)
+        return
+
+    if args.subcommand == "cp2k-extract-frames":
+        from atomi.cp2k.extract_frames import main as cp2k_extract_frames_main
+
+        cp2k_extract_frames_main(args.extract_args)
         return
 
     if args.subcommand == "mace-live":
