@@ -138,6 +138,14 @@ def md_series(
     return points, column
 
 
+def finite_points(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    return sorted(
+        (temp, value)
+        for temp, value in points
+        if math.isfinite(temp) and math.isfinite(value)
+    )
+
+
 def reference_value(
     points: list[tuple[float, float]],
     args: argparse.Namespace,
@@ -343,6 +351,308 @@ def plot_overlay(path: Path, title: str, ylabel: str, qha_points, md_points, arg
     return True
 
 
+def cp_switch_temperature(
+    qha_points: list[tuple[float, float]],
+    md_points: list[tuple[float, float]],
+    requested: float | None = None,
+) -> tuple[float | None, str]:
+    qha_points = finite_points(qha_points)
+    md_points = finite_points(md_points)
+    if requested is not None:
+        return requested, "manual"
+    if not qha_points or not md_points:
+        return None, "missing-cp-source"
+
+    qha_min = qha_points[0][0]
+    qha_max = qha_points[-1][0]
+    md_min = md_points[0][0]
+    md_max = md_points[-1][0]
+    overlap_min = max(qha_min, md_min)
+    overlap_max = min(qha_max, md_max)
+    if overlap_min <= overlap_max:
+        candidates = sorted(
+            {
+                temp
+                for temp, _value in qha_points + md_points
+                if overlap_min <= temp <= overlap_max
+            }
+        )
+        if not candidates:
+            candidates = [overlap_min, overlap_max]
+
+        def cp_delta(temp: float) -> float:
+            qha_value = interpolate(qha_points, temp)
+            md_value = interpolate(md_points, temp)
+            if qha_value is None or md_value is None:
+                return math.inf
+            return abs(qha_value - md_value)
+
+        best = min(candidates, key=cp_delta)
+        return best, "overlap-closest-cp"
+
+    if qha_max < md_min:
+        return 0.5 * (qha_max + md_min), "gap-midpoint-qha-low-md-high"
+    if md_max < qha_min:
+        return 0.5 * (md_max + qha_min), "gap-midpoint-md-low-qha-high"
+    return None, "no-switch-found"
+
+
+def build_hybrid_cp_rows(
+    qha_points: list[tuple[float, float]],
+    md_points: list[tuple[float, float]],
+    switch_temp: float,
+) -> list[dict]:
+    rows = [
+        {"T_K": temp, "Cp": value, "Cp_source": "QHA"}
+        for temp, value in finite_points(qha_points)
+        if temp < switch_temp
+    ]
+    switch_values = [
+        value
+        for value in (
+            interpolate(qha_points, switch_temp),
+            interpolate(md_points, switch_temp),
+        )
+        if value is not None and math.isfinite(value)
+    ]
+    if switch_values:
+        rows.append(
+            {
+                "T_K": switch_temp,
+                "Cp": sum(switch_values) / len(switch_values),
+                "Cp_source": "switch-average",
+            }
+        )
+    rows.extend(
+        {"T_K": temp, "Cp": value, "Cp_source": "MD"}
+        for temp, value in finite_points(md_points)
+        if temp > switch_temp
+    )
+    deduped = {}
+    for row in rows:
+        deduped[round(row["T_K"], 10)] = row
+    return sorted(deduped.values(), key=lambda row: row["T_K"])
+
+
+def cp_over_t(cp_value: float, temp: float) -> float:
+    if temp <= 0.0:
+        return 0.0
+    return cp_value / temp
+
+
+def add_integrated_entropy(
+    rows: list[dict],
+    qha_entropy: list[tuple[float, float]],
+) -> tuple[list[dict], str]:
+    if not rows:
+        return rows, "no-hybrid-cp"
+    first_temp = rows[0]["T_K"]
+    reference = interpolate(qha_entropy, first_temp)
+    if reference is None or not math.isfinite(reference):
+        reference = 0.0
+        note = "S starts at 0 because QHA entropy was unavailable at first hybrid T"
+    else:
+        note = "S starts from QHA entropy at first hybrid T"
+    rows[0]["S_integrated"] = reference
+    for previous, current in zip(rows, rows[1:]):
+        delta_s = 0.5 * (
+            cp_over_t(previous["Cp"], previous["T_K"])
+            + cp_over_t(current["Cp"], current["T_K"])
+        ) * (current["T_K"] - previous["T_K"])
+        current["S_integrated"] = previous["S_integrated"] + delta_s
+    return rows, note
+
+
+def plot_hybrid_cp_entropy(
+    cp_png: Path,
+    entropy_png: Path,
+    qha_cp,
+    md_cp,
+    qha_entropy,
+    md_entropy,
+    hybrid_rows,
+    switch_temp,
+    args,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    cp_label = "J/mol-target-cell/K" if args.energy_basis == "target-cell" else "J/mol-formula/K"
+    plt.figure(figsize=(7.2, 4.8))
+    if qha_cp:
+        x, y = zip(*qha_cp)
+        plt.plot(x, y, "-", color="#1f77b4", linewidth=1.6, alpha=0.7, label="QHA Cp")
+    if md_cp:
+        x, y = zip(*md_cp)
+        plt.plot(x, y, "o--", color="#d62728", markersize=3.2, label="MD Cp")
+    if hybrid_rows:
+        plt.plot(
+            [row["T_K"] for row in hybrid_rows],
+            [row["Cp"] for row in hybrid_rows],
+            "-",
+            color="#111111",
+            linewidth=2.2,
+            label="Hybrid Cp",
+        )
+    plt.axvline(switch_temp, color="#555555", linestyle=":", linewidth=1.2)
+    if args.t_min is not None or args.t_max is not None:
+        plt.xlim(left=args.t_min, right=args.t_max)
+    plt.xlabel("Temperature (K)")
+    plt.ylabel(f"Cp ({cp_label})")
+    plt.title("Hybrid QHA+MD Cp")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(cp_png, dpi=300)
+    plt.close()
+
+    plt.figure(figsize=(7.2, 4.8))
+    if qha_entropy:
+        x, y = zip(*qha_entropy)
+        plt.plot(x, y, "-", color="#1f77b4", linewidth=1.6, alpha=0.7, label="QHA S")
+    if md_entropy:
+        x, y = zip(*md_entropy)
+        plt.plot(x, y, "o--", color="#d62728", markersize=3.2, label="MD S")
+    if hybrid_rows:
+        plt.plot(
+            [row["T_K"] for row in hybrid_rows],
+            [row["S_integrated"] for row in hybrid_rows],
+            "-",
+            color="#111111",
+            linewidth=2.2,
+            label="Integrated hybrid S",
+        )
+    plt.axvline(switch_temp, color="#555555", linestyle=":", linewidth=1.2)
+    if args.t_min is not None or args.t_max is not None:
+        plt.xlim(left=args.t_min, right=args.t_max)
+    plt.xlabel("Temperature (K)")
+    plt.ylabel(f"S ({cp_label})")
+    plt.title("Integrated Hybrid QHA+MD Entropy")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(entropy_png, dpi=300)
+    plt.close()
+
+
+def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
+    qha_cp = filter_range(
+        qha_series(args.qha_dir / "Cp-temperature.dat", cp_qha_scale(args)),
+        args.t_min,
+        args.t_max,
+    )
+    md_path = args.md_dir / "thermo_functions_grid.csv"
+    md_cp, md_cp_column = md_series(md_path, MD_COLUMN_ALIASES["Cp"], md_cp_scale(args))
+    md_cp = filter_range(md_cp, args.t_min, args.t_max)
+    if not qha_cp or not md_cp:
+        return [], {
+            "note": "Hybrid Cp/S skipped because QHA Cp or MD Cp is unavailable",
+            "qha_cp_points": len(qha_cp),
+            "md_cp_points": len(md_cp),
+            "md_cp_column": md_cp_column,
+        }
+    switch_temp, switch_method = cp_switch_temperature(
+        qha_cp,
+        md_cp,
+        args.hybrid_switch_temperature,
+    )
+    if switch_temp is None:
+        return [], {
+            "note": "Hybrid Cp/S skipped because QHA and MD Cp were unavailable",
+            "md_cp_column": md_cp_column,
+        }
+
+    qha_entropy = filter_range(
+        qha_series(args.qha_dir / "entropy-temperature.dat", entropy_qha_scale(args)),
+        args.t_min,
+        args.t_max,
+    )
+    md_entropy, md_entropy_column = md_series(
+        md_path,
+        MD_COLUMN_ALIASES["S"],
+        md_cp_scale(args),
+    )
+    md_entropy = filter_range(md_entropy, args.t_min, args.t_max)
+    hybrid_rows = build_hybrid_cp_rows(qha_cp, md_cp, switch_temp)
+    hybrid_rows, entropy_note = add_integrated_entropy(hybrid_rows, qha_entropy)
+    if not hybrid_rows:
+        return [], {
+            "note": "Hybrid Cp/S skipped because no points survived the switch",
+            "md_cp_column": md_cp_column,
+            "md_entropy_column": md_entropy_column,
+        }
+
+    csv_path = args.outdir / "hybrid_cp_entropy.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        fields = ["T_K", "Cp_source", "Cp", "S_integrated"]
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for row in hybrid_rows:
+            writer.writerow(
+                {
+                    "T_K": row["T_K"],
+                    "Cp_source": row["Cp_source"],
+                    "Cp": row["Cp"],
+                    "S_integrated": row["S_integrated"],
+                }
+            )
+
+    cp_png = args.outdir / "hybrid_cp_qha_md.png"
+    entropy_png = args.outdir / "hybrid_entropy_integrated_qha_md.png"
+    plot_hybrid_cp_entropy(
+        cp_png,
+        entropy_png,
+        qha_cp,
+        md_cp,
+        qha_entropy,
+        md_entropy,
+        hybrid_rows,
+        switch_temp,
+        args,
+    )
+    metadata = {
+        "switch_temperature_K": switch_temp,
+        "switch_method": switch_method,
+        "entropy_integration": "S(T) = S(T0) + integral_T0^T Cp(T')/T' dT'",
+        "entropy_reference_note": entropy_note,
+        "qha_cp_points": len(qha_cp),
+        "md_cp_points": len(md_cp),
+        "qha_entropy_points": len(qha_entropy),
+        "md_entropy_points": len(md_entropy),
+        "md_cp_column": md_cp_column,
+        "md_entropy_column": md_entropy_column,
+        "basis": args.energy_basis,
+        "cp_entropy_units": (
+            "J/mol-target-cell/K"
+            if args.energy_basis == "target-cell"
+            else "J/mol-formula/K"
+        ),
+    }
+    (args.outdir / "hybrid_cp_entropy_metadata.json").write_text(
+        json.dumps(metadata, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(cp_png)
+    print(entropy_png)
+    return [
+        {
+            "quantity": "hybrid_cp",
+            "plot_png": cp_png.name,
+            "data_csv": csv_path.name,
+            "qha_source": "Cp-temperature.dat",
+            "md_source": md_path.name,
+            "md_column": md_cp_column,
+            "comparison_type": "hybrid",
+        },
+        {
+            "quantity": "hybrid_entropy",
+            "plot_png": entropy_png.name,
+            "data_csv": csv_path.name,
+            "qha_source": "entropy-temperature.dat",
+            "md_source": md_path.name,
+            "md_column": md_entropy_column,
+            "comparison_type": "integrated-hybrid",
+        },
+    ], metadata
+
+
 def write_overlay_csv(path: Path, qha_points, md_points) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
@@ -454,6 +764,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reference used to shift G/H/F curves before overlay.",
     )
     parser.add_argument("--energy-reference-temperature", type=float, default=None)
+    parser.add_argument(
+        "--no-hybrid-cp-s",
+        action="store_true",
+        help="Skip integrated hybrid QHA+MD Cp and entropy outputs.",
+    )
+    parser.add_argument(
+        "--hybrid-switch-temperature",
+        type=float,
+        default=None,
+        help="Override the automatic QHA-to-MD Cp switch temperature in K.",
+    )
     return parser
 
 
@@ -539,6 +860,29 @@ def main(argv: list[str] | None = None) -> None:
             }
         )
         print(png)
+
+    if not args.no_hybrid_cp_s:
+        hybrid_index_rows, hybrid_metadata = write_hybrid_outputs(args)
+        index_rows.extend(hybrid_index_rows)
+        hybrid_note = hybrid_metadata.get("note", "")
+        if hybrid_metadata and "switch_temperature_K" in hybrid_metadata:
+            hybrid_note = (
+                f"switch={hybrid_metadata['switch_temperature_K']} K "
+                f"({hybrid_metadata['switch_method']}); "
+                f"{hybrid_metadata['entropy_reference_note']}"
+            )
+        availability_rows.append(
+            {
+                "quantity": "hybrid_cp_entropy",
+                "comparison_type": "integrated-hybrid" if hybrid_index_rows else "missing",
+                "qha_source": "Cp-temperature.dat + entropy-temperature.dat",
+                "qha_points": hybrid_metadata.get("qha_cp_points", 0),
+                "md_source": "thermo_functions_grid.csv",
+                "md_column": hybrid_metadata.get("md_cp_column", ""),
+                "md_points": hybrid_metadata.get("md_cp_points", 0),
+                "note": hybrid_note,
+            }
+        )
 
     with (args.outdir / "overlay_index.csv").open("w", newline="", encoding="utf-8") as handle:
         fields = [

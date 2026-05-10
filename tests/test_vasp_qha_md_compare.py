@@ -1,4 +1,5 @@
 import csv
+import json
 from pathlib import Path
 
 import pytest
@@ -173,3 +174,53 @@ def test_qha_md_compare_uses_md_column_aliases_and_interpolates_entropy(tmp_path
     entropy_row = next(row for row in report if row["quantity"] == "entropy")
     assert entropy_row["md_column"] == "S_rel_J_mol_K"
     assert entropy_row["comparison_type"] == "overlay"
+
+
+def test_qha_md_compare_writes_hybrid_cp_entropy(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+    qha = tmp_path / "qha"
+    md = tmp_path / "md"
+    out = tmp_path / "overlay"
+    qha.mkdir()
+    md.mkdir()
+
+    write_qha_dat(qha / "Cp-temperature.dat", [(300.0, 10.0), (500.0, 20.0)])
+    write_qha_dat(qha / "entropy-temperature.dat", [(300.0, 1.0), (500.0, 8.0)])
+    (md / "thermo_functions_grid.csv").write_text(
+        "T_K,Cp_used_for_integration_J_per_mol_UO2_K,S_rel_J_mol_K\n"
+        "500,22,9\n"
+        "700,40,18\n",
+        encoding="utf-8",
+    )
+
+    main(
+        [
+            "--qha-dir",
+            str(qha),
+            "--md-dir",
+            str(md),
+            "--outdir",
+            str(out),
+            "--qha-formula-units",
+            "1",
+            "--md-formula-units",
+            "1",
+            "--target-z",
+            "1",
+            "--t-min",
+            "300",
+            "--t-max",
+            "700",
+        ]
+    )
+
+    rows = list(csv.DictReader((out / "hybrid_cp_entropy.csv").open()))
+    assert [row["Cp_source"] for row in rows] == ["QHA", "switch-average", "MD"]
+    assert float(rows[1]["T_K"]) == pytest.approx(500.0)
+    assert float(rows[1]["Cp"]) == pytest.approx(21.0)
+    assert float(rows[2]["S_integrated"]) > float(rows[1]["S_integrated"])
+    metadata = json.loads((out / "hybrid_cp_entropy_metadata.json").read_text())
+    assert metadata["switch_method"] == "overlap-closest-cp"
+    assert metadata["switch_temperature_K"] == pytest.approx(500.0)
+    assert (out / "hybrid_cp_qha_md.png").exists()
+    assert (out / "hybrid_entropy_integrated_qha_md.png").exists()

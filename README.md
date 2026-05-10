@@ -918,6 +918,18 @@ example, QHA enthalpy requires both `gibbs-temperature.dat` and
 `lammps-thermo-series` column names such as `S_rel_J_per_mol_UO2_K`,
 `S_rel_J_mol_K`, `H_rel_J_per_mol_UO2`, or `H_rel_J_mol`.
 
+When both QHA and MD Cp are available, the command also writes integrated
+hybrid Cp/S outputs: `hybrid_cp_qha_md.png`,
+`hybrid_entropy_integrated_qha_md.png`, `hybrid_cp_entropy.csv`, and
+`hybrid_cp_entropy_metadata.json`. The automatic switch temperature is chosen
+where QHA and MD Cp are closest inside their overlapping temperature range; if
+there is no overlap, it uses the midpoint between the QHA and MD temperature
+windows. The hybrid entropy is integrated from the hybrid Cp curve using
+`dS = Cp/T dT`, starting from QHA entropy at the first hybrid temperature when
+available. Override the automatic switch with
+`--hybrid-switch-temperature <T>` or skip these outputs with
+`--no-hybrid-cp-s`.
+
 ## Recommended Migration Pattern
 
 1. Put reusable Python logic under `src/atomi/`.
