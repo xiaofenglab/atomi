@@ -2305,20 +2305,21 @@ def build_combined_thermo(summaries: list[dict],
 
     if qha_splice_metadata.get("enabled"):
         reference_T = qha_splice_metadata["blend_start_K"]
-        switch_S = float(np.interp(reference_T, qha_low_t_curve["T"], qha_low_t_curve["S"]))
         switch_H = float(np.interp(reference_T, qha_low_t_curve["T"], qha_low_t_curve["H"]))
         H_rel_J_mol_grid, S_rel_J_mol_K_grid, G_rel_J_mol_grid = integrate_from_reference(
             T_grid=T_grid,
             Cp_grid=Cp_grid,
             T_ref=reference_T,
-            S_ref_J_mol_K=switch_S,
+            S_ref_J_mol_K=0.0,
             H_ref_J_mol=switch_H,
         )
+        if len(T_grid) and abs(T_grid[0]) <= 1.0e-12:
+            S_rel_J_mol_K_grid = trapz_cumulative(T_grid, Cp_over_T)
         G_rel_J_mol_grid = H_rel_J_mol_grid - T_grid * S_rel_J_mol_K_grid
         qha_splice_metadata["entropy_reference"] = {
-            "T_K": float(reference_T),
-            "S_J_mol_formula_K": switch_S,
-            "source": "QHA S integrated from QHA Cp at blend_start",
+            "T_K": 0.0 if len(T_grid) and abs(T_grid[0]) <= 1.0e-12 else float(reference_T),
+            "S_J_mol_formula_K": 0.0,
+            "source": "S(0 K)=0 when grid includes 0 K; otherwise entropy is relative",
         }
         qha_splice_metadata["enthalpy_reference"] = {
             "T_K": float(reference_T),

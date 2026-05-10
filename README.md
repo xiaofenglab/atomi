@@ -989,10 +989,11 @@ switch to MD.
 The hybrid method uses QHA Cp below the blend, MD Cp above it, and a smoothstep
 blend between `blend_start` and `blend_end`. It does not blend S/H/G directly:
 entropy and enthalpy are integrated from the hybrid Cp curve, and Gibbs energy
-is recomputed as `G = H - TS`. The entropy reference comes from QHA entropy at
-the blend start or the nearest QHA grid point; if QHA H can be derived from
-`gibbs-temperature.dat` and entropy, it is used as the H reference, otherwise
-`H_rel(blend_start)=0`. The metadata and `overlap_mismatch_Cp.png` record mean
+is recomputed as `G = H - TS`. Entropy uses the third-law reference
+`S(0 K)=0` when the hybrid grid includes 0 K; if QHA H can be derived from
+`gibbs-temperature.dat` and entropy, it is still used as the H reference near
+the blend start, otherwise `H_rel(blend_start)=0`. The metadata and
+`overlap_mismatch_Cp.png` record mean
 absolute Cp mismatch, RMS mismatch, relative endpoint mismatch, whether the
 curves cross in the blend interval, and a warning when mismatch exceeds 10%.
 Override the automatic switch with `--hybrid-switch-temperature <T>`, choose

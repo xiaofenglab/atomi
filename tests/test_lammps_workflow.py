@@ -182,6 +182,8 @@ def test_build_combined_thermo_can_use_qha_low_t_splice(tmp_path) -> None:
     assert float(by_t[200.0]["Cp_used_for_integration_J_per_mol_UO2_K"]) == 40.0
     assert float(by_t[300.0]["Cp_used_for_integration_J_per_mol_UO2_K"]) == 100.0
     assert float(by_t[100.0]["qha_md_blend_weight"]) == 0.0
+    assert float(by_t[0.0]["S_rel_J_per_mol_UO2_K"]) == 0.0
+    assert min(float(row["S_rel_J_per_mol_UO2_K"]) for row in rows) >= -1.0e-12
     assert (tmp_path / "out" / "qha_low_t_splice_metadata.json").exists()
     assert (tmp_path / "out" / "hybrid_Cp_QHA_MD.png").exists()
     assert (tmp_path / "out" / "hybrid_S_QHA_MD.png").exists()
@@ -199,3 +201,4 @@ def test_build_combined_thermo_can_use_qha_low_t_splice(tmp_path) -> None:
     assert metadata["qha_lattice_modes"]["a"] == "hybrid"
     assert metadata["structural_hybrid"]["correction_type"] == "shift"
     assert metadata["structural_hybrid"]["lattice_references"]["a"] == 4.2
+    assert metadata["entropy_reference"]["S_J_mol_formula_K"] == 0.0

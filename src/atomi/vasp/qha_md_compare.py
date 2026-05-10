@@ -605,18 +605,29 @@ def add_integrated_thermo(
 ) -> tuple[list[dict], str]:
     if not rows:
         return rows, "no-hybrid-cp"
-    ref_temp = blend_start
-    entropy_reference = interpolate(qha_entropy, ref_temp)
-    if entropy_reference is None and qha_entropy:
-        ref_temp, entropy_reference = min(qha_entropy, key=lambda item: abs(item[0] - blend_start))
-    if entropy_reference is None or not math.isfinite(entropy_reference):
-        entropy_reference = 0.0
-        note = "S starts at 0 because QHA entropy was unavailable near blend_start"
+    entropy_zero_idx = next(
+        (idx for idx, row in enumerate(rows) if abs(row["T_K"]) <= 1.0e-12),
+        None,
+    )
+    if entropy_zero_idx is None:
+        entropy_ref_idx = 0
+        entropy_ref_temp = rows[entropy_ref_idx]["T_K"]
+        note = (
+            "S is relative to the first hybrid grid point because the hybrid grid "
+            "does not include 0 K"
+        )
     else:
-        note = "S starts from QHA entropy near blend_start"
-    enthalpy_reference = interpolate(qha_enthalpy, ref_temp)
+        entropy_ref_idx = entropy_zero_idx
+        entropy_ref_temp = 0.0
+        note = "S(0 K)=0 by third-law reference; entropy is integrated from hybrid Cp/T"
+
+    enthalpy_ref_temp = blend_start
+    enthalpy_reference = interpolate(qha_enthalpy, enthalpy_ref_temp)
     if enthalpy_reference is None and qha_enthalpy:
-        _temp, enthalpy_reference = min(qha_enthalpy, key=lambda item: abs(item[0] - ref_temp))
+        enthalpy_ref_temp, enthalpy_reference = min(
+            qha_enthalpy,
+            key=lambda item: abs(item[0] - enthalpy_ref_temp),
+        )
     enthalpy_note = "QHA H reference at blend_start"
     if enthalpy_reference is None or not math.isfinite(enthalpy_reference):
         enthalpy_reference = 0.0
@@ -624,29 +635,35 @@ def add_integrated_thermo(
     for row in rows:
         row["S_integrated"] = math.nan
         row["H_integrated_kJ_mol"] = math.nan
-    ref_idx = min(range(len(rows)), key=lambda idx: abs(rows[idx]["T_K"] - ref_temp))
-    rows[ref_idx]["S_integrated"] = entropy_reference
+    rows[entropy_ref_idx]["S_integrated"] = 0.0
+    for previous, current in zip(rows[entropy_ref_idx:], rows[entropy_ref_idx + 1:]):
+        delta_s = 0.5 * (
+            cp_over_t(previous["Cp"], previous["T_K"])
+            + cp_over_t(current["Cp"], current["T_K"])
+        ) * (current["T_K"] - previous["T_K"])
+        current["S_integrated"] = previous["S_integrated"] + delta_s
+    for current, previous in zip(
+        reversed(rows[:entropy_ref_idx]),
+        reversed(rows[1 : entropy_ref_idx + 1]),
+    ):
+        delta_s = 0.5 * (
+            cp_over_t(previous["Cp"], previous["T_K"])
+            + cp_over_t(current["Cp"], current["T_K"])
+        ) * (previous["T_K"] - current["T_K"])
+        current["S_integrated"] = previous["S_integrated"] - delta_s
+
+    ref_idx = min(range(len(rows)), key=lambda idx: abs(rows[idx]["T_K"] - enthalpy_ref_temp))
     rows[ref_idx]["H_integrated_kJ_mol"] = enthalpy_reference
     for previous, current in zip(rows[ref_idx:], rows[ref_idx + 1:]):
         delta_h = 0.5 * (previous["Cp"] + current["Cp"]) * (
             current["T_K"] - previous["T_K"]
         )
-        delta_s = 0.5 * (
-            cp_over_t(previous["Cp"], previous["T_K"])
-            + cp_over_t(current["Cp"], current["T_K"])
-        ) * (current["T_K"] - previous["T_K"])
         current["H_integrated_kJ_mol"] = previous["H_integrated_kJ_mol"] + delta_h / 1000.0
-        current["S_integrated"] = previous["S_integrated"] + delta_s
     for current, previous in zip(reversed(rows[:ref_idx]), reversed(rows[1 : ref_idx + 1])):
         delta_h = 0.5 * (previous["Cp"] + current["Cp"]) * (
             previous["T_K"] - current["T_K"]
         )
-        delta_s = 0.5 * (
-            cp_over_t(previous["Cp"], previous["T_K"])
-            + cp_over_t(current["Cp"], current["T_K"])
-        ) * (previous["T_K"] - current["T_K"])
         current["H_integrated_kJ_mol"] = previous["H_integrated_kJ_mol"] - delta_h / 1000.0
-        current["S_integrated"] = previous["S_integrated"] - delta_s
     for row in rows:
         row["G_integrated_kJ_mol"] = (
             row["H_integrated_kJ_mol"] - row["T_K"] * row["S_integrated"] / 1000.0
@@ -654,7 +671,10 @@ def add_integrated_thermo(
     g0 = rows[ref_idx]["G_integrated_kJ_mol"]
     for row in rows:
         row["G_relative_kJ_mol"] = row["G_integrated_kJ_mol"] - g0
-    return rows, f"{note}; {enthalpy_note}; reference_T={rows[ref_idx]['T_K']} K"
+    return rows, (
+        f"{note}; entropy_reference_T={entropy_ref_temp} K; "
+        f"{enthalpy_note}; enthalpy_reference_T={rows[ref_idx]['T_K']} K"
+    )
 
 
 def relative_to_temperature(points, ref_t: float) -> list[tuple[float, float]]:
