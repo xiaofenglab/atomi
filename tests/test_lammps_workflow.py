@@ -231,6 +231,17 @@ def test_build_combined_thermo_can_use_qha_low_t_splice(tmp_path) -> None:
         structure_correction="shift",
         thermo_anchor_T=300.0,
         thermo_anchor_H_J_mol=-1084490.0,
+        anchor_metadata={
+            "thermo_db_anchor": {
+                "database": "jaea",
+                "formula": "UO2",
+                "temperature_value_K": 300.0,
+                "S_J_mol_formula_K": 77.8,
+                "H_J_mol_formula": -1084490.0,
+                "G_J_mol_formula": -1107840.0,
+            }
+        },
+        plot_thermo_db_points=True,
     )
 
     rows = list(csv.DictReader((tmp_path / "out" / "thermo_functions_grid.csv").open()))

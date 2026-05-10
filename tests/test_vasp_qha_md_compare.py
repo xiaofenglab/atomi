@@ -527,6 +527,7 @@ def test_qha_md_can_fill_enthalpy_anchor_from_jaea(tmp_path: Path, monkeypatch) 
             "UO2",
             "--thermo-phase",
             "solid",
+            "--plot-thermo-db-points",
         ]
     )
 
@@ -536,6 +537,10 @@ def test_qha_md_can_fill_enthalpy_anchor_from_jaea(tmp_path: Path, monkeypatch) 
     metadata = json.loads((out / "hybrid_cp_entropy_metadata.json").read_text())
     assert metadata["enthalpy_anchor"]["thermo_db_anchor"]["database"] == "jaea"
     assert metadata["enthalpy_anchor"]["thermo_db_anchor"]["formula"] == "UO2"
+    points = metadata["enthalpy_anchor"]["thermo_db_plot_points"]
+    assert points["S"][0]["value"] == pytest.approx(77.8)
+    assert points["H"][0]["value"] == pytest.approx(-1084.49)
+    assert points["G"][0]["value"] == pytest.approx(-1107.84)
 
 
 def test_hybrid_cp_switch_rejects_extreme_low_t_match(tmp_path: Path) -> None:

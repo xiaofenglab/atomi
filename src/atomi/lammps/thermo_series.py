@@ -424,7 +424,8 @@ def plot_hybrid_grid(outpath: Path,
                      md_y: Optional[np.ndarray] = None,
                      band: Optional[tuple[np.ndarray, np.ndarray]] = None,
                      blend_start: Optional[float] = None,
-                     blend_end: Optional[float] = None) -> None:
+                     blend_end: Optional[float] = None,
+                     db_points: Optional[list[dict]] = None) -> None:
     outpath.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(7, 5))
     if qha_T is not None and qha_y is not None and len(qha_T) and len(qha_y):
@@ -435,6 +436,17 @@ def plot_hybrid_grid(outpath: Path,
         lo, hi = band
         ax.fill_between(T_grid, lo, hi, color="#111111", alpha=0.12, label="hybrid MD UQ")
     ax.plot(T_grid, hybrid_y, color="#111111", linewidth=2.3, label="hybrid")
+    if db_points:
+        ax.plot(
+            [point["T_K"] for point in db_points],
+            [point["value"] for point in db_points],
+            "o",
+            color="#111111",
+            markeredgecolor="#111111",
+            markerfacecolor="#111111",
+            markersize=5.5,
+            label=db_points[0].get("label", "database"),
+        )
     if blend_start is not None and blend_end is not None:
         if abs(blend_end - blend_start) <= 1.0e-12:
             ax.axvline(blend_start, color="0.25", linestyle=":", linewidth=1.1)
@@ -1952,7 +1964,8 @@ def build_combined_thermo(summaries: list[dict],
                           volume_reference: Optional[float] = None,
                           lattice_references: Optional[dict[str, float]] = None,
                           structure_correction: str = "none",
-                          structure_correction_apply_to: str = "both") -> list[dict]:
+                          structure_correction_apply_to: str = "both",
+                          plot_thermo_db_points: bool = False) -> list[dict]:
     outdir.mkdir(parents=True, exist_ok=True)
 
     T_data_all = np.array([s["target_T_K"] for s in summaries], dtype=float)
@@ -2119,6 +2132,16 @@ def build_combined_thermo(summaries: list[dict],
     qha_blend_weights = np.ones_like(T_grid, dtype=float)
     lattice_hybrid = {}
     lattice_references = lattice_references or {}
+    thermo_db_anchor = (anchor_metadata or {}).get("thermo_db_anchor")
+    thermo_db_points = {}
+    if plot_thermo_db_points and thermo_db_anchor:
+        label = f"{thermo_db_anchor['database'].upper()} {thermo_db_anchor['formula']}"
+        temp = thermo_db_anchor["temperature_value_K"]
+        thermo_db_points = {
+            "S": [{"T_K": temp, "value": thermo_db_anchor["S_J_mol_formula_K"], "label": label}],
+            "H": [{"T_K": temp, "value": thermo_db_anchor["H_J_mol_formula"] / 1000.0, "label": label}],
+            "G": [{"T_K": temp, "value": thermo_db_anchor["G_J_mol_formula"] / 1000.0, "label": label}],
+        }
     structural_metadata = {
         "reference_T_K": structure_reference_temperature,
         "volume_reference": volume_reference,
@@ -2576,6 +2599,7 @@ def build_combined_thermo(summaries: list[dict],
             None,
             qha_splice_metadata["blend_start_K"],
             qha_splice_metadata["blend_end_K"],
+            db_points=thermo_db_points.get("S"),
         )
         plot_hybrid_grid(
             outdir / "hybrid_H_QHA_MD.png",
@@ -2590,6 +2614,7 @@ def build_combined_thermo(summaries: list[dict],
             None,
             qha_splice_metadata["blend_start_K"],
             qha_splice_metadata["blend_end_K"],
+            db_points=thermo_db_points.get("H"),
         )
         plot_hybrid_grid(
             outdir / "hybrid_G_QHA_MD.png",
@@ -2604,6 +2629,7 @@ def build_combined_thermo(summaries: list[dict],
             None,
             qha_splice_metadata["blend_start_K"],
             qha_splice_metadata["blend_end_K"],
+            db_points=thermo_db_points.get("G"),
         )
         plot_structural_hybrid_detail(
             outdir / "hybrid_V_QHA_MD.png",
@@ -2846,6 +2872,11 @@ def main(argv: list[str] | None = None) -> None:
         help="Database lookup temperature. Defaults to --thermo-anchor-T, or 300 K.",
     )
     ap.add_argument(
+        "--plot-thermo-db-points",
+        action="store_true",
+        help="Overlay thermodynamic database points on hybrid S/H/G plots.",
+    )
+    ap.add_argument(
         "--qha-anchor-dir",
         type=Path,
         default=None,
@@ -3066,6 +3097,7 @@ def main(argv: list[str] | None = None) -> None:
             lattice_references=lattice_references,
             structure_correction=args.structure_correction,
             structure_correction_apply_to=args.structure_correction_apply_to,
+            plot_thermo_db_points=args.plot_thermo_db_points,
         )
     except ValueError as exc:
         ap.error(str(exc))

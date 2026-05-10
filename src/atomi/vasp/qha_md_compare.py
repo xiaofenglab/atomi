@@ -632,6 +632,37 @@ def resolve_enthalpy_anchor(args: argparse.Namespace) -> tuple[float | None, dic
     return enthalpy_anchor_to_kj_per_basis(args), record
 
 
+def thermo_db_plot_points(args: argparse.Namespace, record: dict) -> dict[str, list[dict]]:
+    if not args.plot_thermo_db_points or not record:
+        return {}
+    factor = args.target_z if args.energy_basis == "target-cell" else 1.0
+    label = f"{record['database'].upper()} {record['formula']}"
+    temp = record["temperature_value_K"]
+    return {
+        "S": [
+            {
+                "T_K": temp,
+                "value": record["S_J_mol_formula_K"] * factor,
+                "label": label,
+            }
+        ],
+        "H": [
+            {
+                "T_K": temp,
+                "value": record["H_J_mol_formula"] * factor / 1000.0,
+                "label": label,
+            }
+        ],
+        "G": [
+            {
+                "T_K": temp,
+                "value": record["G_J_mol_formula"] * factor / 1000.0,
+                "label": label,
+            }
+        ],
+    }
+
+
 def add_integrated_thermo(
     rows: list[dict],
     qha_entropy: list[tuple[float, float]],
@@ -765,6 +796,7 @@ def plot_hybrid_quantity(
     blend_start,
     blend_end,
     args,
+    db_points=None,
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -785,6 +817,18 @@ def plot_hybrid_quantity(
             label=hybrid_label,
         )
         apply_hybrid_y_limits(ax, [row[hybrid_key] for row in hybrid_rows])
+    if db_points:
+        x, y = zip(*[(point["T_K"], point["value"]) for point in db_points])
+        ax.plot(
+            x,
+            y,
+            "o",
+            color="#111111",
+            markeredgecolor="#111111",
+            markerfacecolor="#111111",
+            markersize=5.5,
+            label=db_points[0].get("label", "database"),
+        )
     if blend_start == blend_end:
         ax.axvline(blend_start, color="#555555", linestyle=":", linewidth=1.2)
     else:
@@ -1136,6 +1180,7 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
     md_entropy = filter_range(md_entropy, args.t_min, args.t_max)
     qha_enthalpy = filter_range(qha_derived_enthalpy(args), args.t_min, args.t_max)
     enthalpy_anchor_kj_mol, thermo_db_anchor = resolve_enthalpy_anchor(args)
+    db_plot_points = thermo_db_plot_points(args, thermo_db_anchor)
     hybrid_rows = build_hybrid_cp_rows(qha_cp, md_cp, blend_start, blend_end)
     hybrid_rows, entropy_note = add_integrated_thermo(
         hybrid_rows,
@@ -1387,6 +1432,7 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         blend_start,
         blend_end,
         args,
+        db_points=db_plot_points.get("S"),
     )
     plot_hybrid_quantity(
         enthalpy_png,
@@ -1400,6 +1446,7 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         blend_start,
         blend_end,
         args,
+        db_points=db_plot_points.get("H"),
     )
     plot_hybrid_quantity(
         gibbs_png,
@@ -1413,6 +1460,7 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         blend_start,
         blend_end,
         args,
+        db_points=db_plot_points.get("G"),
     )
     if volume_rows:
         plot_structural_quantity(
@@ -1476,6 +1524,7 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
             "value_kJ_mol_basis": enthalpy_anchor_kj_mol,
             "basis": args.energy_basis,
             "thermo_db_anchor": thermo_db_anchor,
+            "thermo_db_plot_points": db_plot_points,
         },
         "structural_hybrid": structural_metadata,
         "cp_overlap_diagnostics": {
@@ -1869,6 +1918,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Database lookup temperature. Defaults to the H anchor temperature, or 300 K.",
+    )
+    parser.add_argument(
+        "--plot-thermo-db-points",
+        action="store_true",
+        help="Overlay thermodynamic database points on hybrid S/H/G plots.",
     )
     return parser
 
