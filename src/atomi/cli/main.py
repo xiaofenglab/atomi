@@ -248,6 +248,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vasp_md_snapshot_candidates.add_argument("snapshot_args", nargs=argparse.REMAINDER)
 
+    vasp_qha_summary = subparsers.add_parser(
+        "vasp-qha-summary",
+        help="Summarize VASP/phonopy QHA volume folders.",
+    )
+    vasp_qha_summary.add_argument("qha_args", nargs=argparse.REMAINDER)
+
     mace_build_dataset = subparsers.add_parser(
         "mace-build-dataset",
         help="Build adaptive MACE train/validation extxyz datasets.",
@@ -412,6 +418,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.md_snapshots import main as vasp_md_snapshot_candidates_main
 
         vasp_md_snapshot_candidates_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "vasp-qha-summary":
+        from atomi.vasp.qha_summary import main as vasp_qha_summary_main
+
+        vasp_qha_summary_main(raw_args[1:])
         return
 
     parser = build_parser()
@@ -600,6 +611,12 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.subcommand == "mace-build-dataset":
         mace_build_dataset_main(args.dataset_args)
+        return
+
+    if args.subcommand == "vasp-qha-summary":
+        from atomi.vasp.qha_summary import main as vasp_qha_summary_main
+
+        vasp_qha_summary_main(args.qha_args)
         return
 
     if args.subcommand == "mace-energy-outliers":

@@ -171,6 +171,7 @@ vasp-prefail-candidates --config dump_npt_900K.json --output-root DFT_PREFail_CA
 vasp-stress-force-candidates --output-root DFT_STRESS_FORCE --vasp-template VASP_TEMPLATE --mode both --target-size 80 --bias-species O
 vasp-defect-candidates --output-root DFT_DEFECTS --vasp-template VASP_TEMPLATE --species O U
 vasp-md-snapshot-candidates --config config_production.json --output-root DFT_MD_SNAPSHOTS --vasp-template VASP_TEMPLATE --last-frames 5
+vasp-qha-summary --root ./2x2x2 --outdir ./summary --phonopy-module phys/phonopy/2.38.1
 md-engine-init my_lammps_md_project
 md-engine --config config.json
 md-engine --resume --config config.json
@@ -776,6 +777,27 @@ cp2k-clean-run . \
 
 Use `--keep-pattern` for project-specific records and `--move-unknown` only after
 reviewing the dry-run manifest.
+
+## VASP Phonopy QHA Summaries
+
+`vasp-qha-summary` summarizes a QHA folder containing volume subfolders such as
+`V0.980`, `V1.000`, and `V1.020`. For each volume, it reads parent VASP energy
+and volume from `vasprun.xml(.gz)` or `OUTCAR(.gz)`, counts displacement folders
+such as `disp-*`, checks common phonopy artifacts, and writes a CSV plus a text
+report.
+
+```bash
+vasp-qha-summary \
+  --root ./2x2x2 \
+  --outdir ./summary \
+  --volume-pattern "V*" \
+  --disp-pattern "disp-*" \
+  --atoms-per-fu 3 \
+  --phonopy-module phys/phonopy/2.38.1
+```
+
+`--phonopy-module` is recorded in the report as an HPC-specific hint. On another
+cluster, pass that site’s module name or omit the option.
 
 ## Recommended Migration Pattern
 
