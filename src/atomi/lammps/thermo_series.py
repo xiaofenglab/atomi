@@ -1823,6 +1823,37 @@ def apply_entropy_anchor_grid(
     return S_out, G_out, metadata
 
 
+def neel_adjusted_entropy_benchmark(
+    db_anchor: dict,
+    neel_t: float,
+    neel_entropy: float,
+    neel_apply_above_t: float,
+) -> tuple[float, dict]:
+    neel_weight = float(
+        neel_activation_weights(
+            np.array([db_anchor["temperature_value_K"]], dtype=float),
+            neel_t,
+            neel_apply_above_t,
+        )[0]
+    )
+    neel_offset = float(neel_entropy) * neel_weight
+    target = db_anchor["S_J_mol_formula_K"] - neel_offset
+    return target, {
+        "source": db_anchor["database"],
+        "formula": db_anchor["formula"],
+        "T_K": db_anchor["temperature_value_K"],
+        "used_as_entropy_anchor": False,
+        "used_for_blend_calibration": True,
+        "benchmark_S_J_mol_formula_K": db_anchor["S_J_mol_formula_K"],
+        "neel_entropy_subtracted_J_mol_formula_K": neel_offset,
+        "value_J_mol_formula_K": target,
+        "reason": (
+            "explicit Neel correction enabled: database S is used as a "
+            "benchmark after subtracting the user Neel entropy contribution"
+        ),
+    }
+
+
 def cp_overlap_diagnostics_np(
     qha_T: np.ndarray,
     qha_Cp: np.ndarray,
@@ -3509,6 +3540,16 @@ def main(argv: list[str] | None = None) -> None:
         entropy_anchor_blend_T = db_anchor["temperature_value_K"]
         entropy_anchor_blend_S = db_anchor["S_J_mol_formula_K"]
         entropy_anchor_is_direct = True
+    elif db_anchor and args.neel_correction == "on":
+        entropy_anchor_blend_T = db_anchor["temperature_value_K"]
+        entropy_anchor_blend_S, entropy_benchmark_metadata = neel_adjusted_entropy_benchmark(
+            db_anchor,
+            args.neel_T,
+            args.neel_entropy,
+            args.neel_apply_above_T,
+        )
+        entropy_anchor_is_direct = False
+        anchor_metadata["neel_adjusted_entropy_benchmark"] = entropy_benchmark_metadata
 
     try:
         lattice_references = parse_lattice_references(args.lattice_reference)

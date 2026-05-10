@@ -363,3 +363,23 @@ def test_lammps_direct_entropy_anchor_shifts_s_and_recomputes_g() -> None:
     assert metadata["applied"] is True
     assert S_out[-1] == pytest.approx(77.81270)
     assert G_out[-1] == pytest.approx(1000.0 - 300.0 * 77.81270)
+
+
+def test_lammps_neel_adjusted_entropy_benchmark_subtracts_neel_entropy() -> None:
+    db_anchor = {
+        "database": "jaea",
+        "formula": "UO2",
+        "temperature_value_K": 300.0,
+        "S_J_mol_formula_K": 77.81270,
+    }
+
+    target, metadata = thermo_series.neel_adjusted_entropy_benchmark(
+        db_anchor,
+        neel_t=30.8,
+        neel_entropy=8.4,
+        neel_apply_above_t=50.0,
+    )
+
+    assert target == pytest.approx(77.81270 - 8.4)
+    assert metadata["used_as_entropy_anchor"] is False
+    assert metadata["used_for_blend_calibration"] is True

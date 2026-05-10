@@ -707,13 +707,28 @@ def resolve_entropy_anchor(args: argparse.Namespace, record: dict) -> tuple[floa
         }
     if record:
         if args.neel_correction == "on":
-            return None, None, {
+            factor = args.target_z if args.energy_basis == "target-cell" else 1.0
+            neel_weight = neel_activation_weight(
+                record["temperature_value_K"],
+                args.neel_T,
+                args.neel_apply_above_T,
+            )
+            benchmark = record["S_J_mol_formula_K"] * factor
+            neel_offset = args.neel_entropy * factor * neel_weight
+            return record["temperature_value_K"], benchmark - neel_offset, {
                 "source": record["database"],
                 "formula": record["formula"],
                 "phase": record["phase"],
                 "T_K": record["temperature_value_K"],
                 "used_as_entropy_anchor": False,
-                "reason": "suppressed because explicit Neel correction is enabled; database S is a benchmark only",
+                "used_for_blend_calibration": True,
+                "benchmark_S_J_mol_basis_K": benchmark,
+                "neel_entropy_subtracted_J_mol_basis_K": neel_offset,
+                "value_J_mol_basis_K": benchmark - neel_offset,
+                "reason": (
+                    "explicit Neel correction enabled: database S is used as a "
+                    "benchmark after subtracting the user Neel entropy contribution"
+                ),
             }
         factor = args.target_z if args.energy_basis == "target-cell" else 1.0
         value = record["S_J_mol_formula_K"] * factor
@@ -1017,6 +1032,9 @@ def apply_entropy_anchor_to_rows(
         "T_K": entropy_anchor_t,
         "target_J_mol_basis_K": entropy_anchor_value,
     }
+    if entropy_anchor_metadata.get("used_as_entropy_anchor") is False:
+        metadata["reason"] = "entropy target used only for blend calibration, not direct S shifting"
+        return metadata
     if entropy_anchor_t is None or entropy_anchor_value is None:
         metadata["reason"] = "no direct entropy anchor"
         return metadata

@@ -366,6 +366,46 @@ def test_qha_md_direct_entropy_anchor_shifts_s_and_recomputes_g() -> None:
     assert rows[1]["G_integrated_kJ_mol"] == pytest.approx(1.0 - 300.0 * 77.81270 / 1000.0)
 
 
+def test_qha_md_neel_uses_database_entropy_as_adjusted_blend_benchmark() -> None:
+    parser = qha_md_compare.build_parser()
+    args = parser.parse_args(
+        [
+            "--qha-dir",
+            ".",
+            "--md-dir",
+            ".",
+            "--outdir",
+            ".",
+            "--qha-formula-units",
+            "1",
+            "--md-formula-units",
+            "1",
+            "--target-z",
+            "1",
+            "--neel-correction",
+            "on",
+            "--neel-entropy",
+            "8.4",
+        ]
+    )
+    record = {
+        "database": "jaea",
+        "formula": "UO2",
+        "phase": "solid",
+        "temperature_value_K": 300.0,
+        "S_J_mol_formula_K": 77.81270,
+    }
+
+    anchor_t, target, metadata = qha_md_compare.resolve_entropy_anchor(args, record)
+
+    assert anchor_t == pytest.approx(300.0)
+    assert target == pytest.approx(77.81270 - 8.4)
+    assert metadata["used_as_entropy_anchor"] is False
+    rows = [{"T_K": 300.0, "S_integrated": 60.0, "H_integrated_kJ_mol": 1.0}]
+    shift = qha_md_compare.apply_entropy_anchor_to_rows(rows, anchor_t, target, metadata)
+    assert shift["applied"] is False
+
+
 def test_hybrid_cp_switch_ignores_extrapolated_low_t_md_grid(tmp_path: Path) -> None:
     pytest.importorskip("matplotlib")
     qha = tmp_path / "qha"
