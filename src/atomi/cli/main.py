@@ -174,6 +174,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cp2k_rotate_seed.add_argument("rotate_args", nargs=argparse.REMAINDER)
 
+    cp2k_bond_analysis = subparsers.add_parser(
+        "cp2k-bond-analysis",
+        help="Analyze post-MD CP2K metal-ligand bond distances.",
+    )
+    cp2k_bond_analysis.add_argument("analysis_args", nargs=argparse.REMAINDER)
+
     mace_live = subparsers.add_parser(
         "mace-live",
         help="Live terminal plot for MACE training logs.",
@@ -348,6 +354,11 @@ def main(argv: list[str] | None = None) -> None:
 
         cp2k_rotate_seed_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "cp2k-bond-analysis":
+        from atomi.cp2k.bond_analysis import main as cp2k_bond_analysis_main
+
+        cp2k_bond_analysis_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "vasp-outcar":
         extv(raw_args[1:])
         return
@@ -518,6 +529,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.cp2k.rotate_seed import main as cp2k_rotate_seed_main
 
         cp2k_rotate_seed_main(args.rotate_args)
+        return
+
+    if args.subcommand == "cp2k-bond-analysis":
+        from atomi.cp2k.bond_analysis import main as cp2k_bond_analysis_main
+
+        cp2k_bond_analysis_main(args.analysis_args)
         return
 
     if args.subcommand == "mace-live":

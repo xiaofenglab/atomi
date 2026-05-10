@@ -153,6 +153,7 @@ cp2k-build-acid-box ga_cl4.xyz --box 26 --water-density 0.75 --project ga_cl4_26
 cp2k-geoopt-input --xyz ga_cl4_26A_box.xyz --stage cheap --mode start --box 26 --charge 0
 cp2k-geoopt-input --xyz ga_cl4_26A-pos-1.xyz --stage refine --mode restart --box 26 --max-iter 150
 cp2k-extract-frames ga_cl4_26A_equil-pos-1.xyz --system chloro --find-good-frames --prefix ga_cl4_good
+cp2k-bond-analysis ga_cl4_26A_equil-pos-1.xyz --inp ga_cl4_26A_nvt.inp --ligand-elements Cl
 plotmace mace_train.log
 plotmace mace_train.log 200 5
 convertmace modelname.model
@@ -725,6 +726,22 @@ cp2k-extract-frames ga_cl4_26A_equil-pos-1.xyz \
 
 Use `--last-fraction`, `--last-frames`, and `--allow-nearest-restart` to tune which
 frames are considered after MD equilibration.
+
+## CP2K Metal-Ligand Bond Analysis
+
+`cp2k-bond-analysis` summarizes post-MD metal-ligand distances from CP2K XYZ
+trajectories. It tracks the nearest ligands in the first frame, reports full-run
+and tail-window statistics, can read timestep/restraint metadata from a CP2K input,
+and writes a bond-evolution PNG unless `--no-plot` is used.
+
+```bash
+cp2k-bond-analysis ga_cl4_26A_equil-pos-1.xyz \
+  --inp ga_cl4_26A_nvt.inp \
+  --metal-index 1 \
+  --ligand-elements Cl \
+  --n-nearest 4 \
+  --summary-csv ga_cl4_bonds.csv
+```
 
 ## Recommended Migration Pattern
 
