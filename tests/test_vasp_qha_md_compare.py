@@ -219,11 +219,15 @@ def test_qha_md_compare_writes_hybrid_cp_entropy(tmp_path: Path) -> None:
     assert float(rows[1]["T_K"]) == pytest.approx(500.0)
     assert float(rows[1]["Cp"]) == pytest.approx(21.0)
     assert float(rows[2]["S_integrated"]) > float(rows[1]["S_integrated"])
+    assert float(rows[2]["H_integrated_kJ_mol"]) > float(rows[1]["H_integrated_kJ_mol"])
+    assert "G_relative_kJ_mol" in rows[0]
     metadata = json.loads((out / "hybrid_cp_entropy_metadata.json").read_text())
     assert metadata["switch_method"] == "overlap-closest-cp"
     assert metadata["switch_temperature_K"] == pytest.approx(500.0)
     assert (out / "hybrid_cp_qha_md.png").exists()
     assert (out / "hybrid_entropy_integrated_qha_md.png").exists()
+    assert (out / "hybrid_enthalpy_integrated_qha_md.png").exists()
+    assert (out / "hybrid_gibbs_integrated_qha_md.png").exists()
 
 
 def test_hybrid_cp_switch_ignores_extrapolated_low_t_md_grid(tmp_path: Path) -> None:

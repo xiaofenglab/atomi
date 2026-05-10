@@ -469,7 +469,7 @@ def cp_over_t(cp_value: float, temp: float) -> float:
     return cp_value / temp
 
 
-def add_integrated_entropy(
+def add_integrated_thermo(
     rows: list[dict],
     qha_entropy: list[tuple[float, float]],
 ) -> tuple[list[dict], str]:
@@ -483,82 +483,88 @@ def add_integrated_entropy(
     else:
         note = "S starts from QHA entropy at first hybrid T"
     rows[0]["S_integrated"] = reference
+    rows[0]["H_integrated_kJ_mol"] = 0.0
     for previous, current in zip(rows, rows[1:]):
+        delta_h = 0.5 * (previous["Cp"] + current["Cp"]) * (
+            current["T_K"] - previous["T_K"]
+        )
         delta_s = 0.5 * (
             cp_over_t(previous["Cp"], previous["T_K"])
             + cp_over_t(current["Cp"], current["T_K"])
         ) * (current["T_K"] - previous["T_K"])
+        current["H_integrated_kJ_mol"] = previous["H_integrated_kJ_mol"] + delta_h / 1000.0
         current["S_integrated"] = previous["S_integrated"] + delta_s
+    for row in rows:
+        row["G_integrated_kJ_mol"] = (
+            row["H_integrated_kJ_mol"] - row["T_K"] * row["S_integrated"] / 1000.0
+        )
+    g0 = rows[0]["G_integrated_kJ_mol"]
+    for row in rows:
+        row["G_relative_kJ_mol"] = row["G_integrated_kJ_mol"] - g0
     return rows, note
 
 
-def plot_hybrid_cp_entropy(
-    cp_png: Path,
-    entropy_png: Path,
-    qha_cp,
-    md_cp,
-    qha_entropy,
-    md_entropy,
+def relative_to_temperature(points, ref_t: float) -> list[tuple[float, float]]:
+    ref = interpolate(points, ref_t)
+    if ref is None or not math.isfinite(ref):
+        ref = min(points, key=lambda item: abs(item[0] - ref_t))[1] if points else 0.0
+    return [(temp, value - ref) for temp, value in points]
+
+
+def apply_hybrid_y_limits(axis, hybrid_values: list[float]) -> None:
+    values = [value for value in hybrid_values if math.isfinite(value)]
+    if not values:
+        return
+    ymin = min(values)
+    ymax = max(values)
+    if abs(ymax - ymin) <= 1.0e-12:
+        pad = max(abs(ymax) * 0.05, 1.0)
+    else:
+        pad = 0.08 * (ymax - ymin)
+    axis.set_ylim(ymin - pad, ymax + pad)
+
+
+def plot_hybrid_quantity(
+    path: Path,
+    title: str,
+    ylabel: str,
+    qha_points,
+    md_points,
     hybrid_rows,
+    hybrid_key: str,
+    hybrid_label: str,
     switch_temp,
     args,
 ) -> None:
     import matplotlib.pyplot as plt
 
-    cp_label = "J/mol-target-cell/K" if args.energy_basis == "target-cell" else "J/mol-formula/K"
-    plt.figure(figsize=(7.2, 4.8))
-    if qha_cp:
-        x, y = zip(*qha_cp)
-        plt.plot(x, y, "-", color="#1f77b4", linewidth=1.6, alpha=0.7, label="QHA Cp")
-    if md_cp:
-        x, y = zip(*md_cp)
-        plt.plot(x, y, "o--", color="#d62728", markersize=3.2, label="MD Cp")
+    fig, ax = plt.subplots(figsize=(7.2, 4.8))
+    if qha_points:
+        x, y = zip(*qha_points)
+        ax.plot(x, y, "-.", color="#8c8c8c", linewidth=1.4, alpha=0.45, label="QHA reference")
+    if md_points:
+        x, y = zip(*md_points)
+        ax.plot(x, y, "--", color="#5f5f5f", linewidth=1.3, alpha=0.45, label="MD reference")
     if hybrid_rows:
-        plt.plot(
+        ax.plot(
             [row["T_K"] for row in hybrid_rows],
-            [row["Cp"] for row in hybrid_rows],
+            [row[hybrid_key] for row in hybrid_rows],
             "-",
             color="#111111",
             linewidth=2.2,
-            label="Hybrid Cp",
+            label=hybrid_label,
         )
-    plt.axvline(switch_temp, color="#555555", linestyle=":", linewidth=1.2)
+        apply_hybrid_y_limits(ax, [row[hybrid_key] for row in hybrid_rows])
+    ax.axvline(switch_temp, color="#555555", linestyle=":", linewidth=1.2)
     if args.t_min is not None or args.t_max is not None:
-        plt.xlim(left=args.t_min, right=args.t_max)
-    plt.xlabel("Temperature (K)")
-    plt.ylabel(f"Cp ({cp_label})")
-    plt.title("Hybrid QHA+MD Cp")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(cp_png, dpi=300)
-    plt.close()
-
-    plt.figure(figsize=(7.2, 4.8))
-    if qha_entropy:
-        x, y = zip(*qha_entropy)
-        plt.plot(x, y, "-", color="#1f77b4", linewidth=1.6, alpha=0.7, label="QHA S")
-    if md_entropy:
-        x, y = zip(*md_entropy)
-        plt.plot(x, y, "o--", color="#d62728", markersize=3.2, label="MD S")
-    if hybrid_rows:
-        plt.plot(
-            [row["T_K"] for row in hybrid_rows],
-            [row["S_integrated"] for row in hybrid_rows],
-            "-",
-            color="#111111",
-            linewidth=2.2,
-            label="Integrated hybrid S",
-        )
-    plt.axvline(switch_temp, color="#555555", linestyle=":", linewidth=1.2)
-    if args.t_min is not None or args.t_max is not None:
-        plt.xlim(left=args.t_min, right=args.t_max)
-    plt.xlabel("Temperature (K)")
-    plt.ylabel(f"S ({cp_label})")
-    plt.title("Integrated Hybrid QHA+MD Entropy")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(entropy_png, dpi=300)
-    plt.close()
+        ax.set_xlim(left=args.t_min, right=args.t_max)
+    ax.set_xlabel("Temperature (K)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
 
 
 def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
@@ -603,7 +609,7 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
     )
     md_entropy = filter_range(md_entropy, args.t_min, args.t_max)
     hybrid_rows = build_hybrid_cp_rows(qha_cp, md_cp, switch_temp)
-    hybrid_rows, entropy_note = add_integrated_entropy(hybrid_rows, qha_entropy)
+    hybrid_rows, entropy_note = add_integrated_thermo(hybrid_rows, qha_entropy)
     if not hybrid_rows:
         return [], {
             "note": "Hybrid Cp/S skipped because no points survived the switch",
@@ -613,7 +619,15 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
 
     csv_path = args.outdir / "hybrid_cp_entropy.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
-        fields = ["T_K", "Cp_source", "Cp", "S_integrated"]
+        fields = [
+            "T_K",
+            "Cp_source",
+            "Cp",
+            "S_integrated",
+            "H_integrated_kJ_mol",
+            "G_integrated_kJ_mol",
+            "G_relative_kJ_mol",
+        ]
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for row in hybrid_rows:
@@ -623,19 +637,95 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
                     "Cp_source": row["Cp_source"],
                     "Cp": row["Cp"],
                     "S_integrated": row["S_integrated"],
+                    "H_integrated_kJ_mol": row["H_integrated_kJ_mol"],
+                    "G_integrated_kJ_mol": row["G_integrated_kJ_mol"],
+                    "G_relative_kJ_mol": row["G_relative_kJ_mol"],
                 }
             )
 
+    first_hybrid_t = hybrid_rows[0]["T_K"]
+    qha_enthalpy = relative_to_temperature(
+        filter_range(qha_derived_enthalpy(args), args.t_min, args.t_max),
+        first_hybrid_t,
+    )
+    md_enthalpy, md_enthalpy_column = md_series(
+        md_path,
+        MD_COLUMN_ALIASES["H"],
+        md_energy_scale(args),
+    )
+    md_enthalpy = relative_to_temperature(
+        filter_range(md_enthalpy, args.t_min, args.t_max),
+        first_hybrid_t,
+    )
+    qha_gibbs = relative_to_temperature(
+        filter_range(
+            qha_series(args.qha_dir / "gibbs-temperature.dat", energy_scale(args)),
+            args.t_min,
+            args.t_max,
+        ),
+        first_hybrid_t,
+    )
+    md_gibbs, md_gibbs_column = md_series(
+        md_path,
+        MD_COLUMN_ALIASES["G"],
+        md_energy_scale(args),
+    )
+    md_gibbs = relative_to_temperature(
+        filter_range(md_gibbs, args.t_min, args.t_max),
+        first_hybrid_t,
+    )
+
+    cp_label = "J/mol-target-cell/K" if args.energy_basis == "target-cell" else "J/mol-formula/K"
+    energy_label = "kJ/mol-target-cell" if args.energy_basis == "target-cell" else "kJ/mol-formula"
     cp_png = args.outdir / "hybrid_cp_qha_md.png"
     entropy_png = args.outdir / "hybrid_entropy_integrated_qha_md.png"
-    plot_hybrid_cp_entropy(
+    enthalpy_png = args.outdir / "hybrid_enthalpy_integrated_qha_md.png"
+    gibbs_png = args.outdir / "hybrid_gibbs_integrated_qha_md.png"
+    plot_hybrid_quantity(
         cp_png,
-        entropy_png,
+        "Hybrid QHA+MD Cp",
+        f"Cp ({cp_label})",
         qha_cp,
         md_cp,
+        hybrid_rows,
+        "Cp",
+        "Hybrid Cp",
+        switch_temp,
+        args,
+    )
+    plot_hybrid_quantity(
+        entropy_png,
+        "Integrated Hybrid QHA+MD Entropy",
+        f"S ({cp_label})",
         qha_entropy,
         md_entropy,
         hybrid_rows,
+        "S_integrated",
+        "Integrated hybrid S",
+        switch_temp,
+        args,
+    )
+    plot_hybrid_quantity(
+        enthalpy_png,
+        "Integrated Hybrid QHA+MD Enthalpy",
+        f"H, relative ({energy_label})",
+        qha_enthalpy,
+        md_enthalpy,
+        hybrid_rows,
+        "H_integrated_kJ_mol",
+        "Integrated hybrid H",
+        switch_temp,
+        args,
+    )
+    plot_hybrid_quantity(
+        gibbs_png,
+        "Integrated Hybrid QHA+MD Gibbs Energy",
+        f"G, relative ({energy_label})",
+        qha_gibbs,
+        md_gibbs,
+        hybrid_rows,
+        "G_relative_kJ_mol",
+        "Hybrid G = H - TS",
         switch_temp,
         args,
     )
@@ -653,6 +743,14 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         "md_entropy_points": len(md_entropy),
         "md_cp_column": md_cp_column,
         "md_entropy_column": md_entropy_column,
+        "md_enthalpy_column": md_enthalpy_column,
+        "md_gibbs_column": md_gibbs_column,
+        "enthalpy_reference": (
+            "Hybrid H is integrated from Cp and starts at 0 at the first hybrid T."
+        ),
+        "gibbs_reference": (
+            "Hybrid/QHA/MD G curves are shifted to 0 at the first hybrid T for plotting."
+        ),
         "basis": args.energy_basis,
         "cp_entropy_units": (
             "J/mol-target-cell/K"
@@ -666,6 +764,8 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
     )
     print(cp_png)
     print(entropy_png)
+    print(enthalpy_png)
+    print(gibbs_png)
     return [
         {
             "quantity": "hybrid_cp",
@@ -683,6 +783,24 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
             "qha_source": "entropy-temperature.dat",
             "md_source": md_path.name,
             "md_column": md_entropy_column,
+            "comparison_type": "integrated-hybrid",
+        },
+        {
+            "quantity": "hybrid_enthalpy",
+            "plot_png": enthalpy_png.name,
+            "data_csv": csv_path.name,
+            "qha_source": "G+T*S",
+            "md_source": md_path.name,
+            "md_column": md_enthalpy_column,
+            "comparison_type": "integrated-hybrid",
+        },
+        {
+            "quantity": "hybrid_gibbs",
+            "plot_png": gibbs_png.name,
+            "data_csv": csv_path.name,
+            "qha_source": "gibbs-temperature.dat",
+            "md_source": md_path.name,
+            "md_column": md_gibbs_column,
             "comparison_type": "integrated-hybrid",
         },
     ], metadata

@@ -947,7 +947,9 @@ example, QHA enthalpy requires both `gibbs-temperature.dat` and
 
 When both QHA and MD Cp are available, the command also writes integrated
 hybrid Cp/S outputs: `hybrid_cp_qha_md.png`,
-`hybrid_entropy_integrated_qha_md.png`, `hybrid_cp_entropy.csv`, and
+`hybrid_entropy_integrated_qha_md.png`,
+`hybrid_enthalpy_integrated_qha_md.png`,
+`hybrid_gibbs_integrated_qha_md.png`, `hybrid_cp_entropy.csv`, and
 `hybrid_cp_entropy_metadata.json`. The automatic switch temperature is chosen
 where QHA and MD Cp are closest inside their overlapping temperature range; if
 there is no overlap, it uses the midpoint between the QHA and MD temperature
@@ -957,10 +959,12 @@ points do not cause an immediate switch to MD. Automatic switches below 50 K
 are rejected by default, which avoids accepting an extreme low-T Cp match as
 the QHA-to-MD splice point. The hybrid entropy is integrated from the hybrid Cp
 curve using `dS = Cp/T dT`, starting from QHA entropy at the first hybrid
-temperature when available. Override the automatic switch with
-`--hybrid-switch-temperature <T>`, change the low-T guard with
-`--hybrid-min-switch-temperature <T>`, or skip these outputs with
-`--no-hybrid-cp-s`.
+temperature when available. Hybrid enthalpy is integrated from Cp, and hybrid
+Gibbs energy is computed as `G = H - TS`; those H/G hybrid plots include QHA
+and MD reference curves in faint gray so the hybrid curve controls the y-axis
+scale. Override the automatic switch with `--hybrid-switch-temperature <T>`,
+change the low-T guard with `--hybrid-min-switch-temperature <T>`, or skip
+these outputs with `--no-hybrid-cp-s`.
 
 ## Recommended Migration Pattern
 
