@@ -10,7 +10,6 @@ EV_TO_KJ_PER_MOL = 96.48533212331002
 
 MD_COLUMN_ALIASES = {
     "V": ("V_fit_A3", "V_mean_A3", "volume_A3"),
-    "a": ("a_fit_A", "a_mean_A", "a_proxy_mean_A"),
     "Cp": (
         "Cp_used_for_integration_J_per_mol_UO2_K",
         "Cp_from_dH_J_per_mol_UO2_K",
@@ -35,6 +34,51 @@ MD_COLUMN_ALIASES = {
     "alpha_V": ("alpha_V_micro_per_K", "alpha_V_1_per_K"),
     "K": ("KT_GPa_from_V_fluct", "bulk_modulus_GPa", "K_GPa"),
 }
+
+LATTICE_PARAMETER_SPECS = [
+    {
+        "key": "a",
+        "name": "lattice_a",
+        "ylabel": "Lattice a (A)",
+        "qha_names": ("a-temperature.dat", "lattice_a-temperature.dat", "lattice-temperature.dat"),
+        "md_aliases": ("a_fit_A", "a_mean_A", "a_proxy_mean_A"),
+    },
+    {
+        "key": "b",
+        "name": "lattice_b",
+        "ylabel": "Lattice b (A)",
+        "qha_names": ("b-temperature.dat", "lattice_b-temperature.dat"),
+        "md_aliases": ("b_fit_A", "b_mean_A", "ly_fit_A", "ly_mean_A"),
+    },
+    {
+        "key": "c",
+        "name": "lattice_c",
+        "ylabel": "Lattice c (A)",
+        "qha_names": ("c-temperature.dat", "lattice_c-temperature.dat"),
+        "md_aliases": ("c_fit_A", "c_mean_A", "lz_fit_A", "lz_mean_A"),
+    },
+    {
+        "key": "alpha",
+        "name": "lattice_alpha",
+        "ylabel": "Lattice alpha (deg)",
+        "qha_names": ("alpha-temperature.dat", "lattice_alpha-temperature.dat"),
+        "md_aliases": ("alpha_fit_deg", "alpha_mean_deg"),
+    },
+    {
+        "key": "beta",
+        "name": "lattice_beta",
+        "ylabel": "Lattice beta (deg)",
+        "qha_names": ("beta-temperature.dat", "lattice_beta-temperature.dat"),
+        "md_aliases": ("beta_fit_deg", "beta_mean_deg"),
+    },
+    {
+        "key": "gamma",
+        "name": "lattice_gamma",
+        "ylabel": "Lattice gamma (deg)",
+        "qha_names": ("gamma-temperature.dat", "lattice_gamma-temperature.dat"),
+        "md_aliases": ("gamma_fit_deg", "gamma_mean_deg"),
+    },
+]
 
 
 def finite_float(value, default=math.nan) -> float:
@@ -283,6 +327,25 @@ def alpha_qha_scale(args: argparse.Namespace) -> float:
     return 1.0e6 if args.qha_alpha_unit == "1/K" else 1.0
 
 
+def lattice_parameter_definitions(args: argparse.Namespace) -> list[dict]:
+    md_grid = args.md_dir / "thermo_functions_grid.csv"
+    definitions = []
+    for spec in LATTICE_PARAMETER_SPECS:
+        qha_points, qha_name = qha_first_available_series(args.qha_dir, spec["qha_names"])
+        md_column = resolve_column(md_grid, spec["md_aliases"])
+        if not qha_points and not md_column:
+            continue
+        definitions.append(
+            {
+                "name": spec["name"],
+                "ylabel": spec["ylabel"],
+                "qha": ((args.qha_dir / qha_name) if qha_name else None, 1.0),
+                "md": (md_grid, spec["md_aliases"], 1.0),
+            }
+        )
+    return definitions
+
+
 def make_definitions(args: argparse.Namespace) -> list[dict]:
     qha = args.qha_dir
     md_grid = args.md_dir / "thermo_functions_grid.csv"
@@ -290,7 +353,7 @@ def make_definitions(args: argparse.Namespace) -> list[dict]:
     energy_label = "kJ/mol-target-cell" if args.energy_basis == "target-cell" else "kJ/mol-formula"
     cp_label = "J/mol-target-cell/K" if args.energy_basis == "target-cell" else "J/mol-formula/K"
     s_label = cp_label
-    return [
+    definitions = [
         {
             "name": "volume",
             "ylabel": f"Volume (A3 per Z={args.target_z:g} cell)",
@@ -343,6 +406,8 @@ def make_definitions(args: argparse.Namespace) -> list[dict]:
             "md": (md_summary, MD_COLUMN_ALIASES["K"], 1.0),
         },
     ]
+    definitions.extend(lattice_parameter_definitions(args))
+    return definitions
 
 
 def plot_overlay(path: Path, title: str, ylabel: str, qha_points, md_points, args) -> bool:
@@ -910,26 +975,56 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         extensive_md_scale(args),
     )
     md_volume = filter_range(md_volume, args.t_min, args.t_max)
-    qha_lattice, qha_lattice_file = qha_first_available_series(
-        args.qha_dir,
-        ("a-temperature.dat", "lattice-temperature.dat", "lattice_a-temperature.dat"),
-    )
-    qha_lattice = filter_range(qha_lattice, args.t_min, args.t_max)
-    md_lattice, md_lattice_column = md_series(md_path, MD_COLUMN_ALIASES["a"], 1.0)
-    md_lattice = filter_range(md_lattice, args.t_min, args.t_max)
     volume_rows, volume_mode = blend_series(qha_volume, md_volume, blend_start, blend_end)
-    lattice_rows, lattice_mode = blend_series(qha_lattice, md_lattice, blend_start, blend_end)
-    if volume_rows or lattice_rows:
+    lattice_hybrids = []
+    for spec in LATTICE_PARAMETER_SPECS:
+        qha_lattice, qha_lattice_file = qha_first_available_series(
+            args.qha_dir,
+            spec["qha_names"],
+        )
+        qha_lattice = filter_range(qha_lattice, args.t_min, args.t_max)
+        md_lattice, md_lattice_column = md_series(md_path, spec["md_aliases"], 1.0)
+        md_lattice = filter_range(md_lattice, args.t_min, args.t_max)
+        lattice_rows, lattice_mode = blend_series(
+            qha_lattice,
+            md_lattice,
+            blend_start,
+            blend_end,
+        )
+        if lattice_rows:
+            lattice_hybrids.append(
+                {
+                    "key": spec["key"],
+                    "ylabel": spec["ylabel"],
+                    "qha_points": qha_lattice,
+                    "qha_file": qha_lattice_file,
+                    "md_points": md_lattice,
+                    "md_column": md_lattice_column,
+                    "rows": lattice_rows,
+                    "mode": lattice_mode,
+                }
+            )
+    if volume_rows or lattice_hybrids:
         va_csv = args.outdir / "hybrid_volume_lattice.csv"
         with va_csv.open("w", newline="", encoding="utf-8") as handle:
             fields = ["quantity", "T_K", "value", "source", "blend_weight"]
             writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()
-            for quantity, rows in (("V_A3", volume_rows), ("a_A", lattice_rows)):
-                for row in rows:
+            for row in volume_rows:
+                writer.writerow(
+                    {
+                        "quantity": "V_A3",
+                        "T_K": row["T_K"],
+                        "value": row["value"],
+                        "source": row["source"],
+                        "blend_weight": row["blend_weight"],
+                    }
+                )
+            for item in lattice_hybrids:
+                for row in item["rows"]:
                     writer.writerow(
                         {
-                            "quantity": quantity,
+                            "quantity": f"{item['key']}_lattice",
                             "T_K": row["T_K"],
                             "value": row["value"],
                             "source": row["source"],
@@ -946,7 +1041,6 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
     enthalpy_png = args.outdir / "hybrid_H_QHA_MD.png"
     gibbs_png = args.outdir / "hybrid_G_QHA_MD.png"
     volume_png = args.outdir / "hybrid_V_QHA_MD.png"
-    lattice_png = args.outdir / "hybrid_a_QHA_MD.png"
     plot_hybrid_quantity(
         cp_png,
         "Hybrid QHA+MD Cp",
@@ -1013,16 +1107,17 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
             blend_end,
             args,
         )
-    if lattice_rows:
+    for item in lattice_hybrids:
+        lattice_png = args.outdir / f"hybrid_{item['key']}_QHA_MD.png"
         plot_hybrid_quantity(
             lattice_png,
-            "Hybrid QHA+MD Lattice",
-            "Lattice a (A)",
-            qha_lattice,
-            md_lattice,
-            lattice_rows,
+            f"Hybrid QHA+MD Lattice {item['key']}",
+            item["ylabel"],
+            item["qha_points"],
+            item["md_points"],
+            item["rows"],
             "value",
-            "Hybrid a" if lattice_mode == "hybrid" else "MD a",
+            f"Hybrid {item['key']}" if item["mode"] == "hybrid" else f"MD {item['key']}",
             blend_start,
             blend_end,
             args,
@@ -1060,7 +1155,12 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
             "S": str((args.qha_dir / "entropy-temperature.dat").resolve()),
             "G": str((args.qha_dir / "gibbs-temperature.dat").resolve()),
             "V": str((args.qha_dir / "volume-temperature.dat").resolve()),
-            "a": str((args.qha_dir / qha_lattice_file).resolve()) if qha_lattice_file else None,
+            "lattice_parameters": {
+                item["key"]: str((args.qha_dir / item["qha_file"]).resolve())
+                if item["qha_file"]
+                else None
+                for item in lattice_hybrids
+            },
         },
         "md_dir": str(args.md_dir),
         "selected_md_configs_logs": selected_md_records(args.md_dir),
@@ -1073,19 +1173,21 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         "md_enthalpy_column": md_enthalpy_column,
         "md_gibbs_column": md_gibbs_column,
         "md_volume_column": md_volume_column,
-        "md_lattice_column": md_lattice_column,
+        "md_lattice_columns": {
+            item["key"]: item["md_column"]
+            for item in lattice_hybrids
+        },
         "volume_source_mode": volume_mode,
-        "lattice_source_mode": lattice_mode,
+        "lattice_source_modes": {
+            item["key"]: item["mode"]
+            for item in lattice_hybrids
+        },
         "volume_note": (
             "V(T) used the same QHA+MD smooth blend."
             if volume_mode == "hybrid"
             else "V(T) is MD-only because QHA volume was unavailable."
         ),
-        "lattice_note": (
-            "a(T) used the same QHA+MD smooth blend."
-            if lattice_mode == "hybrid"
-            else "a(T) is MD-only because QHA lattice-a was unavailable."
-        ),
+        "lattice_note": "Each detected lattice parameter gets its own QHA/MD hybrid plot.",
         "enthalpy_reference": entropy_note,
         "gibbs_reference": (
             "Hybrid G is recomputed from integrated H and S; QHA/MD references are "
@@ -1108,8 +1210,8 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
     print(gibbs_png)
     if volume_rows:
         print(volume_png)
-    if lattice_rows:
-        print(lattice_png)
+    for item in lattice_hybrids:
+        print(args.outdir / f"hybrid_{item['key']}_QHA_MD.png")
     index = [
         {
             "quantity": "hybrid_cp",
@@ -1160,16 +1262,17 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
                 "comparison_type": volume_mode,
             }
         )
-    if lattice_rows:
+    for item in lattice_hybrids:
+        lattice_png = args.outdir / f"hybrid_{item['key']}_QHA_MD.png"
         index.append(
             {
-                "quantity": "hybrid_lattice",
+                "quantity": f"hybrid_lattice_{item['key']}",
                 "plot_png": lattice_png.name,
                 "data_csv": va_csv.name if va_csv else "",
-                "qha_source": qha_lattice_file,
+                "qha_source": item["qha_file"],
                 "md_source": md_path.name,
-                "md_column": md_lattice_column,
-                "comparison_type": lattice_mode,
+                "md_column": item["md_column"],
+                "comparison_type": item["mode"],
             }
         )
     return index, metadata
@@ -1341,7 +1444,7 @@ def main(argv: list[str] | None = None) -> None:
             qha_points = qha_derived_enthalpy(args)
         else:
             qha_path, qha_scale = item["qha"]
-            qha_points = qha_series(qha_path, qha_scale)
+            qha_points = qha_series(qha_path, qha_scale) if qha_path is not None else []
         md_path, md_aliases, md_scale = item["md"]
         if md_path is None:
             md_points, md_column = [], ""

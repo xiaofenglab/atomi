@@ -570,7 +570,10 @@ or `--qha-splice-switch-temperature` to force a specific switch. Use
 interval explicitly. The QHA-low-T workflow writes hybrid diagnostic plots
 named `hybrid_Cp_QHA_MD.png`, `hybrid_S_QHA_MD.png`,
 `hybrid_H_QHA_MD.png`, `hybrid_G_QHA_MD.png`, plus hybrid `V`/`a` plots when
-QHA volume or lattice files are present. It also writes
+QHA volume or lattice files are present. It also writes explicit overlap plots
+such as `volume_QHA_MD_overlap.png` and `lattice_a_QHA_MD_overlap.png`;
+additional independent lattice parameters get their own files when matching
+QHA files and MD columns are available. It also writes
 `overlap_mismatch_Cp.png` and `qha_low_t_splice_metadata.json`; the metadata
 records the blend interval, Cp mismatch diagnostics, source files, and how the
 MD statistical Cp UQ band was tapered through the blend.
@@ -934,8 +937,11 @@ vasp-qha-md-compare \
 ```
 
 The command overlays matching temperature functions, including volume, Cp,
-entropy, Gibbs/Helmholtz-style energy functions, thermal expansion, and bulk
-modulus when the matching source files are present. It converts QHA energies
+unit-cell lattice parameters, entropy, Gibbs/Helmholtz-style energy functions,
+thermal expansion, and bulk modulus when the matching source files are present.
+For cubic UO2 this usually means one lattice overlay, `lattice_a_qha_md_overlay.png`;
+lower-symmetry cells can also produce `lattice_b`, `lattice_c`, or angle
+overlays when the corresponding QHA files and MD columns exist. It converts QHA energies
 from `eV` per QHA cell to `kJ/mol-formula` by default, treats QHA Cp and
 entropy as `J/mol-cell/K`, and normalizes volume to the requested target cell.
 The `G` and derived `H = G + TS` overlays are shifted by default at the lowest
@@ -959,8 +965,9 @@ QHA+MD thermodynamics set: `hybrid_Cp_QHA_MD.png`,
 `hybrid_G_QHA_MD.png`, `hybrid_cp_entropy.csv`, and
 `hybrid_cp_entropy_metadata.json`. If QHA volume or lattice-a files are
 available, it also writes `hybrid_V_QHA_MD.png`, `hybrid_a_QHA_MD.png`, and
-`hybrid_volume_lattice.csv`; otherwise V/a remain MD-only and the metadata says
-so. The automatic switch temperature is chosen where QHA and MD Cp are closest
+`hybrid_volume_lattice.csv`; additional independent lattice parameters are
+written as `hybrid_b_QHA_MD.png`, `hybrid_c_QHA_MD.png`, etc. Otherwise V/a
+remain MD-only and the metadata says so. The automatic switch temperature is chosen where QHA and MD Cp are closest
 inside their overlapping temperature range; if there is no overlap, it uses the
 midpoint between the QHA and MD temperature windows. When `all_T_summary.csv`
 is present in the MD analysis folder, the switch search uses that actual MD

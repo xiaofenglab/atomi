@@ -165,6 +165,45 @@ THERMO_RE = re.compile(
     r"^\s*(\d+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)(?:\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+))?"
 )
 
+LATTICE_PARAMETER_SPECS = [
+    {
+        "key": "a",
+        "ylabel": "Lattice a (Å)",
+        "qha_names": ["a-temperature.dat", "lattice_a-temperature.dat", "lattice-temperature.dat"],
+        "summary_keys": ["a_mean_A", "a_proxy_mean_A"],
+    },
+    {
+        "key": "b",
+        "ylabel": "Lattice b (Å)",
+        "qha_names": ["b-temperature.dat", "lattice_b-temperature.dat"],
+        "summary_keys": ["b_mean_A", "ly_mean_A"],
+    },
+    {
+        "key": "c",
+        "ylabel": "Lattice c (Å)",
+        "qha_names": ["c-temperature.dat", "lattice_c-temperature.dat"],
+        "summary_keys": ["c_mean_A", "lz_mean_A"],
+    },
+    {
+        "key": "alpha",
+        "ylabel": "Lattice alpha (deg)",
+        "qha_names": ["alpha-temperature.dat", "lattice_alpha-temperature.dat"],
+        "summary_keys": ["alpha_mean_deg"],
+    },
+    {
+        "key": "beta",
+        "ylabel": "Lattice beta (deg)",
+        "qha_names": ["beta-temperature.dat", "lattice_beta-temperature.dat"],
+        "summary_keys": ["beta_mean_deg"],
+    },
+    {
+        "key": "gamma",
+        "ylabel": "Lattice gamma (deg)",
+        "qha_names": ["gamma-temperature.dat", "lattice_gamma-temperature.dat"],
+        "summary_keys": ["gamma_mean_deg"],
+    },
+]
+
 
 # -----------------------------
 # general helpers
@@ -408,6 +447,33 @@ def plot_hybrid_grid(outpath: Path,
         else:
             pad = 0.08 * (ymax - ymin)
         ax.set_ylim(ymin - pad, ymax + pad)
+    ax.set_xlabel("T (K)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend(frameon=False, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=180)
+    plt.close(fig)
+
+
+def plot_qha_md_overlap(outpath: Path,
+                        qha_T: np.ndarray,
+                        qha_y: np.ndarray,
+                        md_T: np.ndarray,
+                        md_y: np.ndarray,
+                        ylabel: str,
+                        title: str,
+                        blend_start: Optional[float] = None,
+                        blend_end: Optional[float] = None) -> None:
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(qha_T, qha_y, "-", color="#1f77b4", linewidth=2.0, label="QHA")
+    ax.plot(md_T, md_y, "o--", color="#d62728", markersize=3.5, linewidth=1.5, label="MD")
+    if blend_start is not None and blend_end is not None:
+        if abs(blend_end - blend_start) <= 1.0e-12:
+            ax.axvline(blend_start, color="0.25", linestyle=":", linewidth=1.1)
+        else:
+            ax.axvspan(blend_start, blend_end, color="#111111", alpha=0.08, label="blend")
     ax.set_xlabel("T (K)")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
@@ -1358,10 +1424,18 @@ def qha_cp_thermo_curve(
         qha_dir,
         ["volume-temperature.dat"],
     )
-    T_lattice, a_qha, qha_lattice_file = read_optional_qha_temperature_dat(
-        qha_dir,
-        ["a-temperature.dat", "lattice-temperature.dat", "lattice_a-temperature.dat"],
-    )
+    lattice_parameters = {}
+    for spec in LATTICE_PARAMETER_SPECS:
+        param_T, param_y, param_file = read_optional_qha_temperature_dat(qha_dir, spec["qha_names"])
+        if param_T is None or param_y is None:
+            continue
+        lattice_parameters[spec["key"]] = {
+            "T": param_T,
+            "values": param_y,
+            "file": param_file,
+            "ylabel": spec["ylabel"],
+        }
+    a_param = lattice_parameters.get("a", {})
     return {
         "T": T_qha,
         "Cp": Cp_qha,
@@ -1369,12 +1443,13 @@ def qha_cp_thermo_curve(
         "S": S_qha,
         "V_T": T_volume,
         "V": V_qha,
-        "a_T": T_lattice,
-        "a": a_qha,
+        "a_T": a_param.get("T"),
+        "a": a_param.get("values"),
+        "lattice_parameters": lattice_parameters,
         "qha_dir": str(qha_dir),
         "qha_cp_file": str((qha_dir / "Cp-temperature.dat").resolve()),
         "qha_volume_file": qha_volume_file,
-        "qha_lattice_file": qha_lattice_file,
+        "qha_lattice_file": a_param.get("file"),
         "qha_cp_unit": qha_cp_unit,
         "qha_formula_units": qha_formula_units,
         "temperature_min_K": float(T_qha[0]),
@@ -1597,6 +1672,24 @@ def choose_qha_md_cp_switch(
     return None, "no-switch-found"
 
 
+def summary_series(summaries: list[dict], keys: list[str]) -> tuple[np.ndarray | None, str]:
+    for key in keys:
+        values = np.array([s.get(key, np.nan) for s in summaries], dtype=float)
+        if np.isfinite(values).sum() >= 2:
+            return values, key
+    return None, ""
+
+
+def fit_grid_from_series(T: np.ndarray, y: np.ndarray, T_grid: np.ndarray, degree: int) -> np.ndarray:
+    finite = np.isfinite(T) & np.isfinite(y)
+    if finite.sum() >= 3:
+        deg = min(degree, finite.sum() - 1)
+        return np.poly1d(np.polyfit(T[finite], y[finite], deg))(T_grid)
+    if finite.sum() >= 2:
+        return np.interp(T_grid, T[finite], y[finite])
+    return np.full_like(T_grid, np.nan, dtype=float)
+
+
 def fill_missing_anchors_from_qha(
     *,
     thermo_anchor_T: Optional[float],
@@ -1746,6 +1839,28 @@ def build_combined_thermo(summaries: list[dict],
     dadT = dpa(T)
     a_grid = pa(T_grid)
     dadT_grid = dpa(T_grid)
+    lattice_md = {
+        "a": {
+            "T": T,
+            "values": a,
+            "grid": a_grid.copy(),
+            "summary_key": "a_mean_A",
+            "ylabel": "Lattice a (Å)",
+        }
+    }
+    for spec in LATTICE_PARAMETER_SPECS:
+        if spec["key"] == "a":
+            continue
+        values, summary_key = summary_series(summaries, spec["summary_keys"])
+        if values is None:
+            continue
+        lattice_md[spec["key"]] = {
+            "T": T,
+            "values": values,
+            "grid": fit_grid_from_series(T, values, T_grid, deg_fit),
+            "summary_key": summary_key,
+            "ylabel": spec["ylabel"],
+        }
 
     alpha_V = dVdT / V_fit
     alpha_L = dadT / a_fit
@@ -1806,10 +1921,16 @@ def build_combined_thermo(summaries: list[dict],
     elif anchor_zero and abs(T_grid[0]) < 1e-12:
         Cp_grid[0] = 0.0
 
+    lattice_md["a"]["grid"] = a_grid.copy()
+    for key, item in lattice_md.items():
+        if key == "a":
+            continue
+        item["grid"] = fit_grid_from_series(T, item["values"], T_grid, deg_fit)
+
     Cp_md_grid = Cp_grid.copy()
     V_md_grid = V_grid.copy()
-    a_md_grid = a_grid.copy()
     qha_blend_weights = np.ones_like(T_grid, dtype=float)
+    lattice_hybrid = {}
     qha_splice_metadata = {}
     if qha_low_t_curve:
         switch_T, switch_method = choose_qha_md_cp_switch(
@@ -1845,7 +1966,8 @@ def build_combined_thermo(summaries: list[dict],
                 blend_end,
             )
             qha_volume_mode = "md-only"
-            qha_lattice_mode = "md-only"
+            qha_lattice_modes = {}
+            lattice_hybrid = {}
             if qha_low_t_curve.get("V") is not None and qha_low_t_curve.get("V_T") is not None:
                 qha_V_scaled = qha_low_t_curve["V"] * (nfu / qha_low_t_curve["qha_formula_units"])
                 V_grid, _weights = blend_qha_md_on_grid(
@@ -1859,18 +1981,33 @@ def build_combined_thermo(summaries: list[dict],
                 dVdT_grid = np.gradient(V_grid, T_grid)
                 alpha_V_grid = dVdT_grid / V_grid
                 qha_volume_mode = "hybrid"
-            if qha_low_t_curve.get("a") is not None and qha_low_t_curve.get("a_T") is not None:
-                a_grid, _weights = blend_qha_md_on_grid(
-                    T_grid,
-                    qha_low_t_curve["a_T"],
-                    qha_low_t_curve["a"],
-                    a_md_grid,
-                    blend_start,
-                    blend_end,
-                )
+            for key, md_item in lattice_md.items():
+                qha_item = qha_low_t_curve.get("lattice_parameters", {}).get(key)
+                qha_lattice_modes[key] = "md-only"
+                hybrid_grid = md_item["grid"].copy()
+                if qha_item is not None:
+                    hybrid_grid, _weights = blend_qha_md_on_grid(
+                        T_grid,
+                        qha_item["T"],
+                        qha_item["values"],
+                        md_item["grid"],
+                        blend_start,
+                        blend_end,
+                    )
+                    qha_lattice_modes[key] = "hybrid"
+                lattice_hybrid[key] = {
+                    "hybrid_grid": hybrid_grid,
+                    "md_grid": md_item["grid"],
+                    "md_T": md_item["T"],
+                    "md_values": md_item["values"],
+                    "qha": qha_item,
+                    "mode": qha_lattice_modes[key],
+                    "ylabel": md_item.get("ylabel", f"Lattice {key}"),
+                }
+            if "a" in lattice_hybrid:
+                a_grid = lattice_hybrid["a"]["hybrid_grid"]
                 dadT_grid = np.gradient(a_grid, T_grid)
                 alpha_L_grid = dadT_grid / a_grid
-                qha_lattice_mode = "hybrid"
             diagnostics = cp_overlap_diagnostics_np(
                 qha_low_t_curve["T"],
                 qha_low_t_curve["Cp"],
@@ -1895,12 +2032,15 @@ def build_combined_thermo(summaries: list[dict],
                 },
                 "cp_overlap_diagnostics_rows": diagnostics["rows"],
                 "qha_volume_mode": qha_volume_mode,
-                "qha_lattice_mode": qha_lattice_mode,
+                "qha_lattice_modes": qha_lattice_modes,
                 "qha_source": {
                     "qha_dir": qha_low_t_curve["qha_dir"],
                     "qha_cp_file": qha_low_t_curve["qha_cp_file"],
                     "qha_volume_file": qha_low_t_curve.get("qha_volume_file"),
-                    "qha_lattice_file": qha_low_t_curve.get("qha_lattice_file"),
+                    "qha_lattice_files": {
+                        key: item.get("file")
+                        for key, item in qha_low_t_curve.get("lattice_parameters", {}).items()
+                    },
                     "qha_cp_unit": qha_low_t_curve["qha_cp_unit"],
                     "qha_formula_units": qha_low_t_curve["qha_formula_units"],
                 },
@@ -2111,6 +2251,17 @@ def build_combined_thermo(summaries: list[dict],
         qha_V_scaled = None
         if qha_low_t_curve.get("V") is not None and qha_low_t_curve.get("V_T") is not None:
             qha_V_scaled = qha_low_t_curve["V"] * (nfu / qha_low_t_curve["qha_formula_units"])
+            plot_qha_md_overlap(
+                outdir / "volume_QHA_MD_overlap.png",
+                qha_low_t_curve["V_T"],
+                qha_V_scaled,
+                T_grid,
+                V_md_grid,
+                "V (Å$^3$)",
+                "QHA/MD Volume Overlap",
+                qha_splice_metadata["blend_start_K"],
+                qha_splice_metadata["blend_end_K"],
+            )
         plot_hybrid_grid(
             outdir / "hybrid_Cp_QHA_MD.png",
             T_grid,
@@ -2181,20 +2332,36 @@ def build_combined_thermo(summaries: list[dict],
             qha_splice_metadata["blend_start_K"],
             qha_splice_metadata["blend_end_K"],
         )
-        plot_hybrid_grid(
-            outdir / "hybrid_a_QHA_MD.png",
-            T_grid,
-            a_grid,
-            "a (Å)",
-            "Hybrid QHA+MD Lattice" if qha_low_t_curve.get("a") is not None else "MD Lattice",
-            qha_low_t_curve.get("a_T"),
-            qha_low_t_curve.get("a"),
-            T_grid,
-            a_md_grid,
-            None,
-            qha_splice_metadata["blend_start_K"],
-            qha_splice_metadata["blend_end_K"],
-        )
+        for key, item in lattice_hybrid.items():
+            qha_item = item.get("qha")
+            qha_T = qha_item.get("T") if qha_item is not None else None
+            qha_values = qha_item.get("values") if qha_item is not None else None
+            plot_hybrid_grid(
+                outdir / f"hybrid_{key}_QHA_MD.png",
+                T_grid,
+                item["hybrid_grid"],
+                item["ylabel"],
+                f"Hybrid QHA+MD Lattice {key}",
+                qha_T,
+                qha_values,
+                T_grid,
+                item["md_grid"],
+                None,
+                qha_splice_metadata["blend_start_K"],
+                qha_splice_metadata["blend_end_K"],
+            )
+            if qha_T is not None and qha_values is not None:
+                plot_qha_md_overlap(
+                    outdir / f"lattice_{key}_QHA_MD_overlap.png",
+                    qha_T,
+                    qha_values,
+                    T_grid,
+                    item["md_grid"],
+                    item["ylabel"],
+                    f"QHA/MD Lattice {key} Overlap",
+                    qha_splice_metadata["blend_start_K"],
+                    qha_splice_metadata["blend_end_K"],
+                )
 
 
     # UQ-band plots. Bands are MD processing/statistical bands from block SEM + bootstrap.

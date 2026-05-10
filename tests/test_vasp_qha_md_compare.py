@@ -235,6 +235,9 @@ def test_qha_md_compare_writes_hybrid_cp_entropy(tmp_path: Path) -> None:
     assert (out / "hybrid_G_QHA_MD.png").exists()
     assert (out / "hybrid_V_QHA_MD.png").exists()
     assert (out / "hybrid_a_QHA_MD.png").exists()
+    assert (out / "lattice_a_qha_md_overlay.png").exists()
+    lattice_rows = list(csv.DictReader((out / "lattice_a_qha_md_overlay.csv").open()))
+    assert {row["source"] for row in lattice_rows} == {"QHA", "MD"}
     assert (out / "overlap_mismatch_Cp.png").exists()
 
 
