@@ -1404,11 +1404,11 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
     plot_hybrid_quantity(
         gibbs_png,
         "Integrated Hybrid QHA+MD Gibbs Energy",
-        f"G, relative ({energy_label})",
+        f"G ({energy_label})",
         qha_gibbs,
         md_gibbs,
         hybrid_rows,
-        "G_relative_kJ_mol",
+        "G_integrated_kJ_mol",
         "Hybrid G = H - TS",
         blend_start,
         blend_end,

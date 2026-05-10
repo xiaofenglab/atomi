@@ -992,7 +992,9 @@ When both QHA and MD Cp are available, the command also writes a hybrid
 QHA+MD thermodynamics set: `hybrid_Cp_QHA_MD.png`,
 `hybrid_S_QHA_MD.png`, `hybrid_H_QHA_MD.png`,
 `hybrid_G_QHA_MD.png`, `hybrid_cp_entropy.csv`, and
-`hybrid_cp_entropy_metadata.json`. If QHA volume or lattice-a files are
+`hybrid_cp_entropy_metadata.json`. The hybrid G plot uses the integrated
+absolute/anchored `G = H - TS` column when H is anchored; the CSV also keeps a
+relative G column for diagnostics. If QHA volume or lattice-a files are
 available, it also writes `hybrid_V_QHA_MD.png`, `hybrid_a_QHA_MD.png`, and
 `hybrid_volume_lattice.csv`; additional independent lattice parameters are
 written as `hybrid_b_QHA_MD.png`, `hybrid_c_QHA_MD.png`, etc. Otherwise V/a

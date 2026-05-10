@@ -465,6 +465,7 @@ def test_qha_md_hybrid_enthalpy_anchor_shifts_gibbs(tmp_path: Path) -> None:
     g_300 = float(by_t[300.0]["G_integrated_kJ_mol"])
     assert h_300 == pytest.approx(-1084.49)
     assert g_300 == pytest.approx(h_300 - 300.0 * s_300 / 1000.0)
+    assert g_300 < -1000.0
     metadata = json.loads((out / "hybrid_cp_entropy_metadata.json").read_text())
     assert metadata["enthalpy_anchor"]["value_kJ_mol_basis"] == pytest.approx(-1084.49)
 

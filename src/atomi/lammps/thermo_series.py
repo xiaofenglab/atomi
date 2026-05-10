@@ -2511,6 +2511,9 @@ def build_combined_thermo(summaries: list[dict],
         Cp_over_T_md[md_nonzero] = Cp_md_grid[md_nonzero] / T_grid[md_nonzero]
         H_md_rel_grid = trapz_cumulative(T_grid, Cp_md_grid)
         S_md_rel_grid = trapz_cumulative(T_grid, Cp_over_T_md)
+        if thermo_anchor_T is not None and thermo_anchor_H_J_mol is not None:
+            md_anchor_h = float(np.interp(thermo_anchor_T, T_grid, H_md_rel_grid))
+            H_md_rel_grid = H_md_rel_grid + (float(thermo_anchor_H_J_mol) - md_anchor_h)
         G_md_rel_grid = H_md_rel_grid - T_grid * S_md_rel_grid
         qha_V_scaled = None
         qha_V_corrected = None
