@@ -425,7 +425,8 @@ def plot_hybrid_grid(outpath: Path,
                      band: Optional[tuple[np.ndarray, np.ndarray]] = None,
                      blend_start: Optional[float] = None,
                      blend_end: Optional[float] = None,
-                     db_points: Optional[list[dict]] = None) -> None:
+                     db_points: Optional[list[dict]] = None,
+                     neel_region: Optional[tuple[float, float]] = None) -> None:
     outpath.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(7, 5))
     if qha_T is not None and qha_y is not None and len(qha_T) and len(qha_y):
@@ -453,6 +454,14 @@ def plot_hybrid_grid(outpath: Path,
             ax.axvline(blend_start, color="0.25", linestyle=":", linewidth=1.1)
         else:
             ax.axvspan(blend_start, blend_end, color="#111111", alpha=0.08, label="blend interval")
+    if neel_region is not None:
+        ax.axvspan(
+            neel_region[0],
+            neel_region[1],
+            color="#6f6f6f",
+            alpha=0.12,
+            label="Neel transition region",
+        )
     finite = hybrid_y[np.isfinite(hybrid_y)]
     if len(finite):
         ymin = float(np.min(finite))
@@ -1558,6 +1567,14 @@ def smoothstep_weights(T: np.ndarray, blend_start: float, blend_end: float) -> n
     return 3.0 * x * x - 2.0 * x * x * x
 
 
+def neel_activation_start(neel_t: float, apply_above_t: float) -> float:
+    return max(0.0, min(float(neel_t), float(apply_above_t) - 30.0))
+
+
+def neel_activation_weights(T: np.ndarray, neel_t: float, apply_above_t: float) -> np.ndarray:
+    return smoothstep_weights(T, neel_activation_start(neel_t, apply_above_t), apply_above_t)
+
+
 def default_qha_md_blend_interval(
     switch_T: float,
     qha_T: np.ndarray,
@@ -1672,6 +1689,101 @@ def calibrate_blend_start_for_entropy_grid(
         }
     )
     return calibrated, metadata
+
+
+def neel_enthalpy_j_mol(neel_t: float, neel_entropy: float, neel_enthalpy: str) -> float:
+    if neel_enthalpy == "auto":
+        return float(neel_t) * float(neel_entropy)
+    return float(neel_enthalpy) * 1000.0
+
+
+def neel_entropy_reference_300(anchor_metadata: Optional[dict], thermo_formula: Optional[str]) -> dict:
+    db_anchor = (anchor_metadata or {}).get("thermo_db_anchor")
+    if db_anchor and str(db_anchor.get("formula", "")).upper() == "UO2":
+        return {
+            "source": db_anchor["database"],
+            "formula": db_anchor["formula"],
+            "T_K": db_anchor["temperature_value_K"],
+            "S_J_mol_formula_K": db_anchor["S_J_mol_formula_K"],
+        }
+    if thermo_formula and thermo_formula.upper() == "UO2":
+        return {
+            "source": "JAEA-literature-default",
+            "formula": "UO2",
+            "T_K": 300.0,
+            "S_J_mol_formula_K": 77.81270,
+        }
+    return {}
+
+
+def apply_neel_correction_grid(
+    *,
+    T_grid: np.ndarray,
+    S_grid: np.ndarray,
+    H_grid: np.ndarray,
+    neel_correction: str,
+    neel_t: float,
+    neel_entropy: float,
+    neel_enthalpy: str,
+    neel_apply_above_t: float,
+    entropy_anchor_is_direct: bool,
+    anchor_metadata: Optional[dict],
+    thermo_formula: Optional[str],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
+    weights = np.zeros_like(T_grid, dtype=float)
+    metadata = {
+        "enabled": neel_correction == "on",
+        "applied": False,
+        "reason": "disabled",
+    }
+    if neel_correction != "on":
+        return S_grid, H_grid, H_grid - T_grid * S_grid, weights, metadata
+    if entropy_anchor_is_direct:
+        metadata["reason"] = "skipped because direct experimental entropy anchoring is active"
+        return S_grid, H_grid, H_grid - T_grid * S_grid, weights, metadata
+    activation_start = neel_activation_start(neel_t, neel_apply_above_t)
+    weights = neel_activation_weights(T_grid, neel_t, neel_apply_above_t)
+    delta_s = float(neel_entropy)
+    delta_h = neel_enthalpy_j_mol(neel_t, neel_entropy, neel_enthalpy)
+    S_corrected = S_grid + delta_s * weights
+    H_corrected = H_grid + delta_h * weights
+    G_corrected = H_corrected - T_grid * S_corrected
+    ref = neel_entropy_reference_300(anchor_metadata, thermo_formula)
+    s_before_300 = float(np.interp(300.0, T_grid, S_grid)) if T_grid[0] <= 300.0 <= T_grid[-1] else None
+    s_after_300 = (
+        float(np.interp(300.0, T_grid, S_corrected))
+        if T_grid[0] <= 300.0 <= T_grid[-1]
+        else None
+    )
+    gap_before = None
+    gap_after = None
+    can_explain = None
+    if ref and s_before_300 is not None and s_after_300 is not None:
+        gap_before = ref["S_J_mol_formula_K"] - s_before_300
+        gap_after = ref["S_J_mol_formula_K"] - s_after_300
+        can_explain = abs(gap_after) < abs(gap_before) and abs(gap_after) <= max(1.0, 0.25 * abs(gap_before))
+    metadata.update(
+        {
+            "applied": True,
+            "reason": "explicit phonon-QHA plus Neel entropy correction",
+            "neel_T_K": neel_t,
+            "activation_start_K": activation_start,
+            "apply_full_above_T_K": neel_apply_above_t,
+            "delta_S_J_mol_formula_K": delta_s,
+            "delta_H_J_mol_formula": delta_h,
+            "enthalpy_mode": neel_enthalpy,
+            "S_300_before_J_mol_formula_K": s_before_300,
+            "S_300_after_J_mol_formula_K": s_after_300,
+            "S_reference_300": ref,
+            "delta_S_gap_before_J_mol_formula_K": gap_before,
+            "delta_S_gap_after_J_mol_formula_K": gap_after,
+            "neel_entropy_can_explain_gap": can_explain,
+            "double_counting_guard": (
+                "database S is treated as a benchmark only when explicit Neel correction is enabled"
+            ),
+        }
+    )
+    return S_corrected, H_corrected, G_corrected, weights, metadata
 
 
 def cp_overlap_diagnostics_np(
@@ -2047,6 +2159,13 @@ def build_combined_thermo(summaries: list[dict],
                           entropy_anchor_blend_T: Optional[float] = None,
                           entropy_anchor_blend_S_J_mol_K: Optional[float] = None,
                           entropy_anchor_min_blend_start: float = 200.0,
+                          entropy_anchor_is_direct: bool = False,
+                          neel_correction: str = "off",
+                          neel_t: float = 30.8,
+                          neel_entropy: float = 8.4,
+                          neel_enthalpy: str = "auto",
+                          neel_apply_above_t: float = 50.0,
+                          thermo_formula: Optional[str] = None,
                           structure_reference_temperature: Optional[float] = None,
                           volume_reference: Optional[float] = None,
                           lattice_references: Optional[dict[str, float]] = None,
@@ -2493,10 +2612,39 @@ def build_combined_thermo(summaries: list[dict],
             "source": "manual --thermo-anchor-H" if thermo_anchor_H_J_mol is not None else None,
         }
 
+    S_before_neel_grid = S_rel_J_mol_K_grid.copy()
+    H_before_neel_grid = H_rel_J_mol_grid.copy()
+    G_before_neel_grid = G_rel_J_mol_grid.copy()
+    (
+        S_rel_J_mol_K_grid,
+        H_rel_J_mol_grid,
+        G_rel_J_mol_grid,
+        neel_weights,
+        neel_metadata,
+    ) = apply_neel_correction_grid(
+        T_grid=T_grid,
+        S_grid=S_rel_J_mol_K_grid,
+        H_grid=H_rel_J_mol_grid,
+        neel_correction=neel_correction,
+        neel_t=neel_t,
+        neel_entropy=neel_entropy,
+        neel_enthalpy=neel_enthalpy,
+        neel_apply_above_t=neel_apply_above_t,
+        entropy_anchor_is_direct=entropy_anchor_is_direct,
+        anchor_metadata=anchor_metadata,
+        thermo_formula=thermo_formula,
+    )
+    if qha_splice_metadata.get("enabled"):
+        qha_splice_metadata["neel_correction"] = neel_metadata
+
     # Interpolate grid relative functions back to MD T for the summary table.
     H_rel_J_mol = np.interp(T, T_grid, H_rel_J_mol_grid)
     S_rel_J_mol_K = np.interp(T, T_grid, S_rel_J_mol_K_grid)
     G_rel_J_mol = np.interp(T, T_grid, G_rel_J_mol_grid)
+    S_before_neel = np.interp(T, T_grid, S_before_neel_grid)
+    H_before_neel = np.interp(T, T_grid, H_before_neel_grid)
+    G_before_neel = np.interp(T, T_grid, G_before_neel_grid)
+    neel_weights_at_T = np.interp(T, T_grid, neel_weights)
     Cp_grid_at_T = np.interp(T, T_grid, Cp_grid)
     Cp_from_H_at_T = np.interp(T, T_grid, Cp_from_H_grid)
 
@@ -2532,6 +2680,10 @@ def build_combined_thermo(summaries: list[dict],
             "S_rel_J_per_mol_UO2_K": float(S_rel_J_mol_K[i]),
             "H_rel_J_per_mol_UO2": float(H_rel_J_mol[i]),
             "G_rel_J_per_mol_UO2": float(G_rel_J_mol[i]),
+            "neel_weight": float(neel_weights_at_T[i]),
+            "S_before_neel_J_per_mol_UO2_K": float(S_before_neel[i]),
+            "H_before_neel_J_per_mol_UO2": float(H_before_neel[i]),
+            "G_before_neel_J_per_mol_UO2": float(G_before_neel[i]),
         })
         combined.append(row)
 
@@ -2566,6 +2718,10 @@ def build_combined_thermo(summaries: list[dict],
             "H_rel_J_per_mol_UO2": float(H_rel_J_mol_grid[i]),
             "S_rel_J_per_mol_UO2_K": float(S_rel_J_mol_K_grid[i]),
             "G_rel_J_per_mol_UO2": float(G_rel_J_mol_grid[i]),
+            "neel_weight": float(neel_weights[i]),
+            "S_before_neel_J_per_mol_UO2_K": float(S_before_neel_grid[i]),
+            "H_before_neel_J_per_mol_UO2": float(H_before_neel_grid[i]),
+            "G_before_neel_J_per_mol_UO2": float(G_before_neel_grid[i]),
         })
         for key, band in uq_bands.items():
             lo, hi = band
@@ -2600,6 +2756,7 @@ def build_combined_thermo(summaries: list[dict],
         "use_anchor_Cp_in_fit": use_anchor_Cp_in_fit,
         "anchor_metadata": anchor_metadata or {},
         "qha_low_t_splice": qha_splice_metadata,
+        "neel_correction": neel_metadata,
     }
     dump_json(outdir / "temperature_range_metadata.json", range_meta)
     if anchor_metadata:
@@ -2628,6 +2785,12 @@ def build_combined_thermo(summaries: list[dict],
     plot_xy(outdir / "G_function_grid.png", T_grid, G_rel_J_mol_grid / 1000.0, "T (K)", "G-G$_0$ (kJ/mol)", "Relative Gibbs function")
 
     if qha_splice_metadata.get("enabled"):
+        neel_region = None
+        if neel_metadata.get("applied"):
+            neel_region = (
+                neel_metadata["activation_start_K"],
+                neel_metadata["apply_full_above_T_K"],
+            )
         Cp_over_T_md = np.zeros_like(Cp_md_grid, dtype=float)
         md_nonzero = T_grid > 1.0e-12
         Cp_over_T_md[md_nonzero] = Cp_md_grid[md_nonzero] / T_grid[md_nonzero]
@@ -2688,7 +2851,7 @@ def build_combined_thermo(summaries: list[dict],
         plot_hybrid_grid(
             outdir / "hybrid_S_QHA_MD.png",
             T_grid,
-            S_rel_J_mol_K_grid,
+            S_before_neel_grid if neel_metadata.get("applied") else S_rel_J_mol_K_grid,
             "S (J/mol/K)",
             "Integrated Hybrid QHA+MD Entropy",
             qha_low_t_curve["T"],
@@ -2699,11 +2862,29 @@ def build_combined_thermo(summaries: list[dict],
             qha_splice_metadata["blend_start_K"],
             qha_splice_metadata["blend_end_K"],
             db_points=thermo_db_points.get("S"),
+            neel_region=neel_region,
         )
+        if neel_metadata.get("applied"):
+            plot_hybrid_grid(
+                outdir / "hybrid_S_QHA_MD_neel_corrected.png",
+                T_grid,
+                S_rel_J_mol_K_grid,
+                "S (J/mol/K)",
+                "Neel-Corrected Hybrid QHA+MD Entropy",
+                qha_low_t_curve["T"],
+                qha_low_t_curve["S"],
+                T_grid,
+                S_md_rel_grid,
+                None,
+                qha_splice_metadata["blend_start_K"],
+                qha_splice_metadata["blend_end_K"],
+                db_points=thermo_db_points.get("S"),
+                neel_region=neel_region,
+            )
         plot_hybrid_grid(
             outdir / "hybrid_H_QHA_MD.png",
             T_grid,
-            H_rel_J_mol_grid / 1000.0,
+            (H_before_neel_grid if neel_metadata.get("applied") else H_rel_J_mol_grid) / 1000.0,
             "H (kJ/mol)",
             "Integrated Hybrid QHA+MD Enthalpy",
             qha_low_t_curve["T"],
@@ -2714,11 +2895,29 @@ def build_combined_thermo(summaries: list[dict],
             qha_splice_metadata["blend_start_K"],
             qha_splice_metadata["blend_end_K"],
             db_points=thermo_db_points.get("H"),
+            neel_region=neel_region,
         )
+        if neel_metadata.get("applied"):
+            plot_hybrid_grid(
+                outdir / "hybrid_H_QHA_MD_neel_corrected.png",
+                T_grid,
+                H_rel_J_mol_grid / 1000.0,
+                "H (kJ/mol)",
+                "Neel-Corrected Hybrid QHA+MD Enthalpy",
+                qha_low_t_curve["T"],
+                qha_low_t_curve["H"] / 1000.0,
+                T_grid,
+                H_md_rel_grid / 1000.0,
+                None,
+                qha_splice_metadata["blend_start_K"],
+                qha_splice_metadata["blend_end_K"],
+                db_points=thermo_db_points.get("H"),
+                neel_region=neel_region,
+            )
         plot_hybrid_grid(
             outdir / "hybrid_G_QHA_MD.png",
             T_grid,
-            G_rel_J_mol_grid / 1000.0,
+            (G_before_neel_grid if neel_metadata.get("applied") else G_rel_J_mol_grid) / 1000.0,
             "G (kJ/mol)",
             "Hybrid G = H - TS",
             qha_low_t_curve["T"],
@@ -2729,7 +2928,25 @@ def build_combined_thermo(summaries: list[dict],
             qha_splice_metadata["blend_start_K"],
             qha_splice_metadata["blend_end_K"],
             db_points=thermo_db_points.get("G"),
+            neel_region=neel_region,
         )
+        if neel_metadata.get("applied"):
+            plot_hybrid_grid(
+                outdir / "hybrid_G_QHA_MD_neel_corrected.png",
+                T_grid,
+                G_rel_J_mol_grid / 1000.0,
+                "G (kJ/mol)",
+                "Neel-Corrected Hybrid G = H - TS",
+                qha_low_t_curve["T"],
+                (qha_low_t_curve["H"] - qha_low_t_curve["T"] * qha_low_t_curve["S"]) / 1000.0,
+                T_grid,
+                G_md_rel_grid / 1000.0,
+                None,
+                qha_splice_metadata["blend_start_K"],
+                qha_splice_metadata["blend_end_K"],
+                db_points=thermo_db_points.get("G"),
+                neel_region=neel_region,
+            )
         plot_structural_hybrid_detail(
             outdir / "hybrid_V_QHA_MD.png",
             T_grid=T_grid,
@@ -3038,6 +3255,30 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     ap.add_argument(
+        "--neel-correction",
+        choices=["off", "on"],
+        default="off",
+        help="Apply an optional low-temperature magnetic/Neel entropy correction.",
+    )
+    ap.add_argument("--neel-T", type=float, default=30.8, help="Neel transition temperature in K.")
+    ap.add_argument(
+        "--neel-entropy",
+        type=float,
+        default=8.4,
+        help="Magnetic/Neel entropy contribution in J/mol-formula/K.",
+    )
+    ap.add_argument(
+        "--neel-enthalpy",
+        default="auto",
+        help="Neel enthalpy offset in kJ/mol-formula, or 'auto' = T_N * DeltaS / 1000.",
+    )
+    ap.add_argument(
+        "--neel-apply-above-T",
+        type=float,
+        default=50.0,
+        help="Temperature where the full Neel entropy/enthalpy offset is active.",
+    )
+    ap.add_argument(
         "--structure-reference-temperature",
         type=float,
         default=None,
@@ -3143,6 +3384,17 @@ def main(argv: list[str] | None = None) -> None:
         )
     except (OSError, ValueError) as exc:
         ap.error(str(exc))
+    if (
+        args.neel_correction == "on"
+        and args.thermo_anchor_H is None
+        and "thermo_anchor_H_J_mol" in (anchor_metadata or {}).get("thermo_db_filled_fields", [])
+    ):
+        qha_anchor = (anchor_metadata or {}).get("qha_anchor")
+        if qha_anchor and "thermo_anchor_H_J_mol" in (anchor_metadata or {}).get("filled_fields", []):
+            thermo_anchor_H = qha_anchor["H_J_mol_formula"]
+        else:
+            thermo_anchor_H = None
+        anchor_metadata["thermo_db_H_anchor_suppressed_for_neel"] = True
     if anchor_metadata:
         print("Thermodynamic anchor:")
         qha_anchor = anchor_metadata.get("qha_anchor")
@@ -3176,16 +3428,30 @@ def main(argv: list[str] | None = None) -> None:
             ap.error(str(exc))
     if args.entropy_anchor_min_blend_start < 0.0:
         ap.error("--entropy-anchor-min-blend-start must be non-negative")
+    if args.neel_T <= 0.0:
+        ap.error("--neel-T must be positive")
+    if args.neel_entropy < 0.0:
+        ap.error("--neel-entropy must be non-negative")
+    if args.neel_apply_above_T <= args.neel_T:
+        ap.error("--neel-apply-above-T must be greater than --neel-T")
+    if args.neel_enthalpy != "auto":
+        try:
+            float(args.neel_enthalpy)
+        except ValueError:
+            ap.error("--neel-enthalpy must be 'auto' or a numeric kJ/mol-formula value")
 
     entropy_anchor_blend_T = None
     entropy_anchor_blend_S = None
+    entropy_anchor_is_direct = False
     if args.thermo_anchor_T is not None and args.thermo_anchor_S is not None:
         entropy_anchor_blend_T = args.thermo_anchor_T
         entropy_anchor_blend_S = args.thermo_anchor_S
+        entropy_anchor_is_direct = True
     db_anchor = (anchor_metadata or {}).get("thermo_db_anchor")
-    if db_anchor:
+    if db_anchor and args.neel_correction != "on":
         entropy_anchor_blend_T = db_anchor["temperature_value_K"]
         entropy_anchor_blend_S = db_anchor["S_J_mol_formula_K"]
+        entropy_anchor_is_direct = True
 
     try:
         lattice_references = parse_lattice_references(args.lattice_reference)
@@ -3215,6 +3481,13 @@ def main(argv: list[str] | None = None) -> None:
             entropy_anchor_blend_T=entropy_anchor_blend_T,
             entropy_anchor_blend_S_J_mol_K=entropy_anchor_blend_S,
             entropy_anchor_min_blend_start=args.entropy_anchor_min_blend_start,
+            entropy_anchor_is_direct=entropy_anchor_is_direct,
+            neel_correction=args.neel_correction,
+            neel_t=args.neel_T,
+            neel_entropy=args.neel_entropy,
+            neel_enthalpy=args.neel_enthalpy,
+            neel_apply_above_t=args.neel_apply_above_T,
+            thermo_formula=args.thermo_formula,
             structure_reference_temperature=args.structure_reference_temperature,
             volume_reference=args.volume_reference,
             lattice_references=lattice_references,

@@ -299,3 +299,48 @@ def test_lammps_entropy_anchor_calibrates_qha_splice_blend_start() -> None:
     assert blend_start < 550.0
     assert blend_start >= 200.0
     assert metadata["S_at_calibrated_blend_start_J_mol_formula_K"] == pytest.approx(28.0, abs=0.5)
+
+
+def test_lammps_neel_correction_grid_updates_s_h_g() -> None:
+    T_grid = np.array([0.0, 30.8, 50.0, 300.0])
+    S_grid = np.array([0.0, 2.0, 5.0, 70.0])
+    H_grid = np.array([0.0, 10.0, 20.0, 1000.0])
+
+    S_corr, H_corr, G_corr, weights, metadata = thermo_series.apply_neel_correction_grid(
+        T_grid=T_grid,
+        S_grid=S_grid,
+        H_grid=H_grid,
+        neel_correction="on",
+        neel_t=30.8,
+        neel_entropy=8.4,
+        neel_enthalpy="auto",
+        neel_apply_above_t=50.0,
+        entropy_anchor_is_direct=False,
+        anchor_metadata={},
+        thermo_formula="UO2",
+    )
+
+    assert metadata["applied"] is True
+    assert weights[-1] == pytest.approx(1.0)
+    assert S_corr[-1] == pytest.approx(78.4)
+    assert H_corr[-1] == pytest.approx(1258.72)
+    assert G_corr[-1] == pytest.approx(1258.72 - 300.0 * 78.4)
+    assert metadata["delta_S_gap_before_J_mol_formula_K"] == pytest.approx(7.81270)
+    assert abs(metadata["delta_S_gap_after_J_mol_formula_K"]) < 1.0
+
+    S_skip, H_skip, _G_skip, _weights_skip, skipped = thermo_series.apply_neel_correction_grid(
+        T_grid=T_grid,
+        S_grid=S_grid,
+        H_grid=H_grid,
+        neel_correction="on",
+        neel_t=30.8,
+        neel_entropy=8.4,
+        neel_enthalpy="auto",
+        neel_apply_above_t=50.0,
+        entropy_anchor_is_direct=True,
+        anchor_metadata={},
+        thermo_formula="UO2",
+    )
+    assert skipped["applied"] is False
+    assert np.allclose(S_skip, S_grid)
+    assert np.allclose(H_skip, H_grid)

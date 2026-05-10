@@ -600,6 +600,22 @@ QHA files and MD columns are available. It also writes
 records the blend interval, Cp mismatch diagnostics, source files, and how the
 MD statistical Cp UQ band was tapered through the blend.
 
+For phonon-QHA cases where the low-temperature magnetic anomaly is not already
+included, add an explicit UO2-like Neel entropy correction instead of direct
+experimental entropy anchoring:
+
+```bash
+thermo_lammps --config config_production.json --outdir analysis/thermo_qha_neel --natoms 96 --plot-T-min 0 --plot-T-max 1500 --cp-source dH --qha-anchor-dir ./qha_run --qha-anchor-formula-units 32 --qha-low-t-splice --neel-correction on --neel-T 30.8 --neel-entropy 8.4 --neel-enthalpy auto --neel-apply-above-T 50 --thermo-db jaea --thermo-formula UO2 --plot-thermo-db-points
+```
+
+With `--neel-correction on`, database S is treated as a benchmark point rather
+than a direct entropy anchor, avoiding double counting. The output metadata
+reports `S(300 K)` before and after the correction, the JAEA UO2 300 K entropy
+reference when available, the remaining entropy gap, and whether the selected
+Neel entropy explains that gap. Corrected S/H/G columns are written to the
+thermo grid, and corrected plots such as
+`hybrid_S_QHA_MD_neel_corrected.png` are added.
+
 For structural thermodynamics, CTE is not blended directly. The workflow
 blends corrected primary structural curves, `V(T)` and available lattice
 parameters such as `a(T)`, then derives `alpha_V = (1/V) dV/dT` and
@@ -1031,6 +1047,19 @@ the low side of the blend, bounded by `--entropy-anchor-min-blend-start`
 `--entropy-anchor-temperature`, `--entropy-anchor-value`, and
 `--entropy-anchor-unit`. Add `--plot-thermo-db-points` to overlay database
 S/H/G points as larger hollow black circles.
+
+If QHA is phonon-only and you want to add an explicit UO2-like magnetic/Neel
+entropy contribution instead of using JAEA S as a direct entropy anchor, add:
+
+```bash
+thermo_qha_md --qha-dir ./qha_run --md-dir analysis/thermo_qha_splice --outdir ./qha_md_overlay --qha-formula-units 32 --md-formula-units 32 --target-z 4 --t-min 0 --t-max 1500 --thermo-db jaea --thermo-formula UO2 --plot-thermo-db-points --neel-correction on --neel-T 30.8 --neel-entropy 8.4 --neel-enthalpy auto --neel-apply-above-T 50
+```
+
+In this mode JAEA S/H/G points are plotted and used for diagnostics, but the
+entropy-anchor blend calibration is suppressed so the explicit Neel correction
+is not counted twice. The corrected S/H/G columns are added to
+`hybrid_cp_entropy.csv`, with corrected plots such as
+`hybrid_S_QHA_MD_neel_corrected.png`.
 
 For structural quantities, the compare command follows the same rule as
 `thermo_lammps`: it does not blend CTE directly. It corrects and blends V/a

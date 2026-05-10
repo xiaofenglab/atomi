@@ -274,6 +274,68 @@ def test_qha_md_entropy_anchor_calibrates_blend_start() -> None:
     assert metadata["S_at_calibrated_blend_start_J_mol_basis_K"] == pytest.approx(22.0, abs=0.2)
 
 
+def test_qha_md_neel_correction_adds_entropy_without_double_counting() -> None:
+    parser = qha_md_compare.build_parser()
+    args = parser.parse_args(
+        [
+            "--qha-dir",
+            ".",
+            "--md-dir",
+            ".",
+            "--outdir",
+            ".",
+            "--qha-formula-units",
+            "1",
+            "--md-formula-units",
+            "1",
+            "--target-z",
+            "1",
+            "--thermo-formula",
+            "UO2",
+            "--neel-correction",
+            "on",
+            "--neel-entropy",
+            "8.4",
+            "--neel-T",
+            "30.8",
+            "--neel-apply-above-T",
+            "50",
+        ]
+    )
+    rows = [
+        {
+            "T_K": 0.0,
+            "S_integrated": 0.0,
+            "H_integrated_kJ_mol": 0.0,
+            "G_integrated_kJ_mol": 0.0,
+        },
+        {
+            "T_K": 300.0,
+            "S_integrated": 70.0,
+            "H_integrated_kJ_mol": 1.0,
+            "G_integrated_kJ_mol": -20.0,
+        },
+    ]
+
+    metadata = qha_md_compare.apply_neel_correction_to_rows(rows, args, {"source": None}, {})
+
+    assert metadata["applied"] is True
+    assert rows[1]["S_neel_corrected"] == pytest.approx(78.4)
+    assert rows[1]["H_neel_corrected_kJ_mol"] == pytest.approx(1.25872)
+    assert rows[1]["G_neel_corrected_kJ_mol"] == pytest.approx(1.25872 - 300.0 * 78.4 / 1000.0)
+    assert metadata["delta_S_gap_before_J_mol_basis_K"] == pytest.approx(7.81270)
+    assert abs(metadata["delta_S_gap_after_J_mol_basis_K"]) < 1.0
+
+    rows = [dict(row, S_integrated=70.0, H_integrated_kJ_mol=1.0) for row in rows]
+    skipped = qha_md_compare.apply_neel_correction_to_rows(
+        rows,
+        args,
+        {"source": "user"},
+        {},
+    )
+    assert skipped["applied"] is False
+
+
 def test_hybrid_cp_switch_ignores_extrapolated_low_t_md_grid(tmp_path: Path) -> None:
     pytest.importorskip("matplotlib")
     qha = tmp_path / "qha"

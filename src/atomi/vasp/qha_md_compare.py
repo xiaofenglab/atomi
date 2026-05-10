@@ -527,6 +527,14 @@ def smoothstep_weight(temp: float, blend_start: float, blend_end: float) -> floa
     return 3.0 * x * x - 2.0 * x * x * x
 
 
+def neel_activation_start(neel_t: float, apply_above_t: float) -> float:
+    return max(0.0, min(float(neel_t), float(apply_above_t) - 30.0))
+
+
+def neel_activation_weight(temp: float, neel_t: float, apply_above_t: float) -> float:
+    return smoothstep_weight(temp, neel_activation_start(neel_t, apply_above_t), apply_above_t)
+
+
 def default_blend_interval(switch_temp: float, qha_points, md_points) -> tuple[float, float]:
     qha_points = finite_points(qha_points)
     md_points = finite_points(md_points)
@@ -627,6 +635,8 @@ def resolve_enthalpy_anchor(args: argparse.Namespace) -> tuple[float | None, dic
         args.enthalpy_anchor_temperature = anchor_t
     record = jaea_anchor(args.thermo_formula, anchor_t, phase=args.thermo_phase)
     if args.enthalpy_anchor_value is None:
+        if args.neel_correction == "on":
+            return None, record
         args.enthalpy_anchor_value = record["H_J_mol_formula"]
         args.enthalpy_anchor_unit = "J/mol-formula"
     return enthalpy_anchor_to_kj_per_basis(args), record
@@ -696,6 +706,15 @@ def resolve_entropy_anchor(args: argparse.Namespace, record: dict) -> tuple[floa
             "basis": args.energy_basis,
         }
     if record:
+        if args.neel_correction == "on":
+            return None, None, {
+                "source": record["database"],
+                "formula": record["formula"],
+                "phase": record["phase"],
+                "T_K": record["temperature_value_K"],
+                "used_as_entropy_anchor": False,
+                "reason": "suppressed because explicit Neel correction is enabled; database S is a benchmark only",
+            }
         factor = args.target_z if args.energy_basis == "target-cell" else 1.0
         value = record["S_J_mol_formula_K"] * factor
         return record["temperature_value_K"], value, {
@@ -894,6 +913,98 @@ def add_integrated_thermo(
     )
 
 
+def neel_entropy_reference(args: argparse.Namespace, record: dict) -> dict:
+    if record and str(record.get("formula", "")).upper() == "UO2":
+        factor = args.target_z if args.energy_basis == "target-cell" else 1.0
+        return {
+            "source": record["database"],
+            "formula": record["formula"],
+            "T_K": record["temperature_value_K"],
+            "S_J_mol_basis_K": record["S_J_mol_formula_K"] * factor,
+        }
+    if args.thermo_formula and args.thermo_formula.upper() == "UO2":
+        factor = args.target_z if args.energy_basis == "target-cell" else 1.0
+        return {
+            "source": "JAEA-literature-default",
+            "formula": "UO2",
+            "T_K": 300.0,
+            "S_J_mol_basis_K": 77.81270 * factor,
+        }
+    return {}
+
+
+def neel_enthalpy_kj_per_basis(args: argparse.Namespace) -> float:
+    if args.neel_enthalpy == "auto":
+        value = args.neel_T * args.neel_entropy / 1000.0
+    else:
+        value = float(args.neel_enthalpy)
+    if args.energy_basis == "target-cell":
+        value *= args.target_z
+    return value
+
+
+def apply_neel_correction_to_rows(
+    rows: list[dict],
+    args: argparse.Namespace,
+    entropy_anchor_metadata: dict,
+    thermo_db_anchor: dict,
+) -> dict:
+    metadata = {
+        "enabled": args.neel_correction == "on",
+        "applied": False,
+        "reason": "disabled",
+    }
+    if args.neel_correction != "on":
+        return metadata
+    if entropy_anchor_metadata.get("source") == "user":
+        metadata["reason"] = "skipped because a direct experimental entropy anchor was supplied"
+        return metadata
+    entropy_scale = args.target_z if args.energy_basis == "target-cell" else 1.0
+    delta_s = args.neel_entropy * entropy_scale
+    delta_h = neel_enthalpy_kj_per_basis(args)
+    activation_start = neel_activation_start(args.neel_T, args.neel_apply_above_T)
+    for row in rows:
+        weight = neel_activation_weight(row["T_K"], args.neel_T, args.neel_apply_above_T)
+        row["neel_weight"] = weight
+        row["S_neel_corrected"] = row["S_integrated"] + delta_s * weight
+        row["H_neel_corrected_kJ_mol"] = row["H_integrated_kJ_mol"] + delta_h * weight
+        row["G_neel_corrected_kJ_mol"] = (
+            row["H_neel_corrected_kJ_mol"] - row["T_K"] * row["S_neel_corrected"] / 1000.0
+        )
+    ref = neel_entropy_reference(args, thermo_db_anchor)
+    s_before_300 = interpolate([(row["T_K"], row["S_integrated"]) for row in rows], 300.0)
+    s_after_300 = interpolate([(row["T_K"], row["S_neel_corrected"]) for row in rows], 300.0)
+    gap_before = None
+    gap_after = None
+    can_explain = None
+    if ref and s_before_300 is not None and s_after_300 is not None:
+        gap_before = ref["S_J_mol_basis_K"] - s_before_300
+        gap_after = ref["S_J_mol_basis_K"] - s_after_300
+        can_explain = abs(gap_after) < abs(gap_before) and abs(gap_after) <= max(1.0, 0.25 * abs(gap_before))
+    metadata.update(
+        {
+            "applied": True,
+            "reason": "explicit phonon-QHA plus Neel entropy correction",
+            "neel_T_K": args.neel_T,
+            "activation_start_K": activation_start,
+            "apply_full_above_T_K": args.neel_apply_above_T,
+            "delta_S_J_mol_basis_K": delta_s,
+            "delta_H_kJ_mol_basis": delta_h,
+            "enthalpy_mode": args.neel_enthalpy,
+            "S_300_before_J_mol_basis_K": s_before_300,
+            "S_300_after_J_mol_basis_K": s_after_300,
+            "S_reference_300": ref,
+            "delta_S_gap_before_J_mol_basis_K": gap_before,
+            "delta_S_gap_after_J_mol_basis_K": gap_after,
+            "neel_entropy_can_explain_gap": can_explain,
+            "double_counting_guard": (
+                "JAEA/database S is used only as a benchmark when explicit Neel correction is enabled"
+            ),
+        }
+    )
+    return metadata
+
+
 def relative_to_temperature(points, ref_t: float) -> list[tuple[float, float]]:
     ref = interpolate(points, ref_t)
     if ref is None or not math.isfinite(ref):
@@ -927,6 +1038,7 @@ def plot_hybrid_quantity(
     blend_end,
     args,
     db_points=None,
+    neel_region=None,
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -964,6 +1076,14 @@ def plot_hybrid_quantity(
         ax.axvline(blend_start, color="#555555", linestyle=":", linewidth=1.2)
     else:
         ax.axvspan(blend_start, blend_end, color="#111111", alpha=0.08, label="blend interval")
+    if neel_region:
+        ax.axvspan(
+            neel_region[0],
+            neel_region[1],
+            color="#6f6f6f",
+            alpha=0.12,
+            label="Neel transition region",
+        )
     if args.t_min is not None or args.t_max is not None:
         ax.set_xlim(left=args.t_min, right=args.t_max)
     ax.set_xlabel("Temperature (K)")
@@ -1340,6 +1460,12 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
             "md_cp_column": md_cp_column,
             "md_entropy_column": md_entropy_column,
         }
+    neel_metadata = apply_neel_correction_to_rows(
+        hybrid_rows,
+        args,
+        entropy_anchor_metadata,
+        thermo_db_anchor,
+    )
 
     csv_path = args.outdir / "hybrid_cp_entropy.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
@@ -1352,10 +1478,18 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
             "H_integrated_kJ_mol",
             "G_integrated_kJ_mol",
             "G_relative_kJ_mol",
+            "neel_weight",
+            "S_neel_corrected",
+            "H_neel_corrected_kJ_mol",
+            "G_neel_corrected_kJ_mol",
         ]
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for row in hybrid_rows:
+            neel_weight = row.get("neel_weight", 0.0)
+            s_neel = row.get("S_neel_corrected", row["S_integrated"])
+            h_neel = row.get("H_neel_corrected_kJ_mol", row["H_integrated_kJ_mol"])
+            g_neel = row.get("G_neel_corrected_kJ_mol", row["G_integrated_kJ_mol"])
             writer.writerow(
                 {
                     "T_K": row["T_K"],
@@ -1366,6 +1500,10 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
                     "H_integrated_kJ_mol": row["H_integrated_kJ_mol"],
                     "G_integrated_kJ_mol": row["G_integrated_kJ_mol"],
                     "G_relative_kJ_mol": row["G_relative_kJ_mol"],
+                    "neel_weight": neel_weight,
+                    "S_neel_corrected": s_neel,
+                    "H_neel_corrected_kJ_mol": h_neel,
+                    "G_neel_corrected_kJ_mol": g_neel,
                 }
             )
 
@@ -1551,6 +1689,12 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
     gibbs_png = args.outdir / "hybrid_G_QHA_MD.png"
     volume_png = args.outdir / "hybrid_V_QHA_MD.png"
     alpha_v_png = args.outdir / "hybrid_alpha_V_QHA_MD.png"
+    neel_region = None
+    if neel_metadata.get("applied"):
+        neel_region = (
+            neel_metadata["activation_start_K"],
+            neel_metadata["apply_full_above_T_K"],
+        )
     plot_hybrid_quantity(
         cp_png,
         "Hybrid QHA+MD Cp",
@@ -1577,7 +1721,24 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         blend_end,
         args,
         db_points=db_plot_points.get("S"),
+        neel_region=neel_region,
     )
+    if neel_metadata.get("applied"):
+        plot_hybrid_quantity(
+            args.outdir / "hybrid_S_QHA_MD_neel_corrected.png",
+            "Neel-Corrected Hybrid QHA+MD Entropy",
+            f"S ({cp_label})",
+            qha_entropy,
+            md_entropy,
+            hybrid_rows,
+            "S_neel_corrected",
+            "Neel-corrected hybrid S",
+            blend_start,
+            blend_end,
+            args,
+            db_points=db_plot_points.get("S"),
+            neel_region=neel_region,
+        )
     plot_hybrid_quantity(
         enthalpy_png,
         "Integrated Hybrid QHA+MD Enthalpy",
@@ -1591,7 +1752,24 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         blend_end,
         args,
         db_points=db_plot_points.get("H"),
+        neel_region=neel_region,
     )
+    if neel_metadata.get("applied"):
+        plot_hybrid_quantity(
+            args.outdir / "hybrid_H_QHA_MD_neel_corrected.png",
+            "Neel-Corrected Hybrid QHA+MD Enthalpy",
+            f"H ({energy_label})",
+            qha_enthalpy,
+            md_enthalpy,
+            hybrid_rows,
+            "H_neel_corrected_kJ_mol",
+            "Neel-corrected hybrid H",
+            blend_start,
+            blend_end,
+            args,
+            db_points=db_plot_points.get("H"),
+            neel_region=neel_region,
+        )
     plot_hybrid_quantity(
         gibbs_png,
         "Integrated Hybrid QHA+MD Gibbs Energy",
@@ -1605,7 +1783,24 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         blend_end,
         args,
         db_points=db_plot_points.get("G"),
+        neel_region=neel_region,
     )
+    if neel_metadata.get("applied"):
+        plot_hybrid_quantity(
+            args.outdir / "hybrid_G_QHA_MD_neel_corrected.png",
+            "Neel-Corrected Hybrid QHA+MD Gibbs Energy",
+            f"G ({energy_label})",
+            qha_gibbs,
+            md_gibbs,
+            hybrid_rows,
+            "G_neel_corrected_kJ_mol",
+            "Neel-corrected hybrid G",
+            blend_start,
+            blend_end,
+            args,
+            db_points=db_plot_points.get("G"),
+            neel_region=neel_region,
+        )
     if volume_rows:
         plot_structural_quantity(
             volume_png,
@@ -1672,6 +1867,7 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         },
         "entropy_anchor": entropy_anchor_metadata,
         "entropy_anchor_blend_calibration": entropy_blend_calibration,
+        "neel_correction": neel_metadata,
         "structural_hybrid": structural_metadata,
         "cp_overlap_diagnostics": {
             key: value
@@ -2020,6 +2216,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Lowest allowed blend-start temperature when calibrating S to an experimental/database anchor.",
     )
     parser.add_argument(
+        "--neel-correction",
+        choices=("off", "on"),
+        default="off",
+        help="Apply an optional low-temperature magnetic/Neel entropy correction.",
+    )
+    parser.add_argument("--neel-T", type=float, default=30.8, help="Neel transition temperature in K.")
+    parser.add_argument(
+        "--neel-entropy",
+        type=float,
+        default=8.4,
+        help="Magnetic/Neel entropy contribution in J/mol-formula/K.",
+    )
+    parser.add_argument(
+        "--neel-enthalpy",
+        default="auto",
+        help="Neel enthalpy offset in kJ/mol-formula, or 'auto' = T_N * DeltaS / 1000.",
+    )
+    parser.add_argument(
+        "--neel-apply-above-T",
+        type=float,
+        default=50.0,
+        help="Temperature where the full Neel entropy/enthalpy offset is active.",
+    )
+    parser.add_argument(
         "--structure-reference-temperature",
         type=float,
         default=None,
@@ -2117,6 +2337,17 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--entropy-anchor-temperature and --entropy-anchor-value must be used together")
     if args.entropy_anchor_min_blend_start < 0.0:
         parser.error("--entropy-anchor-min-blend-start must be non-negative")
+    if args.neel_T <= 0.0:
+        parser.error("--neel-T must be positive")
+    if args.neel_entropy < 0.0:
+        parser.error("--neel-entropy must be non-negative")
+    if args.neel_apply_above_T <= args.neel_T:
+        parser.error("--neel-apply-above-T must be greater than --neel-T")
+    if args.neel_enthalpy != "auto":
+        try:
+            float(args.neel_enthalpy)
+        except ValueError:
+            parser.error("--neel-enthalpy must be 'auto' or a numeric kJ/mol-formula value")
     if not args.qha_dir.is_dir():
         parser.error(f"QHA directory not found: {args.qha_dir}")
     if not args.md_dir.is_dir():
