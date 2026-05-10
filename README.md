@@ -930,14 +930,14 @@ the E-V rows. The command checks that the number of thermal YAML files matches
 the number of valid E-V points before writing the run script.
 
 To compare QHA curves with `thermo_lammps` output from `md-engine`, use
-`thermo_qha-md`. The older names `lammps-thermo-series` and
+`thermo_qha_md`. The older names `lammps-thermo-series` and
 `vasp-qha-md-compare` remain as compatibility aliases. For fluorite UO2,
 `target-z 4` means the comparison
 normalizes extensive quantities to one conventional UO2 unit cell with four
 UO2 formula units. A 2x2x2 fluorite QHA or MD cell has 32 UO2 formula units:
 
 ```bash
-thermo_qha-md \
+thermo_qha_md \
   --qha-dir ./qha_run \
   --md-dir ./analysis/thermo_0_1500K_uq \
   --outdir ./qha_md_overlay \
@@ -1007,7 +1007,7 @@ curves first, then derives `hybrid_alpha_V_QHA_MD.png` and
 baseline correction uses a reference temperature plus either shift or scale:
 
 ```bash
-thermo_qha-md --qha-dir ./qha_run --md-dir analysis/thermo_qha_splice --outdir ./qha_md_overlay --qha-formula-units 32 --md-formula-units 32 --target-z 4 --t-min 0 --t-max 1500 --structure-reference-temperature 300 --lattice-reference a=5.47 --structure-correction shift
+thermo_qha_md --qha-dir ./qha_run --md-dir analysis/thermo_qha_splice --outdir ./qha_md_overlay --qha-formula-units 32 --md-formula-units 32 --target-z 4 --t-min 0 --t-max 1500 --structure-reference-temperature 300 --lattice-reference a=5.47 --structure-correction shift
 ```
 
 ## Recommended Migration Pattern

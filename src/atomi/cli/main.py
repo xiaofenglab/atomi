@@ -261,7 +261,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vasp_qha_run.add_argument("qha_args", nargs=argparse.REMAINDER)
 
-    for command_name in ("thermo_qha-md", "vasp-qha-md-compare"):
+    for command_name in ("thermo_qha_md", "thermo_qha-md", "vasp-qha-md-compare"):
         vasp_qha_md_compare = subparsers.add_parser(
             command_name,
             help="Overlay VASP QHA and LAMMPS MD thermodynamic functions.",
@@ -443,7 +443,7 @@ def main(argv: list[str] | None = None) -> None:
 
         vasp_qha_run_main(raw_args[1:])
         return
-    if raw_args and raw_args[0] in ("thermo_qha-md", "vasp-qha-md-compare"):
+    if raw_args and raw_args[0] in ("thermo_qha_md", "thermo_qha-md", "vasp-qha-md-compare"):
         from atomi.vasp.qha_md_compare import main as vasp_qha_md_compare_main
 
         vasp_qha_md_compare_main(raw_args[1:])
@@ -649,7 +649,7 @@ def main(argv: list[str] | None = None) -> None:
         vasp_qha_run_main(args.qha_args)
         return
 
-    if args.subcommand in ("thermo_qha-md", "vasp-qha-md-compare"):
+    if args.subcommand in ("thermo_qha_md", "thermo_qha-md", "vasp-qha-md-compare"):
         from atomi.vasp.qha_md_compare import main as vasp_qha_md_compare_main
 
         vasp_qha_md_compare_main(args.compare_args)
