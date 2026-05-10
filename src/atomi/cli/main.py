@@ -150,6 +150,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cp2k_all.add_argument("logfile", type=Path)
 
+    cp2k_build_acid_box = subparsers.add_parser(
+        "cp2k-build-acid-box",
+        help="Build acidified explicit-water CP2K AIMD boxes and starter inputs.",
+    )
+    cp2k_build_acid_box.add_argument("builder_args", nargs=argparse.REMAINDER)
+
     mace_live = subparsers.add_parser(
         "mace-live",
         help="Live terminal plot for MACE training logs.",
@@ -304,6 +310,11 @@ def main(argv: list[str] | None = None) -> None:
     if raw_args and raw_args[0] == "doctor":
         doctor_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "cp2k-build-acid-box":
+        from atomi.cp2k.acid_box import main as cp2k_build_acid_box_main
+
+        cp2k_build_acid_box_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "vasp-outcar":
         extv(raw_args[1:])
         return
@@ -450,6 +461,12 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.subcommand == "cp2k-all":
         plot_cp2k_all(args.logfile)
+        return
+
+    if args.subcommand == "cp2k-build-acid-box":
+        from atomi.cp2k.acid_box import main as cp2k_build_acid_box_main
+
+        cp2k_build_acid_box_main(args.builder_args)
         return
 
     if args.subcommand == "mace-live":

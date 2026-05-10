@@ -147,6 +147,8 @@ plotvasp4 vasp.outA vasp.outB vasp.outC vasp.outD 200
 plotlammps log.lammps
 plotcp2k cp2k.log
 plotcp2k cp2k.log trajectory.xyz
+cp2k-build-acid-box ga_cl4.xyz --box 26 --density-preset regular --charge 0 --cl 0 --h3o 0
+cp2k-build-acid-box ga_cl4.xyz --box 26 --water-density 0.75 --project ga_cl4_26A
 plotmace mace_train.log
 plotmace mace_train.log 200 5
 convertmace modelname.model
@@ -588,6 +590,39 @@ atomi cp2k-all cp2k_geoopt.log
 
 For MD logs, `plotcp2k` calls the packaged bond-tracking and ETA helpers when useful.
 If no trajectory is found, the MD monitor still plots energy/temperature/SCF data and skips bond panels.
+
+## CP2K AIMD Box Builder
+
+`cp2k-build-acid-box` builds an explicit-water CP2K AIMD starting box from a metal-ligand
+XYZ seed. Seed atoms are kept first, so generated metal-ligand restraint indices remain stable.
+When `--waters` is omitted, Atomi computes the water count from the cubic box length and requested
+water density. Use `--density-preset regular` for about 1.0 g/mL water, `--density-preset loose`
+for a looser initial packing, or pass a numeric `--water-density` in g/mL.
+
+```bash
+cp2k-build-acid-box ga_cl4.xyz \
+  --project ga_cl4_26A \
+  --box 26 \
+  --density-preset regular \
+  --charge 0 \
+  --cl 0 \
+  --h3o 0
+```
+
+The command writes:
+
+```text
+ga_cl4_26A_box.xyz
+ga_cl4_26A_geoopt.inp
+ga_cl4_26A_nvt.inp
+ga_cl4_26A_restraints_colvar.inc
+ga_cl4_26A_restraints_constraint.inc
+ga_cl4_26A_restraints.tsv
+```
+
+By default it auto-detects the first metal atom and restrains nearby non-H ligands within
+`--ligand-cutoff` using the seed metal-ligand distances as targets. Review `CHARGE`, `KIND`
+potentials, and the CP2K data paths before production runs on a new cluster.
 
 ## Recommended Migration Pattern
 
