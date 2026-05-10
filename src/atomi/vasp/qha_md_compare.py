@@ -1005,6 +1005,45 @@ def apply_neel_correction_to_rows(
     return metadata
 
 
+def apply_entropy_anchor_to_rows(
+    rows: list[dict],
+    entropy_anchor_t: float | None,
+    entropy_anchor_value: float | None,
+    entropy_anchor_metadata: dict,
+) -> dict:
+    metadata = {
+        "applied": False,
+        "source": entropy_anchor_metadata.get("source"),
+        "T_K": entropy_anchor_t,
+        "target_J_mol_basis_K": entropy_anchor_value,
+    }
+    if entropy_anchor_t is None or entropy_anchor_value is None:
+        metadata["reason"] = "no direct entropy anchor"
+        return metadata
+    current = interpolate([(row["T_K"], row["S_integrated"]) for row in rows], entropy_anchor_t)
+    if current is None or not math.isfinite(current):
+        metadata["reason"] = "entropy anchor temperature is outside the hybrid grid"
+        return metadata
+    shift = entropy_anchor_value - current
+    for row in rows:
+        row["S_integrated"] += shift
+        row["G_integrated_kJ_mol"] = row["H_integrated_kJ_mol"] - row["T_K"] * row["S_integrated"] / 1000.0
+    ref_idx = min(range(len(rows)), key=lambda idx: abs(rows[idx].get("G_relative_kJ_mol", 0.0)))
+    g_ref = rows[ref_idx]["G_integrated_kJ_mol"]
+    for row in rows:
+        row["G_relative_kJ_mol"] = row["G_integrated_kJ_mol"] - g_ref
+    metadata.update(
+        {
+            "applied": True,
+            "S_before_anchor_J_mol_basis_K": current,
+            "shift_J_mol_basis_K": shift,
+            "S_after_anchor_J_mol_basis_K": entropy_anchor_value,
+            "note": "Direct entropy anchor shifts S and recomputes G = H - TS.",
+        }
+    )
+    return metadata
+
+
 def relative_to_temperature(points, ref_t: float) -> list[tuple[float, float]]:
     ref = interpolate(points, ref_t)
     if ref is None or not math.isfinite(ref):
@@ -1460,6 +1499,12 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
             "md_cp_column": md_cp_column,
             "md_entropy_column": md_entropy_column,
         }
+    entropy_anchor_shift = apply_entropy_anchor_to_rows(
+        hybrid_rows,
+        entropy_anchor_t,
+        entropy_anchor_value,
+        entropy_anchor_metadata,
+    )
     neel_metadata = apply_neel_correction_to_rows(
         hybrid_rows,
         args,
@@ -1867,6 +1912,7 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         },
         "entropy_anchor": entropy_anchor_metadata,
         "entropy_anchor_blend_calibration": entropy_blend_calibration,
+        "entropy_anchor_shift": entropy_anchor_shift,
         "neel_correction": neel_metadata,
         "structural_hybrid": structural_metadata,
         "cp_overlap_diagnostics": {

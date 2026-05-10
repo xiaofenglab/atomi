@@ -1786,6 +1786,43 @@ def apply_neel_correction_grid(
     return S_corrected, H_corrected, G_corrected, weights, metadata
 
 
+def apply_entropy_anchor_grid(
+    *,
+    T_grid: np.ndarray,
+    S_grid: np.ndarray,
+    H_grid: np.ndarray,
+    entropy_anchor_T: Optional[float],
+    entropy_anchor_S: Optional[float],
+    source: Optional[str],
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    metadata = {
+        "applied": False,
+        "source": source,
+        "T_K": entropy_anchor_T,
+        "target_J_mol_formula_K": entropy_anchor_S,
+    }
+    if entropy_anchor_T is None or entropy_anchor_S is None:
+        metadata["reason"] = "no direct entropy anchor"
+        return S_grid, H_grid - T_grid * S_grid, metadata
+    if entropy_anchor_T < float(np.min(T_grid)) or entropy_anchor_T > float(np.max(T_grid)):
+        metadata["reason"] = "entropy anchor temperature is outside the integration grid"
+        return S_grid, H_grid - T_grid * S_grid, metadata
+    current = float(np.interp(entropy_anchor_T, T_grid, S_grid))
+    shift = float(entropy_anchor_S) - current
+    S_out = S_grid + shift
+    G_out = H_grid - T_grid * S_out
+    metadata.update(
+        {
+            "applied": True,
+            "S_before_anchor_J_mol_formula_K": current,
+            "shift_J_mol_formula_K": shift,
+            "S_after_anchor_J_mol_formula_K": float(entropy_anchor_S),
+            "note": "Direct entropy anchor shifts S and recomputes G = H - TS.",
+        }
+    )
+    return S_out, G_out, metadata
+
+
 def cp_overlap_diagnostics_np(
     qha_T: np.ndarray,
     qha_Cp: np.ndarray,
@@ -2612,6 +2649,25 @@ def build_combined_thermo(summaries: list[dict],
             "source": "manual --thermo-anchor-H" if thermo_anchor_H_J_mol is not None else None,
         }
 
+    entropy_anchor_shift_metadata = {
+        "applied": False,
+        "reason": "direct entropy anchor inactive",
+    }
+    if entropy_anchor_is_direct:
+        entropy_source = "manual --thermo-anchor-S"
+        if (anchor_metadata or {}).get("thermo_db_anchor") and neel_correction != "on":
+            entropy_source = (anchor_metadata or {})["thermo_db_anchor"]["database"]
+        S_rel_J_mol_K_grid, G_rel_J_mol_grid, entropy_anchor_shift_metadata = apply_entropy_anchor_grid(
+            T_grid=T_grid,
+            S_grid=S_rel_J_mol_K_grid,
+            H_grid=H_rel_J_mol_grid,
+            entropy_anchor_T=entropy_anchor_blend_T,
+            entropy_anchor_S=entropy_anchor_blend_S_J_mol_K,
+            source=entropy_source,
+        )
+        if qha_splice_metadata.get("enabled"):
+            qha_splice_metadata["entropy_anchor_shift"] = entropy_anchor_shift_metadata
+
     S_before_neel_grid = S_rel_J_mol_K_grid.copy()
     H_before_neel_grid = H_rel_J_mol_grid.copy()
     G_before_neel_grid = G_rel_J_mol_grid.copy()
@@ -2756,6 +2812,7 @@ def build_combined_thermo(summaries: list[dict],
         "use_anchor_Cp_in_fit": use_anchor_Cp_in_fit,
         "anchor_metadata": anchor_metadata or {},
         "qha_low_t_splice": qha_splice_metadata,
+        "entropy_anchor_shift": entropy_anchor_shift_metadata,
         "neel_correction": neel_metadata,
     }
     dump_json(outdir / "temperature_range_metadata.json", range_meta)

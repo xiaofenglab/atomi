@@ -344,3 +344,22 @@ def test_lammps_neel_correction_grid_updates_s_h_g() -> None:
     assert skipped["applied"] is False
     assert np.allclose(S_skip, S_grid)
     assert np.allclose(H_skip, H_grid)
+
+
+def test_lammps_direct_entropy_anchor_shifts_s_and_recomputes_g() -> None:
+    T_grid = np.array([0.0, 300.0])
+    S_grid = np.array([0.0, 70.0])
+    H_grid = np.array([0.0, 1000.0])
+
+    S_out, G_out, metadata = thermo_series.apply_entropy_anchor_grid(
+        T_grid=T_grid,
+        S_grid=S_grid,
+        H_grid=H_grid,
+        entropy_anchor_T=300.0,
+        entropy_anchor_S=77.81270,
+        source="jaea",
+    )
+
+    assert metadata["applied"] is True
+    assert S_out[-1] == pytest.approx(77.81270)
+    assert G_out[-1] == pytest.approx(1000.0 - 300.0 * 77.81270)

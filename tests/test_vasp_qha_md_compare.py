@@ -336,6 +336,36 @@ def test_qha_md_neel_correction_adds_entropy_without_double_counting() -> None:
     assert skipped["applied"] is False
 
 
+def test_qha_md_direct_entropy_anchor_shifts_s_and_recomputes_g() -> None:
+    rows = [
+        {
+            "T_K": 0.0,
+            "S_integrated": 0.0,
+            "H_integrated_kJ_mol": 0.0,
+            "G_integrated_kJ_mol": 0.0,
+            "G_relative_kJ_mol": 0.0,
+        },
+        {
+            "T_K": 300.0,
+            "S_integrated": 70.0,
+            "H_integrated_kJ_mol": 1.0,
+            "G_integrated_kJ_mol": -20.0,
+            "G_relative_kJ_mol": -20.0,
+        },
+    ]
+
+    metadata = qha_md_compare.apply_entropy_anchor_to_rows(
+        rows,
+        300.0,
+        77.81270,
+        {"source": "jaea"},
+    )
+
+    assert metadata["applied"] is True
+    assert rows[1]["S_integrated"] == pytest.approx(77.81270)
+    assert rows[1]["G_integrated_kJ_mol"] == pytest.approx(1.0 - 300.0 * 77.81270 / 1000.0)
+
+
 def test_hybrid_cp_switch_ignores_extrapolated_low_t_md_grid(tmp_path: Path) -> None:
     pytest.importorskip("matplotlib")
     qha = tmp_path / "qha"
