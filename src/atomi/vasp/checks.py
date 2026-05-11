@@ -11,7 +11,8 @@ from pathlib import Path
 DONE_MARKER = "General timing and accounting informations for this job"
 CLEAN_PATTERNS = ("OUTCAR*", "CONTCAR", "vasprun.xml", "OSZICAR")
 OUTPUT_PATTERNS = ("vasprun.xml", "OUTCAR*", "OSZICAR", "CONTCAR")
-DEFAULT_STOPPED_AFTER_MINUTES = 5.0
+DEFAULT_CHECKVASP_STOPPED_AFTER_MINUTES = 5.0
+DEFAULT_CHECKENG_STOPPED_AFTER_MINUTES = 10.0
 ENERGY_PATTERNS = {
     "toten": re.compile(r"free\s+energy\s+TOTEN\s*=\s*([-+0-9.Ee]+)"),
     "without_entropy": re.compile(r"energy\s+without\s+entropy\s*=\s*([-+0-9.Ee]+)"),
@@ -65,7 +66,7 @@ def iter_runlist(runlist: Path) -> list[Path]:
 
 def check_runs(
     runlist: Path,
-    stopped_after_minutes: float = DEFAULT_STOPPED_AFTER_MINUTES,
+    stopped_after_minutes: float = DEFAULT_CHECKVASP_STOPPED_AFTER_MINUTES,
     log_dir: Path | None = None,
 ) -> RunStatusCounts:
     if not runlist.is_file():
@@ -181,7 +182,7 @@ def collect_run_energies(
     runlist: Path,
     log_dir: Path | None = None,
     energy_kind: str = "toten",
-    stopped_after_minutes: float = DEFAULT_STOPPED_AFTER_MINUTES,
+    stopped_after_minutes: float = DEFAULT_CHECKENG_STOPPED_AFTER_MINUTES,
 ) -> list[EnergyRecord]:
     if not runlist.is_file():
         raise FileNotFoundError(f"cannot find {runlist}")
@@ -281,7 +282,7 @@ def checkvasp(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--stopped-after-min",
         type=float,
-        default=DEFAULT_STOPPED_AFTER_MINUTES,
+        default=DEFAULT_CHECKVASP_STOPPED_AFTER_MINUTES,
         help="Report RUNNING-looking runs as STOPPED if the newest VASP output is older than this many minutes.",
     )
     parser.add_argument(
@@ -365,7 +366,7 @@ def vasp_energies(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--stopped-after-min",
         type=float,
-        default=DEFAULT_STOPPED_AFTER_MINUTES,
+        default=DEFAULT_CHECKENG_STOPPED_AFTER_MINUTES,
         help="Mark non-DONE rows as STOPPED if the source log has not been written for this many minutes.",
     )
     parser.add_argument(

@@ -58,7 +58,7 @@ def test_check_runs_uses_array_logs_for_stopped_status(tmp_path: Path) -> None:
     fresh = tmp_path / "vasp.out_std.12346.2"
     stale.write_text("DAV: 1 -1.0 0 0\n", encoding="utf-8")
     fresh.write_text("DAV: 1 -1.0 0 0\n", encoding="utf-8")
-    old_time = time.time() - 6 * 60
+    old_time = time.time() - 11 * 60
     os.utime(stale, (old_time, old_time))
 
     counts = check_runs(runlist)
@@ -150,12 +150,32 @@ def test_collect_run_energies_marks_stale_active_log_stopped(tmp_path: Path) -> 
         "DAV: 219    -0.218545944662E+04    0.25790E-01   -0.30214E-01  6768\n",
         encoding="utf-8",
     )
-    old_time = time.time() - 6 * 60
+    old_time = time.time() - 11 * 60
     os.utime(log, (old_time, old_time))
 
     records = collect_run_energies(runlist)
 
     assert records[0].status == "STOPPED"
+    assert records[0].energy_eV == -2185.45944662
+    assert records[0].energy_kind == "dav"
+
+
+def test_collect_run_energies_keeps_recent_active_log_ok(tmp_path: Path) -> None:
+    runlist = tmp_path / "runlist.txt"
+    run_a = tmp_path / "spin_001"
+    run_a.mkdir()
+    runlist.write_text("spin_001\n", encoding="utf-8")
+    log = tmp_path / "vasp.out_std.21317022.1"
+    log.write_text(
+        "DAV: 219    -0.218545944662E+04    0.25790E-01   -0.30214E-01  6768\n",
+        encoding="utf-8",
+    )
+    old_time = time.time() - 6 * 60
+    os.utime(log, (old_time, old_time))
+
+    records = collect_run_energies(runlist)
+
+    assert records[0].status == "OK"
     assert records[0].energy_eV == -2185.45944662
     assert records[0].energy_kind == "dav"
 

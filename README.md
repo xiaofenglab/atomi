@@ -213,14 +213,14 @@ For a quick energy table from VASP array logs, use `checkeng`. It reads
 and falls back to `vasp.out*`, `OUTCAR`, `OUTCAR.gz`, or `OSZICAR` inside each
 run folder. If final `TOTEN`/`E0` lines are not present yet, it reports the
 latest electronic SCF `DAV:` energy from the active `vasp.out` log. Non-DONE
-rows whose source log has not been written for 5 minutes are marked `STOPPED`
+rows whose source log has not been written for 10 minutes are marked `STOPPED`
 while still showing the latest energy:
 
 ```bash
 checkeng runlist.txt
 atomi checkeng runlist.txt --delimiter tab
 checkeng runlist.txt --energy dav
-checkeng runlist.txt --stopped-after-min 5
+checkeng runlist.txt --stopped-after-min 10
 ```
 
 To update `INCAR` magnetic moments from the final `OUTCAR` magnetization table:
