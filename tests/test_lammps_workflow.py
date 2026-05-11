@@ -385,6 +385,54 @@ def test_lammps_neel_adjusted_entropy_benchmark_subtracts_neel_entropy() -> None
     assert metadata["used_for_blend_calibration"] is True
 
 
+def test_lammps_md_root_discovery_uses_npt_and_ignores_nvt(tmp_path) -> None:
+    npt_chunk = tmp_path / "stages" / "npt_prod_300K" / "chunk_production"
+    nvt_chunk = tmp_path / "stages" / "nvt_ramp_300K" / "chunk_01"
+    npt_chunk.mkdir(parents=True)
+    nvt_chunk.mkdir(parents=True)
+    (npt_chunk / "log.in.npt_prod_300K_production").write_text("npt log\n", encoding="utf-8")
+    (nvt_chunk / "log.in.nvt_ramp_300K_c01").write_text("nvt log\n", encoding="utf-8")
+
+    records = thermo_series.discover_npt_records_from_md_root(tmp_path)
+
+    assert len(records) == 1
+    assert records[0]["stage_name"] == "npt_prod_300K"
+    assert records[0]["temperature"] == 300.0
+    assert records[0]["log_path"].name == "log.in.npt_prod_300K_production"
+
+
+def test_lammps_cli_rejects_qha_hybrid_flags(tmp_path) -> None:
+    with pytest.raises(SystemExit):
+        thermo_series.main([
+            "--manual-analysis-root",
+            str(tmp_path),
+            "--qha-anchor-dir",
+            str(tmp_path / "qha"),
+            "--qha-low-t-splice",
+        ])
+
+
+def test_lammps_tail_window_selects_last_requested_ps() -> None:
+    data = {
+        "step": np.array([0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50], dtype=float),
+        "temp": np.linspace(300, 310, 11),
+        "press_GPa": np.zeros(11),
+        "vol_A3": np.linspace(100, 110, 11),
+        "pe": np.linspace(-10, 0, 11),
+        "enthalpy_eV": np.linspace(-9, 1, 11),
+    }
+
+    mask, metrics, _table = thermo_series.select_tail_window(
+        data,
+        target_T=300.0,
+        timestep_ps=1.0,
+        min_window_ps=20.0,
+    )
+
+    assert data["step"][mask].tolist() == [30.0, 35.0, 40.0, 45.0, 50.0]
+    assert metrics["selection_method"] == "tail_last_window"
+
+
 def test_lammps_compare_series_normalizes_different_box_sizes(tmp_path) -> None:
     pytest.importorskip("matplotlib")
     small = tmp_path / "small"

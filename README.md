@@ -522,112 +522,41 @@ lammps-postprocess --log stages/npt_prod_1400K/chunk_production/log.in.npt_prod_
 
 This writes `thermo_summary.json`, `window_summaries.csv/json`, `selected_timeseries.csv`, and diagnostic plots for the selected window and subwindows.
 
-After production runs finish, analyze the temperature series from `config_production.json`:
+After production runs finish, analyze the temperature series directly from the
+MD run folder. `thermo_lammps` scans NPT folders such as
+`stages/npt_prod_300K/chunk_production`, ignores NVT ramp folders, selects the
+last trajectory window by default with `--min-window-ps 20`, and writes MD-only
+thermodynamic outputs:
 
 ```bash
-thermo_lammps --config config_production.json --outdir analysis/thermo_0_300K_uq --min-window-ps 18 --window-stride-ps 2 --plot-bin-ps 0.5 --raw-decimate 5 --natoms 96 --plot-T-min 0 --plot-T-max 300 --plot-T-step 10 --anchor-zero --n-bootstrap 300
+thermo_lammps --md-root . --outdir analysis/thermo_0_300K_uq --min-window-ps 18 --window-stride-ps 2 --plot-bin-ps 0.5 --raw-decimate 5 --natoms 96 --plot-T-min 0 --plot-T-max 300 --plot-T-step 10 --anchor-zero --n-bootstrap 300
 ```
 
 Use `--cp-source dH` to use dH/dT for Cp:
 
 ```bash
-thermo_lammps --config config_production.json --outdir analysis/thermo_0_300K_uq_dH --min-window-ps 18 --window-stride-ps 2 --plot-bin-ps 0.5 --natoms 96 --plot-T-min 0 --plot-T-max 300 --plot-T-step 10 --anchor-zero --cp-source dH --n-bootstrap 300
+thermo_lammps --md-root . --outdir analysis/thermo_0_300K_uq_dH --min-window-ps 20 --window-stride-ps 2 --plot-bin-ps 0.5 --natoms 96 --plot-T-min 0 --plot-T-max 1300 --plot-T-step 10 --anchor-zero --cp-source dH --n-bootstrap 300
 ```
 
-For high-temperature integration anchored at 300 K:
+If needed, the old config-driven mode still works:
 
 ```bash
-thermo_lammps --config config_production.json --outdir analysis/thermo_anchor_300K --min-window-ps 20 --window-stride-ps 2 --plot-bin-ps 0.5 --natoms 96 --plot-T-min 300 --plot-T-max 1500 --plot-T-step 10 --cp-source dH --thermo-anchor-T 300 --thermo-anchor-S 78.0 --thermo-anchor-Cp 64.0 --use-anchor-for-integration --use-anchor-Cp-in-fit --n-bootstrap 100
+thermo_lammps --config config_production.json --outdir analysis/thermo_0_1300K_uq_dH --min-window-ps 20 --window-stride-ps 2 --plot-bin-ps 0.5 --natoms 96 --plot-T-min 0 --plot-T-max 1300 --plot-T-step 10 --anchor-zero --cp-source dH --n-bootstrap 300
 ```
 
-For absolute/reference H and G, provide an enthalpy anchor such as an
-experimental standard formation enthalpy. With QHA low-T splice, `S(0 K)=0`
-is preserved, H is shifted to match `--thermo-anchor-H` at
-`--thermo-anchor-T`, and G is recomputed from `G = H - TS`:
+QHA+MD hybrid thermodynamics now belongs in `thermo_qha_md`, using the MD-only
+`thermo_lammps` output directory as `--md-dir`:
 
 ```bash
-thermo_lammps --config config_production.json --outdir analysis/thermo_qha_absH --natoms 96 --plot-T-min 0 --plot-T-max 1500 --cp-source dH --qha-anchor-dir ./qha_run --qha-anchor-formula-units 32 --qha-low-t-splice --thermo-anchor-T 300 --thermo-anchor-H -1084490
+thermo_qha_md --qha-dir ./qha_run --md-dir analysis/thermo_0_1300K_uq_dH --outdir analysis/qha_md_overlay --qha-formula-units 32 --md-formula-units 32 --target-z 4 --t-min 0 --t-max 1500
 ```
 
-For UO2, the same H anchor can be pulled from the JAEA thermodynamic database.
-When `--thermo-db jaea` is used, Atomi fills missing `--thermo-anchor-H` by
-default at `--thermo-anchor-T` or 300 K and records the source URL in metadata:
+For comparing two already generated MD series, for example small and large
+cells, use `thermo_lammps --compare-series`:
 
 ```bash
-thermo_lammps --config config_production.json --outdir analysis/thermo_qha_jaeaH --natoms 96 --plot-T-min 0 --plot-T-max 1500 --cp-source dH --qha-anchor-dir ./qha_run --qha-anchor-formula-units 32 --qha-low-t-splice --thermo-db jaea --thermo-formula UO2 --thermo-phase solid --plot-thermo-db-points
+thermo_lammps --compare-series analysis/thermo_0_1300K_uq_dH analysis/thermo_large_0_1500K_uq_dH --compare-label 96-atom --compare-label large-cell --outdir analysis/thermo_compare_small_large --target-z 4 --compare-energy-basis target-cell
 ```
-
-Instead of typing experimental or literature anchor values, a phonopy-QHA
-folder can provide missing anchor values from `Cp-temperature.dat`. This
-integrates QHA Cp to get `S(T_anchor)` and relative `H(T_anchor)`, and also
-uses QHA Cp at the anchor temperature. Manually supplied `--thermo-anchor-S`,
-`--thermo-anchor-H`, or `--thermo-anchor-Cp` still take priority:
-
-```bash
-thermo_lammps --config config_production.json --outdir analysis/thermo_anchor_qha_300K --natoms 96 --plot-T-min 300 --plot-T-max 1500 --cp-source dH --thermo-anchor-T 300 --qha-anchor-dir ./qha_run --qha-anchor-formula-units 32 --use-anchor-for-integration --use-anchor-Cp-in-fit
-```
-
-The QHA Cp unit defaults to `J/mol-cell/K`, matching the phonopy-QHA outputs
-used elsewhere in Atomi. Use `--qha-anchor-cp-unit J/mol-formula/K` if your
-QHA Cp has already been normalized per formula unit.
-
-To use QHA as the full low-temperature branch instead of just one anchor point,
-add `--qha-low-t-splice`. The command then picks a QHA-to-MD Cp switch where
-the two Cp curves are closest, rejects automatic switches below 50 K by
-default, blends QHA and MD Cp with a smoothstep interval, and recomputes
-hybrid S/H/G by integrating the hybrid Cp curve:
-
-```bash
-thermo_lammps --config config_production.json --outdir analysis/thermo_qha_splice --natoms 96 --plot-T-min 0 --plot-T-max 1500 --cp-source dH --qha-anchor-dir ./qha_run --qha-anchor-formula-units 32 --qha-low-t-splice
-```
-
-Use `--qha-splice-min-switch-temperature` to change the low-temperature guard
-or `--qha-splice-switch-temperature` to force a specific switch. Use
-`--qha-splice-blend-start` and `--qha-splice-blend-end` to choose the blend
-interval explicitly. When experimental/database S is available from
-`--thermo-anchor-S` or `--thermo-db jaea`, the splice can extend the blend
-start downward, bounded by `--entropy-anchor-min-blend-start` (default 200 K),
-so the integrated hybrid entropy passes through the anchor without pulling the
-blend into the very-low-temperature region. The QHA-low-T workflow writes
-hybrid diagnostic plots
-named `hybrid_Cp_QHA_MD.png`, `hybrid_S_QHA_MD.png`,
-`hybrid_H_QHA_MD.png`, `hybrid_G_QHA_MD.png`, plus hybrid `V`/`a` plots when
-QHA volume or lattice files are present. It also writes explicit overlap plots
-such as `volume_QHA_MD_overlap.png` and `lattice_a_QHA_MD_overlap.png`;
-additional independent lattice parameters get their own files when matching
-QHA files and MD columns are available. It also writes
-`overlap_mismatch_Cp.png` and `qha_low_t_splice_metadata.json`; the metadata
-records the blend interval, Cp mismatch diagnostics, source files, and how the
-MD statistical Cp UQ band was tapered through the blend.
-
-For phonon-QHA cases where the low-temperature magnetic anomaly is not already
-included, add an explicit UO2-like Neel entropy correction instead of direct
-experimental entropy anchoring:
-
-```bash
-thermo_lammps --config config_production.json --outdir analysis/thermo_qha_neel --natoms 96 --plot-T-min 0 --plot-T-max 1500 --cp-source dH --qha-anchor-dir ./qha_run --qha-anchor-formula-units 32 --qha-low-t-splice --neel-correction on --neel-T 30.8 --neel-entropy 8.4 --neel-enthalpy auto --neel-apply-above-T 50 --thermo-db jaea --thermo-formula UO2 --plot-thermo-db-points
-```
-
-With `--neel-correction on`, database S is treated as a benchmark point rather
-than a direct entropy anchor, avoiding double counting. The output metadata
-reports `S(300 K)` before and after the correction, the JAEA UO2 300 K entropy
-reference when available, the remaining entropy gap, and whether the selected
-Neel entropy explains that gap. Corrected S/H/G columns are written to the
-thermo grid. When the correction is enabled, `hybrid_S_QHA_MD.png` is the
-Neel-corrected entropy curve for direct comparison with the experimental point,
-and `hybrid_S_QHA_MD_phonon_only.png` keeps the pre-correction diagnostic.
-
-For structural thermodynamics, CTE is not blended directly. The workflow
-blends corrected primary structural curves, `V(T)` and available lattice
-parameters such as `a(T)`, then derives `alpha_V = (1/V) dV/dT` and
-`alpha_L = (1/a) da/dT`. If QHA and MD have an absolute offset, provide a
-reference value and choose `shift` or `scale` correction before the blend:
-
-```bash
-thermo_lammps --config config_production.json --outdir analysis/thermo_qha_splice --natoms 96 --plot-T-min 0 --plot-T-max 1500 --cp-source dH --qha-anchor-dir ./qha_run --qha-anchor-formula-units 32 --qha-low-t-splice --structure-reference-temperature 300 --lattice-reference a=5.47 --structure-correction shift
-```
-
-This command packages the v4 anchor-capable analyzer, which also supports the earlier v3-style fluctuation and dH workflows.
 
 ## VASP Live Plotting
 

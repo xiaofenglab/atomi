@@ -2,17 +2,19 @@
 """
 thermo_series_uq_v4.py
 
-Read a production MD config JSON, locate each T-dependent NPT production run,
-auto-select a stable analysis window from each run, compute per-temperature
-thermodynamic summaries, then build T-dependent thermodynamic curves.
+Locate each T-dependent NPT production run from either a production config JSON
+or an MD run root folder, auto-select a stable analysis window from each run,
+compute per-temperature MD thermodynamic summaries, then build MD-only
+T-dependent thermodynamic curves.
 
 This script integrates the core logic of postprocess_npt_thermo_v3.py, but
 automates the full temperature series.
 
 Main goals
 ----------
-1) Read config_production.json and find production stages such as:
+1) Read an MD root folder or config_production.json and find NPT stages such as:
      npt_prod_50K, npt_prod_100K, ..., npt_prod_1400K
+   NVT ramp folders are ignored.
 
 2) For each stage, locate its production LAMMPS log, usually:
      stages/<stage_name>/chunk_production/log.in.<stage_name>_production
@@ -756,6 +758,46 @@ def auto_select_window(data: dict[str, np.ndarray],
     return best_mask, best_metrics, window_table
 
 
+def select_tail_window(data: dict[str, np.ndarray],
+                       target_T: float,
+                       timestep_ps: float,
+                       min_window_ps: float = 20.0,
+                       window_ps: Optional[float] = None,
+                       discard_initial_ps: float = 0.0) -> tuple[np.ndarray, dict, list[dict]]:
+    if window_ps is None:
+        window_ps = min_window_ps
+    if window_ps < min_window_ps:
+        window_ps = min_window_ps
+
+    step = data["step"]
+    base_mask = np.ones(len(step), dtype=bool)
+    if discard_initial_ps > 0:
+        base_mask &= step >= step[0] + discard_initial_ps / timestep_ps
+    sub_step = step[base_mask]
+    if len(sub_step) < 5:
+        raise RuntimeError("No data left after initial discard.")
+
+    end_step = float(sub_step[-1])
+    left_step = end_step - window_ps / timestep_ps
+    mask = base_mask & (step >= left_step) & (step <= end_step)
+    if mask.sum() < 5:
+        raise RuntimeError("Tail window contains fewer than 5 thermo rows.")
+    selected_time_ps = float((step[mask][-1] - step[mask][0]) * timestep_ps)
+    if selected_time_ps + 1.0e-9 < min_window_ps:
+        raise RuntimeError(
+            f"Trajectory shorter than minimum tail window: {selected_time_ps:.3f} ps < {min_window_ps:.3f} ps"
+        )
+
+    metrics = score_window(data, mask, target_T, timestep_ps)
+    metrics.update({
+        "selected_step_min": int(step[mask][0]),
+        "selected_step_max": int(step[mask][-1]),
+        "selected_time_ps": selected_time_ps,
+        "selection_method": "tail_last_window",
+    })
+    return mask, metrics, [metrics]
+
+
 # -----------------------------
 # thermodynamic summary for a window
 # -----------------------------
@@ -1396,6 +1438,116 @@ def discover_production_records(config_paths: list[Path], duplicate_policy: str 
     return [merged[T] for T in sorted(merged)]
 
 
+def candidate_lammps_logs(stage_dir: Path) -> list[Path]:
+    candidates: list[Path] = []
+    preferred_dirs = [stage_dir / "chunk_production"]
+    preferred_dirs.extend(sorted(p for p in stage_dir.glob("chunk_*") if p.is_dir() and p.name != "chunk_production"))
+    preferred_dirs.append(stage_dir)
+
+    seen: set[Path] = set()
+    for log_dir in preferred_dirs:
+        if not log_dir.exists():
+            continue
+        for pattern in ("log.in.*", "log.*"):
+            for path in sorted(log_dir.glob(pattern)):
+                if path.is_file() and path not in seen:
+                    candidates.append(path)
+                    seen.add(path)
+    return candidates
+
+
+def find_md_root_stage_dirs(md_root: Path) -> list[Path]:
+    search_roots = [md_root / "stages"] if (md_root / "stages").is_dir() else [md_root]
+    stage_dirs: list[Path] = []
+    seen: set[Path] = set()
+
+    for search_root in search_roots:
+        for path in [search_root] + sorted(search_root.rglob("*")):
+            if not path.is_dir():
+                continue
+            name = path.name.lower()
+            if "nvt" in name or "npt" not in name:
+                continue
+            if "chunk" in name:
+                path = path.parent
+            if path in seen:
+                continue
+            if infer_temperature_from_name(path.name) is None:
+                continue
+            if not candidate_lammps_logs(path):
+                continue
+            stage_dirs.append(path)
+            seen.add(path)
+    return stage_dirs
+
+
+def discover_npt_records_from_md_root(
+    md_root: Path,
+    duplicate_policy: str = "highest_config_order",
+    timestep_ps: Optional[float] = None,
+) -> list[dict]:
+    """Discover fixed-temperature NPT MD logs without relying on config JSON."""
+    md_root = md_root.resolve()
+    if not md_root.exists():
+        raise FileNotFoundError(f"MD root not found: {md_root}")
+    if not md_root.is_dir():
+        raise NotADirectoryError(f"MD root is not a directory: {md_root}")
+
+    records: list[dict] = []
+    for stage_dir in find_md_root_stage_dirs(md_root):
+        stage_name = stage_dir.name
+        temperature = infer_temperature_from_name(stage_name)
+        if temperature is None:
+            continue
+        logs = candidate_lammps_logs(stage_dir)
+        if not logs:
+            continue
+        log_path = logs[0]
+        chunk_dir = log_path.parent
+        records.append({
+            "temperature": float(temperature),
+            "stage": {
+                "name": stage_name,
+                "type": "npt",
+                "temperature": float(temperature),
+                "chunk_name": chunk_dir.name,
+                "production_run": True,
+                "discovered_from_md_root": True,
+            },
+            "stage_name": stage_name,
+            "config_path": None,
+            "config_root": md_root,
+            "config_index": 0,
+            "log_path": log_path,
+            "timestep_ps": float(timestep_ps) if timestep_ps is not None else 0.0001,
+            "md_root": md_root,
+        })
+
+    if not records:
+        raise RuntimeError(
+            f"No NPT LAMMPS logs found under {md_root}. Expected folders such as "
+            "stages/npt_prod_300K/chunk_production/log.in.*; NVT folders are ignored."
+        )
+
+    merged: dict[float, dict] = {}
+    for rec in records:
+        T = rec["temperature"]
+        if T in merged:
+            if duplicate_policy == "error":
+                raise RuntimeError(f"Duplicate T={T} K:\n  {merged[T]['log_path']}\n  {rec['log_path']}")
+            if duplicate_policy == "first":
+                continue
+            old = merged[T]
+            print(
+                f"WARNING: duplicate T={T} K; keeping later discovered record:\n"
+                f"  old: {old['log_path']}\n"
+                f"  new: {rec['log_path']}"
+            )
+        merged[T] = rec
+
+    return [merged[T] for T in sorted(merged)]
+
+
 def filter_records_by_T(records: list[dict], T_min: Optional[float], T_max: Optional[float]) -> list[dict]:
     T_all=np.array([r["temperature"] for r in records], dtype=float)
     if T_max is None:
@@ -1420,6 +1572,7 @@ def process_records(records: list[dict],
                     atoms_per_formula_unit: int,
                     min_window_ps: float,
                     window_ps: Optional[float],
+                    window_mode: str,
                     window_stride_ps: float,
                     discard_initial_ps: float,
                     plot_bin_ps: Optional[float],
@@ -1438,8 +1591,10 @@ def process_records(records: list[dict],
         T=float(rec["temperature"])
         log_path=rec["log_path"]
         timestep_ps = float(timestep_override_ps) if timestep_override_ps is not None else float(rec.get("timestep_ps", 0.0001))
+        config_path = rec.get("config_path")
+        config_label = config_path.name if isinstance(config_path, Path) else "md-root"
 
-        print(f"Processing {name}: T={T} K, config={rec['config_path'].name}, log={log_path}")
+        print(f"Processing {name}: T={T} K, source={config_label}, log={log_path}")
 
         stage_out = outdir / name
         stage_out.mkdir(parents=True, exist_ok=True)
@@ -1447,15 +1602,25 @@ def process_records(records: list[dict],
         data = parse_lammps_thermo(log_path)
         data = add_derived_series(data, natoms, atoms_per_formula_unit)
 
-        sel_mask, sel_metrics, window_table = auto_select_window(
-            data=data,
-            target_T=T,
-            timestep_ps=timestep_ps,
-            min_window_ps=min_window_ps,
-            window_ps=window_ps,
-            stride_ps=window_stride_ps,
-            discard_initial_ps=discard_initial_ps,
-        )
+        if window_mode == "tail":
+            sel_mask, sel_metrics, window_table = select_tail_window(
+                data=data,
+                target_T=T,
+                timestep_ps=timestep_ps,
+                min_window_ps=min_window_ps,
+                window_ps=window_ps,
+                discard_initial_ps=discard_initial_ps,
+            )
+        else:
+            sel_mask, sel_metrics, window_table = auto_select_window(
+                data=data,
+                target_T=T,
+                timestep_ps=timestep_ps,
+                min_window_ps=min_window_ps,
+                window_ps=window_ps,
+                stride_ps=window_stride_ps,
+                discard_initial_ps=discard_initial_ps,
+            )
 
         summary = summarize_selected_window(
             data=data,
@@ -1469,7 +1634,8 @@ def process_records(records: list[dict],
 
         summary.update({
             "stage_name": name,
-            "config_file": str(rec["config_path"].resolve()),
+            "config_file": str(config_path.resolve()) if isinstance(config_path, Path) else "",
+            "md_root": str(rec["md_root"].resolve()) if isinstance(rec.get("md_root"), Path) else "",
             "log_file": str(log_path.resolve()),
             "timestep_ps": timestep_ps,
             "selection_score": sel_metrics["score"],
@@ -1536,7 +1702,19 @@ def process_from_config(config_path: Path,
                         plot_bin_ps: Optional[float],
                         nblocks: int) -> list[dict]:
     records = discover_production_records([config_path])
-    return process_records(records, outdir, natoms, atoms_per_formula_unit, min_window_ps, window_ps, window_stride_ps, discard_initial_ps, plot_bin_ps, nblocks)
+    return process_records(
+        records,
+        outdir,
+        natoms,
+        atoms_per_formula_unit,
+        min_window_ps,
+        window_ps,
+        "tail",
+        window_stride_ps,
+        discard_initial_ps,
+        plot_bin_ps,
+        nblocks,
+    )
 
 def process_from_manual(manual_root: Path) -> list[dict]:
     files = sorted(manual_root.glob("**/thermo_summary.json"))
@@ -3457,6 +3635,14 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="lammps-thermo-series")
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--config", nargs="+", help="One or more production config JSON files")
+    src.add_argument(
+        "--md-root",
+        type=Path,
+        help=(
+            "Folder containing MD run folders. The scanner reads NPT folders only "
+            "(for example stages/npt_prod_300K/...) and ignores NVT ramp folders."
+        ),
+    )
     src.add_argument("--manual-analysis-root", help="Root containing existing thermo_summary.json files")
     src.add_argument(
         "--compare-series",
@@ -3477,7 +3663,13 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--compare-formula-units", action="append", type=float, default=[], help="Formula units in a compared MD series if old outputs do not record it. Repeat once per series.")
     ap.add_argument("--compare-energy-basis", choices=["per-formula", "target-cell"], default="per-formula", help="Basis for compared Cp/S/H/G overlays.")
     ap.add_argument("--min-window-ps", type=float, default=20.0)
-    ap.add_argument("--window-ps", type=float, default=None, help="Auto-selection window length. Default=min-window-ps")
+    ap.add_argument("--window-ps", type=float, default=None, help="Window length. Default=min-window-ps")
+    ap.add_argument(
+        "--window-mode",
+        choices=["tail", "auto"],
+        default="tail",
+        help="Window selection mode. Default tail uses the last --min-window-ps/--window-ps of each NPT run; auto uses the older stationarity score search.",
+    )
     ap.add_argument("--window-stride-ps", type=float, default=2.0)
     ap.add_argument("--discard-initial-ps", type=float, default=0.0, help="Ignore this early part before auto window search")
     ap.add_argument("--plot-bin-ps", type=float, default=0.5)
@@ -3653,11 +3845,75 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--skip-combined-MD-plot", action="store_true", help="Skip the very large all-temperature raw MD diagnostic PNG")
     ap.add_argument("--skip-selected-timeseries", action="store_true", help="Do not write selected_timeseries.csv for each temperature")
     ap.add_argument("--raw-decimate", type=int, default=10, help="Plot only every Nth raw MD point in diagnostic scatter plots. Does not affect analysis. Use 1 for no decimation")
+    hidden_hybrid_flags = {
+        "--thermo-db",
+        "--thermo-formula",
+        "--thermo-phase",
+        "--thermo-db-temperature",
+        "--plot-thermo-db-points",
+        "--qha-anchor-dir",
+        "--qha-anchor-formula-units",
+        "--qha-anchor-cp-unit",
+        "--qha-low-t-splice",
+        "--qha-splice-switch-temperature",
+        "--qha-splice-min-switch-temperature",
+        "--qha-splice-blend-start",
+        "--qha-splice-blend-end",
+        "--entropy-anchor-min-blend-start",
+        "--neel-correction",
+        "--neel-T",
+        "--neel-entropy",
+        "--neel-enthalpy",
+        "--neel-apply-above-T",
+        "--structure-reference-temperature",
+        "--volume-reference",
+        "--lattice-reference",
+        "--structure-correction",
+        "--structure-correction-apply-to",
+    }
+    for action in ap._actions:
+        if hidden_hybrid_flags.intersection(action.option_strings):
+            action.help = argparse.SUPPRESS
     args = ap.parse_args(argv)
 
     outdir = Path(args.outdir)
     if args.target_z <= 0:
         ap.error("--target-z must be positive")
+
+    moved_to_qha_md_flags = []
+    if args.qha_anchor_dir is not None:
+        moved_to_qha_md_flags.append("--qha-anchor-dir")
+    if args.qha_anchor_formula_units is not None:
+        moved_to_qha_md_flags.append("--qha-anchor-formula-units")
+    if args.qha_low_t_splice:
+        moved_to_qha_md_flags.append("--qha-low-t-splice")
+    if args.qha_splice_switch_temperature is not None:
+        moved_to_qha_md_flags.append("--qha-splice-switch-temperature")
+    if args.qha_splice_blend_start is not None:
+        moved_to_qha_md_flags.append("--qha-splice-blend-start")
+    if args.qha_splice_blend_end is not None:
+        moved_to_qha_md_flags.append("--qha-splice-blend-end")
+    if args.thermo_db is not None:
+        moved_to_qha_md_flags.append("--thermo-db")
+    if args.plot_thermo_db_points:
+        moved_to_qha_md_flags.append("--plot-thermo-db-points")
+    if args.neel_correction == "on":
+        moved_to_qha_md_flags.append("--neel-correction")
+    if args.structure_reference_temperature is not None:
+        moved_to_qha_md_flags.append("--structure-reference-temperature")
+    if args.volume_reference is not None:
+        moved_to_qha_md_flags.append("--volume-reference")
+    if args.lattice_reference:
+        moved_to_qha_md_flags.append("--lattice-reference")
+    if args.structure_correction != "none":
+        moved_to_qha_md_flags.append("--structure-correction")
+    if args.structure_correction_apply_to != "both":
+        moved_to_qha_md_flags.append("--structure-correction-apply-to")
+    if moved_to_qha_md_flags and not args.compare_series:
+        ap.error(
+            "thermo_lammps is now MD-only. Remove these QHA/hybrid flags and run "
+            f"thermo_qha_md afterward for QHA+MD integration: {', '.join(moved_to_qha_md_flags)}"
+        )
 
     if args.compare_series:
         try:
@@ -3699,6 +3955,53 @@ def main(argv: list[str] | None = None) -> None:
             atoms_per_formula_unit=args.atoms_per_formula_unit,
             min_window_ps=args.min_window_ps,
             window_ps=args.window_ps,
+            window_mode=args.window_mode,
+            window_stride_ps=args.window_stride_ps,
+            discard_initial_ps=args.discard_initial_ps,
+            plot_bin_ps=args.plot_bin_ps,
+            nblocks=args.nblocks,
+            timestep_override_ps=args.timestep_ps,
+            skip_per_T_plots=args.skip_per_T_plots,
+            skip_combined_MD_plot=args.skip_combined_MD_plot,
+            skip_selected_timeseries=args.skip_selected_timeseries,
+            raw_decimate=args.raw_decimate,
+        )
+    elif args.md_root:
+        if args.config_dir:
+            ap.error("--config-dir can only be used with --config")
+        records_all = discover_npt_records_from_md_root(
+            args.md_root,
+            duplicate_policy=args.duplicate_policy,
+            timestep_ps=args.timestep_ps,
+        )
+        records = filter_records_by_T(records_all, args.plot_T_min, args.plot_T_max)
+        outdir.mkdir(parents=True, exist_ok=True)
+        dump_json(outdir / "discovered_stage_records.json", [
+            {
+                "temperature": r["temperature"],
+                "stage_name": r["stage_name"],
+                "md_root": str(r.get("md_root", "")),
+                "log_path": str(r["log_path"]),
+            }
+            for r in records_all
+        ])
+        dump_json(outdir / "used_stage_records.json", [
+            {
+                "temperature": r["temperature"],
+                "stage_name": r["stage_name"],
+                "md_root": str(r.get("md_root", "")),
+                "log_path": str(r["log_path"]),
+            }
+            for r in records
+        ])
+        summaries = process_records(
+            records=records,
+            outdir=outdir / "per_T_analysis",
+            natoms=args.natoms,
+            atoms_per_formula_unit=args.atoms_per_formula_unit,
+            min_window_ps=args.min_window_ps,
+            window_ps=args.window_ps,
+            window_mode=args.window_mode,
             window_stride_ps=args.window_stride_ps,
             discard_initial_ps=args.discard_initial_ps,
             plot_bin_ps=args.plot_bin_ps,
