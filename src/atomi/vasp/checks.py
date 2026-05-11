@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,6 +10,12 @@ from pathlib import Path
 DONE_MARKER = "General timing and accounting informations for this job"
 CLEAN_PATTERNS = ("OUTCAR*", "CONTCAR", "vasprun.xml", "OSZICAR")
 OUTPUT_PATTERNS = ("vasprun.xml", "OUTCAR*", "OSZICAR", "CONTCAR")
+ENERGY_PATTERNS = {
+    "toten": re.compile(r"free\s+energy\s+TOTEN\s*=\s*([-+0-9.Ee]+)"),
+    "without_entropy": re.compile(r"energy\s+without\s+entropy\s*=\s*([-+0-9.Ee]+)"),
+    "e0": re.compile(r"\bE0=\s*([-+0-9.Ee]+)"),
+    "f": re.compile(r"\bF=\s*([-+0-9.Ee]+)"),
+}
 
 
 @dataclass
@@ -30,6 +37,16 @@ class ScfCounts:
     missing_dir: int = 0
     cleaned_dirs: int = 0
     stale_nolog: int = 0
+
+
+@dataclass
+class EnergyRecord:
+    index: int
+    run: Path
+    energy_eV: float | None
+    energy_kind: str = ""
+    source: Path | None = None
+    status: str = "NOLOG"
 
 
 def iter_runlist(runlist: Path) -> list[Path]:
@@ -139,6 +156,69 @@ def check_scf(
     return counts
 
 
+def collect_run_energies(
+    runlist: Path,
+    log_dir: Path = Path("."),
+    energy_kind: str = "toten",
+) -> list[EnergyRecord]:
+    if not runlist.is_file():
+        raise FileNotFoundError(f"cannot find {runlist}")
+    if energy_kind not in ENERGY_PATTERNS:
+        raise ValueError(f"unknown energy kind: {energy_kind}")
+
+    records: list[EnergyRecord] = []
+    for index, runpath in enumerate(iter_runlist(runlist), start=1):
+        resolved_runpath = runpath if runpath.is_absolute() else (runlist.parent / runpath)
+        candidates = _energy_candidate_files(index, resolved_runpath, log_dir)
+        record = EnergyRecord(index=index, run=runpath, energy_eV=None)
+        if not resolved_runpath.is_dir():
+            record.status = "NODIR"
+        if not candidates:
+            records.append(record)
+            continue
+
+        record.source = candidates[0]
+        energy, found_kind = _latest_vasp_energy(candidates[0], preferred_kind=energy_kind)
+        if energy is None:
+            record.status = "NOENERGY"
+        else:
+            record.status = "OK"
+            record.energy_eV = energy
+            record.energy_kind = found_kind
+        records.append(record)
+    return records
+
+
+def print_energy_table(records: list[EnergyRecord], delimiter: str = "  ") -> None:
+    if delimiter == "tab":
+        delimiter = "\t"
+    header = ["index", "run", "energy_eV", "kind", "status", "source"]
+    rows = [
+        [
+            str(record.index),
+            str(record.run),
+            "" if record.energy_eV is None else f"{record.energy_eV:.10f}",
+            record.energy_kind,
+            record.status,
+            "" if record.source is None else str(record.source),
+        ]
+        for record in records
+    ]
+    if delimiter == "\t":
+        print(delimiter.join(header))
+        for row in rows:
+            print(delimiter.join(row))
+        return
+
+    widths = [
+        max(len(header[col]), *(len(row[col]) for row in rows)) if rows else len(header[col])
+        for col in range(len(header))
+    ]
+    print(delimiter.join(header[col].ljust(widths[col]) for col in range(len(header))))
+    for row in rows:
+        print(delimiter.join(row[col].ljust(widths[col]) for col in range(len(row))))
+
+
 def print_scf_summary(
     counts: ScfCounts,
     threshold: float,
@@ -221,6 +301,35 @@ def checkscf(argv: list[str] | None = None) -> None:
     )
 
 
+def vasp_energies(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="vasp-energies",
+        description="Print latest VASP energy for each run in a runlist.txt.",
+    )
+    parser.add_argument("runlist", nargs="?", type=Path, default=Path("runlist.txt"))
+    parser.add_argument(
+        "--log-dir",
+        type=Path,
+        default=Path("."),
+        help="Directory containing array logs such as vasp.out*.N. Default: current directory.",
+    )
+    parser.add_argument(
+        "--energy",
+        choices=tuple(ENERGY_PATTERNS),
+        default="toten",
+        help="Preferred energy to report. Falls back to other known VASP energy lines if missing.",
+    )
+    parser.add_argument(
+        "--delimiter",
+        default="  ",
+        help="Column delimiter. Use 'tab' for TSV output.",
+    )
+    args = parser.parse_args(argv)
+
+    records = collect_run_energies(args.runlist, log_dir=args.log_dir, energy_kind=args.energy)
+    print_energy_table(records, delimiter=args.delimiter)
+
+
 def _parse_checkscf_positionals(
     values: list[str], parser: argparse.ArgumentParser
 ) -> tuple[Path, float]:
@@ -266,6 +375,23 @@ def _find_vasp_log_for_index(index: int, log_dir: Path) -> Path | None:
     return matches[0] if matches else None
 
 
+def _energy_candidate_files(index: int, runpath: Path, log_dir: Path) -> list[Path]:
+    candidates: list[Path] = []
+    candidates.extend(sorted(log_dir.glob(f"vasp.out*.{index}")))
+    if runpath.is_dir():
+        for pattern in ("vasp.out*", "OUTCAR", "OUTCAR.gz", "OSZICAR"):
+            candidates.extend(sorted(path for path in runpath.glob(pattern) if path.is_file()))
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(path)
+    return sorted(unique, key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
+
+
 def _last_dav_energy_change(path: Path) -> float | None:
     last_de = None
     with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -277,6 +403,29 @@ def _last_dav_energy_change(path: Path) -> float | None:
                 except ValueError:
                     continue
     return last_de
+
+
+def _latest_vasp_energy(path: Path, preferred_kind: str = "toten") -> tuple[float | None, str]:
+    latest: dict[str, float] = {}
+    opener = gzip.open if path.suffix == ".gz" else open
+    try:
+        with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                for kind, pattern in ENERGY_PATTERNS.items():
+                    match = pattern.search(line)
+                    if not match:
+                        continue
+                    try:
+                        latest[kind] = float(match.group(1))
+                    except ValueError:
+                        continue
+    except OSError:
+        return None, ""
+
+    for kind in (preferred_kind, "toten", "without_entropy", "e0", "f"):
+        if kind in latest:
+            return latest[kind], kind
+    return None, ""
 
 
 def _has_vasp_outputs(runpath: Path) -> bool:

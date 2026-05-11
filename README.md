@@ -203,6 +203,17 @@ checkscf runlist.txt 5e-6 --out bad_runs.txt --clean
 
 Use `--dry-run` first when cleaning. Without `--dry-run`, `--clean` removes `OUTCAR*`, `CONTCAR`, `vasprun.xml`, and `OSZICAR` from runs that fail the threshold or have stale VASP outputs without a matching log.
 
+For a quick energy table from VASP array logs, use `vasp-energies`. It reads
+`runlist.txt`, matches run `N` to `vasp.out*.N` in the current/log directory,
+and falls back to `vasp.out*`, `OUTCAR`, `OUTCAR.gz`, or `OSZICAR` inside each
+run folder:
+
+```bash
+vasp-energies runlist.txt
+atomi vasp-energies runlist.txt --delimiter tab
+vasp-energy-table runlist.txt --energy e0
+```
+
 To update `INCAR` magnetic moments from the final `OUTCAR` magnetization table:
 
 ```bash

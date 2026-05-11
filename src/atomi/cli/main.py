@@ -213,6 +213,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vasp_check_scf.add_argument("check_args", nargs=argparse.REMAINDER)
 
+    vasp_energies = subparsers.add_parser(
+        "vasp-energies",
+        help="Print latest VASP energy table for array runs in runlist.txt.",
+    )
+    vasp_energies.add_argument("energy_args", nargs=argparse.REMAINDER)
+
     vasp_update_magmom = subparsers.add_parser(
         "vasp-update-magmom",
         help="Update INCAR MAGMOM from final OUTCAR moments for selected elements.",
@@ -402,6 +408,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.checks import checkscf
 
         checkscf(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in ("vasp-energies", "vasp-energy-table"):
+        from atomi.vasp.checks import vasp_energies
+
+        vasp_energies(raw_args[1:])
         return
     if raw_args and raw_args[0] == "vasp-update-magmom":
         from atomi.vasp.magmom import main as vasp_update_magmom_main
@@ -607,6 +618,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.checks import checkscf
 
         checkscf(args.check_args)
+        return
+
+    if args.subcommand == "vasp-energies":
+        from atomi.vasp.checks import vasp_energies
+
+        vasp_energies(args.energy_args)
         return
 
     if args.subcommand == "vasp-update-magmom":
