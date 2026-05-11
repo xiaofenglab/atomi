@@ -401,6 +401,48 @@ def test_lammps_md_root_discovery_uses_npt_and_ignores_nvt(tmp_path) -> None:
     assert records[0]["log_path"].name == "log.in.npt_prod_300K_production"
 
 
+def test_lammps_config_discovery_uses_fixed_npt_and_ignores_nvt(tmp_path) -> None:
+    config = tmp_path / "config_lc_800K.json"
+    config.write_text(
+        json.dumps(
+            {
+                "timestep": 0.001,
+                "stages": [
+                    {
+                        "name": "lc_nvt_ramp_300K",
+                        "type": "nvt",
+                        "temperature_start": 0,
+                        "temperature_end": 300,
+                    },
+                    {
+                        "name": "lc_npt_eqm_300K",
+                        "type": "npt",
+                        "temperature": 300,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    nvt_chunk = tmp_path / "stages" / "lc_nvt_ramp_300K" / "chunk_01"
+    npt_chunk_1 = tmp_path / "stages" / "lc_npt_eqm_300K" / "chunk_01"
+    npt_chunk_2 = tmp_path / "stages" / "lc_npt_eqm_300K" / "chunk_02"
+    nvt_chunk.mkdir(parents=True)
+    npt_chunk_1.mkdir(parents=True)
+    npt_chunk_2.mkdir(parents=True)
+    (nvt_chunk / "log.in.lc_nvt_ramp_300K_c01").write_text("nvt log\n", encoding="utf-8")
+    (npt_chunk_1 / "log.in.lc_npt_eqm_300K_c01").write_text("npt old\n", encoding="utf-8")
+    (npt_chunk_2 / "log.in.lc_npt_eqm_300K_c02").write_text("npt new\n", encoding="utf-8")
+
+    records = thermo_series.discover_production_records([config])
+
+    assert len(records) == 1
+    assert records[0]["stage_name"] == "lc_npt_eqm_300K"
+    assert records[0]["temperature"] == 300.0
+    assert records[0]["timestep_ps"] == 0.001
+    assert records[0]["log_path"].name == "log.in.lc_npt_eqm_300K_c02"
+
+
 def test_lammps_cli_rejects_qha_hybrid_flags(tmp_path) -> None:
     with pytest.raises(SystemExit):
         thermo_series.main([

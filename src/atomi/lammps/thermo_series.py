@@ -1342,6 +1342,29 @@ def is_production_stage(stage: dict) -> bool:
     return stage.get("production_run", False) or stage.get("name", "").startswith("npt_prod")
 
 
+def stage_temperature(stage: dict) -> Optional[float]:
+    name = stage.get("name", "")
+    for key in ("temperature", "temperature_end", "temperature_start"):
+        value = stage.get(key)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return infer_temperature_from_name(name)
+
+
+def is_npt_analysis_stage(stage: dict) -> bool:
+    name = str(stage.get("name", "")).lower()
+    stage_type = str(stage.get("type", "")).lower()
+    if "nvt" in name or stage_type == "nvt":
+        return False
+    if is_production_stage(stage):
+        return True
+    return stage_type == "npt" or "npt" in name
+
+
 def find_stage_log(root: Path, stage: dict) -> Path:
     name = stage["name"]
     chunk_name = stage.get("chunk_name", "chunk_production")
@@ -1360,6 +1383,56 @@ def find_stage_log(root: Path, stage: dict) -> Path:
         return candidates[-1]
 
     raise FileNotFoundError(f"No LAMMPS log found for {name} in {chunk_dir}")
+
+
+def preferred_stage_log(root: Path, stage: dict) -> Path:
+    try:
+        return find_stage_log(root, stage)
+    except FileNotFoundError:
+        pass
+
+    stage_dir = root / "stages" / stage["name"]
+    candidates = candidate_lammps_logs(stage_dir)
+    if candidates:
+        if any(path.parent.name == "chunk_production" for path in candidates):
+            return next(path for path in candidates if path.parent.name == "chunk_production")
+        return candidates[-1]
+    raise FileNotFoundError(f"No LAMMPS log found for {stage['name']} in {stage_dir}")
+
+
+def preferred_discovered_log(stage_dir: Path) -> Path | None:
+    candidates = candidate_lammps_logs(stage_dir)
+    if not candidates:
+        return None
+    if any(path.parent.name == "chunk_production" for path in candidates):
+        return next(path for path in candidates if path.parent.name == "chunk_production")
+    return candidates[-1]
+
+
+def merge_duplicate_temperature_records(records: list[dict], duplicate_policy: str) -> list[dict]:
+    merged = {}
+    for record in records:
+        temperature = record["temperature"]
+        if temperature in merged:
+            if duplicate_policy == "error":
+                raise RuntimeError(
+                    f"Duplicate T={temperature} K:\n"
+                    f"  {merged[temperature]['log_path']}\n"
+                    f"  {record['log_path']}"
+                )
+            if duplicate_policy == "first":
+                continue
+            old = merged[temperature]
+            if record["config_index"] >= old["config_index"]:
+                print(
+                    f"WARNING: duplicate T={temperature} K; keeping later record:\n"
+                    f"  old: {old['log_path']}\n"
+                    f"  new: {record['log_path']}"
+                )
+                merged[temperature] = record
+        else:
+            merged[temperature] = record
+    return [merged[temperature] for temperature in sorted(merged)]
 
 
 # -----------------------------
@@ -1387,22 +1460,22 @@ def collect_config_paths(configs: list[str] | None, config_dir: str | None, conf
 
 
 def discover_production_records(config_paths: list[Path], duplicate_policy: str = "highest_config_order") -> list[dict]:
-    """Discover production-stage logs across multiple configs."""
+    """Discover fixed-temperature NPT logs across one or more configs."""
     records=[]
     for ci, config_path in enumerate(config_paths):
         cfg=load_json(config_path)
         root=config_path.resolve().parent
         for stage in cfg.get("stages", []):
-            if not is_production_stage(stage):
+            if not is_npt_analysis_stage(stage):
                 continue
             name=stage["name"]
-            T=stage.get("temperature", infer_temperature_from_name(name))
+            T=stage_temperature(stage)
             if T is None:
                 print(f"WARNING: could not infer temperature for {name} in {config_path}; skipping")
                 continue
             T=float(T)
             try:
-                log_path=find_stage_log(root, stage)
+                log_path=preferred_stage_log(root, stage)
             except FileNotFoundError as exc:
                 print(f"WARNING: {exc}; skipping")
                 continue
@@ -1417,25 +1490,9 @@ def discover_production_records(config_paths: list[Path], duplicate_policy: str 
                 "timestep_ps": float(cfg.get("timestep", 0.0001)),
             })
     if not records:
-        raise RuntimeError("No production logs found across provided config files.")
+        raise RuntimeError("No NPT logs found across provided config files.")
 
-    # Merge duplicate temperatures.
-    merged={}
-    for r in records:
-        T=r["temperature"]
-        if T in merged:
-            if duplicate_policy == "error":
-                raise RuntimeError(f"Duplicate T={T} K:\n  {merged[T]['log_path']}\n  {r['log_path']}")
-            if duplicate_policy == "first":
-                continue
-            # highest_config_order: later configs override earlier configs.
-            old=merged[T]
-            if r["config_index"] >= old["config_index"]:
-                print(f"WARNING: duplicate T={T} K; keeping later config record:\n  old: {old['log_path']}\n  new: {r['log_path']}")
-                merged[T]=r
-        else:
-            merged[T]=r
-    return [merged[T] for T in sorted(merged)]
+    return merge_duplicate_temperature_records(records, duplicate_policy)
 
 
 def candidate_lammps_logs(stage_dir: Path) -> list[Path]:
@@ -1499,10 +1556,9 @@ def discover_npt_records_from_md_root(
         temperature = infer_temperature_from_name(stage_name)
         if temperature is None:
             continue
-        logs = candidate_lammps_logs(stage_dir)
-        if not logs:
+        log_path = preferred_discovered_log(stage_dir)
+        if log_path is None:
             continue
-        log_path = logs[0]
         chunk_dir = log_path.parent
         records.append({
             "temperature": float(temperature),
@@ -1529,23 +1585,7 @@ def discover_npt_records_from_md_root(
             "stages/npt_prod_300K/chunk_production/log.in.*; NVT folders are ignored."
         )
 
-    merged: dict[float, dict] = {}
-    for rec in records:
-        T = rec["temperature"]
-        if T in merged:
-            if duplicate_policy == "error":
-                raise RuntimeError(f"Duplicate T={T} K:\n  {merged[T]['log_path']}\n  {rec['log_path']}")
-            if duplicate_policy == "first":
-                continue
-            old = merged[T]
-            print(
-                f"WARNING: duplicate T={T} K; keeping later discovered record:\n"
-                f"  old: {old['log_path']}\n"
-                f"  new: {rec['log_path']}"
-            )
-        merged[T] = rec
-
-    return [merged[T] for T in sorted(merged)]
+    return merge_duplicate_temperature_records(records, duplicate_policy)
 
 
 def filter_records_by_T(records: list[dict], T_min: Optional[float], T_max: Optional[float]) -> list[dict]:

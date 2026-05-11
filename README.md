@@ -538,10 +538,12 @@ Use `--cp-source dH` to use dH/dT for Cp:
 thermo_lammps --md-root . --outdir analysis/thermo_0_300K_uq_dH --min-window-ps 20 --window-stride-ps 2 --plot-bin-ps 0.5 --natoms 96 --plot-T-min 0 --plot-T-max 1300 --plot-T-step 10 --anchor-zero --cp-source dH --n-bootstrap 300
 ```
 
-If needed, the old config-driven mode still works:
+If needed, config-driven mode still works. It reads fixed-temperature NPT
+stages from the config, ignores NVT stages, and no longer requires a generated
+`npt_prod_*` production-only config:
 
 ```bash
-thermo_lammps --config config_production.json --outdir analysis/thermo_0_1300K_uq_dH --min-window-ps 20 --window-stride-ps 2 --plot-bin-ps 0.5 --natoms 96 --plot-T-min 0 --plot-T-max 1300 --plot-T-step 10 --anchor-zero --cp-source dH --n-bootstrap 300
+thermo_lammps --config config_lc_1500K_2.json --outdir analysis/thermo_0_1300K_uq_dH --min-window-ps 20 --window-stride-ps 2 --plot-bin-ps 0.5 --natoms 96 --plot-T-min 0 --plot-T-max 1300 --plot-T-step 10 --anchor-zero --cp-source dH --n-bootstrap 300
 ```
 
 QHA+MD hybrid thermodynamics now belongs in `thermo_qha_md`, using the MD-only
