@@ -17,3 +17,4 @@ legacy_scripts/
 CODEX_EDIT_LOCK.json
 CODEX_SYNC_STATUS.json
 CODEX_SYNC_PROBE.txt
+CODEX_PROJECT_MEMORY.local.md
