@@ -83,9 +83,7 @@ def check_runs(
             counts.missing += 1
             continue
 
-        if _has_done_marker(resolved_runpath / "OUTCAR") or _has_done_marker(
-            resolved_runpath / "OUTCAR.gz"
-        ):
+        if _run_is_done(resolved_runpath):
             print(f"DONE      {runpath}")
             counts.done += 1
             continue
@@ -181,8 +179,9 @@ def check_scf(
 
 def collect_run_energies(
     runlist: Path,
-    log_dir: Path = Path("."),
+    log_dir: Path | None = None,
     energy_kind: str = "toten",
+    stopped_after_minutes: float = DEFAULT_STOPPED_AFTER_MINUTES,
 ) -> list[EnergyRecord]:
     if not runlist.is_file():
         raise FileNotFoundError(f"cannot find {runlist}")
@@ -190,9 +189,12 @@ def collect_run_energies(
         raise ValueError(f"unknown energy kind: {energy_kind}")
 
     records: list[EnergyRecord] = []
+    now = time.time()
+    stale_seconds = max(0.0, stopped_after_minutes) * 60.0
+    search_log_dir = runlist.parent if log_dir is None else log_dir
     for index, runpath in enumerate(iter_runlist(runlist), start=1):
         resolved_runpath = runpath if runpath.is_absolute() else (runlist.parent / runpath)
-        candidates = _energy_candidate_files(index, resolved_runpath, log_dir)
+        candidates = _energy_candidate_files(index, resolved_runpath, search_log_dir)
         record = EnergyRecord(index=index, run=runpath, energy_eV=None)
         if not resolved_runpath.is_dir():
             record.status = "NODIR"
@@ -208,6 +210,8 @@ def collect_run_energies(
             record.status = "OK"
             record.energy_eV = energy
             record.energy_kind = found_kind
+        if not _run_is_done(resolved_runpath) and now - record.source.stat().st_mtime > stale_seconds:
+            record.status = "STOPPED"
         records.append(record)
     return records
 
@@ -349,8 +353,8 @@ def vasp_energies(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--log-dir",
         type=Path,
-        default=Path("."),
-        help="Directory containing array logs such as vasp.out*.N. Default: current directory.",
+        default=None,
+        help="Directory containing array logs such as vasp.out*.N. Default: runlist parent.",
     )
     parser.add_argument(
         "--energy",
@@ -359,13 +363,24 @@ def vasp_energies(argv: list[str] | None = None) -> None:
         help="Preferred energy to report. Falls back to other known VASP energy lines if missing.",
     )
     parser.add_argument(
+        "--stopped-after-min",
+        type=float,
+        default=DEFAULT_STOPPED_AFTER_MINUTES,
+        help="Mark non-DONE rows as STOPPED if the source log has not been written for this many minutes.",
+    )
+    parser.add_argument(
         "--delimiter",
         default="  ",
         help="Column delimiter. Use 'tab' for TSV output.",
     )
     args = parser.parse_args(argv)
 
-    records = collect_run_energies(args.runlist, log_dir=args.log_dir, energy_kind=args.energy)
+    records = collect_run_energies(
+        args.runlist,
+        log_dir=args.log_dir,
+        energy_kind=args.energy,
+        stopped_after_minutes=args.stopped_after_min,
+    )
     print_energy_table(records, delimiter=args.delimiter)
 
 
@@ -399,6 +414,10 @@ def _has_done_marker(path: Path) -> bool:
             return any(DONE_MARKER in line for line in handle)
     except OSError:
         return False
+
+
+def _run_is_done(runpath: Path) -> bool:
+    return _has_done_marker(runpath / "OUTCAR") or _has_done_marker(runpath / "OUTCAR.gz")
 
 
 def _latest_vasp_output(

@@ -140,6 +140,26 @@ def test_collect_run_energies_uses_dav_energy_from_active_log(tmp_path: Path) ->
     assert records[0].energy_kind == "dav"
 
 
+def test_collect_run_energies_marks_stale_active_log_stopped(tmp_path: Path) -> None:
+    runlist = tmp_path / "runlist.txt"
+    run_a = tmp_path / "spin_001"
+    run_a.mkdir()
+    runlist.write_text("spin_001\n", encoding="utf-8")
+    log = tmp_path / "vasp.out_std.21317022.1"
+    log.write_text(
+        "DAV: 219    -0.218545944662E+04    0.25790E-01   -0.30214E-01  6768\n",
+        encoding="utf-8",
+    )
+    old_time = time.time() - 6 * 60
+    os.utime(log, (old_time, old_time))
+
+    records = collect_run_energies(runlist)
+
+    assert records[0].status == "STOPPED"
+    assert records[0].energy_eV == -2185.45944662
+    assert records[0].energy_kind == "dav"
+
+
 def test_collect_run_energies_falls_back_to_run_folder(tmp_path: Path) -> None:
     runlist = tmp_path / "runlist.txt"
     run_a = tmp_path / "run_A"
