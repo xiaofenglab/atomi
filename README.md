@@ -70,7 +70,7 @@ Most workflows also install short console commands for compatibility with older 
 command-name --help
 ```
 
-Public documentation intentionally avoids detailed project recipes, molecule names, dataset paths, scheduler partitions, and cluster-specific resource settings. Keep those details in a private local handbook or project notes.
+Public documentation intentionally avoids detailed project recipes, molecule names, dataset paths, scheduler partitions, and cluster-specific resource settings.
 
 ## Command Groups
 
@@ -119,12 +119,3 @@ python tools/codex_sync_guard.py release --note "pushed latest changes"
 ```
 
 The guard writes root-level `CODEX_EDIT_LOCK.json`, `CODEX_SYNC_STATUS.json`, and `CODEX_SYNC_PROBE.txt` files. These files are synced by Google Drive but ignored by Git. A clean status with no lock means another Codex can proceed. This is a practical coordination flag, not a perfect proof that every Google Drive client has finished downloading.
-
-## Private Workflow Notes
-
-Detailed command recipes, active project examples, cluster-specific settings, and cross-Codex development notes should live in local private files such as:
-
-- `ATOMI_PRIVATE_HANDBOOK.local.md`
-- `CODEX_PROJECT_MEMORY.local.md`
-
-These files are ignored by Git and are not part of the public package. Keep public documentation focused on installation, updating, command discovery, and general workflow scope.
