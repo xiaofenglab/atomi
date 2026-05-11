@@ -11,6 +11,7 @@ from pathlib import Path
 DONE_MARKER = "General timing and accounting informations for this job"
 CLEAN_PATTERNS = ("OUTCAR*", "CONTCAR", "vasprun.xml", "OSZICAR")
 OUTPUT_PATTERNS = ("vasprun.xml", "OUTCAR*", "OSZICAR", "CONTCAR")
+DEFAULT_STOPPED_AFTER_MINUTES = 5.0
 ENERGY_PATTERNS = {
     "toten": re.compile(r"free\s+energy\s+TOTEN\s*=\s*([-+0-9.Ee]+)"),
     "without_entropy": re.compile(r"energy\s+without\s+entropy\s*=\s*([-+0-9.Ee]+)"),
@@ -62,37 +63,47 @@ def iter_runlist(runlist: Path) -> list[Path]:
     return runs
 
 
-def check_runs(runlist: Path, stopped_after_minutes: float = 10.0) -> RunStatusCounts:
+def check_runs(
+    runlist: Path,
+    stopped_after_minutes: float = DEFAULT_STOPPED_AFTER_MINUTES,
+    log_dir: Path | None = None,
+) -> RunStatusCounts:
     if not runlist.is_file():
         raise FileNotFoundError(f"cannot find {runlist}")
 
     counts = RunStatusCounts()
     now = time.time()
     stale_seconds = max(0.0, stopped_after_minutes) * 60.0
-    for runpath in iter_runlist(runlist):
+    search_log_dir = runlist.parent if log_dir is None else log_dir
+    for index, runpath in enumerate(iter_runlist(runlist), start=1):
         counts.total += 1
-        if not runpath.is_dir():
+        resolved_runpath = runpath if runpath.is_absolute() else (runlist.parent / runpath)
+        if not resolved_runpath.is_dir():
             print(f"MISSING   {runpath}")
             counts.missing += 1
             continue
 
-        if _has_done_marker(runpath / "OUTCAR") or _has_done_marker(runpath / "OUTCAR.gz"):
+        if _has_done_marker(resolved_runpath / "OUTCAR") or _has_done_marker(
+            resolved_runpath / "OUTCAR.gz"
+        ):
             print(f"DONE      {runpath}")
             counts.done += 1
             continue
 
-        if _has_running_output(runpath):
-            latest = _latest_vasp_output(runpath)
-            if latest is not None and now - latest.stat().st_mtime > stale_seconds:
-                age_min = (now - latest.stat().st_mtime) / 60.0
-                print(f"STOPPED   {runpath}   last_write={age_min:.1f} min   file={latest.name}")
-                counts.stopped += 1
-                continue
-            print(f"RUNNING   {runpath}")
-            counts.running += 1
-        else:
+        latest = _latest_vasp_output(resolved_runpath, index=index, log_dir=search_log_dir)
+        if latest is None:
             print(f"NOTSTART  {runpath}")
             counts.not_started += 1
+            continue
+
+        if now - latest.stat().st_mtime > stale_seconds:
+            age_min = (now - latest.stat().st_mtime) / 60.0
+            print(f"STOPPED   {runpath}   last_write={age_min:.1f} min   file={latest.name}")
+            counts.stopped += 1
+            continue
+
+        print(f"RUNNING   {runpath}   last_write=active   file={latest.name}")
+        counts.running += 1
 
     return counts
 
@@ -266,12 +277,22 @@ def checkvasp(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--stopped-after-min",
         type=float,
-        default=10.0,
+        default=DEFAULT_STOPPED_AFTER_MINUTES,
         help="Report RUNNING-looking runs as STOPPED if the newest VASP output is older than this many minutes.",
+    )
+    parser.add_argument(
+        "--log-dir",
+        type=Path,
+        default=None,
+        help="Directory containing array logs such as vasp.out_std.<job>.<index>; default is runlist parent.",
     )
     args = parser.parse_args(argv)
 
-    counts = check_runs(args.runlist, stopped_after_minutes=args.stopped_after_min)
+    counts = check_runs(
+        args.runlist,
+        stopped_after_minutes=args.stopped_after_min,
+        log_dir=args.log_dir,
+    )
     print_run_status_summary(counts)
 
 
@@ -380,18 +401,18 @@ def _has_done_marker(path: Path) -> bool:
         return False
 
 
-def _has_running_output(runpath: Path) -> bool:
-    return (
-        (runpath / "OUTCAR").is_file()
-        or (runpath / "OUTCAR.gz").is_file()
-        or any(runpath.glob("vasp.out*"))
-    )
-
-
-def _latest_vasp_output(runpath: Path) -> Path | None:
+def _latest_vasp_output(
+    runpath: Path,
+    index: int | None = None,
+    log_dir: Path | None = None,
+) -> Path | None:
     candidates: list[Path] = []
     for pattern in ("vasp.out*", "OUTCAR", "OUTCAR.gz", "OSZICAR", "vasprun.xml"):
         candidates.extend(path for path in runpath.glob(pattern) if path.is_file())
+    if index is not None and log_dir is not None:
+        candidates.extend(
+            sorted(path for path in log_dir.glob(f"vasp.out*.{index}") if path.is_file())
+        )
     if not candidates:
         return None
     return max(candidates, key=lambda path: path.stat().st_mtime)

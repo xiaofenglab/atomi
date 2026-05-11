@@ -186,17 +186,17 @@ mace-vasp2extxyz --runlist runlist.txt --out train.extxyz --index index.csv --fa
 mace-convert-lammps modelname.model
 ```
 
-For VASP array DFT checks, `checkvasp` reads a `runlist.txt` whose lines are run directories and reports `DONE`, `RUNNING`, `NOTSTART`, or `MISSING` using `OUTCAR`, `OUTCAR.gz`, and `vasp.out*` files:
+For VASP array DFT checks, `checkvasp` reads a `runlist.txt` whose lines are run directories and reports `DONE`, `RUNNING`, `STOPPED`, `NOTSTART`, or `MISSING` using run-folder outputs plus matching array logs such as `vasp.out*.N` beside the runlist:
 
 ```bash
 checkvasp runlist.txt
 atomi vasp-check runlist.txt
-checkvasp runlist.txt --stopped-after-min 10
+checkvasp runlist.txt --stopped-after-min 5
 ```
 
-Runs with VASP output whose newest write time is older than 10 minutes are
-reported as `STOPPED` instead of `RUNNING`; change the threshold with
-`--stopped-after-min`.
+Runs with VASP output whose newest write time is older than 5 minutes are
+reported as `STOPPED` instead of `RUNNING` by default; change the threshold with
+`--stopped-after-min`. If array logs live elsewhere, pass `--log-dir`.
 
 For SCF convergence, `checkscf` keeps your original convention where run `N` in `runlist.txt` is checked against `vasp.out*.N` in the current directory:
 

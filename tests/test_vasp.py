@@ -47,6 +47,27 @@ def test_check_runs_marks_stale_output_as_stopped(tmp_path: Path) -> None:
     assert counts.running == 1
 
 
+def test_check_runs_uses_array_logs_for_stopped_status(tmp_path: Path) -> None:
+    runlist = tmp_path / "runlist.txt"
+    run_a = tmp_path / "spin_001"
+    run_b = tmp_path / "spin_002"
+    run_a.mkdir()
+    run_b.mkdir()
+    runlist.write_text("spin_001\nspin_002\n", encoding="utf-8")
+    stale = tmp_path / "vasp.out_std.12345.1"
+    fresh = tmp_path / "vasp.out_std.12346.2"
+    stale.write_text("DAV: 1 -1.0 0 0\n", encoding="utf-8")
+    fresh.write_text("DAV: 1 -1.0 0 0\n", encoding="utf-8")
+    old_time = time.time() - 6 * 60
+    os.utime(stale, (old_time, old_time))
+
+    counts = check_runs(runlist)
+
+    assert counts.stopped == 1
+    assert counts.running == 1
+    assert counts.not_started == 0
+
+
 def test_summarize_outcar_uses_selected_file(tmp_path: Path) -> None:
     outcar = tmp_path / "OUTCAR.test"
     outcar.write_text(
