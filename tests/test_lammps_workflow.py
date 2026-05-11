@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 import atomi.lammps.thermo_series as thermo_series
-from atomi.lammps.workflow import effective_max_chunks, is_nvt_ramp_stage
+from atomi.lammps.workflow import effective_max_chunks, is_nvt_ramp_stage, warn_if_ramp_max_chunks_ignored
 from atomi.lammps.thermo_series import (
     build_combined_thermo,
     choose_qha_md_cp_switch,
@@ -27,6 +27,35 @@ def test_nvt_ramp_stage_is_limited_to_one_chunk() -> None:
 
     assert is_nvt_ramp_stage(stage)
     assert effective_max_chunks(cfg, stage) == 1
+
+
+def test_nvt_ramp_stage_warns_when_configured_chunks_are_ignored(capsys) -> None:
+    stage = {
+        "name": "lc_nvt_ramp_100K",
+        "type": "nvt",
+        "temperature_start": 50,
+        "temperature_end": 100,
+        "max_chunks": 3,
+    }
+
+    warn_if_ramp_max_chunks_ignored(stage, max_chunks=1)
+
+    captured = capsys.readouterr()
+    assert "ignoring configured max_chunks=3" in captured.out
+    assert "using max_chunks=1" in captured.out
+
+
+def test_uploaded_large_cell_ramp_pattern_is_effectively_one_chunk() -> None:
+    cfg = {"max_chunks_small": 5, "max_chunks_large": 8}
+    stages = [
+        {"name": "lc_nvt_ramp_100K", "type": "nvt", "temperature_start": 50, "temperature_end": 100, "max_chunks": 3},
+        {"name": "lc_nvt_ramp_150K", "type": "nvt", "temperature_start": 100, "temperature_end": 150, "max_chunks": 3},
+        {"name": "lc_nvt_ramp_300K", "type": "nvt", "temperature_start": 250, "temperature_end": 300, "max_chunks": 3},
+        {"name": "lc_nvt_ramp_700K", "type": "nvt", "temperature_start": 600, "temperature_end": 700, "max_chunks": 1},
+    ]
+
+    assert all(is_nvt_ramp_stage(stage) for stage in stages)
+    assert [effective_max_chunks(cfg, stage) for stage in stages] == [1, 1, 1, 1]
 
 
 def test_fixed_temperature_stage_can_use_configured_chunks() -> None:

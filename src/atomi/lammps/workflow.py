@@ -210,6 +210,20 @@ def effective_max_chunks(cfg, stage, fixed_step_stage=None):
     return int(cfg["max_chunks_small"])
 
 
+def warn_if_ramp_max_chunks_ignored(stage, max_chunks):
+    if not is_nvt_ramp_stage(stage):
+        return
+    configured = int(stage.get("max_chunks", max_chunks))
+    if configured == max_chunks:
+        return
+    print(
+        f"  note: {stage['name']} is an NVT temperature ramp; "
+        f"ignoring configured max_chunks={configured} and using max_chunks={max_chunks}. "
+        "Lengthen time_ps/run_steps if chunk_01 does not reach the target.",
+        flush=True,
+    )
+
+
 def ramp_rules(cfg, stage):
     rules = {
         "tail_average_ps": 2.0,
@@ -1149,6 +1163,7 @@ def run_stage(cfg, stage, structure, resume_mode=False):
     if fixed_step_stage:
         initial_steps = resolve_run_steps(cfg, stage, default_steps=initial_steps)
     max_chunks = effective_max_chunks(cfg, stage, fixed_step_stage=fixed_step_stage)
+    warn_if_ramp_max_chunks_ignored(stage, max_chunks)
 
     start_chunk, resumed_restart = find_latest_chunk_restart(
         stage_dir,
