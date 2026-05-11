@@ -12,7 +12,8 @@ DONE_MARKER = "General timing and accounting informations for this job"
 CLEAN_PATTERNS = ("OUTCAR*", "CONTCAR", "vasprun.xml", "OSZICAR")
 OUTPUT_PATTERNS = ("vasprun.xml", "OUTCAR*", "OSZICAR", "CONTCAR")
 DEFAULT_CHECKVASP_STOPPED_AFTER_MINUTES = 5.0
-DEFAULT_CHECKENG_STOPPED_AFTER_MINUTES = 10.0
+DEFAULT_CHECKENG_STOPPED_AFTER_MINUTES = 15.0
+DEFAULT_CHECKENG_DAV_AVERAGE_WINDOW = 10
 ENERGY_PATTERNS = {
     "toten": re.compile(r"free\s+energy\s+TOTEN\s*=\s*([-+0-9.Ee]+)"),
     "without_entropy": re.compile(r"energy\s+without\s+entropy\s*=\s*([-+0-9.Ee]+)"),
@@ -183,6 +184,7 @@ def collect_run_energies(
     log_dir: Path | None = None,
     energy_kind: str = "toten",
     stopped_after_minutes: float = DEFAULT_CHECKENG_STOPPED_AFTER_MINUTES,
+    dav_average_window: int = DEFAULT_CHECKENG_DAV_AVERAGE_WINDOW,
 ) -> list[EnergyRecord]:
     if not runlist.is_file():
         raise FileNotFoundError(f"cannot find {runlist}")
@@ -204,7 +206,11 @@ def collect_run_energies(
             continue
 
         record.source = candidates[0]
-        energy, found_kind = _latest_vasp_energy(candidates[0], preferred_kind=energy_kind)
+        energy, found_kind = _latest_vasp_energy(
+            candidates[0],
+            preferred_kind=energy_kind,
+            dav_average_window=dav_average_window,
+        )
         if energy is None:
             record.status = "NOENERGY"
         else:
@@ -370,6 +376,12 @@ def vasp_energies(argv: list[str] | None = None) -> None:
         help="Mark non-DONE rows as STOPPED if the source log has not been written for this many minutes.",
     )
     parser.add_argument(
+        "--dav-average-window",
+        type=int,
+        default=DEFAULT_CHECKENG_DAV_AVERAGE_WINDOW,
+        help="When reporting DAV fallback energy, average this many latest DAV electronic energies.",
+    )
+    parser.add_argument(
         "--delimiter",
         default="  ",
         help="Column delimiter. Use 'tab' for TSV output.",
@@ -381,6 +393,7 @@ def vasp_energies(argv: list[str] | None = None) -> None:
         log_dir=args.log_dir,
         energy_kind=args.energy,
         stopped_after_minutes=args.stopped_after_min,
+        dav_average_window=args.dav_average_window,
     )
     print_energy_table(records, delimiter=args.delimiter)
 
@@ -473,8 +486,13 @@ def _last_dav_energy_change(path: Path) -> float | None:
     return last_de
 
 
-def _latest_vasp_energy(path: Path, preferred_kind: str = "toten") -> tuple[float | None, str]:
+def _latest_vasp_energy(
+    path: Path,
+    preferred_kind: str = "toten",
+    dav_average_window: int = DEFAULT_CHECKENG_DAV_AVERAGE_WINDOW,
+) -> tuple[float | None, str]:
     latest: dict[str, float] = {}
+    dav_energies: list[float] = []
     opener = gzip.open if path.suffix == ".gz" else open
     try:
         with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
@@ -484,13 +502,20 @@ def _latest_vasp_energy(path: Path, preferred_kind: str = "toten") -> tuple[floa
                     if not match:
                         continue
                     try:
-                        latest[kind] = float(match.group(1))
+                        value = float(match.group(1))
                     except ValueError:
                         continue
+                    latest[kind] = value
+                    if kind == "dav":
+                        dav_energies.append(value)
     except OSError:
         return None, ""
 
     for kind in (preferred_kind, "toten", "without_entropy", "e0", "f", "dav"):
+        if kind == "dav" and dav_energies:
+            window = max(1, int(dav_average_window))
+            selected = dav_energies[-window:]
+            return sum(selected) / len(selected), f"dav_avg{min(window, len(selected))}"
         if kind in latest:
             return latest[kind], kind
     return None, ""

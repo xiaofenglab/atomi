@@ -3,7 +3,11 @@ import os
 import time
 
 from atomi.codes.vasp import missing_inputs, summarize_outcar
-from atomi.vasp.checks import check_runs, collect_run_energies, vasp_energies
+from atomi.vasp.checks import (
+    check_runs,
+    collect_run_energies,
+    vasp_energies,
+)
 from atomi.viz.lammps import read_thermo_rows, summarize_thermo
 from atomi.viz.vasp_live import count_dav_steps
 
@@ -136,11 +140,51 @@ def test_collect_run_energies_uses_dav_energy_from_active_log(tmp_path: Path) ->
     records = collect_run_energies(runlist, log_dir=tmp_path)
 
     assert records[0].status == "OK"
-    assert records[0].energy_eV == -2185.45944662
-    assert records[0].energy_kind == "dav"
+    expected = (-2185.50013889 - 2185.48523694 - 2185.45944662) / 3
+    assert records[0].energy_eV == expected
+    assert records[0].energy_kind == "dav_avg3"
+
+
+def test_collect_run_energies_averages_last_ten_dav_steps(tmp_path: Path) -> None:
+    runlist = tmp_path / "runlist.txt"
+    run_a = tmp_path / "spin_001"
+    run_a.mkdir()
+    runlist.write_text("spin_001\n", encoding="utf-8")
+    lines = [
+        f"DAV: {idx:3d} {-100.0 - idx:.8E} 0.1E-02 -0.1E-02 100\n"
+        for idx in range(1, 13)
+    ]
+    (tmp_path / "vasp.out_std.21317022.1").write_text("".join(lines), encoding="utf-8")
+
+    records = collect_run_energies(runlist, log_dir=tmp_path)
+
+    expected = sum(-100.0 - idx for idx in range(3, 13)) / 10
+    assert records[0].status == "OK"
+    assert records[0].energy_eV == expected
+    assert records[0].energy_kind == "dav_avg10"
 
 
 def test_collect_run_energies_marks_stale_active_log_stopped(tmp_path: Path) -> None:
+    runlist = tmp_path / "runlist.txt"
+    run_a = tmp_path / "spin_001"
+    run_a.mkdir()
+    runlist.write_text("spin_001\n", encoding="utf-8")
+    log = tmp_path / "vasp.out_std.21317022.1"
+    log.write_text(
+        "DAV: 219    -0.218545944662E+04    0.25790E-01   -0.30214E-01  6768\n",
+        encoding="utf-8",
+    )
+    old_time = time.time() - 16 * 60
+    os.utime(log, (old_time, old_time))
+
+    records = collect_run_energies(runlist)
+
+    assert records[0].status == "STOPPED"
+    assert records[0].energy_eV == -2185.45944662
+    assert records[0].energy_kind == "dav_avg1"
+
+
+def test_collect_run_energies_keeps_recent_active_log_ok(tmp_path: Path) -> None:
     runlist = tmp_path / "runlist.txt"
     run_a = tmp_path / "spin_001"
     run_a.mkdir()
@@ -155,29 +199,9 @@ def test_collect_run_energies_marks_stale_active_log_stopped(tmp_path: Path) -> 
 
     records = collect_run_energies(runlist)
 
-    assert records[0].status == "STOPPED"
-    assert records[0].energy_eV == -2185.45944662
-    assert records[0].energy_kind == "dav"
-
-
-def test_collect_run_energies_keeps_recent_active_log_ok(tmp_path: Path) -> None:
-    runlist = tmp_path / "runlist.txt"
-    run_a = tmp_path / "spin_001"
-    run_a.mkdir()
-    runlist.write_text("spin_001\n", encoding="utf-8")
-    log = tmp_path / "vasp.out_std.21317022.1"
-    log.write_text(
-        "DAV: 219    -0.218545944662E+04    0.25790E-01   -0.30214E-01  6768\n",
-        encoding="utf-8",
-    )
-    old_time = time.time() - 6 * 60
-    os.utime(log, (old_time, old_time))
-
-    records = collect_run_energies(runlist)
-
     assert records[0].status == "OK"
     assert records[0].energy_eV == -2185.45944662
-    assert records[0].energy_kind == "dav"
+    assert records[0].energy_kind == "dav_avg1"
 
 
 def test_collect_run_energies_falls_back_to_run_folder(tmp_path: Path) -> None:
