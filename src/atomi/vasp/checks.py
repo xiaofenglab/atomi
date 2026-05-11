@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,7 @@ class RunStatusCounts:
     total: int = 0
     done: int = 0
     running: int = 0
+    stopped: int = 0
     not_started: int = 0
     missing: int = 0
 
@@ -60,11 +62,13 @@ def iter_runlist(runlist: Path) -> list[Path]:
     return runs
 
 
-def check_runs(runlist: Path) -> RunStatusCounts:
+def check_runs(runlist: Path, stopped_after_minutes: float = 10.0) -> RunStatusCounts:
     if not runlist.is_file():
         raise FileNotFoundError(f"cannot find {runlist}")
 
     counts = RunStatusCounts()
+    now = time.time()
+    stale_seconds = max(0.0, stopped_after_minutes) * 60.0
     for runpath in iter_runlist(runlist):
         counts.total += 1
         if not runpath.is_dir():
@@ -78,6 +82,12 @@ def check_runs(runlist: Path) -> RunStatusCounts:
             continue
 
         if _has_running_output(runpath):
+            latest = _latest_vasp_output(runpath)
+            if latest is not None and now - latest.stat().st_mtime > stale_seconds:
+                age_min = (now - latest.stat().st_mtime) / 60.0
+                print(f"STOPPED   {runpath}   last_write={age_min:.1f} min   file={latest.name}")
+                counts.stopped += 1
+                continue
             print(f"RUNNING   {runpath}")
             counts.running += 1
         else:
@@ -92,6 +102,7 @@ def print_run_status_summary(counts: RunStatusCounts) -> None:
     print("Summary:")
     print(f"DONE      : {counts.done} / {counts.total} ({_pct(counts.done, counts.total)}%)")
     print(f"RUNNING   : {counts.running} / {counts.total} ({_pct(counts.running, counts.total)}%)")
+    print(f"STOPPED   : {counts.stopped} / {counts.total} ({_pct(counts.stopped, counts.total)}%)")
     print(
         f"NOTSTART  : {counts.not_started} / {counts.total} "
         f"({_pct(counts.not_started, counts.total)}%)"
@@ -252,9 +263,15 @@ def checkvasp(argv: list[str] | None = None) -> None:
         description="Check completion state for VASP array runs listed in runlist.txt.",
     )
     parser.add_argument("runlist", nargs="?", type=Path, default=Path("runlist.txt"))
+    parser.add_argument(
+        "--stopped-after-min",
+        type=float,
+        default=10.0,
+        help="Report RUNNING-looking runs as STOPPED if the newest VASP output is older than this many minutes.",
+    )
     args = parser.parse_args(argv)
 
-    counts = check_runs(args.runlist)
+    counts = check_runs(args.runlist, stopped_after_minutes=args.stopped_after_min)
     print_run_status_summary(counts)
 
 
@@ -369,6 +386,15 @@ def _has_running_output(runpath: Path) -> bool:
         or (runpath / "OUTCAR.gz").is_file()
         or any(runpath.glob("vasp.out*"))
     )
+
+
+def _latest_vasp_output(runpath: Path) -> Path | None:
+    candidates: list[Path] = []
+    for pattern in ("vasp.out*", "OUTCAR", "OUTCAR.gz", "OSZICAR", "vasprun.xml"):
+        candidates.extend(path for path in runpath.glob(pattern) if path.is_file())
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
 def _find_vasp_log_for_index(index: int, log_dir: Path) -> Path | None:

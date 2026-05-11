@@ -1,7 +1,9 @@
 from pathlib import Path
+import os
+import time
 
 from atomi.codes.vasp import missing_inputs, summarize_outcar
-from atomi.vasp.checks import collect_run_energies, vasp_energies
+from atomi.vasp.checks import check_runs, collect_run_energies, vasp_energies
 from atomi.viz.lammps import read_thermo_rows, summarize_thermo
 from atomi.viz.vasp_live import count_dav_steps
 
@@ -23,6 +25,26 @@ def test_count_dav_steps(tmp_path: Path) -> None:
     )
 
     assert count_dav_steps(output) == 2
+
+
+def test_check_runs_marks_stale_output_as_stopped(tmp_path: Path) -> None:
+    runlist = tmp_path / "runlist.txt"
+    run_a = tmp_path / "run_A"
+    run_b = tmp_path / "run_B"
+    run_a.mkdir()
+    run_b.mkdir()
+    runlist.write_text(f"{run_a}\n{run_b}\n", encoding="utf-8")
+    stale = run_a / "vasp.out"
+    fresh = run_b / "vasp.out"
+    stale.write_text("DAV: 1 -1.0 0 0\n", encoding="utf-8")
+    fresh.write_text("DAV: 1 -1.0 0 0\n", encoding="utf-8")
+    old_time = time.time() - 20 * 60
+    os.utime(stale, (old_time, old_time))
+
+    counts = check_runs(runlist, stopped_after_minutes=10)
+
+    assert counts.stopped == 1
+    assert counts.running == 1
 
 
 def test_summarize_outcar_uses_selected_file(tmp_path: Path) -> None:

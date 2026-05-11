@@ -191,7 +191,12 @@ For VASP array DFT checks, `checkvasp` reads a `runlist.txt` whose lines are run
 ```bash
 checkvasp runlist.txt
 atomi vasp-check runlist.txt
+checkvasp runlist.txt --stopped-after-min 10
 ```
+
+Runs with VASP output whose newest write time is older than 10 minutes are
+reported as `STOPPED` instead of `RUNNING`; change the threshold with
+`--stopped-after-min`.
 
 For SCF convergence, `checkscf` keeps your original convention where run `N` in `runlist.txt` is checked against `vasp.out*.N` in the current directory:
 
