@@ -383,3 +383,46 @@ def test_lammps_neel_adjusted_entropy_benchmark_subtracts_neel_entropy() -> None
     assert target == pytest.approx(77.81270 - 8.4)
     assert metadata["used_as_entropy_anchor"] is False
     assert metadata["used_for_blend_calibration"] is True
+
+
+def test_lammps_compare_series_normalizes_different_box_sizes(tmp_path) -> None:
+    pytest.importorskip("matplotlib")
+    small = tmp_path / "small"
+    large = tmp_path / "large"
+    out = tmp_path / "compare"
+    small.mkdir()
+    large.mkdir()
+
+    (small / "thermo_functions_grid.csv").write_text(
+        "T_K,n_formula_units,V_fit_A3,a_fit_A,Cp_used_for_integration_J_per_mol_UO2_K,"
+        "S_rel_J_per_mol_UO2_K,H_rel_J_per_mol_UO2,G_rel_J_per_mol_UO2,"
+        "alpha_V_micro_per_K,alpha_L_micro_per_K,qha_md_blend_weight\n"
+        "300,32,800,5.0,60,70,1000,-2000,30,10,1\n"
+        "500,32,832,5.1,70,80,2000,-3000,32,11,1\n",
+        encoding="utf-8",
+    )
+    (small / "all_T_summary.csv").write_text("target_T_K,n_formula_units\n300,32\n", encoding="utf-8")
+    (large / "thermo_functions_grid.csv").write_text(
+        "T_K,n_formula_units,V_fit_A3,a_fit_A,Cp_used_for_integration_J_per_mol_UO2_K,"
+        "S_rel_J_per_mol_UO2_K,H_rel_J_per_mol_UO2,G_rel_J_per_mol_UO2,"
+        "alpha_V_micro_per_K,alpha_L_micro_per_K,qha_md_blend_weight\n"
+        "300,256,6400,5.0,61,71,1100,-2100,31,10.5,1\n"
+        "500,256,6656,5.1,71,81,2100,-3100,33,11.5,1\n",
+        encoding="utf-8",
+    )
+    (large / "all_T_summary.csv").write_text("target_T_K,n_formula_units\n300,256\n", encoding="utf-8")
+
+    thermo_series.compare_existing_lammps_series(
+        [small, large],
+        outdir=out,
+        labels=["small", "large"],
+        target_z=4.0,
+    )
+
+    metadata = json.loads((out / "compare_metadata.json").read_text())
+    assert metadata["series"][0]["n_formula_units"] == 32.0
+    assert metadata["series"][1]["n_formula_units"] == 256.0
+    assert (out / "compare_volume_target_cell.png").exists()
+    assert (out / "compare_Cp.png").exists()
+    index = list(csv.DictReader((out / "compare_index.csv").open()))
+    assert next(row for row in index if row["quantity"] == "V_target_cell_A3")["written"] == "True"

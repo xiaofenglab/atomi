@@ -813,6 +813,9 @@ def summarize_selected_window(data: dict[str, np.ndarray],
 
     return {
         "target_T_K": float(target_T),
+        "natoms": int(natoms),
+        "atoms_per_formula_unit": int(atoms_per_formula_unit),
+        "n_formula_units": float(nfu),
         "n_used_points": int(mask.sum()),
         "step_min": int(sel["step"][0]),
         "step_max": int(sel["step"][-1]),
@@ -1063,6 +1066,230 @@ def plot_xy(outpath: Path, x, y, xlabel, ylabel, title=None, y2=None, y2label=No
     fig.tight_layout()
     fig.savefig(outpath, dpi=180)
     plt.close(fig)
+
+
+def read_csv_dicts(path: Path) -> list[dict]:
+    with path.open(newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def first_float(row: dict, names: list[str]) -> Optional[float]:
+    for name in names:
+        if name not in row:
+            continue
+        value = row.get(name)
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def infer_series_formula_units(series_dir: Path, override: Optional[float] = None) -> float:
+    if override is not None:
+        if override <= 0:
+            raise ValueError("--compare-formula-units values must be positive")
+        return float(override)
+
+    for csv_name in ("all_T_summary.csv", "thermo_functions_grid.csv"):
+        path = series_dir / csv_name
+        if not path.exists():
+            continue
+        rows = read_csv_dicts(path)
+        if not rows:
+            continue
+        nfu = first_float(rows[0], ["n_formula_units"])
+        if nfu and nfu > 0:
+            return nfu
+
+    metadata_path = series_dir / "temperature_range_metadata.json"
+    if metadata_path.exists():
+        metadata = load_json(metadata_path)
+        nfu = metadata.get("n_formula_units")
+        if nfu and float(nfu) > 0:
+            return float(nfu)
+
+    raise ValueError(
+        f"Cannot infer formula units for {series_dir}. Re-run thermo_lammps with a recent "
+        "Atomi version or pass a matching --compare-formula-units value."
+    )
+
+
+def read_compare_series(
+    series_dir: Path,
+    label: str,
+    n_formula_units: float,
+    target_z: float,
+    energy_basis: str,
+) -> dict:
+    grid_path = series_dir / "thermo_functions_grid.csv"
+    if not grid_path.exists():
+        raise ValueError(f"Missing thermo_functions_grid.csv in {series_dir}")
+    rows = read_csv_dicts(grid_path)
+    if not rows:
+        raise ValueError(f"No rows in {grid_path}")
+
+    multiplier = target_z if energy_basis == "target-cell" else 1.0
+    data = {
+        "label": label,
+        "dir": series_dir,
+        "n_formula_units": n_formula_units,
+        "target_z": target_z,
+        "T_K": [],
+        "V_target_cell_A3": [],
+        "a_A": [],
+        "Cp": [],
+        "S": [],
+        "H_kJ": [],
+        "G_kJ": [],
+        "alpha_V_micro": [],
+        "alpha_L_micro": [],
+        "qha_md_blend_weight": [],
+    }
+
+    for row in rows:
+        T = first_float(row, ["T_K"])
+        if T is None:
+            continue
+        V_target = first_float(row, ["V_target_cell_A3"])
+        if V_target is None:
+            V_cell = first_float(row, ["V_fit_A3"])
+            V_target = None if V_cell is None else V_cell * target_z / n_formula_units
+        values = {
+            "T_K": T,
+            "V_target_cell_A3": V_target,
+            "a_A": first_float(row, ["a_fit_A"]),
+            "Cp": first_float(row, ["Cp_used_for_integration_J_per_mol_UO2_K"]),
+            "S": first_float(row, ["S_rel_J_per_mol_UO2_K"]),
+            "H_kJ": first_float(row, ["H_rel_J_per_mol_UO2"]),
+            "G_kJ": first_float(row, ["G_rel_J_per_mol_UO2"]),
+            "alpha_V_micro": first_float(row, ["alpha_V_micro_per_K"]),
+            "alpha_L_micro": first_float(row, ["alpha_L_micro_per_K"]),
+            "qha_md_blend_weight": first_float(row, ["qha_md_blend_weight"]),
+        }
+        for key, value in values.items():
+            if key in ("H_kJ", "G_kJ") and value is not None:
+                value = value * multiplier / 1000.0
+            elif key in ("Cp", "S") and value is not None:
+                value = value * multiplier
+            data[key].append(value)
+
+    return data
+
+
+def plot_compare_series(
+    outpath: Path,
+    series: list[dict],
+    key: str,
+    ylabel: str,
+    title: str,
+    t_min: Optional[float] = None,
+    t_max: Optional[float] = None,
+) -> bool:
+    fig, ax = plt.subplots(figsize=(7.5, 5.2))
+    plotted = False
+    for item in series:
+        T = np.array(item["T_K"], dtype=float)
+        y = np.array([np.nan if value is None else value for value in item[key]], dtype=float)
+        mask = np.isfinite(T) & np.isfinite(y)
+        if t_min is not None:
+            mask &= T >= t_min
+        if t_max is not None:
+            mask &= T <= t_max
+        if not np.any(mask):
+            continue
+        order = np.argsort(T[mask])
+        ax.plot(T[mask][order], y[mask][order], marker="o", linewidth=1.9, markersize=3.8, label=item["label"])
+        plotted = True
+    if not plotted:
+        plt.close(fig)
+        return False
+    ax.set_xlabel("T (K)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend()
+    fig.tight_layout()
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(outpath, dpi=180)
+    plt.close(fig)
+    return True
+
+
+def compare_existing_lammps_series(
+    series_dirs: list[Path],
+    outdir: Path,
+    labels: Optional[list[str]] = None,
+    formula_units: Optional[list[float]] = None,
+    target_z: float = 4.0,
+    energy_basis: str = "per-formula",
+    t_min: Optional[float] = None,
+    t_max: Optional[float] = None,
+) -> None:
+    if len(series_dirs) < 2:
+        raise ValueError("--compare-series requires at least two thermo_lammps output directories")
+    if target_z <= 0:
+        raise ValueError("--target-z must be positive")
+    if labels and len(labels) != len(series_dirs):
+        raise ValueError("--compare-label must be repeated once per --compare-series directory")
+    if formula_units and len(formula_units) != len(series_dirs):
+        raise ValueError("--compare-formula-units must be repeated once per --compare-series directory")
+
+    outdir.mkdir(parents=True, exist_ok=True)
+    labels = labels or [path.name for path in series_dirs]
+    formula_units = formula_units or [None] * len(series_dirs)
+
+    series = []
+    metadata = {
+        "target_z_formula_units": target_z,
+        "energy_basis": energy_basis,
+        "temperature_window": {"t_min": t_min, "t_max": t_max},
+        "series": [],
+        "note": (
+            "Comparison reads existing thermo_lammps thermo_functions_grid.csv files. "
+            "If each source was generated with the same --qha-low-t-splice/QHA directory "
+            "and blend flags, these overlays compare the corresponding hybrid QHA+MD curves."
+        ),
+    }
+    for path, label, nfu_override in zip(series_dirs, labels, formula_units):
+        resolved = path.resolve()
+        nfu = infer_series_formula_units(resolved, nfu_override)
+        item = read_compare_series(resolved, label, nfu, target_z, energy_basis)
+        series.append(item)
+        qha_meta_path = resolved / "qha_low_t_splice_metadata.json"
+        metadata["series"].append({
+            "label": label,
+            "dir": str(resolved),
+            "n_formula_units": nfu,
+            "qha_low_t_splice_metadata": str(qha_meta_path) if qha_meta_path.exists() else None,
+        })
+
+    energy_label = "kJ/mol-target-cell" if energy_basis == "target-cell" else "kJ/mol-formula"
+    cp_label = "J/mol-target-cell/K" if energy_basis == "target-cell" else "J/mol-formula/K"
+    plot_defs = [
+        ("V_target_cell_A3", "V (A3 per target cell)", "compare_volume_target_cell.png", "Normalized Volume"),
+        ("a_A", "a (A)", "compare_lattice_a.png", "Lattice a"),
+        ("Cp", f"Cp ({cp_label})", "compare_Cp.png", "QHA/MD Hybrid Cp"),
+        ("S", f"S ({cp_label})", "compare_S.png", "Hybrid Entropy"),
+        ("H_kJ", f"H ({energy_label})", "compare_H.png", "Hybrid Enthalpy"),
+        ("G_kJ", f"G ({energy_label})", "compare_G.png", "Hybrid Gibbs Energy"),
+        ("alpha_V_micro", "alpha_V (10^-6 K^-1)", "compare_alpha_V.png", "Volumetric CTE"),
+        ("alpha_L_micro", "alpha_L (10^-6 K^-1)", "compare_alpha_L.png", "Linear CTE"),
+        ("qha_md_blend_weight", "MD blend weight", "compare_qha_md_blend_weight.png", "QHA/MD Blend Weight"),
+    ]
+
+    index_rows = []
+    for key, ylabel, filename, title in plot_defs:
+        written = plot_compare_series(outdir / filename, series, key, ylabel, title, t_min, t_max)
+        index_rows.append({"quantity": key, "file": filename, "written": written})
+
+    with (outdir / "compare_index.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["quantity", "file", "written"])
+        writer.writeheader()
+        for row in index_rows:
+            writer.writerow(row)
+    dump_json(outdir / "compare_metadata.json", metadata)
 
 
 # -----------------------------
@@ -2239,7 +2466,8 @@ def build_combined_thermo(summaries: list[dict],
                           lattice_references: Optional[dict[str, float]] = None,
                           structure_correction: str = "none",
                           structure_correction_apply_to: str = "both",
-                          plot_thermo_db_points: bool = False) -> list[dict]:
+                          plot_thermo_db_points: bool = False,
+                          target_z: float = 4.0) -> list[dict]:
     outdir.mkdir(parents=True, exist_ok=True)
 
     T_data_all = np.array([s["target_T_K"] for s in summaries], dtype=float)
@@ -2267,6 +2495,10 @@ def build_combined_thermo(summaries: list[dict],
     # For 2x2x2 fluorite UO2: 96 atoms / 3 atoms per UO2 = 32 formula units.
     # This must be defined before any eV/cell -> kJ/mol-UO2 conversion.
     nfu = float(summaries[0].get("n_formula_units", 32.0))
+    if nfu <= 0:
+        raise ValueError("n_formula_units must be positive")
+    if target_z <= 0:
+        raise ValueError("--target-z must be positive")
 
     T = np.array([s["target_T_K"] for s in summaries], dtype=float)
     V = np.array([s["V_mean_A3"] for s in summaries], dtype=float)
@@ -2754,7 +2986,10 @@ def build_combined_thermo(summaries: list[dict],
     for i, s in enumerate(summaries):
         row = dict(s)
         row.update({
+            "target_z_formula_units": float(target_z),
             "V_fit_A3": float(V_fit[i]),
+            "V_per_formula_A3": float(V_fit[i] / nfu),
+            "V_target_cell_A3": float(V_fit[i] * target_z / nfu),
             "a_fit_A": float(a_fit[i]),
             "alpha_V_1_per_K": float(alpha_V[i]),
             "alpha_L_1_per_K": float(alpha_L[i]),
@@ -2790,7 +3025,11 @@ def build_combined_thermo(summaries: list[dict],
     for i in range(len(T_grid)):
         grid_rows.append({
             "T_K": float(T_grid[i]),
+            "n_formula_units": float(nfu),
+            "target_z_formula_units": float(target_z),
             "V_fit_A3": float(V_grid[i]),
+            "V_per_formula_A3": float(V_grid[i] / nfu),
+            "V_target_cell_A3": float(V_grid[i] * target_z / nfu),
             "a_fit_A": float(a_grid[i]),
             "density_fit_g_cm3": float(rho_grid[i]),
             "alpha_V_1_per_K": float(alpha_V_grid[i]),
@@ -2835,6 +3074,8 @@ def build_combined_thermo(summaries: list[dict],
         "anchor_zero": anchor_zero,
         "cp_source": cp_source,
         "fit_degree": deg_fit,
+        "n_formula_units": nfu,
+        "target_z_formula_units": target_z,
         "thermo_anchor_T": thermo_anchor_T,
         "thermo_anchor_S_J_mol_K": thermo_anchor_S_J_mol_K,
         "thermo_anchor_Cp_J_mol_K": thermo_anchor_Cp_J_mol_K,
@@ -3217,6 +3458,12 @@ def main(argv: list[str] | None = None) -> None:
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--config", nargs="+", help="One or more production config JSON files")
     src.add_argument("--manual-analysis-root", help="Root containing existing thermo_summary.json files")
+    src.add_argument(
+        "--compare-series",
+        nargs="+",
+        type=Path,
+        help="Compare two or more existing thermo_lammps output directories.",
+    )
     ap.add_argument("--config-dir", default=None, help="Optional directory containing more config JSON files")
     ap.add_argument("--config-glob", default="*.json", help="Glob pattern used with --config-dir")
     ap.add_argument("--duplicate-policy", choices=["highest_config_order", "first", "error"], default="highest_config_order")
@@ -3225,6 +3472,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--outdir", default="analysis/temperature_series_thermo")
     ap.add_argument("--natoms", type=int, default=96)
     ap.add_argument("--atoms-per-formula-unit", type=int, default=3)
+    ap.add_argument("--target-z", type=float, default=4.0, help="Formula units in the normalized structural target cell, e.g. 4 for fluorite UO2.")
+    ap.add_argument("--compare-label", action="append", default=[], help="Label for a --compare-series directory. Repeat once per series.")
+    ap.add_argument("--compare-formula-units", action="append", type=float, default=[], help="Formula units in a compared MD series if old outputs do not record it. Repeat once per series.")
+    ap.add_argument("--compare-energy-basis", choices=["per-formula", "target-cell"], default="per-formula", help="Basis for compared Cp/S/H/G overlays.")
     ap.add_argument("--min-window-ps", type=float, default=20.0)
     ap.add_argument("--window-ps", type=float, default=None, help="Auto-selection window length. Default=min-window-ps")
     ap.add_argument("--window-stride-ps", type=float, default=2.0)
@@ -3405,6 +3656,25 @@ def main(argv: list[str] | None = None) -> None:
     args = ap.parse_args(argv)
 
     outdir = Path(args.outdir)
+    if args.target_z <= 0:
+        ap.error("--target-z must be positive")
+
+    if args.compare_series:
+        try:
+            compare_existing_lammps_series(
+                series_dirs=args.compare_series,
+                outdir=outdir,
+                labels=args.compare_label or None,
+                formula_units=args.compare_formula_units or None,
+                target_z=args.target_z,
+                energy_basis=args.compare_energy_basis,
+                t_min=args.plot_T_min,
+                t_max=args.plot_T_max,
+            )
+        except ValueError as exc:
+            ap.error(str(exc))
+        print(f"Done. Comparison outputs written to: {outdir.resolve()}")
+        return
 
     if args.config:
         config_paths = collect_config_paths(args.config, args.config_dir, args.config_glob)
@@ -3592,6 +3862,7 @@ def main(argv: list[str] | None = None) -> None:
             structure_correction=args.structure_correction,
             structure_correction_apply_to=args.structure_correction_apply_to,
             plot_thermo_db_points=args.plot_thermo_db_points,
+            target_z=args.target_z,
         )
     except ValueError as exc:
         ap.error(str(exc))
