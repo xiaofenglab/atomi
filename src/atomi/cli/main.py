@@ -213,11 +213,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vasp_check_scf.add_argument("check_args", nargs=argparse.REMAINDER)
 
-    vasp_energies = subparsers.add_parser(
-        "vasp-energies",
-        help="Print latest VASP energy table for array runs in runlist.txt.",
-    )
-    vasp_energies.add_argument("energy_args", nargs=argparse.REMAINDER)
+    for command_name in ("checkeng", "vasp-energies", "vasp-energy-table"):
+        vasp_energies = subparsers.add_parser(
+            command_name,
+            help="Print latest VASP energy table for array runs in runlist.txt.",
+        )
+        vasp_energies.add_argument("energy_args", nargs=argparse.REMAINDER)
 
     vasp_update_magmom = subparsers.add_parser(
         "vasp-update-magmom",
@@ -409,7 +410,7 @@ def main(argv: list[str] | None = None) -> None:
 
         checkscf(raw_args[1:])
         return
-    if raw_args and raw_args[0] in ("vasp-energies", "vasp-energy-table"):
+    if raw_args and raw_args[0] in ("checkeng", "vasp-energies", "vasp-energy-table"):
         from atomi.vasp.checks import vasp_energies
 
         vasp_energies(raw_args[1:])
@@ -620,7 +621,7 @@ def main(argv: list[str] | None = None) -> None:
         checkscf(args.check_args)
         return
 
-    if args.subcommand == "vasp-energies":
+    if args.subcommand in ("checkeng", "vasp-energies", "vasp-energy-table"):
         from atomi.vasp.checks import vasp_energies
 
         vasp_energies(args.energy_args)

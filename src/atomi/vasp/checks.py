@@ -15,6 +15,7 @@ ENERGY_PATTERNS = {
     "without_entropy": re.compile(r"energy\s+without\s+entropy\s*=\s*([-+0-9.Ee]+)"),
     "e0": re.compile(r"\bE0=\s*([-+0-9.Ee]+)"),
     "f": re.compile(r"\bF=\s*([-+0-9.Ee]+)"),
+    "dav": re.compile(r"^\s*DAV:\s+\d+\s+([-+0-9.Ee]+)"),
 }
 
 
@@ -303,7 +304,7 @@ def checkscf(argv: list[str] | None = None) -> None:
 
 def vasp_energies(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        prog="vasp-energies",
+        prog="checkeng",
         description="Print latest VASP energy for each run in a runlist.txt.",
     )
     parser.add_argument("runlist", nargs="?", type=Path, default=Path("runlist.txt"))
@@ -422,7 +423,7 @@ def _latest_vasp_energy(path: Path, preferred_kind: str = "toten") -> tuple[floa
     except OSError:
         return None, ""
 
-    for kind in (preferred_kind, "toten", "without_entropy", "e0", "f"):
+    for kind in (preferred_kind, "toten", "without_entropy", "e0", "f", "dav"):
         if kind in latest:
             return latest[kind], kind
     return None, ""

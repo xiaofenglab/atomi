@@ -78,6 +78,25 @@ def test_collect_run_energies_uses_array_logs(tmp_path: Path) -> None:
     assert records[1].energy_kind == "e0"
 
 
+def test_collect_run_energies_uses_dav_energy_from_active_log(tmp_path: Path) -> None:
+    runlist = tmp_path / "runlist.txt"
+    run_a = tmp_path / "spin_001"
+    run_a.mkdir()
+    runlist.write_text("spin_001\n", encoding="utf-8")
+    (tmp_path / "vasp.out_std.21317022.1").write_text(
+        "DAV: 217    -0.218550013889E+04    0.15528E-02   -0.28211E-02  7104\n"
+        "DAV: 218    -0.218548523694E+04    0.14902E-01   -0.12478E-02  6864\n"
+        "DAV: 219    -0.218545944662E+04    0.25790E-01   -0.30214E-01  6768\n",
+        encoding="utf-8",
+    )
+
+    records = collect_run_energies(runlist, log_dir=tmp_path)
+
+    assert records[0].status == "OK"
+    assert records[0].energy_eV == -2185.45944662
+    assert records[0].energy_kind == "dav"
+
+
 def test_collect_run_energies_falls_back_to_run_folder(tmp_path: Path) -> None:
     runlist = tmp_path / "runlist.txt"
     run_a = tmp_path / "run_A"
