@@ -1,7 +1,9 @@
 import tarfile
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
-from atomi.cp2k.pymol_render import main
+from atomi.cp2k.pymol_render import count_xyz_frames, main
 
 
 def write_xyz(path: Path) -> None:
@@ -22,43 +24,48 @@ def test_pymol_render_writes_workspace_and_archive(tmp_path: Path) -> None:
     archive = tmp_path / "render_download.tar.gz"
     write_xyz(xyz)
 
-    main(
-        [
-            str(xyz),
-            "--outdir",
-            str(outdir),
-            "--reference-state",
-            "1",
-            "--start",
-            "1",
-            "--stop",
-            "10",
-            "--step",
-            "2",
-            "--snapshot",
-            "1",
-            "--snapshot",
-            "5",
-            "--no-ray",
-            "--ga-o-cutoff",
-            "2.70",
-            "--archive",
-            "--archive-path",
-            str(archive),
-        ]
-    )
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        main(
+            [
+                str(xyz),
+                "--outdir",
+                str(outdir),
+                "--reference-state",
+                "1",
+                "--start",
+                "1",
+                "--stop",
+                "10",
+                "--step",
+                "2",
+                "--snapshot",
+                "1",
+                "--snapshot",
+                "5",
+                "--no-ray",
+                "--ga-o-cutoff",
+                "2.70",
+                "--archive",
+                "--archive-path",
+                str(archive),
+            ]
+        )
 
     helper = outdir / "aimd_render_dynamic.py"
     driver = outdir / "render_movie.pml"
     run_script = outdir / "run_pymol_render.sh"
     movie_script = outdir / "make_movie.sh"
     pack_script = outdir / "pack_for_download.sh"
+    summary = outdir / "render_summary.txt"
 
+    assert count_xyz_frames(xyz) == 1
     assert helper.is_file()
     assert driver.is_file()
     assert run_script.is_file()
     assert movie_script.is_file()
     assert pack_script.is_file()
+    assert summary.is_file()
     assert (outdir / "frames").is_dir()
     assert (outdir / "snapshots").is_dir()
 
@@ -73,7 +80,18 @@ def test_pymol_render_writes_workspace_and_archive(tmp_path: Path) -> None:
     assert "set_reference_view 1" in driver_text
     assert "snapshot 1, snapshots/snapshot_0001.png" in driver_text
     assert "snapshot 5, snapshots/snapshot_0005.png" in driver_text
-    assert "render_movie 1, 10, frames/frame, 2, 0" in driver_text
+    assert "render_movie 1, 1, frames/frame, 2, 0" in driver_text
+
+    summary_text = summary.read_text(encoding="utf-8")
+    assert "available_frames = 1" in summary_text
+    assert "requested_stop = 10" in summary_text
+    assert "effective_stop = 1" in summary_text
+    assert "frames_to_render = 1" in summary_text
+
+    terminal = stdout.getvalue()
+    assert "available XYZ frames: 1" in terminal
+    assert "frames selected for rendering: 1 (1:1:2)" in terminal
+    assert "requested stop 10 was clamped to available frame 1" in terminal
 
     assert archive.is_file()
     with tarfile.open(archive, "r:gz") as handle:

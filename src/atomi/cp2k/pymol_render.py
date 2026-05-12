@@ -9,6 +9,53 @@ import tarfile
 from pathlib import Path
 
 
+def count_xyz_frames(path: Path) -> int:
+    frames = 0
+    with path.open("r", encoding="utf-8") as handle:
+        while True:
+            first = handle.readline()
+            if not first:
+                break
+            first = first.strip()
+            if not first:
+                continue
+            try:
+                natoms = int(first)
+            except ValueError as exc:
+                raise ValueError(f"Malformed XYZ atom-count line in {path}: {first!r}") from exc
+            comment = handle.readline()
+            if not comment:
+                raise ValueError(f"XYZ frame {frames + 1} in {path} is missing a comment line")
+            for _ in range(natoms):
+                atom_line = handle.readline()
+                if not atom_line:
+                    raise ValueError(f"XYZ frame {frames + 1} in {path} is truncated")
+            frames += 1
+    if frames == 0:
+        raise ValueError(f"No XYZ frames found in {path}")
+    return frames
+
+
+def resolve_frame_plan(
+    start: int,
+    stop: int | None,
+    step: int,
+    available_frames: int,
+) -> tuple[int, int, int]:
+    if step <= 0:
+        raise ValueError("--step must be a positive integer")
+    if start < 1:
+        raise ValueError("--start must be >= 1")
+    if start > available_frames:
+        raise ValueError(f"--start {start} is beyond the available {available_frames} frame(s)")
+    requested_stop = available_frames if stop is None else stop
+    if requested_stop < start:
+        raise ValueError("--stop must be >= --start")
+    effective_stop = min(requested_stop, available_frames)
+    n_render = len(range(start, effective_stop + 1, step))
+    return requested_stop, effective_stop, n_render
+
+
 PYMOL_HELPER_TEMPLATE = r'''from pymol import cmd
 import math
 import os
@@ -347,7 +394,7 @@ def quote_pymol_path(path: Path) -> str:
     return str(path).replace("\\", "\\\\")
 
 
-def write_pml(args: argparse.Namespace, helper_name: str) -> str:
+def write_pml(args: argparse.Namespace, helper_name: str, effective_stop: int) -> str:
     prefix = Path("frames") / args.frame_prefix
     lines = [
         f"load {quote_pymol_path(args.xyz.resolve())}, {args.object_name}",
@@ -357,8 +404,9 @@ def write_pml(args: argparse.Namespace, helper_name: str) -> str:
     for state in args.snapshot:
         lines.append(f"snapshot {state}, snapshots/snapshot_{int(state):04d}.png")
     do_ray = 1 if args.ray else 0
-    stop = "None" if args.stop is None else str(args.stop)
-    lines.append(f"render_movie {args.start}, {stop}, {prefix.as_posix()}, {args.step}, {do_ray}")
+    lines.append(
+        f"render_movie {args.start}, {effective_stop}, {prefix.as_posix()}, {args.step}, {do_ray}"
+    )
     lines.append("quit")
     return "\n".join(lines) + "\n"
 
@@ -482,6 +530,13 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     if not args.xyz.is_file():
         raise FileNotFoundError(f"XYZ trajectory not found: {args.xyz}")
+    available_frames = count_xyz_frames(args.xyz)
+    requested_stop, effective_stop, n_render = resolve_frame_plan(
+        start=args.start,
+        stop=args.stop,
+        step=args.step,
+        available_frames=available_frames,
+    )
     outdir = args.outdir
     outdir.mkdir(parents=True, exist_ok=True)
     (outdir / "frames").mkdir(exist_ok=True)
@@ -489,14 +544,37 @@ def main(argv: list[str] | None = None) -> None:
 
     helper_name = "aimd_render_dynamic.py"
     (outdir / helper_name).write_text(render_helper_text(args), encoding="utf-8")
-    (outdir / "render_movie.pml").write_text(write_pml(args, helper_name), encoding="utf-8")
+    (outdir / "render_movie.pml").write_text(
+        write_pml(args, helper_name, effective_stop=effective_stop),
+        encoding="utf-8",
+    )
 
     archive_path = args.archive_path or outdir.with_suffix(".tar.gz")
     write_shell_scripts(args, outdir=outdir, archive_path=archive_path)
 
+    summary_lines = [
+        f"xyz = {args.xyz.resolve()}",
+        f"available_frames = {available_frames}",
+        f"requested_start = {args.start}",
+        f"requested_stop = {requested_stop}",
+        f"effective_stop = {effective_stop}",
+        f"step = {args.step}",
+        f"frames_to_render = {n_render}",
+        f"snapshots_requested = {','.join(str(item) for item in args.snapshot) or 'none'}",
+    ]
+    (outdir / "render_summary.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
+
     print(f"Wrote PyMOL render workspace: {outdir}")
+    print(f"  available XYZ frames: {available_frames}")
+    print(
+        f"  frames selected for rendering: {n_render} "
+        f"({args.start}:{effective_stop}:{args.step})"
+    )
+    if requested_stop != effective_stop:
+        print(f"  requested stop {requested_stop} was clamped to available frame {effective_stop}")
     print(f"  helper: {outdir / helper_name}")
     print(f"  driver: {outdir / 'render_movie.pml'}")
+    print(f"  summary: {outdir / 'render_summary.txt'}")
     print(f"  run script: {outdir / 'run_pymol_render.sh'}")
     print(f"  movie script: {outdir / 'make_movie.sh'}")
     print(f"  download pack script: {outdir / 'pack_for_download.sh'}")
