@@ -253,9 +253,9 @@ set label 13 sprintf("ETA: %s", latest_eta) at screen 0.82,0.945 right
 # ============================================================
 # PANEL 1 : Temperature
 # ============================================================
-set title "Temperature"
+unset ylabel
+set title "Temperature\nT (K)"
 set xlabel "MD record"
-set ylabel "T (K)"
 set grid
 set key off
 set xrange [xmin:xmax]
@@ -265,9 +265,9 @@ plot live_dat using 0:3 with lines lc rgb "red" lw 1.4
 # ============================================================
 # PANEL 2 : Potential / Conserved Energy
 # ============================================================
-set title "Potential / Conserved Energy"
+unset ylabel
+set title "Potential / Conserved Energy\nEnergy (Ha)"
 set xlabel "MD record"
-set ylabel "Energy (Ha)"
 set grid
 set key right
 set xrange [xmin:xmax]
@@ -279,9 +279,9 @@ live_dat using 0:6 with lines lc rgb "yellow" lw 1.4 title "Conserved"
 # ============================================================
 # PANEL 3 : Kinetic Energy
 # ============================================================
-set title "Kinetic Energy"
+unset ylabel
+set title "Kinetic Energy\nKinetic (Ha)"
 set xlabel "MD record"
-set ylabel "Kinetic (Ha)"
 set grid
 set key off
 set xrange [xmin:xmax]
@@ -291,9 +291,9 @@ plot live_dat using 0:5 with lines lc rgb "magenta" lw 1.4
 # ============================================================
 # PANEL 4 : SCF effort
 # ============================================================
-set title "SCF effort"
+unset ylabel
+set title "SCF effort\nSCF steps"
 set xlabel "MD record"
-set ylabel "SCF steps"
 set grid
 set key off
 set xrange [xmin:xmax]
@@ -350,9 +350,9 @@ if (have_bonds && ncols >= 5) {
 # ============================================================
 # PANEL 6 : Bond summary
 # ============================================================
-set title sprintf("Bond summary (%s)", summary_label)
+unset ylabel
+set title sprintf("Bond summary (%s)\nDistance (Angstrom)", summary_label)
 set xlabel "Frame"
-set ylabel "Distance (Angstrom)" offset -2,0
 set grid
 set key outside right top
 set rmargin 18

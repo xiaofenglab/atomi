@@ -175,11 +175,11 @@ set label 7 sprintf("trust radius: %s", latest_trust) at screen 0.54,0.938 left
 # =========================================================
 # Panel 1 — SCF energy
 # =========================================================
+unset ylabel
 set grid
 set key off
-set title "Current GEO step SCF energy"
+set title "Current GEO step SCF energy\nEnergy (Ha)"
 set xlabel "SCF iteration"
-set ylabel "Energy (Ha)"
 set xrange [xmin:xmax]
 set autoscale y
 
@@ -193,11 +193,11 @@ if (have_scf) {
 # =========================================================
 # Panel 2 — SCF convergence
 # =========================================================
+unset ylabel
 set grid
 set key off
-set title "Current GEO step SCF convergence"
+set title "Current GEO step SCF convergence\nlog10(conv)"
 set xlabel "SCF iteration"
-set ylabel "log10(conv)"
 set xrange [xmin:xmax]
 set autoscale y
 
@@ -211,11 +211,11 @@ if (have_scf) {
 # =========================================================
 # Panel 3 — GEO energy
 # =========================================================
+unset ylabel
 set grid
 set key off
-set title sprintf("Completed GEO energy   trust radius=%s", latest_trust)
+set title sprintf("Completed GEO energy\nEnergy (Ha), trust radius=%s", latest_trust)
 set xlabel "GEO step"
-set ylabel "Energy (Ha)"
 set xrange [gxmin:gxmax]
 set autoscale y
 
@@ -224,11 +224,11 @@ plot geodat using 1:2 with lines lw 1.5 lc rgb "cyan"
 # =========================================================
 # Panel 4 — gradients
 # =========================================================
+unset ylabel
 set grid
 set key right
-set title "Completed GEO gradients"
+set title "Completed GEO gradients\nlog10(gradient)"
 set xlabel "GEO step"
-set ylabel "log10(gradient)"
 set xrange [gxmin:gxmax]
 set yrange [-4:0]
 
@@ -281,9 +281,9 @@ if (int(system(sprintf("test -f '%s'; echo $?", bond_dat))) == 0) {
 # ============================================================
 # PANEL 6 : Bond summary
 # ============================================================
-set title sprintf("Bond summary (%s)", summary_label)
+unset ylabel
+set title sprintf("Bond summary (%s)\nDistance (Angstrom)", summary_label)
 set xlabel "Frame"
-set ylabel "Distance (Angstrom)" offset -2,0
 set grid
 set key outside right top
 set rmargin 18
