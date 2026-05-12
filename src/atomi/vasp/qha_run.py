@@ -166,6 +166,33 @@ def write_run_script(
     path.chmod(0o755)
 
 
+def write_sbatch_script(
+    path: Path,
+    run_script: Path,
+    outdir: Path,
+    job_name: str,
+    time_limit: str,
+    cpus: int,
+    mem: str,
+) -> None:
+    content = f"""#!/usr/bin/env bash
+#SBATCH --job-name={job_name}
+#SBATCH --output=logs/{job_name}_%j.out
+#SBATCH --error=logs/{job_name}_%j.err
+#SBATCH --time={time_limit}
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task={cpus}
+#SBATCH --mem={mem}
+
+set -euo pipefail
+mkdir -p logs
+bash {shlex.quote(rel_or_abs(run_script, outdir))}
+"""
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o755)
+
+
 def write_plot_script(path: Path) -> None:
     script = r'''
 #!/usr/bin/env python3
@@ -332,6 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phonopy-qha", default="phonopy-qha")
     parser.add_argument("--ev-file", default="e-v.dat")
     parser.add_argument("--script-name", default="run_phonopy_qha.sh")
+    parser.add_argument("--sbatch-script-name", default="submit_phonopy_qha.sbatch")
     parser.add_argument("--plot-script-name", default="plot_qha_results.py")
     parser.add_argument("--plot-output-dir", default="qha_plots")
     parser.add_argument("--plot-t-min", type=float, default=None)
@@ -341,8 +369,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Append a plotting step to the generated phonopy-qha shell script.",
     )
+    parser.add_argument("--job-name", default="phonopy_qha")
+    parser.add_argument("--time", default="12:00:00")
+    parser.add_argument("--cpus", type=int, default=8)
+    parser.add_argument("--mem", default="96G")
     parser.add_argument("--sort-by", choices=("scale", "volume", "folder"), default="scale")
     parser.add_argument("--execute", action="store_true", help="Run the generated shell script.")
+    parser.add_argument("--submit", action="store_true", help="Run sbatch on the generated Slurm script.")
     return parser
 
 
@@ -364,6 +397,7 @@ def main(argv: list[str] | None = None) -> None:
     thermals = thermal_paths(args, rows, parser)
     ev_path = outdir / args.ev_file
     script_path = outdir / args.script_name
+    sbatch_path = outdir / args.sbatch_script_name
     plot_script_path = outdir / args.plot_script_name
     manifest_path = outdir / "qha_inputs.csv"
 
@@ -383,13 +417,25 @@ def main(argv: list[str] | None = None) -> None:
         args.plot_t_max,
         args.plot_after_qha,
     )
+    write_sbatch_script(
+        sbatch_path,
+        script_path,
+        outdir,
+        args.job_name,
+        args.time,
+        args.cpus,
+        args.mem,
+    )
 
     print(ev_path)
     print(manifest_path)
     print(script_path)
+    print(sbatch_path)
     print(plot_script_path)
     if args.execute:
         subprocess.run(["bash", str(script_path)], cwd=outdir, check=True)
+    if args.submit:
+        subprocess.run(["sbatch", str(sbatch_path)], cwd=outdir, check=True)
 
 
 if __name__ == "__main__":

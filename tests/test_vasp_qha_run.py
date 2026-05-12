@@ -48,10 +48,13 @@ def test_qha_run_writes_ev_manifest_and_script(tmp_path: Path) -> None:
     rows = list(csv.DictReader((outdir / "qha_inputs.csv").open(encoding="utf-8")))
     assert [row["volume_folder"] for row in rows] == ["V0.980", "V1.000"]
     script = (outdir / "run_phonopy_qha.sh").read_text(encoding="utf-8")
+    sbatch = (outdir / "submit_phonopy_qha.sbatch").read_text(encoding="utf-8")
     assert "module load phys/phonopy/2.38.1" in script
     assert "phonopy-qha e-v.dat" in script
     assert "../2x2x2/V0.980/thermal_properties.yaml" in script
     assert "../2x2x2/V1.000/thermal_properties.yaml" in script
+    assert "#SBATCH --mem=96G" in sbatch
+    assert "bash run_phonopy_qha.sh" in sbatch
     assert (outdir / "plot_qha_results.py").exists()
     py_compile.compile(str(outdir / "plot_qha_results.py"), doraise=True)
 
@@ -144,6 +147,35 @@ def test_qha_run_can_append_plot_command(tmp_path: Path) -> None:
 
     script = (outdir / "run_phonopy_qha.sh").read_text(encoding="utf-8")
     assert "python plot_qha_results.py --outdir qha_plots --t-min 300.0 --t-max 1500.0" in script
+
+
+def test_qha_run_accepts_custom_sbatch_memory(tmp_path: Path) -> None:
+    root = tmp_path / "2x2x2"
+    outdir = tmp_path / "qha_run"
+    parent = root / "V1.000" / "parent_static"
+    parent.mkdir(parents=True)
+    write_outcar(parent / "OUTCAR", energy=-10.0, volume=100.0, natoms=12)
+    (root / "V1.000" / "thermal_properties.yaml").write_text("thermal\n", encoding="utf-8")
+
+    main(
+        [
+            "--root",
+            str(root),
+            "--outdir",
+            str(outdir),
+            "--mem",
+            "128G",
+            "--time",
+            "24:00:00",
+            "--cpus",
+            "16",
+        ]
+    )
+
+    sbatch = (outdir / "submit_phonopy_qha.sbatch").read_text(encoding="utf-8")
+    assert "#SBATCH --mem=128G" in sbatch
+    assert "#SBATCH --time=24:00:00" in sbatch
+    assert "#SBATCH --cpus-per-task=16" in sbatch
 
 
 def test_qha_run_rejects_thermal_yaml_count_mismatch(tmp_path: Path) -> None:
