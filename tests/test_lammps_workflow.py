@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 import atomi.lammps.thermo_series as thermo_series
-from atomi.lammps.workflow import effective_max_chunks, is_nvt_ramp_stage, warn_if_ramp_max_chunks_ignored
+from atomi.lammps.workflow import check_not_exploded_for_max_chunk, effective_max_chunks, is_nvt_ramp_stage, warn_if_ramp_max_chunks_ignored
 from atomi.lammps.thermo_series import (
     build_combined_thermo,
     choose_qha_md_cp_switch,
@@ -70,6 +70,45 @@ def test_fixed_temperature_stage_can_use_configured_chunks() -> None:
 
     assert not is_nvt_ramp_stage(stage)
     assert effective_max_chunks(cfg, stage) == 3
+
+
+def test_npt_stage_honors_global_max_chunks() -> None:
+    cfg = {"max_chunks": 3, "max_chunks_small": 5, "max_chunks_large": 8}
+    stage = {
+        "name": "lc_npt_eqm_400K",
+        "type": "npt",
+        "temperature": 400,
+    }
+
+    assert effective_max_chunks(cfg, stage) == 3
+
+
+def test_final_npt_chunk_can_force_pass_when_not_exploded() -> None:
+    cfg = {
+        "equilibrium_rules": {
+            "temperature_tol_fraction": 0.1,
+            "temperature_tol_min": 10.0,
+            "volume_slope_tol": 1e-12,
+            "energy_slope_tol": 1e-12,
+            "runaway_temperature_factor": 3.0,
+            "stable_temperature_tol_fraction": 0.25,
+            "stable_temperature_tol_min": 20.0,
+            "stable_volume_slope_tol": 1e-12,
+            "stable_energy_slope_tol": 1e-12,
+            "stable_runaway_temperature_factor": 3.0,
+        }
+    }
+    stage = {"name": "lc_npt_eqm_400K", "type": "npt", "temperature": 400}
+    steps = list(range(20))
+    T = [398.0 + 0.1 * i for i in range(20)]
+    P = [1000.0 - 10.0 * i for i in range(20)]
+    V = [1000.0 + 0.01 * i for i in range(20)]
+    PE = [-100.0 + 0.001 * i for i in range(20)]
+
+    ok, msg = check_not_exploded_for_max_chunk(cfg, stage, steps, T, P, V, PE)
+
+    assert ok
+    assert "not exploded" in msg
 
 
 def test_fixed_step_stage_still_defaults_to_single_chunk() -> None:

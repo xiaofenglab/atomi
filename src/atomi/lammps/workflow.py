@@ -203,6 +203,8 @@ def effective_max_chunks(cfg, stage, fixed_step_stage=None):
         fixed_step_stage = stage_uses_fixed_steps(stage)
     if "max_chunks" in stage:
         return int(stage["max_chunks"])
+    if "max_chunks" in cfg:
+        return int(cfg["max_chunks"])
     if fixed_step_stage:
         return 1
     if stage.get("large_cell", False):
@@ -511,6 +513,54 @@ def check_stable_enough(cfg, stage, steps, T, V, PE):
         return False, f"stable_PE_slope_too_large ({summary['PE_slope']:.6e}; tol={loose_pe_slope:.6e})"
 
     return True, "stable_enough"
+
+
+def check_not_exploded_for_max_chunk(cfg, stage, steps, T, P, V, PE):
+    if len(steps) < 10:
+        return False, "too_few_points"
+
+    if not T or not P or not V or not PE:
+        return False, "missing_thermo_series"
+
+    series = list(T) + list(P) + list(V) + list(PE)
+    if not all(math.isfinite(float(x)) for x in series):
+        return False, "nonfinite_thermo_value"
+
+    if min(V) <= 0.0:
+        return False, f"nonpositive_volume (V_min={min(V):.6g})"
+
+    rules = effective_rules(cfg, stage)
+    summary = summarize_thermo(stage, steps, P=P, T=T, V=V, PE=PE)
+    if summary is None:
+        return False, "no_summary"
+
+    target = stage_target_temperature(stage)
+    max_temp_factor = rules.get(
+        "max_chunk_accept_temperature_factor",
+        rules.get("stable_runaway_temperature_factor", rules["runaway_temperature_factor"]),
+    )
+    if target is not None and summary["T_max"] > target * max_temp_factor:
+        return False, (
+            f"temperature_runaway_for_forced_pass "
+            f"(T_max={summary['T_max']:.3f}, target={target}, factor={max_temp_factor})"
+        )
+
+    max_abs_pressure = rules.get("max_chunk_accept_abs_pressure_bar", 50000.0)
+    if max(abs(float(p)) for p in P) > max_abs_pressure:
+        return False, f"pressure_too_large_for_forced_pass (limit={max_abs_pressure:g} bar)"
+
+    max_volume_range_factor = rules.get("max_chunk_accept_volume_range_factor", 2.0)
+    if max(V) / min(V) > max_volume_range_factor:
+        return False, (
+            f"volume_range_too_large_for_forced_pass "
+            f"(V_max/V_min={max(V) / min(V):.3f}, limit={max_volume_range_factor:g})"
+        )
+
+    return True, (
+        "max_chunks reached; final NPT chunk is finite and not exploded "
+        f"(T_mean={summary['T_mean']:.3f} K, P_mean={summary['P_mean_bar']:.3f} bar, "
+        f"V_mean={summary['V_mean']:.6g})"
+    )
 
 
 # ---------------------------------------------------
@@ -1195,6 +1245,14 @@ def run_stage(cfg, stage, structure, resume_mode=False):
             "time_ps/run_steps so the final tail reaches the target temperature."
         )
 
+    if start_chunk > max_chunks:
+        raise RuntimeError(
+            f"stage {stage_name} has already reached max_chunks={max_chunks} without PASS. "
+            f"Latest restart would continue at chunk_{start_chunk:02d}, which is beyond the "
+            "configured limit. Increase max_chunks, force-pass the stage, or remove/restart "
+            "the stage directory after reviewing the failed chunks."
+        )
+
     for chunk in range(start_chunk, max_chunks + 1):
         chunk_dir = chunk_dir_for_index(stage_dir, stage, chunk)
         chunk_dir.mkdir(exist_ok=True)
@@ -1337,6 +1395,26 @@ def run_stage(cfg, stage, structure, resume_mode=False):
             )
             write_decision(chunk_dir, decision_lines + ["decision: FAIL", f"reason: {reason}"])
             raise RuntimeError(f"stage {stage_name} did not reach ramp target in chunk_01")
+
+        if chunk >= max_chunks:
+            if stage["type"] == "npt":
+                sane_ok, sane_msg = check_not_exploded_for_max_chunk(cfg, stage, steps, T, P, V, PE)
+                decision_lines.append(f"max_chunk_sanity_check: {sane_msg}")
+                if sane_ok:
+                    reason = f"forced PASS at max_chunks={max_chunks}: {sane_msg}"
+                    write_decision(chunk_dir, decision_lines + ["decision: PASS", f"reason: {reason}"])
+                    write_stage_outputs(
+                        stage_dir,
+                        stage_name,
+                        final_data_path,
+                        final_restart_path=final_restart_path,
+                        pass_note=reason
+                    )
+                    return (stage_dir / f"{stage_name}.restart").resolve()
+
+            reason = f"maximum chunk count reached: max_chunks={max_chunks}"
+            write_decision(chunk_dir, decision_lines + ["decision: FAIL", f"reason: {reason}"])
+            raise RuntimeError(f"stage {stage_name} did not converge within max_chunks={max_chunks}")
 
         decision_lines.append("decision: CONTINUE")
         write_decision(chunk_dir, decision_lines)

@@ -2,6 +2,8 @@ from pathlib import Path
 import os
 import time
 
+import pytest
+
 from atomi.codes.vasp import missing_inputs, summarize_outcar
 from atomi.vasp.checks import (
     check_runs,
@@ -141,7 +143,7 @@ def test_collect_run_energies_uses_dav_energy_from_active_log(tmp_path: Path) ->
 
     assert records[0].status == "OK"
     expected = (-2185.50013889 - 2185.48523694 - 2185.45944662) / 3
-    assert records[0].energy_eV == expected
+    assert records[0].energy_eV == pytest.approx(expected)
     assert records[0].energy_kind == "dav_avg3"
 
 
@@ -160,7 +162,7 @@ def test_collect_run_energies_averages_last_ten_dav_steps(tmp_path: Path) -> Non
 
     expected = sum(-100.0 - idx for idx in range(3, 13)) / 10
     assert records[0].status == "OK"
-    assert records[0].energy_eV == expected
+    assert records[0].energy_eV == pytest.approx(expected)
     assert records[0].energy_kind == "dav_avg10"
 
 
