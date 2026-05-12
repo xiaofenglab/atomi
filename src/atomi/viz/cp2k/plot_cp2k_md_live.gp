@@ -136,15 +136,25 @@ if (int(system(test_bond_meta_cmd)) == 0) {
     coord_n   = system("awk -F= '/^coordination_number=/{print $2}' " . bond_meta)
     lig_types = system("awk -F= '/^ligand_types=/{print $2}' " . bond_meta)
     tmp_label = system("awk -F= '/^distance_labels=/{split($2,a,\",\"); print a[1]}' " . bond_meta)
-    if (strlen(tmp_label) > 0) dlabel1 = tmp_label
+    if (strlen(tmp_label) > 0) {
+        dlabel1 = tmp_label
+    }
     tmp_label = system("awk -F= '/^distance_labels=/{split($2,a,\",\"); print a[2]}' " . bond_meta)
-    if (strlen(tmp_label) > 0) dlabel2 = tmp_label
+    if (strlen(tmp_label) > 0) {
+        dlabel2 = tmp_label
+    }
     tmp_label = system("awk -F= '/^distance_labels=/{split($2,a,\",\"); print a[3]}' " . bond_meta)
-    if (strlen(tmp_label) > 0) dlabel3 = tmp_label
+    if (strlen(tmp_label) > 0) {
+        dlabel3 = tmp_label
+    }
     tmp_label = system("awk -F= '/^distance_labels=/{split($2,a,\",\"); print a[4]}' " . bond_meta)
-    if (strlen(tmp_label) > 0) dlabel4 = tmp_label
+    if (strlen(tmp_label) > 0) {
+        dlabel4 = tmp_label
+    }
     tmp_label = system("awk -F= '/^distance_labels=/{split($2,a,\",\"); print a[5]}' " . bond_meta)
-    if (strlen(tmp_label) > 0) dlabel5 = tmp_label
+    if (strlen(tmp_label) > 0) {
+        dlabel5 = tmp_label
+    }
 }
 
 # -------- ETA summary --------
