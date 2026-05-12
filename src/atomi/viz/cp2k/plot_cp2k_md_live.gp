@@ -303,9 +303,9 @@ plot live_dat using 0:7 with lines lc rgb "green" lw 1.4
 # ============================================================
 # PANEL 5 : Individual nearest-shell bond distances
 # ============================================================
+unset ylabel
 set title "Nearest-shell metal-ligand distances\nDistance (Angstrom)"
 set xlabel "Frame"
-set ylabel ""
 set grid
 set key outside right top
 set rmargin 18
