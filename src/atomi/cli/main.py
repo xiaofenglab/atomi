@@ -249,6 +249,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vasp_phonopy_neareq.add_argument("phonopy_args", nargs=argparse.REMAINDER)
 
+    vasp_phonopy_post = subparsers.add_parser(
+        "vasp-phonopy-post",
+        help="Generate phonopy thermal/DOS/band post-analysis scripts.",
+    )
+    vasp_phonopy_post.add_argument("phonopy_args", nargs=argparse.REMAINDER)
+
     vasp_prefail_candidates = subparsers.add_parser(
         "vasp-prefail-candidates",
         help="Extract prefail MD frames and prepare distorted VASP candidate runs.",
@@ -451,6 +457,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.phonopy_neareq import main as vasp_phonopy_neareq_main
 
         vasp_phonopy_neareq_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "vasp-phonopy-post":
+        from atomi.vasp.phonopy_post import main as vasp_phonopy_post_main
+
+        vasp_phonopy_post_main(raw_args[1:])
         return
     if raw_args and raw_args[0] == "vasp-prefail-candidates":
         from atomi.vasp.prefail import main as vasp_prefail_candidates_main
@@ -677,6 +688,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.phonopy_neareq import main as vasp_phonopy_neareq_main
 
         vasp_phonopy_neareq_main(args.phonopy_args)
+        return
+
+    if args.subcommand == "vasp-phonopy-post":
+        from atomi.vasp.phonopy_post import main as vasp_phonopy_post_main
+
+        vasp_phonopy_post_main(args.phonopy_args)
         return
 
     if args.subcommand == "vasp-prefail-candidates":
