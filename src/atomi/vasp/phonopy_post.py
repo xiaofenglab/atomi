@@ -7,6 +7,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from atomi.vasp.phonopy_band import write_standalone_script
+
 
 @dataclass
 class PoscarInfo:
@@ -152,6 +154,10 @@ def write_run_script(
     run_thermal: bool,
     run_dos: bool,
     run_band: bool,
+    run_band_plot: bool,
+    band_plot_script: str,
+    band_plot_png: str,
+    band_plot_title: str,
     module_purge: bool,
 ) -> None:
     lines = [
@@ -231,6 +237,23 @@ def write_run_script(
                 f'{shell_quote(phonopy_load)} --band "${{BAND_PATH}}"',
                 "if [[ -f band.yaml ]]; then",
                 '  cp -f band.yaml "band_${DUP_X}x${DUP_Y}x${DUP_Z}.yaml"',
+                "fi",
+                "",
+            ]
+        )
+    if run_band and run_band_plot:
+        lines.extend(
+            [
+                'echo "=== Step 5: Band plot ==="',
+                'mkdir -p "${WORKDIR}/.matplotlib"',
+                'export MPLCONFIGDIR="${WORKDIR}/.matplotlib"',
+                f"if [[ -f band.yaml && -f {shell_quote(band_plot_script)} ]]; then",
+                f"  python3 {shell_quote(band_plot_script)} "
+                f"--band-yaml band.yaml --outpng {shell_quote(band_plot_png)} "
+                f"--title {shell_quote(band_plot_title)} "
+                '|| echo "WARNING: band plot failed; band.yaml is still available."',
+                "else",
+                '  echo "WARNING: band.yaml or band plot script missing; skipping band plot."',
                 "fi",
                 "",
             ]
@@ -325,6 +348,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-thermal", action="store_true")
     parser.add_argument("--no-dos", action="store_true")
     parser.add_argument("--no-band", action="store_true")
+    parser.add_argument("--no-band-plot", action="store_true", help="Do not write/run the band plotting helper.")
+    parser.add_argument("--band-plot-script", default="plot_phonopy_band.py")
+    parser.add_argument("--band-plot-png", default="phonon_band.png")
+    parser.add_argument("--band-plot-title", default="Phonon band structure")
     parser.add_argument("--job-name", default="phonopy_post")
     parser.add_argument("--time", default="12:00:00")
     parser.add_argument("--cpus", type=int, default=8)
@@ -347,8 +374,11 @@ def main(argv: list[str] | None = None) -> None:
     run_script = outdir / args.run_script
     sbatch_script = outdir / args.sbatch_script
     summary = outdir / args.summary
+    band_plot_script = outdir / args.band_plot_script
 
     write_env(env_file, info, mesh, band_path)
+    if not args.no_band and not args.no_band_plot:
+        write_standalone_script(band_plot_script)
     write_run_script(
         run_script,
         env_file,
@@ -358,6 +388,10 @@ def main(argv: list[str] | None = None) -> None:
         run_thermal=not args.no_thermal,
         run_dos=not args.no_dos,
         run_band=not args.no_band,
+        run_band_plot=not args.no_band_plot,
+        band_plot_script=args.band_plot_script,
+        band_plot_png=args.band_plot_png,
+        band_plot_title=args.band_plot_title,
         module_purge=args.module_purge,
     )
     write_sbatch_script(sbatch_script, run_script, args.job_name, args.time, args.cpus, args.mem)
@@ -367,7 +401,18 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Wrote env file      : {env_file}")
     print(f"Wrote run script    : {run_script}")
     print(f"Wrote sbatch script : {sbatch_script}")
-    print("Expected outputs    : thermal_properties.yaml, total_dos.dat, band.yaml")
+    if band_plot_script.exists():
+        print(f"Wrote band plotter  : {band_plot_script}")
+    expected = []
+    if not args.no_thermal:
+        expected.append("thermal_properties.yaml")
+    if not args.no_dos:
+        expected.append("total_dos.dat")
+    if not args.no_band:
+        expected.append("band.yaml")
+    if not args.no_band and not args.no_band_plot:
+        expected.append(args.band_plot_png)
+    print(f"Expected outputs    : {', '.join(expected)}")
     if args.submit:
         subprocess.run(["sbatch", str(sbatch_script)], cwd=outdir, check=True)
 
