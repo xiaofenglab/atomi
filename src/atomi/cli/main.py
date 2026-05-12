@@ -144,6 +144,11 @@ def build_parser() -> argparse.ArgumentParser:
     cp2k_live.add_argument("--mode", choices=("auto", "md", "geo"), default="auto")
     cp2k_live.add_argument("--window", type=int, default=300)
     cp2k_live.add_argument("--refresh", type=int, default=15)
+    cp2k_live.add_argument(
+        "--track-atom",
+        type=int,
+        help="Track one 1-based trajectory atom as a metal-distance trace.",
+    )
 
     cp2k_all = subparsers.add_parser(
         "cp2k-all",
@@ -580,6 +585,7 @@ def main(argv: list[str] | None = None) -> None:
             mode=args.mode,
             window=args.window,
             refresh=args.refresh,
+            track_atom=args.track_atom,
         )
         return
 

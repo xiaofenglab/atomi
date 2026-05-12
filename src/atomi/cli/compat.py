@@ -71,6 +71,11 @@ def plotcp2k(argv: list[str] | None = None) -> None:
     parser.add_argument("--mode", choices=("auto", "md", "geo"), default="auto")
     parser.add_argument("--window", type=int, default=300)
     parser.add_argument("--refresh", type=int, default=15)
+    parser.add_argument(
+        "--track-atom",
+        type=int,
+        help="Track one 1-based trajectory atom as a metal-distance trace.",
+    )
     args = parser.parse_args(argv)
 
     plot_cp2k(
@@ -79,6 +84,7 @@ def plotcp2k(argv: list[str] | None = None) -> None:
         mode=args.mode,
         window=args.window,
         refresh=args.refresh,
+        track_atom=args.track_atom,
     )
 
 

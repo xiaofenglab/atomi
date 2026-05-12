@@ -15,6 +15,8 @@ if (!exists("xyzfile")) {
 if (!exists("refresh")) refresh = 15
 if (!exists("win"))     win = 300
 if (win < 1)            win = 300
+if (!exists("track_atom")) track_atom = 0
+track_atom_meta = (int(track_atom) > 0) ? sprintf("%d", int(track_atom)) : "NA"
 
 if (!exists("helper_py")) {
     helper_py = "cp2k_md_bondtrack.py"
@@ -75,8 +77,9 @@ system(build_live_cmd)
 # ------------------------------------------------------------
 if (strlen(xyzfile) > 0) {
     bond_update_cmd = \
-    "if [ ! -f '" . bond_dat . "' ] || [ '" . file . "' -nt '" . bond_dat . "' ] || [ '" . xyzfile . "' -nt '" . bond_dat . "' ]; then " . \
-    "python3 '" . helper_py . "' '" . file . "' '" . xyzfile . "' '" . bond_dat . "' > cp2k_md_bondtrack.debug 2>&1; fi"
+    "if [ ! -f '" . bond_dat . "' ] || [ '" . file . "' -nt '" . bond_dat . "' ] || [ '" . xyzfile . "' -nt '" . bond_dat . "' ] || " . \
+    "[ \"$(awk -F= '/^track_atom=/{print $2}' '" . bond_meta . "' 2>/dev/null)\" != '" . track_atom_meta . "' ]; then " . \
+    "python3 '" . helper_py . "' '" . file . "' '" . xyzfile . "' '" . bond_dat . "' '" . sprintf("%d", int(track_atom)) . "' > cp2k_md_bondtrack.debug 2>&1; fi"
     system(bond_update_cmd)
 }
 
@@ -129,6 +132,7 @@ dlabel2 = "d2"
 dlabel3 = "d3"
 dlabel4 = "d4"
 dlabel5 = "d5"
+dlabel6 = "d6"
 
 test_bond_meta_cmd = "test -f '" . bond_meta . "'; echo $?"
 if (int(system(test_bond_meta_cmd)) == 0) {
@@ -154,6 +158,10 @@ if (int(system(test_bond_meta_cmd)) == 0) {
     tmp_label = system("awk -F= '/^distance_labels=/{split($2,a,\",\"); print a[5]}' " . bond_meta)
     if (strlen(tmp_label) > 0) {
         dlabel5 = tmp_label
+    }
+    tmp_label = system("awk -F= '/^distance_labels=/{split($2,a,\",\"); print a[6]}' " . bond_meta)
+    if (strlen(tmp_label) > 0) {
+        dlabel6 = tmp_label
     }
 }
 
@@ -279,14 +287,16 @@ if (have_bonds && ncols >= 5) {
         bond_dat using 1:(ncols>=6 ? column(6) : 1/0) with points pt 7 ps 0.35 lc 6 title dlabel2, \
         bond_dat using 1:(ncols>=7 ? column(7) : 1/0) with points pt 7 ps 0.35 lc 7 title dlabel3, \
         bond_dat using 1:(ncols>=8 ? column(8) : 1/0) with points pt 7 ps 0.35 lc 8 title dlabel4, \
-        bond_dat using 1:(ncols>=9 ? column(9) : 1/0) with points pt 7 ps 0.35 lc 9 title dlabel5
+        bond_dat using 1:(ncols>=9 ? column(9) : 1/0) with points pt 7 ps 0.35 lc 9 title dlabel5, \
+        bond_dat using 1:(ncols>=10 ? column(10) : 1/0) with points pt 7 ps 0.35 lc 10 title dlabel6
     } else {
         plot \
         bond_dat using 1:(ncols>=5 ? column(5) : 1/0) with lines lw 1.2 lc 5 title dlabel1, \
         bond_dat using 1:(ncols>=6 ? column(6) : 1/0) with lines lw 1.2 lc 6 title dlabel2, \
         bond_dat using 1:(ncols>=7 ? column(7) : 1/0) with lines lw 1.2 lc 7 title dlabel3, \
         bond_dat using 1:(ncols>=8 ? column(8) : 1/0) with lines lw 1.2 lc 8 title dlabel4, \
-        bond_dat using 1:(ncols>=9 ? column(9) : 1/0) with lines lw 1.2 lc 9 title dlabel5
+        bond_dat using 1:(ncols>=9 ? column(9) : 1/0) with lines lw 1.2 lc 9 title dlabel5, \
+        bond_dat using 1:(ncols>=10 ? column(10) : 1/0) with lines lw 1.2 lc 10 title dlabel6
     }
 } else {
     plot NaN title "no bond-distance data"

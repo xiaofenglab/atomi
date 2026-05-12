@@ -11,6 +11,7 @@ def plot_cp2k(
     mode: str = "auto",
     window: int = 300,
     refresh: int = 15,
+    track_atom: int | None = None,
 ) -> None:
     """Auto-detect CP2K MD/GEO logs and launch the terminal monitor."""
     if not logfile.is_file():
@@ -24,13 +25,26 @@ def plot_cp2k(
     xyz = xyzfile or auto_find_xyz(logfile, required=False)
 
     if mode == "md":
-        _plot_cp2k_md(logfile=logfile, xyzfile=xyz, window=window, refresh=refresh)
+        _plot_cp2k_md(
+            logfile=logfile,
+            xyzfile=xyz,
+            window=window,
+            refresh=refresh,
+            track_atom=track_atom,
+        )
         return
 
     geodat = Path("cp2k_geo_steps.dat")
     scfdat = Path("cp2k_geo_scf.dat")
     write_geo_tables(logfile=logfile, geodat=geodat, scfdat=scfdat)
-    _plot_cp2k_geo(logfile=logfile, geodat=geodat, scfdat=scfdat, xyzfile=xyz, refresh=refresh)
+    _plot_cp2k_geo(
+        logfile=logfile,
+        geodat=geodat,
+        scfdat=scfdat,
+        xyzfile=xyz,
+        refresh=refresh,
+        track_atom=track_atom,
+    )
 
 
 def plot_cp2k_all(logfile: Path) -> None:
@@ -151,7 +165,13 @@ def write_geo_tables(logfile: Path, geodat: Path, scfdat: Path) -> None:
     scfdat.write_text("\n".join(scf_rows) + ("\n" if scf_rows else ""), encoding="utf-8")
 
 
-def _plot_cp2k_md(logfile: Path, xyzfile: Path | None, window: int, refresh: int) -> None:
+def _plot_cp2k_md(
+    logfile: Path,
+    xyzfile: Path | None,
+    window: int,
+    refresh: int,
+    track_atom: int | None,
+) -> None:
     if xyzfile is None:
         print("WARNING: no XYZ trajectory found; bond panels will be skipped.")
 
@@ -161,6 +181,7 @@ def _plot_cp2k_md(logfile: Path, xyzfile: Path | None, window: int, refresh: int
         f"eta_py='{_quote(_resource('cp2k_md_eta.py'))}'",
         f"win={window}",
         f"refresh={refresh}",
+        f"track_atom={track_atom or 0}",
     ]
     if xyzfile is not None:
         assignments.append(f"xyzfile='{_quote(xyzfile)}'")
@@ -173,6 +194,7 @@ def _plot_cp2k_geo(
     scfdat: Path,
     xyzfile: Path | None,
     refresh: int,
+    track_atom: int | None,
 ) -> None:
     assignments = [
         f"file='{_quote(logfile)}'",
@@ -180,6 +202,7 @@ def _plot_cp2k_geo(
         f"scfdat='{_quote(scfdat)}'",
         f"helper_py='{_quote(_resource('cp2k_md_bondtrack.py'))}'",
         f"refresh={refresh}",
+        f"track_atom={track_atom or 0}",
     ]
     if xyzfile is not None:
         assignments.append(f"xyzfile='{_quote(xyzfile)}'")

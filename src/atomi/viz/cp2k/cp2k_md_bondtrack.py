@@ -92,6 +92,22 @@ def label_shell(shell):
         labels.append(f"{symbol}{counts[symbol]}")
     return labels
 
+def parse_track_atom(value: str | None, symbols: list[str]) -> int | None:
+    if not value or value == "0":
+        return None
+    try:
+        atom_number = int(value)
+    except ValueError as exc:
+        raise RuntimeError(f"tracked atom must be a 1-based integer, got: {value}") from exc
+    if atom_number < 1 or atom_number > len(symbols):
+        raise RuntimeError(
+            f"tracked atom {atom_number} is outside the first-frame atom range 1-{len(symbols)}"
+        )
+    return atom_number - 1
+
+def tracked_atom_label(symbols: list[str], atom_idx: int) -> str:
+    return f"{symbols[atom_idx]}{atom_idx + 1}"
+
 def auto_find_xyz(logfile: Path, xyz_hint: str | None = None):
     if xyz_hint:
         p = Path(xyz_hint)
@@ -139,7 +155,7 @@ def auto_find_xyz(logfile: Path, xyz_hint: str | None = None):
 def main():
     if len(sys.argv) < 2:
         print(
-            "Usage: cp2k_md_bondtrack.py cp2k_md.log [trajectory.xyz] [output.dat]",
+            "Usage: cp2k_md_bondtrack.py cp2k_md.log [trajectory.xyz] [output.dat] [track_atom]",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -147,6 +163,7 @@ def main():
     logfile = Path(sys.argv[1])
     xyzfile = auto_find_xyz(logfile, sys.argv[2] if len(sys.argv) >= 3 else None)
     outfile = Path(sys.argv[3]) if len(sys.argv) >= 4 else Path("cp2k_md_bonds.dat")
+    track_atom_arg = sys.argv[4] if len(sys.argv) >= 5 else None
     metaout = outfile.with_suffix(".meta")
 
     if not logfile.exists():
@@ -166,6 +183,20 @@ def main():
         metal_idx,
     )
     distance_labels = label_shell(display_shell0)
+    dynamic_display_count = len(distance_labels)
+    track_idx = parse_track_atom(track_atom_arg, syms0)
+    track_label = ""
+    track_in_default_shell = False
+    track_replace_position = None
+    if track_idx is not None:
+        track_label = tracked_atom_label(syms0, track_idx)
+        display_indices = [idx for _, idx, _ in display_shell0]
+        if track_idx in display_indices:
+            track_replace_position = display_indices.index(track_idx)
+            distance_labels[track_replace_position] = track_label
+            track_in_default_shell = True
+        else:
+            distance_labels.append(track_label)
     display_count = len(distance_labels)
 
     lines = []
@@ -184,9 +215,19 @@ def main():
             cand.append((dist(mpos, pos[i]), i, s))
         cand.sort(key=lambda x: x[0])
 
-        dvals = [x[0] for x in cand[:display_count]]
-        if len(dvals) < display_count:
-            dvals += [float("nan")] * (display_count - len(dvals))
+        dvals = [x[0] for x in cand[:dynamic_display_count]]
+        if len(dvals) < dynamic_display_count:
+            dvals += [float("nan")] * (dynamic_display_count - len(dvals))
+
+        if track_idx is not None:
+            if track_idx < len(pos):
+                track_distance = dist(mpos, pos[track_idx])
+            else:
+                track_distance = float("nan")
+            if track_replace_position is None:
+                dvals.append(track_distance)
+            else:
+                dvals[track_replace_position] = track_distance
 
         finite = [x for x in dvals if x == x]
         dmin = min(finite) if finite else float("nan")
@@ -213,8 +254,17 @@ def main():
         f.write(f"coordination_number={cn}\n")
         f.write(f"ligand_types={','.join(ligand_types)}\n")
         f.write(f"display_count={display_count}\n")
+        f.write(f"dynamic_display_count={dynamic_display_count}\n")
         f.write(f"display_ligand_types={','.join(display_ligand_types)}\n")
         f.write(f"distance_labels={','.join(distance_labels)}\n")
+        if track_idx is None:
+            f.write("track_atom=NA\n")
+            f.write("track_label=NA\n")
+            f.write("track_in_default_shell=NA\n")
+        else:
+            f.write(f"track_atom={track_idx + 1}\n")
+            f.write(f"track_label={track_label}\n")
+            f.write(f"track_in_default_shell={'yes' if track_in_default_shell else 'no'}\n")
         f.write(f"initial_cutoff={cutoff:.6f}\n")
         f.write("initial_shell=" + ",".join(f"{d:.4f}:{i+1}:{s}" for d, i, s in shell0) + "\n")
         f.write(

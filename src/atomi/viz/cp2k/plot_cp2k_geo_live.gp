@@ -15,6 +15,9 @@ if (!exists("scfdat")) {
 if (!exists("xyzfile")) {
     xyzfile = ""
 }
+if (!exists("track_atom")) {
+    track_atom = 0
+}
 
 refresh = 5
 set datafile commentschars "#"
@@ -26,7 +29,7 @@ bond_dat  = "cp2k_geo_bonds.dat"
 bond_meta = "cp2k_geo_bonds.meta"
 
 if (strlen(xyzfile) > 0) {
-    helper_cmd = sprintf("python3 '%s' '%s' '%s' '%s' > cp2k_geo_bondtrack.debug 2>&1", helper_py, file, xyzfile, bond_dat)
+    helper_cmd = sprintf("python3 '%s' '%s' '%s' '%s' '%d' > cp2k_geo_bondtrack.debug 2>&1", helper_py, file, xyzfile, bond_dat, int(track_atom))
     system(helper_cmd)
 }
 
@@ -57,6 +60,7 @@ dlabel2 = "d2"
 dlabel3 = "d3"
 dlabel4 = "d4"
 dlabel5 = "d5"
+dlabel6 = "d6"
 if (int(system(sprintf("test -f '%s'; echo $?", bond_meta))) == 0) {
     metal_sym = system("awk -F= '/^metal_symbol=/{print $2}' ".bond_meta)
     coord_n   = system("awk -F= '/^coordination_number=/{print $2}' ".bond_meta)
@@ -80,6 +84,10 @@ if (int(system(sprintf("test -f '%s'; echo $?", bond_meta))) == 0) {
     tmp_label = system("awk -F= '/^distance_labels=/{split($2,a,\",\"); print a[5]}' ".bond_meta)
     if (strlen(tmp_label) > 0) {
         dlabel5 = tmp_label
+    }
+    tmp_label = system("awk -F= '/^distance_labels=/{split($2,a,\",\"); print a[6]}' ".bond_meta)
+    if (strlen(tmp_label) > 0) {
+        dlabel6 = tmp_label
     }
 }
 
@@ -208,7 +216,8 @@ if (int(system(sprintf("test -f '%s'; echo $?", bond_dat))) == 0) {
             bond_dat using 1:(ncols>=6 ? column(6) : 1/0) with points pt 7 ps 0.35 lc 6 title dlabel2, \
             bond_dat using 1:(ncols>=7 ? column(7) : 1/0) with points pt 7 ps 0.35 lc 7 title dlabel3, \
             bond_dat using 1:(ncols>=8 ? column(8) : 1/0) with points pt 7 ps 0.35 lc 8 title dlabel4, \
-            bond_dat using 1:(ncols>=9 ? column(9) : 1/0) with points pt 7 ps 0.35 lc 9 title dlabel5
+            bond_dat using 1:(ncols>=9 ? column(9) : 1/0) with points pt 7 ps 0.35 lc 9 title dlabel5, \
+            bond_dat using 1:(ncols>=10 ? column(10) : 1/0) with points pt 7 ps 0.35 lc 10 title dlabel6
         } else {
             set autoscale x
             plot \
@@ -216,7 +225,8 @@ if (int(system(sprintf("test -f '%s'; echo $?", bond_dat))) == 0) {
             bond_dat using 1:(ncols>=6 ? column(6) : 1/0) with lines lw 1.2 lc 6 title dlabel2, \
             bond_dat using 1:(ncols>=7 ? column(7) : 1/0) with lines lw 1.2 lc 7 title dlabel3, \
             bond_dat using 1:(ncols>=8 ? column(8) : 1/0) with lines lw 1.2 lc 8 title dlabel4, \
-            bond_dat using 1:(ncols>=9 ? column(9) : 1/0) with lines lw 1.2 lc 9 title dlabel5
+            bond_dat using 1:(ncols>=9 ? column(9) : 1/0) with lines lw 1.2 lc 9 title dlabel5, \
+            bond_dat using 1:(ncols>=10 ? column(10) : 1/0) with lines lw 1.2 lc 10 title dlabel6
         }
     } else {
         plot NaN title "no bond-distance columns"
