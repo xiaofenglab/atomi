@@ -48,7 +48,7 @@ def find_metal_index(symbols):
             return i, s
     raise RuntimeError("No metal atom detected in first frame.")
 
-def detect_shell(symbols, pos, metal_idx, max_candidates=12):
+def detect_shell(symbols, pos, metal_idx, max_candidates=12, max_display=5):
     mpos = pos[metal_idx]
     pairs = []
     for i, s in enumerate(symbols):
@@ -76,10 +76,21 @@ def detect_shell(symbols, pos, metal_idx, max_candidates=12):
     else:
         cn = 1
 
+    display_count = max(cn, min(max_display, len(pairs)))
     shell = pairs[:cn]
+    display_shell = pairs[:display_count]
     ligand_types = sorted(set(s for _, _, s in shell))
     cutoff = shell[-1][0] + 0.25
-    return cn, ligand_types, cutoff, shell
+    display_ligand_types = sorted(set(s for _, _, s in display_shell))
+    return cn, ligand_types, cutoff, shell, display_shell, display_ligand_types
+
+def label_shell(shell):
+    counts = {}
+    labels = []
+    for _, _, symbol in shell:
+        counts[symbol] = counts.get(symbol, 0) + 1
+        labels.append(f"{symbol}{counts[symbol]}")
+    return labels
 
 def auto_find_xyz(logfile: Path, xyz_hint: str | None = None):
     if xyz_hint:
@@ -127,7 +138,10 @@ def auto_find_xyz(logfile: Path, xyz_hint: str | None = None):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: cp2k_md_bondtrack.py cp2k_md.log [trajectory.xyz] [output.dat]", file=sys.stderr)
+        print(
+            "Usage: cp2k_md_bondtrack.py cp2k_md.log [trajectory.xyz] [output.dat]",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     logfile = Path(sys.argv[1])
@@ -146,10 +160,16 @@ def main():
 
     _, syms0, pos0 = frames[0]
     metal_idx, metal_sym = find_metal_index(syms0)
-    cn, ligand_types, cutoff, shell0 = detect_shell(syms0, pos0, metal_idx)
+    cn, ligand_types, cutoff, shell0, display_shell0, display_ligand_types = detect_shell(
+        syms0,
+        pos0,
+        metal_idx,
+    )
+    distance_labels = label_shell(display_shell0)
+    display_count = len(distance_labels)
 
     lines = []
-    header_cols = ["frame", "min_d", "max_d", "mean_d"] + [f"d{i+1}" for i in range(cn)]
+    header_cols = ["frame", "min_d", "max_d", "mean_d"] + distance_labels
 
     for iframe, (_, syms, pos) in enumerate(frames, start=1):
         mpos = pos[metal_idx]
@@ -159,14 +179,14 @@ def main():
                 continue
             if s in COMMON_EXCLUDE:
                 continue
-            if s not in ligand_types:
+            if s not in display_ligand_types:
                 continue
             cand.append((dist(mpos, pos[i]), i, s))
         cand.sort(key=lambda x: x[0])
 
-        dvals = [x[0] for x in cand[:cn]]
-        if len(dvals) < cn:
-            dvals += [float("nan")] * (cn - len(dvals))
+        dvals = [x[0] for x in cand[:display_count]]
+        if len(dvals) < display_count:
+            dvals += [float("nan")] * (display_count - len(dvals))
 
         finite = [x for x in dvals if x == x]
         dmin = min(finite) if finite else float("nan")
@@ -192,8 +212,19 @@ def main():
         f.write(f"metal_symbol={metal_sym}\n")
         f.write(f"coordination_number={cn}\n")
         f.write(f"ligand_types={','.join(ligand_types)}\n")
+        f.write(f"display_count={display_count}\n")
+        f.write(f"display_ligand_types={','.join(display_ligand_types)}\n")
+        f.write(f"distance_labels={','.join(distance_labels)}\n")
         f.write(f"initial_cutoff={cutoff:.6f}\n")
         f.write("initial_shell=" + ",".join(f"{d:.4f}:{i+1}:{s}" for d, i, s in shell0) + "\n")
+        f.write(
+            "display_shell="
+            + ",".join(
+                f"{label}:{d:.4f}:{i+1}:{s}"
+                for label, (d, i, s) in zip(distance_labels, display_shell0)
+            )
+            + "\n"
+        )
 
     print(f"Wrote {outfile}")
     print(f"Wrote {metaout}")
@@ -201,6 +232,7 @@ def main():
     print(f"Detected metal: {metal_sym} (index {metal_idx + 1})")
     print(f"Detected CN: {cn}")
     print(f"Detected ligand types: {', '.join(ligand_types)}")
+    print(f"Displayed distance labels: {', '.join(distance_labels)}")
 
 if __name__ == "__main__":
     main()

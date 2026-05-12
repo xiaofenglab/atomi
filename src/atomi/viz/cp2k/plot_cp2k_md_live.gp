@@ -124,12 +124,27 @@ if (int(system(test_live_meta_cmd)) == 0) {
 metal_sym = "NA"
 coord_n   = "NA"
 lig_types = "NA"
+dlabel1 = "d1"
+dlabel2 = "d2"
+dlabel3 = "d3"
+dlabel4 = "d4"
+dlabel5 = "d5"
 
 test_bond_meta_cmd = "test -f '" . bond_meta . "'; echo $?"
 if (int(system(test_bond_meta_cmd)) == 0) {
     metal_sym = system("awk -F= '/^metal_symbol=/{print $2}' " . bond_meta)
     coord_n   = system("awk -F= '/^coordination_number=/{print $2}' " . bond_meta)
     lig_types = system("awk -F= '/^ligand_types=/{print $2}' " . bond_meta)
+    tmp_label = system("awk -F= '/^distance_labels=/{split($2,a,\",\"); print a[1]}' " . bond_meta)
+    if (strlen(tmp_label) > 0) dlabel1 = tmp_label
+    tmp_label = system("awk -F= '/^distance_labels=/{split($2,a,\",\"); print a[2]}' " . bond_meta)
+    if (strlen(tmp_label) > 0) dlabel2 = tmp_label
+    tmp_label = system("awk -F= '/^distance_labels=/{split($2,a,\",\"); print a[3]}' " . bond_meta)
+    if (strlen(tmp_label) > 0) dlabel3 = tmp_label
+    tmp_label = system("awk -F= '/^distance_labels=/{split($2,a,\",\"); print a[4]}' " . bond_meta)
+    if (strlen(tmp_label) > 0) dlabel4 = tmp_label
+    tmp_label = system("awk -F= '/^distance_labels=/{split($2,a,\",\"); print a[5]}' " . bond_meta)
+    if (strlen(tmp_label) > 0) dlabel5 = tmp_label
 }
 
 # -------- ETA summary --------
@@ -249,9 +264,19 @@ bxmin = (bond_rows > win) ? (bond_rows - win + 1) : 1
 if (have_bonds && ncols >= 5) {
     set xrange [bxmin:bxmax]
     if (bond_rows <= 1) {
-        plot for [col=5:ncols] bond_dat using 1:col with points pt 7 ps 0.35 lc col title sprintf("d%d", col-4)
+        plot \
+        bond_dat using 1:(ncols>=5 ? column(5) : 1/0) with points pt 7 ps 0.35 lc 5 title dlabel1, \
+        bond_dat using 1:(ncols>=6 ? column(6) : 1/0) with points pt 7 ps 0.35 lc 6 title dlabel2, \
+        bond_dat using 1:(ncols>=7 ? column(7) : 1/0) with points pt 7 ps 0.35 lc 7 title dlabel3, \
+        bond_dat using 1:(ncols>=8 ? column(8) : 1/0) with points pt 7 ps 0.35 lc 8 title dlabel4, \
+        bond_dat using 1:(ncols>=9 ? column(9) : 1/0) with points pt 7 ps 0.35 lc 9 title dlabel5
     } else {
-        plot for [col=5:ncols] bond_dat using 1:col with lines lw 1.2 lc col title sprintf("d%d", col-4)
+        plot \
+        bond_dat using 1:(ncols>=5 ? column(5) : 1/0) with lines lw 1.2 lc 5 title dlabel1, \
+        bond_dat using 1:(ncols>=6 ? column(6) : 1/0) with lines lw 1.2 lc 6 title dlabel2, \
+        bond_dat using 1:(ncols>=7 ? column(7) : 1/0) with lines lw 1.2 lc 7 title dlabel3, \
+        bond_dat using 1:(ncols>=8 ? column(8) : 1/0) with lines lw 1.2 lc 8 title dlabel4, \
+        bond_dat using 1:(ncols>=9 ? column(9) : 1/0) with lines lw 1.2 lc 9 title dlabel5
     }
 } else {
     plot NaN title "no bond-distance data"
