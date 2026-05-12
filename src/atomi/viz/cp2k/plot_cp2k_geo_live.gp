@@ -236,9 +236,9 @@ plot \
 # ============================================================
 # PANEL 5 : Individual nearest-shell bond distances
 # ============================================================
-set title "Nearest-shell metal-ligand distances"
+set title "Nearest-shell metal-ligand distances\nDistance (Angstrom)"
 set xlabel "Frame"
-set ylabel "Distance (Angstrom)" offset -2,0
+set ylabel ""
 set grid
 set key outside right top
 set rmargin 18
