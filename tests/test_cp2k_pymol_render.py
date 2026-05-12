@@ -46,9 +46,8 @@ def test_pymol_render_writes_workspace_and_archive(tmp_path: Path) -> None:
                 "--no-ray",
                 "--ga-o-cutoff",
                 "2.70",
-                "--archive",
-                "--archive-path",
-                str(archive),
+                "--movie-name",
+                "ga_water_entry.mp4",
             ]
         )
 
@@ -87,14 +86,33 @@ def test_pymol_render_writes_workspace_and_archive(tmp_path: Path) -> None:
     assert "requested_stop = 10" in summary_text
     assert "effective_stop = 1" in summary_text
     assert "frames_to_render = 1" in summary_text
+    assert "movie_name = ga_water_entry.mp4" in summary_text
 
     terminal = stdout.getvalue()
     assert "available XYZ frames: 1" in terminal
     assert "frames selected for rendering: 1 (1:1:2)" in terminal
     assert "requested stop 10 was clamped to available frame 1" in terminal
+    assert "movie name: ga_water_entry.mp4" in terminal
 
+    (outdir / "frames" / "frame0001.png").write_text("frame", encoding="utf-8")
+    (outdir / "snapshots" / "snapshot_0001.png").write_text("snapshot", encoding="utf-8")
+    (outdir / "ga_water_entry.mp4").write_text("movie", encoding="utf-8")
+    main(
+        [
+            "--pack-existing",
+            str(outdir),
+            "--movie-name",
+            "ga_water_entry.mp4",
+            "--archive-path",
+            str(archive),
+        ]
+    )
     assert archive.is_file()
     with tarfile.open(archive, "r:gz") as handle:
         names = set(handle.getnames())
-    assert "render/render_movie.pml" in names
-    assert "render/aimd_render_dynamic.py" in names
+    assert "download_manifest.txt" in names
+    assert "render_movie.pml" in names
+    assert "aimd_render_dynamic.py" in names
+    assert "ga_water_entry.mp4" in names
+    assert "frames.tar.gz" in names
+    assert "snapshots.tar.gz" in names

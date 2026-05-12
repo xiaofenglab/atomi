@@ -6,6 +6,7 @@ import argparse
 import shlex
 import subprocess
 import tarfile
+import tempfile
 from pathlib import Path
 
 
@@ -456,26 +457,101 @@ def write_shell_scripts(args: argparse.Namespace, outdir: Path, archive_path: Pa
     (outdir / "pack_for_download.sh").write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
-        "cd \"$(dirname \"$0\")/..\"\n"
-        f"tar -czf {shlex.quote(archive_path.name)} {shlex.quote(outdir.name)}\n",
+        "cd \"$(dirname \"$0\")\"\n"
+        "python -m atomi.cp2k.pymol_render "
+        "--pack-existing . "
+        f"--movie-name {shlex.quote(args.movie_name)} "
+        f"--archive-path {shlex.quote(str(archive_path.resolve()))}\n",
         encoding="utf-8",
     )
     for script in ("run_pymol_render.sh", "make_movie.sh", "pack_for_download.sh"):
         (outdir / script).chmod(0o755)
 
 
-def make_archive(outdir: Path, archive_path: Path) -> None:
+def tar_directory_contents(source_dir: Path, output_path: Path) -> bool:
+    members = [item for item in sorted(source_dir.iterdir()) if item.name != ".DS_Store"]
+    if not members:
+        return False
+    with tarfile.open(output_path, "w:gz") as archive:
+        for item in members:
+            archive.add(item, arcname=f"{source_dir.name}/{item.name}")
+    return True
+
+
+def write_download_manifest(
+    path: Path,
+    outdir: Path,
+    movie_name: str,
+    included_files: list[str],
+) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                "Atomi PyMOL render download bundle",
+                f"source_render_folder = {outdir.resolve()}",
+                f"movie_name = {movie_name}",
+                "",
+                "Contents:",
+                *[f"- {item}" for item in included_files],
+                "",
+                "Large PNG folders are packed as frames.tar.gz and snapshots.tar.gz when present.",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def make_archive(outdir: Path, archive_path: Path, movie_name: str) -> None:
     if archive_path.exists():
         archive_path.unlink()
-    with tarfile.open(archive_path, "w:gz") as archive:
-        archive.add(outdir, arcname=outdir.name)
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    direct_names = [
+        movie_name,
+        "render_summary.txt",
+        "render_movie.pml",
+        "aimd_render_dynamic.py",
+        "run_pymol_render.sh",
+        "make_movie.sh",
+        "pack_for_download.sh",
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        included: list[str] = []
+        nested_archives: list[Path] = []
+        for folder_name in ("frames", "snapshots"):
+            folder = outdir / folder_name
+            if folder.is_dir():
+                nested = tmpdir / f"{folder_name}.tar.gz"
+                if tar_directory_contents(folder, nested):
+                    nested_archives.append(nested)
+                    included.append(nested.name)
+        for name in direct_names:
+            if (outdir / name).exists():
+                included.append(name)
+        manifest = tmpdir / "download_manifest.txt"
+        write_download_manifest(
+            manifest,
+            outdir=outdir,
+            movie_name=movie_name,
+            included_files=included,
+        )
+
+        with tarfile.open(archive_path, "w:gz") as archive:
+            archive.add(manifest, arcname="download_manifest.txt")
+            for name in direct_names:
+                path = outdir / name
+                if path.exists():
+                    archive.add(path, arcname=name)
+            for nested in nested_archives:
+                archive.add(nested, arcname=nested.name)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Generate and optionally run PyMOL rendering scripts for CP2K AIMD XYZ files."
     )
-    parser.add_argument("xyz", type=Path, help="CP2K multi-frame XYZ trajectory.")
+    parser.add_argument("xyz", type=Path, nargs="?", help="CP2K multi-frame XYZ trajectory.")
     parser.add_argument("--outdir", type=Path, default=Path("pymol_render"))
     parser.add_argument("--object-name", default="traj")
     parser.add_argument("--start", type=int, default=1)
@@ -520,14 +596,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--archive",
         action="store_true",
-        help="Create a tar.gz archive for download.",
+        help="Create a compact download archive with nested frame/snapshot tarballs.",
     )
     parser.add_argument("--archive-path", type=Path)
+    parser.add_argument("--pack-existing", type=Path, help=argparse.SUPPRESS)
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if args.pack_existing is not None:
+        archive_path = args.archive_path or args.pack_existing.with_suffix(".tar.gz")
+        make_archive(args.pack_existing, archive_path, movie_name=args.movie_name)
+        print(f"Wrote download archive: {archive_path}")
+        return
+    if args.xyz is None:
+        raise ValueError("XYZ trajectory is required unless --pack-existing is used")
     if not args.xyz.is_file():
         raise FileNotFoundError(f"XYZ trajectory not found: {args.xyz}")
     available_frames = count_xyz_frames(args.xyz)
@@ -560,6 +644,7 @@ def main(argv: list[str] | None = None) -> None:
         f"effective_stop = {effective_stop}",
         f"step = {args.step}",
         f"frames_to_render = {n_render}",
+        f"movie_name = {args.movie_name}",
         f"snapshots_requested = {','.join(str(item) for item in args.snapshot) or 'none'}",
     ]
     (outdir / "render_summary.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
@@ -572,6 +657,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     if requested_stop != effective_stop:
         print(f"  requested stop {requested_stop} was clamped to available frame {effective_stop}")
+    print(f"  movie name: {args.movie_name}")
     print(f"  helper: {outdir / helper_name}")
     print(f"  driver: {outdir / 'render_movie.pml'}")
     print(f"  summary: {outdir / 'render_summary.txt'}")
@@ -584,7 +670,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.make_movie:
         subprocess.run([str(outdir / "make_movie.sh")], check=True)
     if args.archive:
-        make_archive(outdir, archive_path)
+        make_archive(outdir, archive_path, movie_name=args.movie_name)
         print(f"Wrote download archive: {archive_path}")
 
 
