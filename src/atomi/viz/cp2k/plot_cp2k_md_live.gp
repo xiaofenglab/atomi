@@ -129,6 +129,7 @@ if (int(system(test_live_meta_cmd)) == 0) {
 metal_sym = "NA"
 coord_n   = "NA"
 lig_types = "NA"
+summary_label = "displayed"
 dlabel1 = "d1"
 dlabel2 = "d2"
 dlabel3 = "d3"
@@ -141,6 +142,10 @@ if (int(system(test_bond_meta_cmd)) == 0) {
     metal_sym = system("awk -F= '/^metal_symbol=/{print $2}' " . bond_meta)
     coord_n   = system("awk -F= '/^coordination_number=/{print $2}' " . bond_meta)
     lig_types = system("awk -F= '/^ligand_types=/{print $2}' " . bond_meta)
+    tmp_label = system("awk -F= '/^summary_label=/{print $2}' " . bond_meta)
+    if (strlen(tmp_label) > 0) {
+        summary_label = tmp_label
+    }
     tmp_label = system("awk -F= '/^distance_labels=/{split($2,a,\",\"); print a[1]}' " . bond_meta)
     if (strlen(tmp_label) > 0) {
         dlabel1 = tmp_label
@@ -345,7 +350,7 @@ if (have_bonds && ncols >= 5) {
 # ============================================================
 # PANEL 6 : Bond summary
 # ============================================================
-set title "Bond summary"
+set title sprintf("Bond summary (%s)", summary_label)
 set xlabel "Frame"
 set ylabel "Distance (Angstrom)" offset -2,0
 set grid

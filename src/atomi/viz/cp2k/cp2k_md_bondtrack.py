@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys
 import math
+from collections import Counter
 from pathlib import Path
 
 METALS = {
@@ -91,6 +92,17 @@ def label_shell(shell):
         counts[symbol] = counts.get(symbol, 0) + 1
         labels.append(f"{symbol}{counts[symbol]}")
     return labels
+
+def choose_summary_ligand(shell):
+    counts = Counter(symbol for _, _, symbol in shell)
+    if not counts:
+        return None, 0, "displayed"
+    ranked = counts.most_common()
+    symbol, count = ranked[0]
+    second_count = ranked[1][1] if len(ranked) > 1 else 0
+    if count > second_count:
+        return symbol, count, f"{symbol}x{count}"
+    return None, len(shell), "displayed"
 
 def parse_track_atom(value: str | None, symbols: list[str]) -> int | None:
     if not value or value == "0":
@@ -183,6 +195,7 @@ def main():
         metal_idx,
     )
     distance_labels = label_shell(display_shell0)
+    summary_ligand_type, summary_ligand_count, summary_label = choose_summary_ligand(shell0)
     dynamic_display_count = len(distance_labels)
     track_idx = parse_track_atom(track_atom_arg, syms0)
     track_label = ""
@@ -229,7 +242,22 @@ def main():
             else:
                 dvals[track_replace_position] = track_distance
 
-        finite = [x for x in dvals if x == x]
+        if summary_ligand_type is None:
+            summary_vals = dvals[:dynamic_display_count]
+        else:
+            summary_cand = []
+            for i, s in enumerate(syms):
+                if i == metal_idx:
+                    continue
+                if s != summary_ligand_type:
+                    continue
+                summary_cand.append(dist(mpos, pos[i]))
+            summary_cand.sort()
+            summary_vals = summary_cand[:summary_ligand_count]
+            if len(summary_vals) < summary_ligand_count:
+                summary_vals += [float("nan")] * (summary_ligand_count - len(summary_vals))
+
+        finite = [x for x in summary_vals if x == x]
         dmin = min(finite) if finite else float("nan")
         dmax = max(finite) if finite else float("nan")
         dmean = sum(finite) / len(finite) if finite else float("nan")
@@ -257,6 +285,9 @@ def main():
         f.write(f"dynamic_display_count={dynamic_display_count}\n")
         f.write(f"display_ligand_types={','.join(display_ligand_types)}\n")
         f.write(f"distance_labels={','.join(distance_labels)}\n")
+        f.write(f"summary_ligand_type={summary_ligand_type or 'displayed'}\n")
+        f.write(f"summary_ligand_count={summary_ligand_count}\n")
+        f.write(f"summary_label={summary_label}\n")
         if track_idx is None:
             f.write("track_atom=NA\n")
             f.write("track_label=NA\n")
@@ -283,6 +314,7 @@ def main():
     print(f"Detected CN: {cn}")
     print(f"Detected ligand types: {', '.join(ligand_types)}")
     print(f"Displayed distance labels: {', '.join(distance_labels)}")
+    print(f"Bond summary basis: {summary_label}")
 
 if __name__ == "__main__":
     main()

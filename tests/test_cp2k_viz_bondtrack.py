@@ -53,11 +53,15 @@ def test_bondtrack_writes_element_labels_and_five_distances(tmp_path: Path) -> N
     rows = [line.split() for line in out.read_text(encoding="utf-8").splitlines()[1:]]
     assert len(rows) == 2
     assert len(rows[0]) == 9
+    assert rows[0][1:4] == ["2.40000000", "2.70000000", "2.55000000"]
 
     meta = out.with_suffix(".meta").read_text(encoding="utf-8")
     assert "display_count=5" in meta
     assert "display_ligand_types=Cl,O" in meta
     assert "distance_labels=Cl1,Cl2,Cl3,Cl4,O1" in meta
+    assert "summary_ligand_type=Cl" in meta
+    assert "summary_ligand_count=4" in meta
+    assert "summary_label=Clx4" in meta
 
 
 def test_bondtrack_relabels_tracked_atom_in_display_shell(tmp_path: Path) -> None:
@@ -108,6 +112,7 @@ def test_bondtrack_appends_tracked_atom_outside_display_shell(tmp_path: Path) ->
     assert header == "# frame min_d max_d mean_d Cl1 Cl2 Cl3 Cl4 O1 O8"
     rows = [line.split() for line in out.read_text(encoding="utf-8").splitlines()[1:]]
     assert len(rows[0]) == 10
+    assert rows[0][1:4] == ["2.40000000", "2.70000000", "2.55000000"]
     assert rows[0][-1] == "6.00000000"
 
     meta = out.with_suffix(".meta").read_text(encoding="utf-8")
