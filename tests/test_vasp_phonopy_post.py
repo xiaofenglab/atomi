@@ -114,6 +114,7 @@ def test_vasp_phonopy_post_writes_env_run_and_sbatch(tmp_path: Path) -> None:
     assert "total_dos.dat" in run_text
     assert "band.yaml" in run_text
     assert (outdir / "plot_phonopy_band.py").exists()
+    assert "#SBATCH --mem=96G" in sbatch_text
     assert "bash run_phonopy_post.sh" in sbatch_text
     assert "Inferred reference cell" in summary_text
 

@@ -355,7 +355,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--job-name", default="phonopy_post")
     parser.add_argument("--time", default="12:00:00")
     parser.add_argument("--cpus", type=int, default=8)
-    parser.add_argument("--mem", default="16G")
+    parser.add_argument("--mem", default="96G")
     parser.add_argument("--submit", action="store_true", help="Run sbatch after writing files.")
     return parser
 
