@@ -607,6 +607,38 @@ def write_candidate_outputs(
             )
 
 
+def print_candidate_summary(
+    candidates: list[Candidate],
+    metal_index: int,
+    ligand_index: int,
+) -> None:
+    if not candidates:
+        print("No candidate water molecules passed the distance/angle filters.")
+        return
+
+    print("Chosen water-entry candidates:")
+    print(
+        "  rank frame step time_ps metal ligand Owater Hs "
+        "M-ligand_A M-Owater_A angle_deg score"
+    )
+    for rank, candidate in enumerate(candidates, start=1):
+        h1, h2 = candidate.hydrogen_indices
+        print(
+            f"  {rank:>2d} "
+            f"{candidate.frame.index + 1:>5d} "
+            f"{candidate.step:>8d} "
+            f"{candidate.time_ps:>7.3f} "
+            f"{metal_index + 1:>5d} "
+            f"{ligand_index + 1:>6d} "
+            f"{candidate.oxygen_index + 1:>6d} "
+            f"{h1 + 1},{h2 + 1} "
+            f"{candidate.metal_ligand_distance:>10.4f} "
+            f"{candidate.metal_water_distance:>10.4f} "
+            f"{candidate.angle_deg:>9.2f} "
+            f"{candidate.score:>7.4f}"
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -694,6 +726,7 @@ def main(argv: list[str] | None = None) -> None:
         water_k=args.water_k,
     )
     print(f"Scanned {len(frames)} frame(s); selected {len(candidates)} water-entry candidate(s).")
+    print_candidate_summary(candidates, metal_index=metal_index, ligand_index=ligand_index)
     print(f"Wrote outputs to {args.outdir}")
 
 

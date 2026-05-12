@@ -1,3 +1,5 @@
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 from atomi.cp2k.water_entry import main, parse_cp2k_input, read_xyz_trajectory
@@ -77,28 +79,36 @@ def test_water_entry_writes_candidate_inputs(tmp_path: Path) -> None:
     write_trajectory(traj)
     write_input(inp)
 
-    main(
-        [
-            str(traj),
-            "--inp",
-            str(inp),
-            "--outdir",
-            str(outdir),
-            "--last-ps",
-            "1.5",
-            "--max-candidates",
-            "2",
-            "--min-frame-gap",
-            "1",
-            "--cl-target",
-            "2.80",
-            "--water-target",
-            "2.80",
-        ]
-    )
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        main(
+            [
+                str(traj),
+                "--inp",
+                str(inp),
+                "--outdir",
+                str(outdir),
+                "--last-ps",
+                "1.5",
+                "--max-candidates",
+                "2",
+                "--min-frame-gap",
+                "1",
+                "--cl-target",
+                "2.80",
+                "--water-target",
+                "2.80",
+            ]
+        )
 
     frames = read_xyz_trajectory(traj)
     assert len(frames) == 3
+    terminal = stdout.getvalue()
+    assert "Chosen water-entry candidates:" in terminal
+    assert "M-Owater_A" in terminal
+    assert "angle_deg" in terminal
+    assert "score" in terminal
+    assert "2.7500" in terminal
     summary = outdir / "water_entry_candidates.csv"
     assert summary.is_file()
     candidate_inputs = sorted(outdir.glob("*_water_entry.inp"))
