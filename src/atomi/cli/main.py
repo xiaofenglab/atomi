@@ -193,6 +193,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cp2k_water_entry.add_argument("water_entry_args", nargs=argparse.REMAINDER)
 
+    cp2k_pymol_render = subparsers.add_parser(
+        "cp2k-pymol-render",
+        help="Generate and optionally run PyMOL AIMD render/movie scripts.",
+    )
+    cp2k_pymol_render.add_argument("render_args", nargs=argparse.REMAINDER)
+
     mace_live = subparsers.add_parser(
         "mace-live",
         help="Live terminal plot for MACE training logs.",
@@ -408,6 +414,11 @@ def main(argv: list[str] | None = None) -> None:
 
         cp2k_water_entry_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "cp2k-pymol-render":
+        from atomi.cp2k.pymol_render import main as cp2k_pymol_render_main
+
+        cp2k_pymol_render_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "vasp-outcar":
         extv(raw_args[1:])
         return
@@ -616,6 +627,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.cp2k.water_entry import main as cp2k_water_entry_main
 
         cp2k_water_entry_main(args.water_entry_args)
+        return
+
+    if args.subcommand == "cp2k-pymol-render":
+        from atomi.cp2k.pymol_render import main as cp2k_pymol_render_main
+
+        cp2k_pymol_render_main(args.render_args)
         return
 
     if args.subcommand == "mace-live":
