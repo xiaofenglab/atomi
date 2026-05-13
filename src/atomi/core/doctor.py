@@ -581,6 +581,13 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
             "env_path": "ATOMI_LAMMPS_ENV",
             "lammps_executable": "ATOMI_LMP_EXE",
             "lammps_prefix": "ATOMI_LAMMPS_PREFIX",
+            "partition": "ATOMI_LAMMPS_PARTITION",
+            "gres": "ATOMI_LAMMPS_GRES",
+            "nodes": "ATOMI_LAMMPS_NODES",
+            "ntasks": "ATOMI_LAMMPS_NTASKS",
+            "cpus_per_task": "ATOMI_LAMMPS_CPUS_PER_TASK",
+            "mem_per_cpu": "ATOMI_LAMMPS_MEM_PER_CPU",
+            "mem": "ATOMI_LAMMPS_MEM",
         }
         for field, env_key in mappings.items():
             if _nonempty(lammps.get(field)):

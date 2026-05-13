@@ -111,6 +111,9 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
                 "profiles": {
                     "lammps_md_engine": {
                         "env_path": "/private/env",
+                        "partition": "gpu",
+                        "gres": "gpu:1",
+                        "cpus_per_task": 4,
                         "modules": ["compiler/private", "cuda/private"],
                         "lammps_executable": "/private/lmp",
                         "lammps_prefix": "/private/lammps",
@@ -140,6 +143,9 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
     assert "source" in result["next_steps"][0]
     assert "export ATOMI_HPC_CONFIG=" in env_text
     assert "export ATOMI_LAMMPS_ENV=/private/env" in env_text
+    assert "export ATOMI_LAMMPS_PARTITION=gpu" in env_text
+    assert "export ATOMI_LAMMPS_GRES=gpu:1" in env_text
+    assert "export ATOMI_LAMMPS_CPUS_PER_TASK=4" in env_text
     assert "export ATOMI_LAMMPS_MODULES='compiler/private cuda/private'" in env_text
     assert "export ATOMI_LMP_EXE=/private/lmp" in env_text
     assert "export ATOMI_CP2K_DATA_DIR=/private/cp2k/data" in env_text

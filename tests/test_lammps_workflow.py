@@ -6,6 +6,7 @@ import pytest
 
 import atomi.lammps.thermo_series as thermo_series
 from atomi.lammps.workflow import (
+    create_stage_wrapper,
     check_not_exploded_for_max_chunk,
     effective_max_chunks,
     is_npt_equilibration_stage,
@@ -165,6 +166,43 @@ def test_fixed_step_stage_still_defaults_to_single_chunk() -> None:
     }
 
     assert effective_max_chunks(cfg, stage) == 1
+
+
+def test_stage_wrapper_rewrites_sbatch_resources_from_environment(tmp_path, monkeypatch) -> None:
+    template = tmp_path / "run_lammps_gpu.sh"
+    template.write_text(
+        "\n".join(
+            [
+                "#!/bin/bash",
+                "##SBATCH --partition=old",
+                "#SBATCH --nodes=1",
+                "#SBATCH --ntasks=1",
+                "##SBATCH --gres=gpu:1",
+                "#SBATCH --cpus-per-task=1",
+                "#SBATCH --mem-per-cpu=3500M",
+                "#SBATCH --time=1:00:00",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ATOMI_LAMMPS_PARTITION", "gpu")
+    monkeypatch.setenv("ATOMI_LAMMPS_GRES", "gpu:1")
+    monkeypatch.setenv("ATOMI_LAMMPS_CPUS_PER_TASK", "4")
+    chunk_dir = tmp_path / "chunk_01"
+    chunk_dir.mkdir()
+
+    wrapper = create_stage_wrapper(
+        {"wrapper_script": str(template)},
+        chunk_dir,
+        "05:36:00",
+    )
+    text = wrapper.read_text(encoding="utf-8")
+
+    assert "#SBATCH --partition=gpu" in text
+    assert "#SBATCH --gres=gpu:1" in text
+    assert "#SBATCH --cpus-per-task=4" in text
+    assert "#SBATCH --time=05:36:00" in text
 
 
 def test_qha_cp_can_generate_thermo_anchor_values(tmp_path) -> None:

@@ -20,6 +20,7 @@ from difflib import get_close_matches
 from pathlib import Path
 from statistics import mean
 import argparse
+import os
 import shutil
 
 
@@ -291,8 +292,67 @@ def ramp_target_reached(cfg, stage, steps, temperatures):
 # CREATE PER-CHUNK WRAPPER
 # ---------------------------------------------------
 
+SBATCH_RESOURCE_ENV = {
+    "partition": "ATOMI_LAMMPS_PARTITION",
+    "gres": "ATOMI_LAMMPS_GRES",
+    "nodes": "ATOMI_LAMMPS_NODES",
+    "ntasks": "ATOMI_LAMMPS_NTASKS",
+    "cpus-per-task": "ATOMI_LAMMPS_CPUS_PER_TASK",
+    "mem-per-cpu": "ATOMI_LAMMPS_MEM_PER_CPU",
+    "mem": "ATOMI_LAMMPS_MEM",
+}
+
+
+def _cfg_resource_value(cfg, option):
+    resources = cfg.get("slurm_resources", {})
+    if not isinstance(resources, dict):
+        resources = {}
+    aliases = {
+        "cpus-per-task": ("cpus_per_task", "cpus-per-task"),
+        "mem-per-cpu": ("mem_per_cpu", "mem-per-cpu"),
+    }
+    keys = aliases.get(option, (option.replace("-", "_"), option))
+    for key in keys:
+        value = resources.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _sbatch_resource_overrides(cfg):
+    overrides = {}
+    for option, env_key in SBATCH_RESOURCE_ENV.items():
+        value = os.environ.get(env_key) or _cfg_resource_value(cfg, option)
+        if value not in (None, ""):
+            overrides[option] = str(value)
+    return overrides
+
+
+def _replace_sbatch_option(script, option, value):
+    pattern = rf"(?m)^#+SBATCH\s+--{re.escape(option)}(?:[=\s].*)?$"
+    replacement = f"#SBATCH --{option}={value}"
+    updated, count = re.subn(pattern, replacement, script)
+    if count:
+        return updated
+
+    lines = updated.splitlines()
+    insert_at = 0
+    for index, line in enumerate(lines):
+        if re.match(r"^#+SBATCH\b", line):
+            insert_at = index + 1
+    lines.insert(insert_at, replacement)
+    return "\n".join(lines) + ("\n" if updated.endswith("\n") else "")
+
+
+def _apply_sbatch_resource_overrides(script, cfg):
+    for option, value in _sbatch_resource_overrides(cfg).items():
+        script = _replace_sbatch_option(script, option, value)
+    return script
+
+
 def create_stage_wrapper(cfg, chunk_dir, walltime):
     template = Path(cfg["wrapper_script"]).read_text()
+    template = _apply_sbatch_resource_overrides(template, cfg)
 
     new_script, nsubs = re.subn(
         r'(?m)^#SBATCH\s+--time=\S+\s*$',

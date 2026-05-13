@@ -79,6 +79,10 @@
 #
 # ============================================================
 
+if [ -z "${ATOMI_HPC_CONFIG:-}" ] && [ -f "$HOME/atomi_hpc/atomi_hpc_env.sh" ]; then
+    source "$HOME/atomi_hpc/atomi_hpc_env.sh"
+fi
+
 if [ -z "${ATOMI_LAMMPS_ENV:-}" ]; then
     echo "ERROR: set ATOMI_LAMMPS_ENV to the private path of your Atomi/LAMMPS Python environment."
     exit 2

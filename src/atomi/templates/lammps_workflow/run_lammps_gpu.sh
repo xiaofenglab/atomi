@@ -21,6 +21,10 @@
 unset LANG
 export LC_ALL="C"
 
+if [ -z "${ATOMI_HPC_CONFIG:-}" ] && [ -f "$HOME/atomi_hpc/atomi_hpc_env.sh" ]; then
+    source "$HOME/atomi_hpc/atomi_hpc_env.sh"
+fi
+
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
