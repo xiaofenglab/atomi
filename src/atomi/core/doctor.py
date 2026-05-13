@@ -18,7 +18,8 @@ EXECUTABLES = {
     "core": ["python", "python3"],
     "scheduler": ["sbatch", "squeue", "srun", "qsub"],
     "visualization": ["gnuplot"],
-    "engines": ["vasp_std", "vasp_gam", "vasp_ncl", "cp2k", "lmp", "lammps", "nvidia-smi"],
+    "engines": ["vasp_std", "vasp_gam", "vasp_ncl", "cp2k", "lmp", "lammps"],
+    "gpu": ["nvidia-smi", "nvcc"],
     "moose": ["moose-opt", "moose-dbg", "moose-devel", "moose_test-opt"],
     "environment": [
         "module",
@@ -46,6 +47,8 @@ HPC_PROBE_WHICH = [
     "conda",
     "git",
     "cmake",
+    "nvidia-smi",
+    "nvcc",
 ]
 
 HPC_PROBE_COMMANDS = [
@@ -64,6 +67,34 @@ HPC_PROBE_COMMANDS = [
     {
         "key": "module_avail_cmake_head60",
         "command": "module avail cmake 2>&1 | head -60",
+    },
+    {
+        "key": "module_avail_cuda_head80",
+        "command": "module avail cuda 2>&1 | head -80",
+    },
+    {
+        "key": "module_avail_nvidia_head80",
+        "command": "module avail nvidia 2>&1 | head -80",
+    },
+    {
+        "key": "module_avail_gpu_head80",
+        "command": "module avail gpu 2>&1 | head -80",
+    },
+    {
+        "key": "module_list_head80",
+        "command": "module list 2>&1 | head -80",
+    },
+    {
+        "key": "nvidia_smi_list",
+        "command": "nvidia-smi -L 2>&1",
+    },
+    {
+        "key": "nvidia_smi_query",
+        "command": "nvidia-smi --query-gpu=name,driver_version,memory.total,compute_cap --format=csv,noheader 2>&1",
+    },
+    {
+        "key": "nvcc_version_head",
+        "command": "nvcc --version 2>&1 | head",
     },
     {
         "key": "python3_version",
@@ -178,6 +209,7 @@ def _executable_version(name: str) -> str | None:
         "squeue": ["squeue", "--version"],
         "cp2k": ["cp2k", "--version"],
         "nvidia-smi": ["nvidia-smi"],
+        "nvcc": ["nvcc", "--version"],
         "lmp": ["lmp", "-help"],
         "lammps": ["lammps", "-help"],
     }
@@ -297,9 +329,32 @@ def build_report(include_hpc_probe: bool = False) -> dict[str, Any]:
                 "partition": "gpu",
                 "gres": "gpu:1",
                 "modules": ["compiler/gnu", "mpi/openmpi", "numlib/mkl/2020.2", "devel/cuda/12.3"],
+                "module_commands": [
+                    "module purge",
+                    "module load compiler/gnu",
+                    "module load mpi/openmpi",
+                    "module load numlib/mkl/2020.2",
+                    "module load devel/cuda/12.3",
+                ],
                 "lammps_prefix": "~/projects/lammps/gup_run",
                 "lammps_executable": "~/projects/lammps/gup_run/install/bin/lmp",
                 "libtorch_lib": "~/projects/lammps/gup_run/src/libtorch-gpu/lib",
+                "gpu_checks": ["nvidia-smi -L", "nvcc --version", "mpicc --version"],
+            },
+            "gpu_lammps": {
+                "description": "GPU LAMMPS build/runtime module stack to verify on each HPC before installing or running.",
+                "scheduler": "slurm",
+                "partition": "gpu",
+                "gres": "gpu:1",
+                "modules": ["compiler/gnu", "mpi/openmpi", "numlib/mkl/2020.2", "devel/cuda/12.3"],
+                "module_commands": [
+                    "module purge",
+                    "module load compiler/gnu",
+                    "module load mpi/openmpi",
+                    "module load numlib/mkl/2020.2",
+                    "module load devel/cuda/12.3",
+                ],
+                "checks": ["which nvidia-smi nvcc mpicc", "nvidia-smi -L", "nvcc --version"],
             }
         },
         "hpc_assumptions": HPC_ASSUMPTIONS,
@@ -346,6 +401,10 @@ def print_summary(report: dict[str, Any]) -> None:
         print(f"  which found: {', '.join(found) if found else 'none'}")
         if missing:
             print(f"  which missing: {', '.join(missing)}")
+        gpu_list = probe["commands"].get("nvidia_smi_list", {}).get("output", "")
+        if gpu_list:
+            first_gpu_line = gpu_list.splitlines()[0]
+            print(f"  gpu: {first_gpu_line[:160]}")
 
 
 def main(argv: list[str] | None = None) -> None:

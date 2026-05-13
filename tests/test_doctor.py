@@ -23,5 +23,11 @@ def test_build_report_can_include_hpc_probe(monkeypatch, tmp_path: Path) -> None
     assert probe["which"]["python3"] == "/usr/bin/python3"
     assert probe["which"]["git"] == "/usr/bin/git"
     assert probe["which"]["sbatch"] is None
+    assert probe["which"]["nvcc"] is None
     assert probe["commands"]["module_avail_gcc_head60"]["output"].startswith("ran: module avail gcc")
+    assert probe["commands"]["module_avail_cuda_head80"]["output"].startswith("ran: module avail cuda")
+    assert probe["commands"]["nvidia_smi_query"]["command"].startswith("nvidia-smi --query-gpu")
     assert probe["commands"]["home_scratch_df"]["command"] == 'df -h "$HOME" "${SCRATCH:-$HOME}" 2>/dev/null'
+
+    assert report["profiles"]["lammps_md_engine"]["module_commands"][0] == "module purge"
+    assert "devel/cuda/12.3" in report["profiles"]["gpu_lammps"]["modules"]
