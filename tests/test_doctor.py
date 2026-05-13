@@ -115,7 +115,16 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
                         "lammps_executable": "/private/lmp",
                         "lammps_prefix": "/private/lammps",
                     },
-                    "cp2k": {"data_dir": "/private/cp2k/data"},
+                    "cp2k": {
+                        "data_dir": "/private/cp2k/data",
+                        "executable": "/private/cp2k.psmp",
+                        "runtime_library_path": "/private/intel/lib",
+                        "environment": {
+                            "CP2K_DATA_DIR": "/private/cp2k/data",
+                            "OMP_NUM_THREADS": "${SLURM_CPUS_PER_TASK}",
+                        },
+                    },
+                    "mace_training_gpu": {"env_path": "/private/mlip_env"},
                     "phonopy": {"module": "private/phonopy"},
                 },
             }
@@ -134,7 +143,12 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
     assert "export ATOMI_LAMMPS_MODULES='compiler/private cuda/private'" in env_text
     assert "export ATOMI_LMP_EXE=/private/lmp" in env_text
     assert "export ATOMI_CP2K_DATA_DIR=/private/cp2k/data" in env_text
+    assert "export ATOMI_CP2K_EXE=/private/cp2k.psmp" in env_text
+    assert "export ATOMI_CP2K_INTEL_RUNTIME_LIB=/private/intel/lib" in env_text
+    assert "export ATOMI_MACE_TRAIN_ENV=/private/mlip_env" in env_text
     assert "export ATOMI_PHONOPY_MODULE=private/phonopy" in env_text
+    assert "export CP2K_DATA_DIR=/private/cp2k/data" in env_text
+    assert "OMP_NUM_THREADS" not in env_text
 
 
 def test_auto_setup_without_config_writes_helpers(tmp_path: Path, monkeypatch) -> None:

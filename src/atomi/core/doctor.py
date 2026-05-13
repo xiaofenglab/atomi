@@ -310,12 +310,26 @@ def build_hpc_config_template(site: str = "") -> dict[str, Any]:
             "cp2k": {
                 "modules": [],
                 "cp2k_executable": "",
+                "executable": "",
                 "data_dir": "",
                 "basis_file": "",
                 "potential_file": "",
                 "d3_file": "",
+                "runtime_library_path": "",
                 "environment": {
                     "ATOMI_CP2K_DATA_DIR": "",
+                    "ATOMI_CP2K_EXE": "",
+                    "ATOMI_CP2K_INTEL_RUNTIME_LIB": "",
+                },
+            },
+            "mace_training_gpu": {
+                "scheduler": "slurm",
+                "partition": "",
+                "gres": "",
+                "env_path": "",
+                "command": "mace_run_train",
+                "environment": {
+                    "ATOMI_MACE_TRAIN_ENV": "",
                 },
             },
             "phonopy": {
@@ -558,7 +572,7 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
         env = lammps.get("environment", {})
         if isinstance(env, dict):
             for key, value in env.items():
-                if _nonempty(value):
+                if _nonempty(value) and (str(key).startswith("ATOMI_") or str(key) == "PSM2_CUDA"):
                     exports[str(key)] = str(value)
         mappings = {
             "env_path": "ATOMI_LAMMPS_ENV",
@@ -577,17 +591,33 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
         env = cp2k.get("environment", {})
         if isinstance(env, dict):
             for key, value in env.items():
-                if _nonempty(value):
+                if _nonempty(value) and (str(key).startswith("ATOMI_") or str(key) == "CP2K_DATA_DIR"):
                     exports[str(key)] = str(value)
         if _nonempty(cp2k.get("data_dir")):
             exports.setdefault("ATOMI_CP2K_DATA_DIR", str(cp2k["data_dir"]))
+        for field in ("executable", "cp2k_executable"):
+            if _nonempty(cp2k.get(field)):
+                exports.setdefault("ATOMI_CP2K_EXE", str(cp2k[field]))
+                break
+        if _nonempty(cp2k.get("runtime_library_path")):
+            exports.setdefault("ATOMI_CP2K_INTEL_RUNTIME_LIB", str(cp2k["runtime_library_path"]))
+
+    mace_training = profiles.get("mace_training_gpu", {})
+    if isinstance(mace_training, dict):
+        env = mace_training.get("environment", {})
+        if isinstance(env, dict):
+            for key, value in env.items():
+                if _nonempty(value):
+                    exports[str(key)] = str(value)
+        if _nonempty(mace_training.get("env_path")):
+            exports.setdefault("ATOMI_MACE_TRAIN_ENV", str(mace_training["env_path"]))
 
     phonopy = profiles.get("phonopy", {})
     if isinstance(phonopy, dict):
         env = phonopy.get("environment", {})
         if isinstance(env, dict):
             for key, value in env.items():
-                if _nonempty(value):
+                if _nonempty(value) and str(key).startswith("ATOMI_"):
                     exports[str(key)] = str(value)
         if _nonempty(phonopy.get("module")):
             exports.setdefault("ATOMI_PHONOPY_MODULE", str(phonopy["module"]))
@@ -596,6 +626,14 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
         exports[CONFIG_ENV_VAR] = str(config_path.expanduser().resolve())
 
     return {key: value for key, value in sorted(exports.items()) if _nonempty(value)}
+
+
+def _quote_export_value(value: str) -> str:
+    """Quote an export value, preserving intentional shell variable expansion."""
+    if "$" not in value:
+        return shlex.quote(value)
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`")
+    return f'"{escaped}"'
 
 
 def render_env_script(config: dict[str, Any], config_path: Path | None = None) -> str:
@@ -608,7 +646,7 @@ def render_env_script(config: dict[str, Any], config_path: Path | None = None) -
         "",
     ]
     for key, value in exports.items():
-        lines.append(f"export {key}={shlex.quote(value)}")
+        lines.append(f"export {key}={_quote_export_value(value)}")
     lines.append("")
     return "\n".join(lines)
 
