@@ -102,6 +102,20 @@ ATOMI_HPC_CONFIG
 
 Cluster paths, module names, scheduler partitions, GPU resources, Python environments, and executable names should be treated as local configuration. Do not assume settings from one HPC system are portable to another without checking the doctor output.
 
+Use auto-setup to prefer an existing private config and otherwise start the discovery workflow:
+
+```bash
+atomi-doctor --auto-setup --site my_hpc
+```
+
+If a config is found, Atomi writes a local `atomi_hpc_env.sh` file with sourceable exports for generated shell/sbatch scripts. Source it in the shell that launches workflows:
+
+```bash
+source atomi_hpc_env.sh
+```
+
+If no config is found, auto-setup writes a private config template and `atomi_hpc_discover.sh`.
+
 For a new HPC, generate local-only helper files first:
 
 ```bash

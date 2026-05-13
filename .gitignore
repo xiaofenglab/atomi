@@ -23,3 +23,6 @@ ATOMI_PRIVATE_HANDBOOK.local.md
 # Private local HPC configuration
 atomi_hpc_config.json
 *.local.json
+atomi_hpc_env.sh
+atomi_hpc_discover.sh
+atomi_hpc_discovery*.log

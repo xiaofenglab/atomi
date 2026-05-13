@@ -99,3 +99,50 @@ def test_write_private_template_and_discovery_script(tmp_path: Path) -> None:
     assert "ask_stack" in script
     assert "module spider" in script
     assert script_path.stat().st_mode & 0o111
+
+
+def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "atomi_hpc_config.existing.local.json"
+    env_path = tmp_path / "atomi_hpc_env.sh"
+    config_path.write_text(
+        json.dumps(
+            {
+                "site": "existing",
+                "profiles": {
+                    "lammps_md_engine": {
+                        "env_path": "/private/env",
+                        "modules": ["compiler/private", "cuda/private"],
+                        "lammps_executable": "/private/lmp",
+                        "lammps_prefix": "/private/lammps",
+                    },
+                    "cp2k": {"data_dir": "/private/cp2k/data"},
+                    "phonopy": {"module": "private/phonopy"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = doctor.auto_setup_hpc(hpc_config_path=config_path, env_path=env_path)
+    env_text = env_path.read_text(encoding="utf-8")
+
+    assert result["config_found"] is True
+    assert result["profile_names"] == ["cp2k", "lammps_md_engine", "phonopy"]
+    assert "source" in result["next_steps"][0]
+    assert "export ATOMI_HPC_CONFIG=" in env_text
+    assert "export ATOMI_LAMMPS_ENV=/private/env" in env_text
+    assert "export ATOMI_LAMMPS_MODULES='compiler/private cuda/private'" in env_text
+    assert "export ATOMI_LMP_EXE=/private/lmp" in env_text
+    assert "export ATOMI_CP2K_DATA_DIR=/private/cp2k/data" in env_text
+    assert "export ATOMI_PHONOPY_MODULE=private/phonopy" in env_text
+
+
+def test_auto_setup_without_config_writes_helpers(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = doctor.auto_setup_hpc(site="new cluster")
+
+    assert result["config_found"] is False
+    assert (tmp_path / "atomi_hpc_config.new_cluster.local.json").exists()
+    assert (tmp_path / "atomi_hpc_discover.sh").exists()
+    assert "ATOMI_DISCOVERY_INTERACTIVE=1" in result["next_steps"][1]

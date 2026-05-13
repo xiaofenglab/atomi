@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -536,6 +537,168 @@ def write_discovery_script(path: Path, overwrite: bool = False) -> None:
     path.chmod(0o755)
 
 
+def _nonempty(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return text
+
+
+def collect_environment_exports(config: dict[str, Any], config_path: Path | None = None) -> dict[str, str]:
+    """Collect sourceable environment exports from a private HPC config."""
+    exports: dict[str, str] = {}
+
+    for key, value in config.get("environment_exports", {}).items():
+        if _nonempty(value):
+            exports[str(key)] = str(value)
+
+    profiles = config.get("profiles", {})
+    lammps = profiles.get("lammps_md_engine", {})
+    if isinstance(lammps, dict):
+        env = lammps.get("environment", {})
+        if isinstance(env, dict):
+            for key, value in env.items():
+                if _nonempty(value):
+                    exports[str(key)] = str(value)
+        mappings = {
+            "env_path": "ATOMI_LAMMPS_ENV",
+            "lammps_executable": "ATOMI_LMP_EXE",
+            "lammps_prefix": "ATOMI_LAMMPS_PREFIX",
+        }
+        for field, env_key in mappings.items():
+            if _nonempty(lammps.get(field)):
+                exports.setdefault(env_key, str(lammps[field]))
+        modules = lammps.get("modules")
+        if isinstance(modules, list) and modules:
+            exports.setdefault("ATOMI_LAMMPS_MODULES", " ".join(str(item) for item in modules if _nonempty(item)))
+
+    cp2k = profiles.get("cp2k", {})
+    if isinstance(cp2k, dict):
+        env = cp2k.get("environment", {})
+        if isinstance(env, dict):
+            for key, value in env.items():
+                if _nonempty(value):
+                    exports[str(key)] = str(value)
+        if _nonempty(cp2k.get("data_dir")):
+            exports.setdefault("ATOMI_CP2K_DATA_DIR", str(cp2k["data_dir"]))
+
+    phonopy = profiles.get("phonopy", {})
+    if isinstance(phonopy, dict):
+        env = phonopy.get("environment", {})
+        if isinstance(env, dict):
+            for key, value in env.items():
+                if _nonempty(value):
+                    exports[str(key)] = str(value)
+        if _nonempty(phonopy.get("module")):
+            exports.setdefault("ATOMI_PHONOPY_MODULE", str(phonopy["module"]))
+
+    if config_path is not None:
+        exports[CONFIG_ENV_VAR] = str(config_path.expanduser().resolve())
+
+    return {key: value for key, value in sorted(exports.items()) if _nonempty(value)}
+
+
+def render_env_script(config: dict[str, Any], config_path: Path | None = None) -> str:
+    """Return a sourceable shell snippet that applies private HPC settings."""
+    exports = collect_environment_exports(config, config_path=config_path)
+    lines = [
+        "#!/usr/bin/env bash",
+        "# Local-only Atomi HPC environment exports.",
+        "# Source this file in your shell or sbatch script. Do not commit it.",
+        "",
+    ]
+    for key, value in exports.items():
+        lines.append(f"export {key}={shlex.quote(value)}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def write_env_script(
+    path: Path,
+    config: dict[str, Any],
+    config_path: Path | None = None,
+    overwrite: bool = False,
+) -> None:
+    """Write sourceable local-only environment exports from private config."""
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"{path} already exists; pass --overwrite to replace it")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_env_script(config, config_path=config_path), encoding="utf-8")
+    path.chmod(0o600)
+
+
+def _safe_site_name(site: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in site.strip())
+    return cleaned.strip("._-") or "local"
+
+
+def auto_setup_hpc(
+    hpc_config_path: Path | None = None,
+    site: str = "",
+    template_path: Path | None = None,
+    discovery_path: Path | None = None,
+    env_path: Path | None = None,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Find private HPC config or create local discovery/template helpers."""
+    found_config = find_config_path(hpc_config_path)
+    result: dict[str, Any] = {
+        "config_found": found_config is not None,
+        "actions": [],
+        "next_steps": [],
+    }
+    if found_config is not None:
+        config = load_hpc_config(found_config)
+        target_env = env_path or Path("atomi_hpc_env.sh")
+        try:
+            write_env_script(target_env, config, config_path=found_config, overwrite=overwrite)
+            result["actions"].append({"wrote_env": str(target_env)})
+        except FileExistsError:
+            result["actions"].append({"env_exists": str(target_env)})
+        result["config_path"] = str(found_config)
+        result["site"] = config.get("site")
+        result["profile_names"] = sorted(config.get("profiles", {}))
+        result["next_steps"].append(f"source {target_env}")
+        result["next_steps"].append("atomi-doctor --hpc-probe --hpc-config <config> --write atomi_hpc_probe.json")
+        return result
+
+    safe_site = _safe_site_name(site or platform.node() or "local")
+    target_template = template_path or Path(f"atomi_hpc_config.{safe_site}.local.json")
+    target_discovery = discovery_path or Path("atomi_hpc_discover.sh")
+    for label, writer, path in (
+        ("config_template", lambda p: write_private_template(p, site=safe_site, overwrite=overwrite), target_template),
+        ("discovery_script", lambda p: write_discovery_script(p, overwrite=overwrite), target_discovery),
+    ):
+        try:
+            writer(path)
+            result["actions"].append({f"wrote_{label}": str(path)})
+        except FileExistsError:
+            result["actions"].append({f"{label}_exists": str(path)})
+    result["config_path"] = str(target_template)
+    result["discovery_script"] = str(target_discovery)
+    result["next_steps"].append(f"bash {target_discovery}")
+    result["next_steps"].append(f"ATOMI_DISCOVERY_INTERACTIVE=1 bash {target_discovery}")
+    result["next_steps"].append(f"Fill private values in {target_template}")
+    result["next_steps"].append(f"export {CONFIG_ENV_VAR}={target_template}")
+    return result
+
+
+def print_auto_setup_summary(result: dict[str, Any]) -> None:
+    """Print concise setup actions without exposing private values."""
+    print("Atomi HPC auto-setup")
+    print(f"Private config found: {result['config_found']}")
+    if result.get("site"):
+        print(f"Site: {result['site']}")
+    if result.get("profile_names"):
+        print(f"Profiles: {', '.join(result['profile_names'])}")
+    for action in result.get("actions", []):
+        for key, value in action.items():
+            print(f"{key}: {value}")
+    print("Next steps:")
+    for step in result.get("next_steps", []):
+        print(f"  {step}")
+
+
 def mace_lammps_defaults(config: dict[str, Any]) -> dict[str, str]:
     """Return MACE LAMMPS conversion defaults from config with portable fallbacks."""
     profile = config.get("profiles", {}).get("mace_lammps", {})
@@ -788,6 +951,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--write", type=Path, help="Write the full report to a JSON file.")
     parser.add_argument("--hpc-config", type=Path, help="Read a private local atomi HPC config.")
     parser.add_argument(
+        "--auto-setup",
+        action="store_true",
+        help="Use existing private HPC config if found; otherwise create local template/discovery helpers.",
+    )
+    parser.add_argument(
         "--write-config-template",
         type=Path,
         help="Write a private local HPC config template. Use a .local.json path and do not commit it.",
@@ -796,6 +964,11 @@ def main(argv: list[str] | None = None) -> None:
         "--write-discovery-script",
         type=Path,
         help="Write a local shell script that probes module stacks and executable paths on a new HPC.",
+    )
+    parser.add_argument(
+        "--write-env",
+        type=Path,
+        help="Write sourceable private environment exports from the selected HPC config.",
     )
     parser.add_argument("--site", default="", help="Site label for --write-config-template.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite generated template/script outputs.")
@@ -811,6 +984,25 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
+    if args.auto_setup:
+        result = auto_setup_hpc(
+            hpc_config_path=args.hpc_config,
+            site=args.site,
+            template_path=args.write_config_template,
+            discovery_path=args.write_discovery_script,
+            env_path=args.write_env,
+            overwrite=args.overwrite,
+        )
+        if args.write:
+            args.write.parent.mkdir(parents=True, exist_ok=True)
+            args.write.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+            print(f"Wrote {args.write}")
+        elif args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print_auto_setup_summary(result)
+        return
+
     wrote_helper = False
     if args.write_config_template:
         write_private_template(args.write_config_template, site=args.site, overwrite=args.overwrite)
@@ -819,6 +1011,13 @@ def main(argv: list[str] | None = None) -> None:
     if args.write_discovery_script:
         write_discovery_script(args.write_discovery_script, overwrite=args.overwrite)
         print(f"Wrote HPC discovery script {args.write_discovery_script}")
+        wrote_helper = True
+    if args.write_env:
+        config_path = find_config_path(args.hpc_config)
+        if config_path is None:
+            raise SystemExit("No private HPC config found; use --auto-setup or pass --hpc-config.")
+        write_env_script(args.write_env, load_hpc_config(config_path), config_path=config_path, overwrite=args.overwrite)
+        print(f"Wrote Atomi HPC env exports {args.write_env}")
         wrote_helper = True
     if wrote_helper and not (args.json or args.write or args.hpc_probe or args.hpc_config):
         return
