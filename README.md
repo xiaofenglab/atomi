@@ -111,6 +111,12 @@ atomi-doctor --write-discovery-script atomi_hpc_discover.sh
 
 Run the discovery script on the HPC login node, and run it again inside a GPU allocation when GPU workflows are needed. If you already know exact private module stacks, pass them through `ATOMI_PROBE_*_MODULES` environment variables before running the script. Copy confirmed local values into the private config file and keep it ignored by Git.
 
+When multiple module choices are available, run the discovery script interactively so you can choose the stack after reading the module candidates:
+
+```bash
+ATOMI_DISCOVERY_INTERACTIVE=1 bash atomi_hpc_discover.sh
+```
+
 ## Shared Google Drive Development
 
 If this repository is edited from a Google Drive shared folder by more than one Codex session or computer, use the guard script before changing files:

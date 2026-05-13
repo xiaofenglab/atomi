@@ -373,6 +373,7 @@ def build_discovery_script() -> str:
 
         OUT="${{1:-atomi_hpc_discovery.$(hostname).$(date +%Y%m%d_%H%M%S).log}}"
         exec > >(tee "$OUT") 2>&1
+        INTERACTIVE="${{ATOMI_DISCOVERY_INTERACTIVE:-0}}"
 
         section() {{
             printf '\\n===== %s =====\\n' "$1"
@@ -392,6 +393,31 @@ def build_discovery_script() -> str:
                     printf '  %s -> MISSING\\n' "$exe"
                 fi
             done
+        }}
+
+        ask_stack() {{
+            local label="$1"
+            local current="$2"
+            if [ "$INTERACTIVE" != "1" ] || [ ! -t 0 ]; then
+                printf '%s' "$current"
+                return
+            fi
+            printf '\\nInteractive selection for %s\\n' "$label" > /dev/tty
+            if [ -n "$current" ]; then
+                printf 'Current stack: %s\\n' "$current" > /dev/tty
+                printf 'Press Enter to keep it, type a replacement stack, or type skip: ' > /dev/tty
+            else
+                printf 'Enter module stack to test, or press Enter/skip to skip: ' > /dev/tty
+            fi
+            local answer
+            IFS= read -r answer < /dev/tty || answer=""
+            if [ -z "$answer" ]; then
+                printf '%s' "$current"
+            elif [ "$answer" = "skip" ]; then
+                printf ''
+            else
+                printf '%s' "$answer"
+            fi
         }}
 
         probe_stack() {{
@@ -459,10 +485,15 @@ def build_discovery_script() -> str:
         section "Optional exact module-stack tests"
         echo "Set any of these private variables before running this script to test exact stacks:"
         {stack_exports}
-        probe_stack "VASP CPU" "${{ATOMI_PROBE_VASP_MODULES:-}}" vasp_std vasp_gam vasp_ncl
-        probe_stack "LAMMPS GPU" "${{ATOMI_PROBE_LAMMPS_GPU_MODULES:-}}" lmp lammps mpicc mpicxx nvcc nvidia-smi
-        probe_stack "CP2K" "${{ATOMI_PROBE_CP2K_MODULES:-}}" cp2k
-        probe_stack "phonopy" "${{ATOMI_PROBE_PHONOPY_MODULES:-}}" phonopy phonopy-load
+        echo "For interactive choice after reviewing candidates, run with: ATOMI_DISCOVERY_INTERACTIVE=1 bash $0"
+        VASP_STACK="$(ask_stack "VASP CPU" "${{ATOMI_PROBE_VASP_MODULES:-}}")"
+        LAMMPS_GPU_STACK="$(ask_stack "LAMMPS GPU" "${{ATOMI_PROBE_LAMMPS_GPU_MODULES:-}}")"
+        CP2K_STACK="$(ask_stack "CP2K" "${{ATOMI_PROBE_CP2K_MODULES:-}}")"
+        PHONOPY_STACK="$(ask_stack "phonopy" "${{ATOMI_PROBE_PHONOPY_MODULES:-}}")"
+        probe_stack "VASP CPU" "$VASP_STACK" vasp_std vasp_gam vasp_ncl
+        probe_stack "LAMMPS GPU" "$LAMMPS_GPU_STACK" lmp lammps mpicc mpicxx nvcc nvidia-smi
+        probe_stack "CP2K" "$CP2K_STACK" cp2k
+        probe_stack "phonopy" "$PHONOPY_STACK" phonopy phonopy-load
 
         section "Atomi private config reminders"
         cat <<'EOF'

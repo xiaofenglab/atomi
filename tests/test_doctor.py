@@ -95,5 +95,7 @@ def test_write_private_template_and_discovery_script(tmp_path: Path) -> None:
     assert "lammps_md_engine" in config["profiles"]
     assert config["profiles"]["lammps_md_engine"]["modules"] == []
     assert "ATOMI_PROBE_LAMMPS_GPU_MODULES" in script
+    assert "ATOMI_DISCOVERY_INTERACTIVE=1" in script
+    assert "ask_stack" in script
     assert "module spider" in script
     assert script_path.stat().st_mode & 0o111
