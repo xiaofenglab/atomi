@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from atomi.core import doctor
@@ -32,3 +33,47 @@ def test_build_report_can_include_hpc_probe(monkeypatch, tmp_path: Path) -> None
     assert report["profiles"]["lammps_md_engine"]["module_commands"][0] == "module purge"
     assert report["profiles"]["gpu_lammps"]["modules"] == []
     assert "privately" in report["profiles"]["gpu_lammps"]["note"]
+
+
+def test_hpc_config_report_redacts_private_values(tmp_path: Path) -> None:
+    config_path = tmp_path / "kit.local.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "site": "KIT",
+                "profiles": {
+                    "lammps_md_engine": {
+                        "modules": ["private/compiler", "private/cuda"],
+                        "lammps_executable": "/private/lmp",
+                        "partition": "private_gpu",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = doctor.build_report(hpc_config_path=config_path)
+
+    config = report["hpc_config"]
+    assert config["found"] is True
+    assert config["site"] == "KIT"
+    assert config["profile_names"] == ["lammps_md_engine"]
+    profile = config["profiles"]["lammps_md_engine"]
+    assert "modules" in profile["private_keys_redacted"]
+    assert "lammps_executable" in profile["private_keys_redacted"]
+    assert "partition" in profile["private_keys_redacted"]
+    assert "private/compiler" not in json.dumps(config)
+
+
+def test_hpc_config_report_can_include_private_values(tmp_path: Path) -> None:
+    config_path = tmp_path / "kit.local.json"
+    config_path.write_text(
+        json.dumps({"profiles": {"mace_lammps": {"env_path": "/private/env"}}}),
+        encoding="utf-8",
+    )
+
+    report = doctor.build_report(hpc_config_path=config_path, include_private_config=True)
+
+    assert report["hpc_config"]["config"]["profiles"]["mace_lammps"]["env_path"] == "/private/env"

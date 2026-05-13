@@ -115,6 +115,26 @@ PYTHON_PACKAGES = [
     "pycalphad",
 ]
 
+SENSITIVE_CONFIG_KEYS = {
+    "basis_file",
+    "data_dir",
+    "d3_file",
+    "env_path",
+    "gres",
+    "home_candidates",
+    "lammps_executable",
+    "lammps_prefix",
+    "libtorch_lib",
+    "micromamba_env",
+    "micromamba_root",
+    "module",
+    "module_commands",
+    "modules",
+    "partition",
+    "potential_file",
+    "time",
+}
+
 HPC_ASSUMPTIONS = [
     {
         "key": "gnuplot_on_path",
@@ -176,6 +196,40 @@ def load_hpc_config(explicit: Path | None = None) -> dict[str, Any]:
         return {}
     with path.open(encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def hpc_config_report(explicit: Path | None = None, include_private_values: bool = False) -> dict[str, Any]:
+    """Return a redacted summary of private HPC config, or exact values by request."""
+    path = find_config_path(explicit)
+    if path is None:
+        return {"found": False, "path": str(explicit.expanduser()) if explicit else None}
+    config = load_hpc_config(path)
+    if include_private_values:
+        return {"found": True, "path": str(path), "config": config}
+
+    profiles = config.get("profiles", {})
+    profile_summary = {}
+    for name, profile in profiles.items():
+        if not isinstance(profile, dict):
+            profile_summary[name] = {"type": type(profile).__name__}
+            continue
+        sensitive = sorted(key for key in profile if key in SENSITIVE_CONFIG_KEYS)
+        public_keys = sorted(key for key in profile if key not in SENSITIVE_CONFIG_KEYS)
+        profile_summary[name] = {
+            "keys": sorted(profile),
+            "public_keys": public_keys,
+            "private_keys_redacted": sensitive,
+        }
+
+    return {
+        "found": True,
+        "path": str(path),
+        "site": config.get("site"),
+        "schema_version": config.get("schema_version"),
+        "profile_names": sorted(profiles),
+        "profiles": profile_summary,
+        "private_values": "redacted; pass --show-private-config only for local/private reports",
+    }
 
 
 def mace_lammps_defaults(config: dict[str, Any]) -> dict[str, str]:
@@ -295,7 +349,11 @@ def python_package_report() -> dict[str, dict[str, str | bool | None]]:
     return report
 
 
-def build_report(include_hpc_probe: bool = False) -> dict[str, Any]:
+def build_report(
+    include_hpc_probe: bool = False,
+    hpc_config_path: Path | None = None,
+    include_private_config: bool = False,
+) -> dict[str, Any]:
     executables = executable_report()
     packages = python_package_report()
     report = {
@@ -352,6 +410,12 @@ def build_report(include_hpc_probe: bool = False) -> dict[str, Any]:
     }
     if include_hpc_probe:
         report["hpc_probe"] = hpc_probe_report()
+    config_path = find_config_path(hpc_config_path)
+    if hpc_config_path is not None or config_path is not None:
+        report["hpc_config"] = hpc_config_report(
+            hpc_config_path,
+            include_private_values=include_private_config,
+        )
     return report
 
 
@@ -396,6 +460,19 @@ def print_summary(report: dict[str, Any]) -> None:
         if gpu_list:
             first_gpu_line = gpu_list.splitlines()[0]
             print(f"  gpu: {first_gpu_line[:160]}")
+    if "hpc_config" in report:
+        config = report["hpc_config"]
+        print("")
+        print("Private HPC config:")
+        if not config["found"]:
+            print(f"  not found: {config.get('path') or '<auto>'}")
+        else:
+            print(f"  path: {config['path']}")
+            print(f"  site: {config.get('site') or '<unset>'}")
+            names = config.get("profile_names", [])
+            print(f"  profiles: {', '.join(names) if names else 'none'}")
+            if not config.get("config"):
+                print("  values: redacted")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -405,6 +482,12 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--json", action="store_true", help="Print the full report as JSON.")
     parser.add_argument("--write", type=Path, help="Write the full report to a JSON file.")
+    parser.add_argument("--hpc-config", type=Path, help="Read a private local atomi HPC config.")
+    parser.add_argument(
+        "--show-private-config",
+        action="store_true",
+        help="Include exact private HPC config values in JSON/write output. Do not share this report.",
+    )
     parser.add_argument(
         "--hpc-probe",
         action="store_true",
@@ -412,7 +495,11 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
-    report = build_report(include_hpc_probe=args.hpc_probe)
+    report = build_report(
+        include_hpc_probe=args.hpc_probe,
+        hpc_config_path=args.hpc_config,
+        include_private_config=args.show_private_config,
+    )
     if args.write:
         args.write.parent.mkdir(parents=True, exist_ok=True)
         args.write.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
