@@ -102,6 +102,15 @@ ATOMI_HPC_CONFIG
 
 Cluster paths, module names, scheduler partitions, GPU resources, Python environments, and executable names should be treated as local configuration. Do not assume settings from one HPC system are portable to another without checking the doctor output.
 
+For a new HPC, generate local-only helper files first:
+
+```bash
+atomi-doctor --write-config-template atomi_hpc_config.my_hpc.local.json --site my_hpc
+atomi-doctor --write-discovery-script atomi_hpc_discover.sh
+```
+
+Run the discovery script on the HPC login node, and run it again inside a GPU allocation when GPU workflows are needed. If you already know exact private module stacks, pass them through `ATOMI_PROBE_*_MODULES` environment variables before running the script. Copy confirmed local values into the private config file and keep it ignored by Git.
+
 ## Shared Google Drive Development
 
 If this repository is edited from a Google Drive shared folder by more than one Codex session or computer, use the guard script before changing files:

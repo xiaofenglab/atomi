@@ -77,3 +77,23 @@ def test_hpc_config_report_can_include_private_values(tmp_path: Path) -> None:
     report = doctor.build_report(hpc_config_path=config_path, include_private_config=True)
 
     assert report["hpc_config"]["config"]["profiles"]["mace_lammps"]["env_path"] == "/private/env"
+
+
+def test_write_private_template_and_discovery_script(tmp_path: Path) -> None:
+    config_path = tmp_path / "atomi_hpc_config.new.local.json"
+    script_path = tmp_path / "atomi_hpc_discover.sh"
+
+    doctor.write_private_template(config_path, site="new_cluster")
+    doctor.write_discovery_script(script_path)
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    script = script_path.read_text(encoding="utf-8")
+
+    assert config["site"] == "new_cluster"
+    assert config["privacy"] == "local-only; do not commit or push"
+    assert "vasp_cpu" in config["profiles"]
+    assert "lammps_md_engine" in config["profiles"]
+    assert config["profiles"]["lammps_md_engine"]["modules"] == []
+    assert "ATOMI_PROBE_LAMMPS_GPU_MODULES" in script
+    assert "module spider" in script
+    assert script_path.stat().st_mode & 0o111

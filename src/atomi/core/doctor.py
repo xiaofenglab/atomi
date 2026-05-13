@@ -5,6 +5,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import textwrap
 from importlib import metadata, util
 from pathlib import Path
 from typing import Any
@@ -173,6 +174,30 @@ HPC_ASSUMPTIONS = [
     },
 ]
 
+DISCOVERY_MODULE_KEYWORDS = [
+    "gcc",
+    "gnu",
+    "intel",
+    "openmpi",
+    "mpi",
+    "mkl",
+    "cuda",
+    "cmake",
+    "python",
+    "vasp",
+    "lammps",
+    "cp2k",
+    "phonopy",
+    "gnuplot",
+]
+
+DISCOVERY_STACK_ENV_VARS = {
+    "vasp_cpu": "ATOMI_PROBE_VASP_MODULES",
+    "lammps_gpu": "ATOMI_PROBE_LAMMPS_GPU_MODULES",
+    "cp2k": "ATOMI_PROBE_CP2K_MODULES",
+    "phonopy": "ATOMI_PROBE_PHONOPY_MODULES",
+}
+
 
 def find_config_path(explicit: Path | None = None) -> Path | None:
     """Return the first existing atomi HPC config path."""
@@ -230,6 +255,254 @@ def hpc_config_report(explicit: Path | None = None, include_private_values: bool
         "profiles": profile_summary,
         "private_values": "redacted; pass --show-private-config only for local/private reports",
     }
+
+
+def build_hpc_config_template(site: str = "") -> dict[str, Any]:
+    """Return a private local HPC config template with no site-specific values."""
+    return {
+        "schema_version": 1,
+        "site": site or "new_hpc",
+        "privacy": "local-only; do not commit or push",
+        "notes": [
+            "Fill this file on the HPC after running atomi_hpc_discover.sh.",
+            "Keep module names, executable paths, partitions, accounts, and user paths private.",
+            "Set ATOMI_HPC_CONFIG to this file when running Atomi commands.",
+        ],
+        "profiles": {
+            "vasp_cpu": {
+                "scheduler": "slurm",
+                "partition": "",
+                "account": "",
+                "modules": [],
+                "module_commands": [],
+                "executables": {
+                    "vasp_std": "",
+                    "vasp_gam": "",
+                    "vasp_ncl": "",
+                },
+            },
+            "lammps_md_engine": {
+                "scheduler": "slurm",
+                "partition": "",
+                "gres": "",
+                "account": "",
+                "env_path": "",
+                "modules": [],
+                "module_commands": [],
+                "lammps_executable": "",
+                "lammps_prefix": "",
+                "libtorch_lib": "",
+                "environment": {
+                    "ATOMI_LAMMPS_ENV": "",
+                    "ATOMI_LAMMPS_MODULES": "",
+                    "ATOMI_LMP_EXE": "",
+                    "ATOMI_LAMMPS_PREFIX": "",
+                    "PSM2_CUDA": "",
+                },
+            },
+            "mace_lammps": {
+                "env_path": "",
+                "partition": "",
+                "gres": "",
+                "time": "00:15:00",
+            },
+            "cp2k": {
+                "modules": [],
+                "cp2k_executable": "",
+                "data_dir": "",
+                "basis_file": "",
+                "potential_file": "",
+                "d3_file": "",
+                "environment": {
+                    "ATOMI_CP2K_DATA_DIR": "",
+                },
+            },
+            "phonopy": {
+                "modules": [],
+                "phonopy": "",
+                "phonopy_load": "",
+                "environment": {
+                    "ATOMI_PHONOPY_MODULE": "",
+                },
+            },
+            "pymol": {
+                "modules": [],
+                "pymol_executable": "",
+                "ffmpeg_executable": "",
+                "micromamba_root": "",
+                "micromamba_env": "",
+            },
+            "moose": {
+                "modules": [],
+                "app_executable": "",
+                "environment": {},
+            },
+            "calphad": {
+                "python_env": "",
+                "database_paths": [],
+            },
+        },
+        "discovery": {
+            "module_keyword_searches": DISCOVERY_MODULE_KEYWORDS,
+            "stack_env_variables": DISCOVERY_STACK_ENV_VARS,
+            "required_commands_by_profile": {
+                "vasp_cpu": ["vasp_std", "vasp_gam", "vasp_ncl"],
+                "lammps_gpu": ["lmp", "lammps", "mpicc", "mpicxx", "nvcc", "nvidia-smi"],
+                "cp2k": ["cp2k"],
+                "phonopy": ["phonopy", "phonopy-load"],
+                "pymol": ["pymol", "ffmpeg"],
+            },
+        },
+    }
+
+
+def build_discovery_script() -> str:
+    """Return a shell script that discovers local HPC module/runtime details."""
+    keywords = " ".join(DISCOVERY_MODULE_KEYWORDS)
+    stack_exports = "\n".join(
+        f"#   export {env_var}=\"module_a module_b module_c\""
+        for env_var in DISCOVERY_STACK_ENV_VARS.values()
+    )
+    script = textwrap.dedent(
+        f"""\
+        #!/usr/bin/env bash
+        # Local-only Atomi HPC discovery helper.
+        # Run this on a new HPC login node. For GPU checks, run again inside a GPU allocation.
+        # The output may include private paths, module names, accounts, and usernames. Do not commit it.
+        set -u
+
+        OUT="${{1:-atomi_hpc_discovery.$(hostname).$(date +%Y%m%d_%H%M%S).log}}"
+        exec > >(tee "$OUT") 2>&1
+
+        section() {{
+            printf '\\n===== %s =====\\n' "$1"
+        }}
+
+        run() {{
+            printf '\\n$ %s\\n' "$*"
+            bash -lc "$*" || true
+        }}
+
+        show_which() {{
+            printf '\\n$ which %s\\n' "$*"
+            for exe in "$@"; do
+                if command -v "$exe" >/dev/null 2>&1; then
+                    printf '  %s -> %s\\n' "$exe" "$(command -v "$exe")"
+                else
+                    printf '  %s -> MISSING\\n' "$exe"
+                fi
+            done
+        }}
+
+        probe_stack() {{
+            local label="$1"
+            local modules="$2"
+            shift 2
+            section "Module stack: $label"
+            if ! command -v module >/dev/null 2>&1; then
+                echo "module command is not available in this shell"
+                return
+            fi
+            if [ -z "$modules" ]; then
+                echo "No module stack provided; set the matching ATOMI_PROBE_*_MODULES variable to test exact loads."
+                return
+            fi
+            module purge || true
+            for mod in $modules; do
+                echo "+ module load $mod"
+                module load "$mod" || true
+            done
+            module list 2>&1 || true
+            show_which "$@"
+            run 'python3 --version'
+            run 'gcc --version | head -3'
+            run 'mpicc --version | head -3'
+            run 'nvcc --version | head -6'
+            run 'nvidia-smi -L'
+        }}
+
+        section "Host and scheduler"
+        run 'hostname'
+        run 'echo "$0"'
+        run 'pwd'
+        run 'python3 --version'
+        show_which sbatch qsub srun squeue mpiexec mpirun mpicc mpicxx mpif90 python3 conda git cmake gnuplot vasp_std vasp_gam vasp_ncl cp2k lmp lammps nvcc nvidia-smi phonopy phonopy-load pymol ffmpeg
+        run 'df -h "$HOME" "${{SCRATCH:-$HOME}}" 2>/dev/null'
+
+        section "Loaded modules"
+        run 'module --version 2>&1 | head'
+        run 'module list 2>&1 | head -80'
+
+        section "Module keyword discovery"
+        for key in {keywords}; do
+            run "module avail $key 2>&1 | head -80"
+            run "module spider $key 2>&1 | head -80"
+        done
+
+        section "Python package discovery"
+        run 'python3 - <<'"'"'PY'"'"'
+        import importlib.util
+        import sys
+        from importlib import metadata
+        print("python:", sys.executable)
+        for name in ["numpy", "ase", "matplotlib", "torch", "mace", "pycalphad"]:
+            ok = importlib.util.find_spec(name) is not None
+            version = None
+            if ok:
+                try:
+                    version = metadata.version(name)
+                except metadata.PackageNotFoundError:
+                    version = "unknown"
+            print(f"{{name}}: {{version if ok else 'MISSING'}}")
+        PY'
+
+        section "Optional exact module-stack tests"
+        echo "Set any of these private variables before running this script to test exact stacks:"
+        {stack_exports}
+        probe_stack "VASP CPU" "${{ATOMI_PROBE_VASP_MODULES:-}}" vasp_std vasp_gam vasp_ncl
+        probe_stack "LAMMPS GPU" "${{ATOMI_PROBE_LAMMPS_GPU_MODULES:-}}" lmp lammps mpicc mpicxx nvcc nvidia-smi
+        probe_stack "CP2K" "${{ATOMI_PROBE_CP2K_MODULES:-}}" cp2k
+        probe_stack "phonopy" "${{ATOMI_PROBE_PHONOPY_MODULES:-}}" phonopy phonopy-load
+
+        section "Atomi private config reminders"
+        cat <<'EOF'
+        Put confirmed local values into a private ignored JSON file, for example:
+          ~/.config/atomi/hpc.json
+          ./atomi_hpc_config.json
+          ./atomi_hpc_config.<site>.local.json
+
+        Useful private environment variables for generated scripts:
+          ATOMI_HPC_CONFIG
+          ATOMI_LAMMPS_ENV
+          ATOMI_LAMMPS_MODULES
+          ATOMI_LMP_EXE
+          ATOMI_LAMMPS_PREFIX
+          ATOMI_CP2K_DATA_DIR
+          ATOMI_PHONOPY_MODULE
+        EOF
+
+        echo
+        echo "Wrote $OUT"
+        """
+    ).lstrip()
+    return "\n".join(line[8:] if line.startswith("        ") else line for line in script.splitlines()) + "\n"
+
+
+def write_private_template(path: Path, site: str = "", overwrite: bool = False) -> None:
+    """Write a local-only HPC config template."""
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"{path} already exists; pass --overwrite to replace it")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(build_hpc_config_template(site=site), indent=2) + "\n", encoding="utf-8")
+
+
+def write_discovery_script(path: Path, overwrite: bool = False) -> None:
+    """Write the local-only HPC discovery shell script."""
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"{path} already exists; pass --overwrite to replace it")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(build_discovery_script(), encoding="utf-8")
+    path.chmod(0o755)
 
 
 def mace_lammps_defaults(config: dict[str, Any]) -> dict[str, str]:
@@ -484,6 +757,18 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--write", type=Path, help="Write the full report to a JSON file.")
     parser.add_argument("--hpc-config", type=Path, help="Read a private local atomi HPC config.")
     parser.add_argument(
+        "--write-config-template",
+        type=Path,
+        help="Write a private local HPC config template. Use a .local.json path and do not commit it.",
+    )
+    parser.add_argument(
+        "--write-discovery-script",
+        type=Path,
+        help="Write a local shell script that probes module stacks and executable paths on a new HPC.",
+    )
+    parser.add_argument("--site", default="", help="Site label for --write-config-template.")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite generated template/script outputs.")
+    parser.add_argument(
         "--show-private-config",
         action="store_true",
         help="Include exact private HPC config values in JSON/write output. Do not share this report.",
@@ -494,6 +779,18 @@ def main(argv: list[str] | None = None) -> None:
         help="Run shell-level HPC probes: scheduler/MPI/compiler paths, module avail, python3, and df.",
     )
     args = parser.parse_args(argv)
+
+    wrote_helper = False
+    if args.write_config_template:
+        write_private_template(args.write_config_template, site=args.site, overwrite=args.overwrite)
+        print(f"Wrote private HPC config template {args.write_config_template}")
+        wrote_helper = True
+    if args.write_discovery_script:
+        write_discovery_script(args.write_discovery_script, overwrite=args.overwrite)
+        print(f"Wrote HPC discovery script {args.write_discovery_script}")
+        wrote_helper = True
+    if wrote_helper and not (args.json or args.write or args.hpc_probe or args.hpc_config):
+        return
 
     report = build_report(
         include_hpc_probe=args.hpc_probe,
