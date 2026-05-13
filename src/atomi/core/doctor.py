@@ -19,8 +19,50 @@ EXECUTABLES = {
     "scheduler": ["sbatch", "squeue", "srun", "qsub"],
     "visualization": ["gnuplot"],
     "engines": ["vasp_std", "vasp_gam", "vasp_ncl", "cp2k", "lmp", "lammps", "nvidia-smi"],
-    "environment": ["module"],
+    "environment": ["module", "conda", "git", "cmake", "mpiexec", "mpirun", "mpicc", "mpicxx", "mpif90"],
 }
+
+HPC_PROBE_WHICH = [
+    "sbatch",
+    "qsub",
+    "srun",
+    "mpiexec",
+    "mpirun",
+    "mpicc",
+    "mpicxx",
+    "mpif90",
+    "python3",
+    "conda",
+    "git",
+    "cmake",
+]
+
+HPC_PROBE_COMMANDS = [
+    {
+        "key": "module_version_head",
+        "command": "module --version 2>&1 | head",
+    },
+    {
+        "key": "module_avail_gcc_head60",
+        "command": "module avail gcc 2>&1 | head -60",
+    },
+    {
+        "key": "module_avail_mpi_head80",
+        "command": "module avail mpi 2>&1 | head -80",
+    },
+    {
+        "key": "module_avail_cmake_head60",
+        "command": "module avail cmake 2>&1 | head -60",
+    },
+    {
+        "key": "python3_version",
+        "command": "python3 --version",
+    },
+    {
+        "key": "home_scratch_df",
+        "command": 'df -h "$HOME" "${SCRATCH:-$HOME}" 2>/dev/null',
+    },
+]
 
 PYTHON_PACKAGES = [
     "numpy",
@@ -137,6 +179,54 @@ def _executable_version(name: str) -> str | None:
     return None
 
 
+def _run_shell_probe(command: str, timeout: int = 20) -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            ["bash", "-lc", command],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return {"command": command, "returncode": None, "output": "bash not found"}
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stdout or ""
+        if isinstance(output, bytes):
+            output = output.decode(errors="replace")
+        return {
+            "command": command,
+            "returncode": None,
+            "timed_out": True,
+            "output": output.strip(),
+        }
+    return {
+        "command": command,
+        "returncode": result.returncode,
+        "output": result.stdout.strip(),
+    }
+
+
+def hpc_probe_report() -> dict[str, Any]:
+    """Return a shell-level HPC portability probe requested by other projects."""
+    which_report = {}
+    for name in HPC_PROBE_WHICH:
+        which_report[name] = shutil.which(name)
+
+    command_report = {}
+    for item in HPC_PROBE_COMMANDS:
+        command_report[item["key"]] = _run_shell_probe(item["command"])
+
+    return {
+        "hostname": platform.node(),
+        "shell_argv0": _run_shell_probe('echo "$0"'),
+        "shell_env": os.environ.get("SHELL", ""),
+        "pwd": str(Path.cwd()),
+        "which": which_report,
+        "commands": command_report,
+    }
+
+
 def python_package_report() -> dict[str, dict[str, str | bool | None]]:
     report = {}
     for package in PYTHON_PACKAGES:
@@ -151,10 +241,10 @@ def python_package_report() -> dict[str, dict[str, str | bool | None]]:
     return report
 
 
-def build_report() -> dict[str, Any]:
+def build_report(include_hpc_probe: bool = False) -> dict[str, Any]:
     executables = executable_report()
     packages = python_package_report()
-    return {
+    report = {
         "schema_version": 1,
         "generated_by": "atomi doctor",
         "platform": {
@@ -192,6 +282,9 @@ def build_report() -> dict[str, Any]:
         },
         "hpc_assumptions": HPC_ASSUMPTIONS,
     }
+    if include_hpc_probe:
+        report["hpc_probe"] = hpc_probe_report()
+    return report
 
 
 def print_summary(report: dict[str, Any]) -> None:
@@ -219,6 +312,18 @@ def print_summary(report: dict[str, Any]) -> None:
     print("Cluster-specific assumptions to review:")
     for item in report["hpc_assumptions"]:
         print(f"  {item['key']}: {item['note']}")
+    if "hpc_probe" in report:
+        probe = report["hpc_probe"]
+        print("")
+        print("HPC shell probe:")
+        print(f"  hostname: {probe['hostname']}")
+        print(f"  shell: {probe['shell_env'] or probe['shell_argv0'].get('output', 'unknown')}")
+        print(f"  pwd: {probe['pwd']}")
+        found = [name for name, path in probe["which"].items() if path]
+        missing = [name for name, path in probe["which"].items() if not path]
+        print(f"  which found: {', '.join(found) if found else 'none'}")
+        if missing:
+            print(f"  which missing: {', '.join(missing)}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -228,9 +333,14 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--json", action="store_true", help="Print the full report as JSON.")
     parser.add_argument("--write", type=Path, help="Write the full report to a JSON file.")
+    parser.add_argument(
+        "--hpc-probe",
+        action="store_true",
+        help="Run shell-level HPC probes: scheduler/MPI/compiler paths, module avail, python3, and df.",
+    )
     args = parser.parse_args(argv)
 
-    report = build_report()
+    report = build_report(include_hpc_probe=args.hpc_probe)
     if args.write:
         args.write.parent.mkdir(parents=True, exist_ok=True)
         args.write.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
