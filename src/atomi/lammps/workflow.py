@@ -196,6 +196,10 @@ def is_nvt_ramp_stage(stage):
     return float(stage["temperature_start"]) != float(stage["temperature_end"])
 
 
+def is_npt_equilibration_stage(stage):
+    return stage.get("type") == "npt" and "_eqm" in stage.get("name", "").lower()
+
+
 def effective_max_chunks(cfg, stage, fixed_step_stage=None):
     if is_nvt_ramp_stage(stage):
         return 1
@@ -207,6 +211,8 @@ def effective_max_chunks(cfg, stage, fixed_step_stage=None):
         return int(cfg["max_chunks"])
     if fixed_step_stage:
         return 1
+    if is_npt_equilibration_stage(stage):
+        return int(cfg.get("max_chunks_npt_eqm", cfg.get("max_chunks_equilibration", 3)))
     if stage.get("large_cell", False):
         return int(cfg["max_chunks_large"])
     return int(cfg["max_chunks_small"])

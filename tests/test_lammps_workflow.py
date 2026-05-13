@@ -5,7 +5,13 @@ import numpy as np
 import pytest
 
 import atomi.lammps.thermo_series as thermo_series
-from atomi.lammps.workflow import check_not_exploded_for_max_chunk, effective_max_chunks, is_nvt_ramp_stage, warn_if_ramp_max_chunks_ignored
+from atomi.lammps.workflow import (
+    check_not_exploded_for_max_chunk,
+    effective_max_chunks,
+    is_npt_equilibration_stage,
+    is_nvt_ramp_stage,
+    warn_if_ramp_max_chunks_ignored,
+)
 from atomi.lammps.thermo_series import (
     build_combined_thermo,
     choose_qha_md_cp_switch,
@@ -81,6 +87,44 @@ def test_npt_stage_honors_global_max_chunks() -> None:
     }
 
     assert effective_max_chunks(cfg, stage) == 3
+
+
+def test_npt_eqm_stage_defaults_to_three_chunks_not_large_cell_limit() -> None:
+    cfg = {"max_chunks_small": 5, "max_chunks_large": 8}
+    stage = {
+        "name": "lc_npt_eqm_1200K",
+        "type": "npt",
+        "temperature": 1200,
+        "large_cell": True,
+    }
+
+    assert is_npt_equilibration_stage(stage)
+    assert effective_max_chunks(cfg, stage) == 3
+
+
+def test_npt_eqm_stage_can_use_named_configured_limit() -> None:
+    cfg = {"max_chunks_small": 5, "max_chunks_large": 8, "max_chunks_npt_eqm": 2}
+    stage = {
+        "name": "lc_npt_eqm_1200K",
+        "type": "npt",
+        "temperature": 1200,
+        "large_cell": True,
+    }
+
+    assert effective_max_chunks(cfg, stage) == 2
+
+
+def test_npt_eqm_stage_explicit_stage_limit_still_wins() -> None:
+    cfg = {"max_chunks_small": 5, "max_chunks_large": 8, "max_chunks_npt_eqm": 2}
+    stage = {
+        "name": "lc_npt_eqm_1200K",
+        "type": "npt",
+        "temperature": 1200,
+        "large_cell": True,
+        "max_chunks": 4,
+    }
+
+    assert effective_max_chunks(cfg, stage) == 4
 
 
 def test_final_npt_chunk_can_force_pass_when_not_exploded() -> None:
