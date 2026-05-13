@@ -79,7 +79,10 @@
 #
 # ============================================================
 
-ATOMI_LAMMPS_ENV="${ATOMI_LAMMPS_ENV:-$HOME/m_lammps_env}"
+if [ -z "${ATOMI_LAMMPS_ENV:-}" ]; then
+    echo "ERROR: set ATOMI_LAMMPS_ENV to the private path of your Atomi/LAMMPS Python environment."
+    exit 2
+fi
 source "$ATOMI_LAMMPS_ENV/bin/activate"
 cd "$SLURM_SUBMIT_DIR"
 

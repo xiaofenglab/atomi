@@ -85,7 +85,7 @@ def test_qha_summary_scans_volume_folders(tmp_path: Path) -> None:
             "--atoms-per-fu",
             "3",
             "--phonopy-module",
-            "phys/phonopy/2.38.1",
+            "phonopy/example",
             "--no-plot",
         ]
     )
@@ -95,7 +95,7 @@ def test_qha_summary_scans_volume_folders(tmp_path: Path) -> None:
     assert [row["volume_folder"] for row in rows] == ["V0.980", "V1.000"]
     assert rows[0]["n_disp_dirs"] == "2"
     assert rows[0]["has_FORCE_SETS"] == "True"
-    assert "phys/phonopy/2.38.1" in (outdir / "qha_summary_report.txt").read_text(
+    assert "phonopy/example" in (outdir / "qha_summary_report.txt").read_text(
         encoding="utf-8"
     )
 

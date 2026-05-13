@@ -1,4 +1,5 @@
 import argparse
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -7,7 +8,7 @@ from pathlib import Path
 from atomi.cp2k.acid_box import KIND_DEFAULTS, render_kinds
 
 
-CP2K_DATA_DIR = "/opt/bwhpc/common/chem/cp2k/2024.1/data"
+CP2K_DATA_DIR = os.environ.get("ATOMI_CP2K_DATA_DIR") or os.environ.get("CP2K_DATA_DIR") or "."
 
 
 @dataclass(frozen=True)

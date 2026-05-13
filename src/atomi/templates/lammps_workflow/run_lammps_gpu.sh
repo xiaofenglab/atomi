@@ -2,10 +2,11 @@
 #SBATCH --job-name=md-engine
 #SBATCH --output=lammps_gpu.%x.%j.out
 #SBATCH --error=lammps_gpu.%x.%j.err
-#SBATCH --partition=gpu
+# Set cluster-specific partition/resource directives in your private copy.
+##SBATCH --partition=your_gpu_partition
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
+##SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem-per-cpu=3500M
 #SBATCH --time=2:00:00
@@ -34,18 +35,27 @@ export SLURM_JOB_NAME="${SLURM_JOB_NAME//[^a-zA-Z0-9._-]/_}"
 # ---- modules ----
 if command -v module >/dev/null 2>&1; then
     module purge
-    for mod in ${ATOMI_LAMMPS_MODULES:-compiler/gnu mpi/openmpi numlib/mkl/2020.2 devel/cuda/12.3}; do
-        module load "$mod"
-    done
+    if [ -n "${ATOMI_LAMMPS_MODULES:-}" ]; then
+        for mod in ${ATOMI_LAMMPS_MODULES}; do
+            module load "$mod"
+        done
+    else
+        echo "ATOMI_LAMMPS_MODULES is not set; using the current environment after module purge."
+    fi
 fi
 
 # ---- optional env ----
 unset PYTHONPATH
 
 # ---- runtime libraries ----
-ATOMI_LAMMPS_PREFIX="${ATOMI_LAMMPS_PREFIX:-$HOME/projects/lammps/gup_run}"
-ATOMI_LIBTORCH_LIB="${ATOMI_LIBTORCH_LIB:-$ATOMI_LAMMPS_PREFIX/src/libtorch-gpu/lib}"
-export LD_LIBRARY_PATH=$ATOMI_LAMMPS_PREFIX/install/lib64:$ATOMI_LAMMPS_PREFIX/install/lib:$ATOMI_LIBTORCH_LIB:$LD_LIBRARY_PATH
+if [ -z "${ATOMI_LMP_EXE:-}" ]; then
+    echo "ERROR: set ATOMI_LMP_EXE to the private path of your LAMMPS executable."
+    exit 2
+fi
+if [ -n "${ATOMI_LAMMPS_PREFIX:-}" ]; then
+    ATOMI_LIBTORCH_LIB="${ATOMI_LIBTORCH_LIB:-$ATOMI_LAMMPS_PREFIX/src/libtorch-gpu/lib}"
+    export LD_LIBRARY_PATH=$ATOMI_LAMMPS_PREFIX/install/lib64:$ATOMI_LAMMPS_PREFIX/install/lib:$ATOMI_LIBTORCH_LIB:$LD_LIBRARY_PATH
+fi
 
 
 cd "${SLURM_SUBMIT_DIR}" || exit 1
@@ -76,7 +86,7 @@ echo "SLURM_NTASKS      = ${SLURM_NTASKS}"
 echo "OMP_NUM_THREADS   = ${OMP_NUM_THREADS}"
 echo "INPUT_FILE        = ${INPUT}"
 echo "CUDA_VISIBLE_DEVICES = ${CUDA_VISIBLE_DEVICES}"
-echo "LMP_EXE           = ${ATOMI_LMP_EXE:-$ATOMI_LAMMPS_PREFIX/install/bin/lmp}"
+echo "LMP_EXE           = ${ATOMI_LMP_EXE}"
 echo "========================================"
 
 echo "----- TOOLCHAIN -----"
@@ -85,7 +95,7 @@ which nvcc || true
 nvidia-smi || true
 echo "---------------------"
 
-LMP_EXE="${ATOMI_LMP_EXE:-$ATOMI_LAMMPS_PREFIX/install/bin/lmp}"
+LMP_EXE="${ATOMI_LMP_EXE}"
 
 ${LMP_EXE} \
     -nonbuf \

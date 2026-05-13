@@ -37,7 +37,7 @@ def test_qha_run_writes_ev_manifest_and_script(tmp_path: Path) -> None:
             "--outdir",
             str(outdir),
             "--phonopy-module",
-            "phys/phonopy/2.38.1",
+            "phonopy/example",
         ]
     )
 
@@ -49,7 +49,7 @@ def test_qha_run_writes_ev_manifest_and_script(tmp_path: Path) -> None:
     assert [row["volume_folder"] for row in rows] == ["V0.980", "V1.000"]
     script = (outdir / "run_phonopy_qha.sh").read_text(encoding="utf-8")
     sbatch = (outdir / "submit_phonopy_qha.sbatch").read_text(encoding="utf-8")
-    assert "module load phys/phonopy/2.38.1" in script
+    assert "module load phonopy/example" in script
     assert "phonopy-qha e-v.dat" in script
     assert "../2x2x2/V0.980/thermal_properties.yaml" in script
     assert "../2x2x2/V1.000/thermal_properties.yaml" in script

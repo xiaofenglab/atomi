@@ -30,4 +30,5 @@ def test_build_report_can_include_hpc_probe(monkeypatch, tmp_path: Path) -> None
     assert probe["commands"]["home_scratch_df"]["command"] == 'df -h "$HOME" "${SCRATCH:-$HOME}" 2>/dev/null'
 
     assert report["profiles"]["lammps_md_engine"]["module_commands"][0] == "module purge"
-    assert "devel/cuda/12.3" in report["profiles"]["gpu_lammps"]["modules"]
+    assert report["profiles"]["gpu_lammps"]["modules"] == []
+    assert "privately" in report["profiles"]["gpu_lammps"]["note"]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -339,7 +340,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-script", default="run_phonopy_post.sh")
     parser.add_argument("--sbatch-script", default="submit_phonopy_post.sbatch")
     parser.add_argument("--summary", default="phonopy_post_summary.txt")
-    parser.add_argument("--phonopy-module", default="phys/phonopy/2.38.1")
+    parser.add_argument("--phonopy-module", default=os.environ.get("ATOMI_PHONOPY_MODULE"))
     parser.add_argument("--no-module", action="store_true", help="Do not write a module load line.")
     parser.add_argument("--module-purge", action="store_true", help="Write module purge before module load.")
     parser.add_argument("--phonopy", default="phonopy")

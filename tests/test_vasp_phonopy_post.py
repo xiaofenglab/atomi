@@ -92,7 +92,7 @@ def test_vasp_phonopy_post_writes_env_run_and_sbatch(tmp_path: Path) -> None:
             "--outdir",
             str(outdir),
             "--phonopy-module",
-            "phys/phonopy/2.38.1",
+            "phonopy/example",
         ]
     )
 
@@ -103,7 +103,7 @@ def test_vasp_phonopy_post_writes_env_run_and_sbatch(tmp_path: Path) -> None:
 
     assert 'export MESH="12 12 12"' in env_text
     assert 'export BAND_PATH="' in env_text
-    assert "module load phys/phonopy/2.38.1" in run_text
+    assert "module load phonopy/example" in run_text
     assert "phonopy -f disp-*/vasprun.xml" in run_text
     assert "phonopy-load --mesh ${MESH} -t" in run_text
     assert "phonopy-load --mesh ${MESH} --dos" in run_text

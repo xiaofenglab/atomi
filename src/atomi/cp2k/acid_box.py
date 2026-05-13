@@ -1,5 +1,6 @@
 import argparse
 import math
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +11,7 @@ import numpy as np
 
 AVOGADRO = 6.02214076e23
 WATER_MOLAR_MASS_G_MOL = 18.01528
+CP2K_DATA_DIR = os.environ.get("ATOMI_CP2K_DATA_DIR") or os.environ.get("CP2K_DATA_DIR") or "."
 
 DENSITY_PRESETS = {
     "regular": 1.0,
@@ -661,13 +663,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--multiplicity", type=int, default=1)
     parser.add_argument(
         "--basis-file",
-        default="/opt/bwhpc/common/chem/cp2k/2024.1/data/BASIS_MOLOPT",
+        default=str(Path(CP2K_DATA_DIR) / "BASIS_MOLOPT"),
     )
     parser.add_argument(
         "--potential-file",
-        default="/opt/bwhpc/common/chem/cp2k/2024.1/data/GTH_POTENTIALS",
+        default=str(Path(CP2K_DATA_DIR) / "GTH_POTENTIALS"),
     )
-    parser.add_argument("--d3-file", default="/opt/bwhpc/common/chem/cp2k/2024.1/data/dftd3.dat")
+    parser.add_argument("--d3-file", default=str(Path(CP2K_DATA_DIR) / "dftd3.dat"))
     parser.add_argument("--cutoff", type=int, default=300)
     parser.add_argument("--rel-cutoff", type=int, default=40)
     parser.add_argument("--geoopt-max-iter", type=int, default=200)

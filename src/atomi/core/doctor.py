@@ -182,9 +182,9 @@ def mace_lammps_defaults(config: dict[str, Any]) -> dict[str, str]:
     """Return MACE LAMMPS conversion defaults from config with portable fallbacks."""
     profile = config.get("profiles", {}).get("mace_lammps", {})
     return {
-        "env_path": str(profile.get("env_path") or "~/m_lammps_env"),
-        "partition": str(profile.get("partition") or "gpu"),
-        "gres": str(profile.get("gres") or "gpu:1"),
+        "env_path": str(profile.get("env_path") or ""),
+        "partition": str(profile.get("partition") or ""),
+        "gres": str(profile.get("gres") or ""),
         "time": str(profile.get("time") or "00:15:00"),
     }
 
@@ -319,42 +319,33 @@ def build_report(include_hpc_probe: bool = False) -> dict[str, Any]:
         "python_packages": packages,
         "profiles": {
             "mace_lammps": {
-                "env_path": "~/m_lammps_env",
-                "partition": "gpu",
-                "gres": "gpu:1",
+                "env_path": "",
+                "partition": "",
+                "gres": "",
                 "time": "00:15:00",
+                "note": "Set env_path, partition, and gres in private local config before submitting.",
             },
             "lammps_md_engine": {
-                "env_path": "~/m_lammps_env",
-                "partition": "gpu",
-                "gres": "gpu:1",
-                "modules": ["compiler/gnu", "mpi/openmpi", "numlib/mkl/2020.2", "devel/cuda/12.3"],
-                "module_commands": [
-                    "module purge",
-                    "module load compiler/gnu",
-                    "module load mpi/openmpi",
-                    "module load numlib/mkl/2020.2",
-                    "module load devel/cuda/12.3",
-                ],
-                "lammps_prefix": "~/projects/lammps/gup_run",
-                "lammps_executable": "~/projects/lammps/gup_run/install/bin/lmp",
-                "libtorch_lib": "~/projects/lammps/gup_run/src/libtorch-gpu/lib",
+                "env_path": "",
+                "partition": "",
+                "gres": "",
+                "modules": [],
+                "module_commands": ["module purge"],
+                "lammps_prefix": "",
+                "lammps_executable": "",
+                "libtorch_lib": "",
                 "gpu_checks": ["nvidia-smi -L", "nvcc --version", "mpicc --version"],
+                "note": "Keep site-specific module names in a private atomi_hpc_config.json or ATOMI_LAMMPS_MODULES, not in the public package.",
             },
             "gpu_lammps": {
                 "description": "GPU LAMMPS build/runtime module stack to verify on each HPC before installing or running.",
                 "scheduler": "slurm",
-                "partition": "gpu",
-                "gres": "gpu:1",
-                "modules": ["compiler/gnu", "mpi/openmpi", "numlib/mkl/2020.2", "devel/cuda/12.3"],
-                "module_commands": [
-                    "module purge",
-                    "module load compiler/gnu",
-                    "module load mpi/openmpi",
-                    "module load numlib/mkl/2020.2",
-                    "module load devel/cuda/12.3",
-                ],
+                "partition": "",
+                "gres": "",
+                "modules": [],
+                "module_commands": ["module purge"],
                 "checks": ["which nvidia-smi nvcc mpicc", "nvidia-smi -L", "nvcc --version"],
+                "note": "Populate modules privately per cluster; doctor only reports public generic fields.",
             }
         },
         "hpc_assumptions": HPC_ASSUMPTIONS,

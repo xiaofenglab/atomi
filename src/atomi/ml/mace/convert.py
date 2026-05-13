@@ -54,8 +54,8 @@ def convert_mace_model_local(model: Path) -> None:
 def submit_mace_conversion(
     model: Path,
     env_path: Path,
-    partition: str = "gpu",
-    gres: str = "gpu:1",
+    partition: str,
+    gres: str,
     time_limit: str = "00:15:00",
     dry_run: bool = False,
 ) -> None:
@@ -101,7 +101,8 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     defaults = mace_lammps_defaults(load_hpc_config(args.hpc_config))
-    env_path = args.env or Path(defaults["env_path"]).expanduser()
+    env_default = defaults["env_path"]
+    env_path = args.env or (Path(env_default).expanduser() if env_default else None)
     partition = args.partition or defaults["partition"]
     gres = args.gres or defaults["gres"]
     time_limit = args.time or defaults["time"]
@@ -113,6 +114,20 @@ def main(argv: list[str] | None = None) -> None:
     if args.local:
         convert_mace_model_local(model)
         return
+
+    missing = []
+    if env_path is None:
+        missing.append("--env or profiles.mace_lammps.env_path")
+    if not partition:
+        missing.append("--partition or profiles.mace_lammps.partition")
+    if not gres:
+        missing.append("--gres or profiles.mace_lammps.gres")
+    if missing:
+        raise SystemExit(
+            "Missing cluster-specific conversion settings: "
+            + ", ".join(missing)
+            + ". Keep these in a private atomi_hpc_config.json or pass them explicitly."
+        )
 
     submit_mace_conversion(
         model=model,
