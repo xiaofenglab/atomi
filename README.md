@@ -102,6 +102,19 @@ ATOMI_HPC_CONFIG
 
 Cluster paths, module names, scheduler partitions, GPU resources, Python environments, and executable names should be treated as local configuration. Do not assume settings from one HPC system are portable to another without checking the doctor output.
 
+For routine use on an HPC where a private config already exists, place the local-only config in `~/atomi_hpc/` with a `*.local.json` name and apply it with:
+
+```bash
+confighpc
+source ~/atomi_hpc/atomi_hpc_env.sh
+```
+
+`confighpc` automatically prefers `atomi_hpc_config*.local.json` files in `~/atomi_hpc/` and writes a sourceable env file for Atomi workflows. To apply the exports directly in the current shell:
+
+```bash
+eval "$(confighpc --shell)"
+```
+
 Use auto-setup to prefer an existing private config and otherwise start the discovery workflow:
 
 ```bash

@@ -136,7 +136,7 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
     env_text = env_path.read_text(encoding="utf-8")
 
     assert result["config_found"] is True
-    assert result["profile_names"] == ["cp2k", "lammps_md_engine", "phonopy"]
+    assert result["profile_names"] == ["cp2k", "lammps_md_engine", "mace_training_gpu", "phonopy"]
     assert "source" in result["next_steps"][0]
     assert "export ATOMI_HPC_CONFIG=" in env_text
     assert "export ATOMI_LAMMPS_ENV=/private/env" in env_text
@@ -160,3 +160,54 @@ def test_auto_setup_without_config_writes_helpers(tmp_path: Path, monkeypatch) -
     assert (tmp_path / "atomi_hpc_config.new_cluster.local.json").exists()
     assert (tmp_path / "atomi_hpc_discover.sh").exists()
     assert "ATOMI_DISCOVERY_INTERACTIVE=1" in result["next_steps"][1]
+
+
+def test_confighpc_applies_default_local_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "atomi_hpc_config.kit.local.json"
+    env_path = tmp_path / "atomi_hpc_env.sh"
+    config_path.write_text(
+        json.dumps(
+            {
+                "site": "KIT",
+                "environment_exports": {"ATOMI_CUSTOM": "yes"},
+                "profiles": {
+                    "lammps_md_engine": {"lammps_executable": "/private/lmp"},
+                    "cp2k": {"data_dir": "/private/cp2k/data"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = doctor.configure_hpc_environment(directory=tmp_path, env_path=env_path)
+    env_text = env_path.read_text(encoding="utf-8")
+
+    assert result["config_found"] is True
+    assert result["config_path"] == str(config_path.resolve())
+    assert result["site"] == "KIT"
+    assert result["export_count"] == 4
+    assert "export ATOMI_CUSTOM=yes" in env_text
+    assert "export ATOMI_CP2K_DATA_DIR=/private/cp2k/data" in env_text
+    assert "export ATOMI_LMP_EXE=/private/lmp" in env_text
+    assert f"export ATOMI_HPC_CONFIG={config_path}" in env_text
+
+
+def test_confighpc_prefers_named_local_config_and_warns_on_multiple(tmp_path: Path) -> None:
+    less_preferred = tmp_path / "other.local.json"
+    preferred = tmp_path / "atomi_hpc_config.kit.local.json"
+    less_preferred.write_text(json.dumps({"site": "other"}), encoding="utf-8")
+    preferred.write_text(json.dumps({"site": "kit"}), encoding="utf-8")
+
+    selected, warnings = doctor.select_confighpc_config(directory=tmp_path, use_env=False)
+
+    assert selected == preferred.resolve()
+    assert warnings
+    assert "Multiple *.local.json" in warnings[0]
+
+
+def test_confighpc_reports_missing_config_without_discovery(tmp_path: Path) -> None:
+    result = doctor.configure_hpc_environment(directory=tmp_path)
+
+    assert result["config_found"] is False
+    assert result["searched_patterns"] == list(doctor.LOCAL_CONFIG_PATTERNS)
+    assert "atomi-doctor --auto-setup" in result["next_steps"][-1]

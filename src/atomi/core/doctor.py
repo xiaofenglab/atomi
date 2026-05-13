@@ -15,6 +15,9 @@ from typing import Any
 CONFIG_ENV_VAR = "ATOMI_HPC_CONFIG"
 LOCAL_CONFIG = Path("atomi_hpc_config.json")
 USER_CONFIG = Path("~/.config/atomi/hpc.json").expanduser()
+DEFAULT_HPC_DIR = Path("~/atomi_hpc").expanduser()
+DEFAULT_HPC_ENV = "atomi_hpc_env.sh"
+LOCAL_CONFIG_PATTERNS = ("atomi_hpc_config*.local.json", "*.local.json")
 
 EXECUTABLES = {
     "core": ["python", "python3"],
@@ -663,6 +666,216 @@ def write_env_script(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_env_script(config, config_path=config_path), encoding="utf-8")
     path.chmod(0o600)
+
+
+def find_local_hpc_configs(directory: Path | None = None) -> list[Path]:
+    """Return local-only HPC config candidates from the default private directory."""
+    root = (directory or DEFAULT_HPC_DIR).expanduser()
+    if not root.is_dir():
+        return []
+
+    found: dict[Path, tuple[int, float]] = {}
+    for priority, pattern in enumerate(LOCAL_CONFIG_PATTERNS):
+        for path in root.glob(pattern):
+            if path.is_file():
+                found[path.resolve()] = (priority, path.stat().st_mtime)
+
+    return sorted(found, key=lambda path: (found[path][0], -found[path][1], path.name))
+
+
+def select_confighpc_config(
+    explicit: Path | None = None,
+    directory: Path | None = None,
+    use_env: bool = True,
+) -> tuple[Path | None, list[str]]:
+    """Select the config that confighpc should apply, with human-readable warnings."""
+    warnings: list[str] = []
+    if explicit is not None:
+        path = explicit.expanduser()
+        return (path if path.is_file() else None), warnings
+
+    if use_env:
+        env_path = os.environ.get(CONFIG_ENV_VAR)
+        if env_path:
+            path = Path(env_path).expanduser()
+            if path.is_file():
+                return path, warnings
+            warnings.append(f"{CONFIG_ENV_VAR} is set but does not exist: {path}")
+
+    candidates = find_local_hpc_configs(directory)
+    if not candidates:
+        return None, warnings
+    if len(candidates) > 1:
+        warnings.append(
+            "Multiple *.local.json configs found; using "
+            f"{candidates[0].name}. Pass --config PATH to choose another."
+        )
+    return candidates[0], warnings
+
+
+def configure_hpc_environment(
+    config_path: Path | None = None,
+    directory: Path | None = None,
+    env_path: Path | None = None,
+    overwrite: bool = True,
+    use_env: bool = True,
+) -> dict[str, Any]:
+    """Apply a private local HPC JSON by writing a sourceable env file."""
+    selected, warnings = select_confighpc_config(
+        explicit=config_path,
+        directory=directory,
+        use_env=use_env,
+    )
+    result: dict[str, Any] = {"warnings": warnings, "config_found": selected is not None}
+    target_dir = (directory or DEFAULT_HPC_DIR).expanduser()
+    target_env = (env_path or (target_dir / DEFAULT_HPC_ENV)).expanduser()
+
+    if selected is None:
+        result["directory"] = str(target_dir)
+        result["searched_patterns"] = list(LOCAL_CONFIG_PATTERNS)
+        result["next_steps"] = [
+            f"mkdir -p {target_dir}",
+            f"copy atomi_hpc_config.<site>.local.json into {target_dir}",
+            "confighpc",
+            "or run atomi-doctor --auto-setup --site <site>",
+        ]
+        return result
+
+    config = load_hpc_config(selected)
+    write_env_script(target_env, config, config_path=selected, overwrite=overwrite)
+    result.update(
+        {
+            "config_path": str(selected.expanduser().resolve()),
+            "env_path": str(target_env.expanduser()),
+            "site": config.get("site"),
+            "profile_names": sorted(config.get("profiles", {})),
+            "export_count": len(collect_environment_exports(config, config_path=selected)),
+            "next_steps": [
+                f"source {target_env}",
+                'or apply directly with: eval "$(confighpc --shell)"',
+            ],
+        }
+    )
+    return result
+
+
+def print_confighpc_summary(result: dict[str, Any], stream: Any = None) -> None:
+    """Print confighpc actions without exposing private paths beyond selected files."""
+    out = stream or sys.stdout
+    print("Atomi HPC config apply", file=out)
+    for warning in result.get("warnings", []):
+        print(f"warning: {warning}", file=out)
+    if not result.get("config_found"):
+        print(f"No private *.local.json config found in {result.get('directory')}", file=out)
+        print("Next steps:", file=out)
+        for step in result.get("next_steps", []):
+            print(f"  {step}", file=out)
+        return
+
+    print(f"Config: {result['config_path']}", file=out)
+    print(f"Env file: {result['env_path']}", file=out)
+    if result.get("site"):
+        print(f"Site: {result['site']}", file=out)
+    profiles = result.get("profile_names", [])
+    if profiles:
+        print(f"Profiles: {', '.join(profiles)}", file=out)
+    print(f"Exports: {result.get('export_count', 0)}", file=out)
+    print("Apply in the current shell:", file=out)
+    print(f"  source {result['env_path']}", file=out)
+    print('One-line immediate apply:', file=out)
+    print('  eval "$(confighpc --shell)"', file=out)
+
+
+def config_hpc_main(argv: list[str] | None = None) -> None:
+    """Console entrypoint for quickly applying private HPC config."""
+    parser = argparse.ArgumentParser(
+        prog="confighpc",
+        description=(
+            "Apply a private Atomi HPC JSON from ~/atomi_hpc. "
+            "By default this writes ~/atomi_hpc/atomi_hpc_env.sh."
+        ),
+    )
+    parser.add_argument("--config", type=Path, help="Use this private .local.json config.")
+    parser.add_argument(
+        "--dir",
+        type=Path,
+        default=DEFAULT_HPC_DIR,
+        help="Directory to search for atomi_hpc_config*.local.json files.",
+    )
+    parser.add_argument("--env", type=Path, help="Env script to write.")
+    parser.add_argument(
+        "--no-env-var",
+        action="store_true",
+        help=f"Ignore an existing {CONFIG_ENV_VAR} value and search --dir.",
+    )
+    parser.add_argument(
+        "--no-overwrite",
+        action="store_true",
+        help="Do not overwrite an existing env script.",
+    )
+    parser.add_argument(
+        "--shell",
+        action="store_true",
+        help=(
+            'Print export commands to stdout for eval "$(confighpc --shell)" '
+            "instead of writing a file."
+        ),
+    )
+    parser.add_argument(
+        "--print-env-path",
+        action="store_true",
+        help=(
+            "Write/update the env file and print only its path, useful as "
+            'source "$(confighpc --print-env-path)".'
+        ),
+    )
+    parser.add_argument("--json", action="store_true", help="Print a machine-readable summary.")
+    args = parser.parse_args(argv)
+
+    selected, warnings = select_confighpc_config(
+        explicit=args.config,
+        directory=args.dir,
+        use_env=not args.no_env_var,
+    )
+    if selected is None:
+        result = configure_hpc_environment(
+            config_path=args.config,
+            directory=args.dir,
+            env_path=args.env,
+            overwrite=not args.no_overwrite,
+            use_env=not args.no_env_var,
+        )
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            stream = sys.stderr if args.shell or args.print_env_path else sys.stdout
+            print_confighpc_summary(result, stream=stream)
+        raise SystemExit(2)
+
+    if args.shell:
+        for warning in warnings:
+            print(f"warning: {warning}", file=sys.stderr)
+        config = load_hpc_config(selected)
+        sys.stdout.write(render_env_script(config, config_path=selected))
+        return
+
+    result = configure_hpc_environment(
+        config_path=selected,
+        directory=args.dir,
+        env_path=args.env,
+        overwrite=not args.no_overwrite,
+        use_env=False,
+    )
+    result["warnings"] = warnings + result.get("warnings", [])
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    elif args.print_env_path:
+        for warning in result.get("warnings", []):
+            print(f"warning: {warning}", file=sys.stderr)
+        print(result["env_path"])
+    else:
+        print_confighpc_summary(result)
 
 
 def _safe_site_name(site: str) -> str:
