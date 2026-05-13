@@ -82,6 +82,7 @@ Atomi currently includes command families for:
 - MACE/MLIP dataset construction, validation, outlier detection, extxyz updating, and model conversion.
 - LAMMPS MD engine setup, staged equilibration/production workflows, post-processing, and thermodynamic analysis.
 - CP2K input preparation, trajectory extraction, molecular box construction, bond analysis, and run cleanup.
+- MOOSE and CALPHAD environment discovery modules for project-specific app executables and pycalphad database checks.
 - HPC environment diagnostics and local configuration discovery.
 
 The command names and options may evolve as workflows are cleaned up, so use `--help` from the installed version you are actually running.

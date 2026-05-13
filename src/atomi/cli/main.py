@@ -14,7 +14,7 @@ from atomi.viz.vasp_live import plot_vasp_live, plot_vasp_live4
 from atomi.ml.mace.datasets import main as mace_build_dataset_main
 
 
-SUPPORTED_CODES = ("vasp", "cp2k", "lammps", "turbomole", "molcas")
+SUPPORTED_CODES = ("vasp", "cp2k", "lammps", "turbomole", "molcas", "moose", "calphad")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -203,6 +203,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Generate and optionally run PyMOL AIMD render/movie scripts.",
     )
     cp2k_pymol_render.add_argument("render_args", nargs=argparse.REMAINDER)
+
+    moose_doctor = subparsers.add_parser(
+        "moose-doctor",
+        help="Inspect MOOSE app executables and common MOOSE environment variables.",
+    )
+    moose_doctor.add_argument("moose_args", nargs=argparse.REMAINDER)
+
+    calphad_doctor = subparsers.add_parser(
+        "calphad-doctor",
+        help="Inspect pycalphad availability and optional TDB database metadata.",
+    )
+    calphad_doctor.add_argument("calphad_args", nargs=argparse.REMAINDER)
 
     mace_live = subparsers.add_parser(
         "mace-live",
@@ -436,6 +448,16 @@ def main(argv: list[str] | None = None) -> None:
 
         cp2k_pymol_render_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "moose-doctor":
+        from atomi.moose.env import main as moose_doctor_main
+
+        moose_doctor_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "calphad-doctor":
+        from atomi.calphad.env import main as calphad_doctor_main
+
+        calphad_doctor_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "vasp-outcar":
         extv(raw_args[1:])
         return
@@ -661,6 +683,18 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.cp2k.pymol_render import main as cp2k_pymol_render_main
 
         cp2k_pymol_render_main(args.render_args)
+        return
+
+    if args.subcommand == "moose-doctor":
+        from atomi.moose.env import main as moose_doctor_main
+
+        moose_doctor_main(args.moose_args)
+        return
+
+    if args.subcommand == "calphad-doctor":
+        from atomi.calphad.env import main as calphad_doctor_main
+
+        calphad_doctor_main(args.calphad_args)
         return
 
     if args.subcommand == "mace-live":

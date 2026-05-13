@@ -19,7 +19,18 @@ EXECUTABLES = {
     "scheduler": ["sbatch", "squeue", "srun", "qsub"],
     "visualization": ["gnuplot"],
     "engines": ["vasp_std", "vasp_gam", "vasp_ncl", "cp2k", "lmp", "lammps", "nvidia-smi"],
-    "environment": ["module", "conda", "git", "cmake", "mpiexec", "mpirun", "mpicc", "mpicxx", "mpif90"],
+    "moose": ["moose-opt", "moose-dbg", "moose-devel", "moose_test-opt"],
+    "environment": [
+        "module",
+        "conda",
+        "git",
+        "cmake",
+        "mpiexec",
+        "mpirun",
+        "mpicc",
+        "mpicxx",
+        "mpif90",
+    ],
 }
 
 HPC_PROBE_WHICH = [
@@ -70,6 +81,7 @@ PYTHON_PACKAGES = [
     "matplotlib",
     "torch",
     "mace",
+    "pycalphad",
 ]
 
 HPC_ASSUMPTIONS = [
@@ -97,6 +109,16 @@ HPC_ASSUMPTIONS = [
         "key": "lammps_md_engine_runtime",
         "applies_to": ["md-engine-init", "md-engine"],
         "note": "The MD engine needs Slurm sbatch/squeue, a LAMMPS executable, GPU modules, and MACE/LAMMPS runtime libraries configured for each HPC.",
+    },
+    {
+        "key": "moose_application_executable",
+        "applies_to": ["moose-doctor"],
+        "note": "MOOSE workflows usually run project-specific app executables; record the app-opt path and required compiler/MPI/PETSc modules per cluster.",
+    },
+    {
+        "key": "pycalphad_database_paths",
+        "applies_to": ["calphad-doctor"],
+        "note": "CALPHAD workflows need pycalphad installed and explicit local paths to thermodynamic database files.",
     },
 ]
 

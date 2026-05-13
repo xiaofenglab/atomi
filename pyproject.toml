@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "atomi"
-version = "0.2.28"
+version = "0.2.29"
 description = "Reusable HPC automation tools for atomistic modeling workflows."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -21,6 +21,9 @@ dev = [
 materials = [
   "ase>=3.23",
   "pymatgen>=2024.5",
+]
+calphad = [
+  "pycalphad",
 ]
 
 [project.scripts]
@@ -40,6 +43,8 @@ cp2k-bond-analysis = "atomi.cp2k.bond_analysis:main"
 cp2k-clean-run = "atomi.cp2k.clean_run:main"
 cp2k-water-entry = "atomi.cp2k.water_entry:main"
 cp2k-pymol-render = "atomi.cp2k.pymol_render:main"
+moose-doctor = "atomi.moose.env:main"
+calphad-doctor = "atomi.calphad.env:main"
 convertmace = "atomi.ml.mace.convert:main"
 extv = "atomi.cli.vasp:extv"
 checkvasp = "atomi.vasp.checks:checkvasp"
