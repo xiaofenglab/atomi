@@ -234,6 +234,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     moose_qha_md_material.add_argument("moose_material_args", nargs=argparse.REMAINDER)
 
+    moose_material_source = subparsers.add_parser(
+        "moose-material-source",
+        help="Fetch or normalize external MOOSE material-property source data.",
+    )
+    moose_material_source.add_argument("moose_material_source_args", nargs=argparse.REMAINDER)
+
+    moose_material_compare = subparsers.add_parser(
+        "moose-material-compare",
+        help="Compare MOOSE material-property CSVs and write plots/tables.",
+    )
+    moose_material_compare.add_argument("moose_material_compare_args", nargs=argparse.REMAINDER)
+
     moose_thermal_stress = subparsers.add_parser(
         "moose-thermal-stress",
         help="Write a material-driven cylindrical thermal-stress MOOSE input.",
@@ -509,6 +521,16 @@ def main(argv: list[str] | None = None) -> None:
 
         moose_qha_md_material_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "moose-material-source":
+        from atomi.moose.material_sources import source_main as moose_material_source_main
+
+        moose_material_source_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "moose-material-compare":
+        from atomi.moose.material_sources import compare_main as moose_material_compare_main
+
+        moose_material_compare_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "moose-thermal-stress":
         from atomi.moose.workflow import thermal_stress_main
 
@@ -779,6 +801,18 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.moose.material_export import main as moose_qha_md_material_main
 
         moose_qha_md_material_main(args.moose_material_args)
+        return
+
+    if args.subcommand == "moose-material-source":
+        from atomi.moose.material_sources import source_main as moose_material_source_main
+
+        moose_material_source_main(args.moose_material_source_args)
+        return
+
+    if args.subcommand == "moose-material-compare":
+        from atomi.moose.material_sources import compare_main as moose_material_compare_main
+
+        moose_material_compare_main(args.moose_material_compare_args)
         return
 
     if args.subcommand == "moose-thermal-stress":

@@ -5,6 +5,7 @@ import pytest
 from atomi.calphad.env import _parse_csv, inspect_calphad_environment
 from atomi.moose.env import inspect_moose_environment
 from atomi.moose.material_export import main as moose_material_main
+from atomi.moose.material_sources import compare_main, source_main
 from atomi.moose.workflow import (
     build_info,
     load_moose_profile,
@@ -465,3 +466,80 @@ def test_moose_qha_md_material_export_tdb_priority_can_override_dft_cp(tmp_path:
     rows = list(csv.DictReader(out_csv.open()))
     assert float(rows[0]["Cp_J_kgK"]) == pytest.approx(111.0)
     assert float(rows[1]["Cp_J_kgK"]) == pytest.approx(222.0)
+
+
+def test_moose_material_source_normalizes_user_csv(tmp_path: Path) -> None:
+    source = tmp_path / "bison_uo2.csv"
+    source.write_text(
+        "T_K,k_W_mK,Cp_J_kgK,rho_kg_m3,alpha_1_K,E_Pa,nu\n"
+        "300,7.5,235,10970,1.0e-5,2.05e11,0.316\n",
+        encoding="utf-8",
+    )
+    out_csv = tmp_path / "source.csv"
+    out_meta = tmp_path / "source.json"
+
+    source_main(
+        [
+            "--provider",
+            "user-csv",
+            "--input",
+            str(source),
+            "--source-label",
+            "bison-uO2-curated",
+            "--citation",
+            "BISON UO2Thermal documentation",
+            "--out-csv",
+            str(out_csv),
+            "--out-meta",
+            str(out_meta),
+        ]
+    )
+
+    import csv
+    import json
+
+    rows = list(csv.DictReader(out_csv.open()))
+    assert rows[0]["provider"] == "bison-uO2-curated"
+    assert rows[0]["citation"] == "BISON UO2Thermal documentation"
+    meta = json.loads(out_meta.read_text(encoding="utf-8"))
+    assert meta["provider"] == "user-csv"
+
+
+def test_moose_material_compare_writes_table_and_plots_optional(tmp_path: Path) -> None:
+    atomi_csv = tmp_path / "atomi.csv"
+    atomi_csv.write_text(
+        "T_K,k_W_mK,Cp_J_kgK,rho_kg_m3,alpha_1_K,E_Pa,nu\n"
+        "300,7.8,235,10970,1.0e-5,2.05e11,0.316\n"
+        "600,5.2,300,10600,1.2e-5,1.95e11,0.318\n",
+        encoding="utf-8",
+    )
+    literature_csv = tmp_path / "literature.csv"
+    literature_csv.write_text(
+        "T_K,k_W_mK,Cp_J_kgK,rho_kg_m3,alpha_1_K,E_Pa,nu\n"
+        "300,7.5,240,10900,1.1e-5,2.00e11,0.31\n"
+        "600,5.0,310,10550,1.25e-5,1.90e11,0.32\n",
+        encoding="utf-8",
+    )
+    outdir = tmp_path / "compare"
+
+    compare_main(
+        [
+            "--source",
+            f"atomi={atomi_csv}",
+            "--source",
+            f"literature={literature_csv}",
+            "--outdir",
+            str(outdir),
+            "--no-plots",
+        ]
+    )
+
+    import csv
+    import json
+
+    table = outdir / "material_property_comparison.csv"
+    rows = list(csv.DictReader(table.open()))
+    assert any(row["source"] == "literature" and row["field"] == "k_W_mK" for row in rows)
+    assert any(row["delta"] for row in rows if row["source"] == "literature")
+    meta = json.loads((outdir / "material_property_comparison.meta.json").read_text())
+    assert meta["reference"] == "atomi"
