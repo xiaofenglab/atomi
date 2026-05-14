@@ -5,7 +5,7 @@ import pytest
 from atomi.calphad.env import _parse_csv, inspect_calphad_environment
 from atomi.moose.env import inspect_moose_environment
 from atomi.moose.material_export import main as moose_material_main
-from atomi.moose.material_sources import compare_main, source_main
+from atomi.moose.material_sources import compare_main, screen_main, screen_plan, source_main
 from atomi.moose.workflow import (
     build_info,
     load_moose_profile,
@@ -543,3 +543,70 @@ def test_moose_material_compare_writes_table_and_plots_optional(tmp_path: Path) 
     assert any(row["delta"] for row in rows if row["source"] == "literature")
     meta = json.loads((outdir / "material_property_comparison.meta.json").read_text())
     assert meta["reference"] == "atomi"
+
+
+def test_moose_material_screen_identifies_missing_thermal_stress_inputs(tmp_path: Path) -> None:
+    qha_md = tmp_path / "qha_md"
+    qha_md.mkdir()
+    (qha_md / "thermo_functions_grid.csv").write_text(
+        "T_K,Cp_used_for_integration_J_per_mol_UO2_K,density_fit_g_cm3,alpha_L_1_per_K\n"
+        "300,240,10.9,1.0e-5\n"
+        "600,300,10.6,1.2e-5\n",
+        encoding="utf-8",
+    )
+
+    plan = screen_plan(
+        prediction="thermal-stress",
+        material="UO2",
+        qha_md_dir=qha_md,
+        csv_sources=[],
+    )
+
+    assert plan["ready"] is False
+    assert "Cp_J_kgK" in plan["present_required"]
+    assert "rho_kg_m3" in plan["present_required"]
+    assert "k_W_mK" in plan["missing_required"]
+    assert any(item["field"] == "E_Pa" for item in plan["recommendations"])
+
+
+def test_moose_material_screen_cli_writes_plan(tmp_path: Path) -> None:
+    qha_md = tmp_path / "qha_md"
+    qha_md.mkdir()
+    (qha_md / "thermo_functions_grid.csv").write_text(
+        "T_K,Cp_used_for_integration_J_per_mol_UO2_K,density_fit_g_cm3,alpha_L_1_per_K\n"
+        "300,240,10.9,1.0e-5\n",
+        encoding="utf-8",
+    )
+    elastic = tmp_path / "elastic.csv"
+    elastic.write_text(
+        "T_K,E_Pa,nu\n"
+        "300,2.05e11,0.316\n",
+        encoding="utf-8",
+    )
+    out_json = tmp_path / "screen.json"
+    out_md = tmp_path / "screen.md"
+
+    screen_main(
+        [
+            "--prediction",
+            "thermal-stress",
+            "--material",
+            "UO2",
+            "--qha-md-dir",
+            str(qha_md),
+            "--source",
+            f"elastic={elastic}",
+            "--out-json",
+            str(out_json),
+            "--out-md",
+            str(out_md),
+        ]
+    )
+
+    import json
+
+    data = json.loads(out_json.read_text(encoding="utf-8"))
+    assert data["ready"] is False
+    assert data["present_fields"]["E_Pa"] == ["elastic"]
+    assert "k_W_mK" in data["missing_required"]
+    assert "MOOSE Material Screen" in out_md.read_text(encoding="utf-8")

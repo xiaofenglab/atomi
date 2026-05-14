@@ -234,6 +234,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     moose_qha_md_material.add_argument("moose_material_args", nargs=argparse.REMAINDER)
 
+    moose_material_screen = subparsers.add_parser(
+        "moose-material-screen",
+        help="Screen which material inputs are present/missing for a MOOSE prediction.",
+    )
+    moose_material_screen.add_argument("moose_material_screen_args", nargs=argparse.REMAINDER)
+
     moose_material_source = subparsers.add_parser(
         "moose-material-source",
         help="Fetch or normalize external MOOSE material-property source data.",
@@ -521,6 +527,11 @@ def main(argv: list[str] | None = None) -> None:
 
         moose_qha_md_material_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "moose-material-screen":
+        from atomi.moose.material_sources import screen_main as moose_material_screen_main
+
+        moose_material_screen_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "moose-material-source":
         from atomi.moose.material_sources import source_main as moose_material_source_main
 
@@ -801,6 +812,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.moose.material_export import main as moose_qha_md_material_main
 
         moose_qha_md_material_main(args.moose_material_args)
+        return
+
+    if args.subcommand == "moose-material-screen":
+        from atomi.moose.material_sources import screen_main as moose_material_screen_main
+
+        moose_material_screen_main(args.moose_material_screen_args)
         return
 
     if args.subcommand == "moose-material-source":

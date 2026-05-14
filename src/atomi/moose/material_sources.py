@@ -13,7 +13,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from atomi.moose.material_export import MOOSE_FIELDS, format_value
+from atomi.moose.material_export import MOOSE_FIELDS, format_value, load_thermo_grid
 
 
 SOURCE_FIELDS = MOOSE_FIELDS + ["provider", "material_id", "citation", "notes"]
@@ -38,6 +38,43 @@ PLOT_FIELDS = [
     "K_Pa",
     "G_Pa",
 ]
+PREDICTION_REQUIREMENTS = {
+    "thermal-stress": {
+        "required": ["T_K", "k_W_mK", "Cp_J_kgK", "rho_kg_m3", "E_Pa", "nu"],
+        "one_of": [["alpha_1_K", "dilatation"]],
+        "description": "Heat conduction plus quasi-static thermal stress.",
+    },
+    "transient-thermal": {
+        "required": ["T_K", "k_W_mK", "Cp_J_kgK", "rho_kg_m3"],
+        "one_of": [],
+        "description": "Transient heat conduction.",
+    },
+    "elastic-thermal": {
+        "required": ["T_K", "E_Pa", "nu"],
+        "one_of": [["alpha_1_K", "dilatation"]],
+        "description": "Temperature-dependent elastic/thermal expansion material model.",
+    },
+    "phase-redistribution": {
+        "required": ["T_K", "phase_free_energy", "chemical_potential", "mobility"],
+        "one_of": [],
+        "description": "Phase-field or diffusion-driven phase redistribution; requires thermodynamic and kinetic models.",
+    },
+}
+FIELD_SOURCE_HINTS = {
+    "T_K": ["thermo_qha_md", "user-csv"],
+    "Cp_J_kgK": ["thermo_qha_md", "CALPHAD/TDB", "NIST-JANAF curated CSV"],
+    "rho_kg_m3": ["thermo_qha_md density/volume", "experiment/handbook curated CSV"],
+    "alpha_1_K": ["thermo_qha_md lattice/volume fits", "experiment/handbook curated CSV"],
+    "dilatation": ["thermo_qha_md lattice/volume fits"],
+    "k_W_mK": ["MLIP-MD transport workflow", "BISON/IAEA/literature curated CSV"],
+    "E_Pa": ["MLIP-MD elastic workflow", "Materials Project", "AFLOW", "literature curated CSV"],
+    "nu": ["MLIP-MD elastic workflow", "Materials Project", "AFLOW", "literature curated CSV"],
+    "K_Pa": ["MLIP-MD elastic workflow", "Materials Project", "AFLOW"],
+    "G_Pa": ["MLIP-MD elastic workflow", "Materials Project", "AFLOW"],
+    "phase_free_energy": ["pycalphad/TDB", "Thermochimica", "custom MOOSE material model"],
+    "chemical_potential": ["pycalphad/TDB", "Thermochimica", "custom MOOSE material model"],
+    "mobility": ["diffusion database", "literature", "fitted phase-field kinetics"],
+}
 
 
 def finite_float(value: Any) -> float | None:
@@ -78,6 +115,190 @@ def parse_source_arg(value: str) -> tuple[str, Path]:
     if not label:
         raise SystemExit(f"Source label is empty in {value!r}")
     return label, Path(path)
+
+
+def row_has_field(rows: list[dict[str, Any]], field: str) -> bool:
+    return any(finite_float(row.get(field)) is not None for row in rows)
+
+
+def infer_qha_md_fields(qha_md_dir: Path | None) -> tuple[dict[str, bool], dict[str, Any]]:
+    fields = {field: False for field in MOOSE_FIELDS}
+    metadata: dict[str, Any] = {"available": False}
+    if qha_md_dir is None:
+        return fields, metadata
+    try:
+        rows, source_info = load_thermo_grid(qha_md_dir)
+    except SystemExit as exc:
+        metadata.update({"available": False, "error": str(exc), "qha_md_dir": str(qha_md_dir)})
+        return fields, metadata
+    fields["T_K"] = bool(rows)
+    fields["Cp_J_kgK"] = any(row.get("Cp_J_molK") is not None for row in rows)
+    fields["Cp_std_J_kgK"] = any(row.get("Cp_std_J_molK") is not None for row in rows)
+    fields["rho_kg_m3"] = any(
+        row.get("density_g_cm3") is not None or row.get("V_A3") is not None for row in rows
+    )
+    fields["alpha_1_K"] = any(row.get("alpha_1_K") is not None for row in rows)
+    fields["dilatation"] = any(row.get("dilatation_source_value") is not None for row in rows)
+    metadata.update(
+        {
+            "available": True,
+            "qha_md_dir": str(qha_md_dir),
+            "rows": len(rows),
+            "temperature_range_K": [rows[0]["T_K"], rows[-1]["T_K"]] if rows else None,
+            "source_info": source_info,
+        }
+    )
+    return fields, metadata
+
+
+def infer_csv_fields(path: Path) -> dict[str, bool]:
+    if not path.exists():
+        return {}
+    rows = read_rows(path)
+    fields = set(rows[0].keys()) if rows else set()
+    result: dict[str, bool] = {}
+    for field in set(MOOSE_FIELDS + list(FIELD_SOURCE_HINTS)):
+        result[field] = field in fields and row_has_field(rows, field)
+    return result
+
+
+def merge_field_sources(
+    qha_fields: dict[str, bool],
+    csv_sources: list[tuple[str, Path]],
+) -> dict[str, list[str]]:
+    present: dict[str, list[str]] = {}
+    for field, available in qha_fields.items():
+        if available:
+            present.setdefault(field, []).append("thermo_qha_md")
+    for label, path in csv_sources:
+        for field, available in infer_csv_fields(path).items():
+            if available:
+                present.setdefault(field, []).append(label)
+    return present
+
+
+def screen_plan(
+    *,
+    prediction: str,
+    material: str,
+    qha_md_dir: Path | None,
+    csv_sources: list[tuple[str, Path]],
+) -> dict[str, Any]:
+    if prediction not in PREDICTION_REQUIREMENTS:
+        choices = ", ".join(sorted(PREDICTION_REQUIREMENTS))
+        raise SystemExit(f"Unknown prediction {prediction!r}. Choices: {choices}")
+    qha_fields, qha_metadata = infer_qha_md_fields(qha_md_dir)
+    present = merge_field_sources(qha_fields, csv_sources)
+    spec = PREDICTION_REQUIREMENTS[prediction]
+    required = list(spec["required"])
+    present_required = [field for field in required if present.get(field)]
+    missing_required = [field for field in required if not present.get(field)]
+    one_of_status = []
+    for group in spec["one_of"]:
+        provided = [field for field in group if present.get(field)]
+        one_of_status.append(
+            {
+                "options": group,
+                "provided": provided,
+                "missing": [] if provided else group,
+                "satisfied": bool(provided),
+            }
+        )
+    missing_structural = [
+        field
+        for group in one_of_status
+        if not group["satisfied"]
+        for field in group["missing"]
+    ]
+    missing_all = missing_required + missing_structural
+    recommendations = []
+    for field in missing_all:
+        recommendations.append(
+            {
+                "field": field,
+                "candidate_sources": FIELD_SOURCE_HINTS.get(field, ["user-csv"]),
+                "commands": recommendation_commands(field, material),
+            }
+        )
+    return {
+        "material": material,
+        "prediction": prediction,
+        "description": spec["description"],
+        "qha_md": qha_metadata,
+        "sources": [{"label": label, "path": str(path)} for label, path in csv_sources],
+        "present_fields": {field: sources for field, sources in sorted(present.items())},
+        "required_fields": required,
+        "present_required": present_required,
+        "missing_required": missing_required,
+        "one_of": one_of_status,
+        "ready": not missing_required and all(group["satisfied"] for group in one_of_status),
+        "recommendations": recommendations,
+    }
+
+
+def recommendation_commands(field: str, material: str) -> list[str]:
+    commands = []
+    if field in {"E_Pa", "nu", "K_Pa", "G_Pa"}:
+        commands.extend(
+            [
+                (
+                    "moose-material-source --provider materials-project "
+                    f"--material {material} --out-csv mp_{material.lower()}_elastic.csv"
+                ),
+                (
+                    "moose-material-source --provider aflow "
+                    f"--material {material} --out-csv aflow_{material.lower()}_elastic.csv"
+                ),
+            ]
+        )
+    if field in {"k_W_mK", "Cp_J_kgK", "rho_kg_m3", "alpha_1_K"}:
+        commands.append(
+            "moose-material-source --provider user-csv --input curated_properties.csv "
+            "--source-label literature --citation 'fill citation'"
+        )
+    if field in {"phase_free_energy", "chemical_potential"}:
+        commands.append(
+            "Generate phase thermodynamics with pycalphad/Thermochimica, then pass as "
+            "custom MOOSE functions/materials."
+        )
+    if field == "mobility":
+        commands.append("Provide mobility/diffusivity from literature, MD, or a fitted kinetic model.")
+    return commands
+
+
+def render_screen_markdown(plan: dict[str, Any]) -> str:
+    lines = [
+        f"# MOOSE Material Screen: {plan['material']} / {plan['prediction']}",
+        "",
+        plan["description"],
+        "",
+        f"Ready: {'yes' if plan['ready'] else 'no'}",
+        "",
+        "## Present Fields",
+    ]
+    if plan["present_fields"]:
+        for field, sources in plan["present_fields"].items():
+            lines.append(f"- `{field}`: {', '.join(sources)}")
+    else:
+        lines.append("- none detected")
+    lines.extend(["", "## Missing Required Fields"])
+    if plan["missing_required"]:
+        for field in plan["missing_required"]:
+            lines.append(f"- `{field}`")
+    else:
+        lines.append("- none")
+    for group in plan["one_of"]:
+        if not group["satisfied"]:
+            lines.append(f"- one of: {', '.join(f'`{field}`' for field in group['options'])}")
+    lines.extend(["", "## Recommendations"])
+    if plan["recommendations"]:
+        for item in plan["recommendations"]:
+            lines.append(f"- `{item['field']}`: {', '.join(item['candidate_sources'])}")
+            for command in item["commands"]:
+                lines.append(f"  - `{command}`")
+    else:
+        lines.append("- all required inputs are present")
+    return "\n".join(lines) + "\n"
 
 
 def formula_to_aflow_compound(formula: str) -> str:
@@ -262,6 +483,46 @@ def source_main(argv: list[str] | None = None) -> None:
     args.out_meta.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     print(f"Wrote {args.out_csv}")
     print(f"Wrote {args.out_meta}")
+
+
+def screen_main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="moose-material-screen",
+        description=(
+            "Inspect QHA/MD and external source coverage for a target MOOSE prediction "
+            "before compiling material tables."
+        ),
+    )
+    parser.add_argument("--prediction", choices=sorted(PREDICTION_REQUIREMENTS), default="thermal-stress")
+    parser.add_argument("--material", default="UO2")
+    parser.add_argument("--qha-md-dir", type=Path)
+    parser.add_argument(
+        "--source",
+        action="append",
+        default=[],
+        metavar="LABEL=CSV",
+        help="Existing source/material CSV to include in the screen.",
+    )
+    parser.add_argument("--out-json", type=Path, default=Path("moose_material_screen.json"))
+    parser.add_argument("--out-md", type=Path, default=Path("moose_material_screen.md"))
+    parser.add_argument("--json", action="store_true", help="Also print JSON to stdout.")
+    args = parser.parse_args(argv)
+
+    sources = [parse_source_arg(item) for item in args.source]
+    plan = screen_plan(
+        prediction=args.prediction,
+        material=args.material,
+        qha_md_dir=args.qha_md_dir,
+        csv_sources=sources,
+    )
+    args.out_json.parent.mkdir(parents=True, exist_ok=True)
+    args.out_md.parent.mkdir(parents=True, exist_ok=True)
+    args.out_json.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+    args.out_md.write_text(render_screen_markdown(plan), encoding="utf-8")
+    print(f"Wrote {args.out_json}")
+    print(f"Wrote {args.out_md}")
+    if args.json:
+        print(json.dumps(plan, indent=2))
 
 
 def collect_series(label: str, rows: list[dict[str, str]]) -> dict[str, dict[float, float]]:
