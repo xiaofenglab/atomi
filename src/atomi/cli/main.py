@@ -210,6 +210,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     moose_doctor.add_argument("moose_args", nargs=argparse.REMAINDER)
 
+    moose_info = subparsers.add_parser(
+        "moose-info",
+        help="Print MOOSE profile information from the local HPC config.",
+    )
+    moose_info.add_argument("moose_args", nargs=argparse.REMAINDER)
+
+    moose_smoke = subparsers.add_parser(
+        "moose-smoke",
+        help="Run a configured MOOSE executable --help smoke check.",
+    )
+    moose_smoke.add_argument("moose_args", nargs=argparse.REMAINDER)
+
+    moose_write_submit = subparsers.add_parser(
+        "moose-write-submit",
+        help="Write a Slurm MOOSE submission script from local config.",
+    )
+    moose_write_submit.add_argument("moose_args", nargs=argparse.REMAINDER)
+
     calphad_doctor = subparsers.add_parser(
         "calphad-doctor",
         help="Inspect pycalphad availability and optional TDB database metadata.",
@@ -453,6 +471,21 @@ def main(argv: list[str] | None = None) -> None:
 
         moose_doctor_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "moose-info":
+        from atomi.moose.workflow import info_main as moose_info_main
+
+        moose_info_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "moose-smoke":
+        from atomi.moose.workflow import smoke_main as moose_smoke_main
+
+        moose_smoke_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "moose-write-submit":
+        from atomi.moose.workflow import write_submit_main as moose_write_submit_main
+
+        moose_write_submit_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "calphad-doctor":
         from atomi.calphad.env import main as calphad_doctor_main
 
@@ -689,6 +722,24 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.moose.env import main as moose_doctor_main
 
         moose_doctor_main(args.moose_args)
+        return
+
+    if args.subcommand == "moose-info":
+        from atomi.moose.workflow import info_main as moose_info_main
+
+        moose_info_main(args.moose_args)
+        return
+
+    if args.subcommand == "moose-smoke":
+        from atomi.moose.workflow import smoke_main as moose_smoke_main
+
+        moose_smoke_main(args.moose_args)
+        return
+
+    if args.subcommand == "moose-write-submit":
+        from atomi.moose.workflow import write_submit_main as moose_write_submit_main
+
+        moose_write_submit_main(args.moose_args)
         return
 
     if args.subcommand == "calphad-doctor":
