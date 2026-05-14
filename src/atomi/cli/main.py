@@ -234,6 +234,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     moose_qha_md_material.add_argument("moose_material_args", nargs=argparse.REMAINDER)
 
+    moose_thermal_stress = subparsers.add_parser(
+        "moose-thermal-stress",
+        help="Write a material-driven cylindrical thermal-stress MOOSE input.",
+    )
+    moose_thermal_stress.add_argument("moose_workflow_args", nargs=argparse.REMAINDER)
+
     moose_uo2_thermal_stress = subparsers.add_parser(
         "moose-uo2-thermal-stress",
         help="Write a starter UO2 pellet thermal-stress MOOSE input.",
@@ -503,6 +509,11 @@ def main(argv: list[str] | None = None) -> None:
 
         moose_qha_md_material_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "moose-thermal-stress":
+        from atomi.moose.workflow import thermal_stress_main
+
+        thermal_stress_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "moose-uo2-thermal-stress":
         from atomi.moose.workflow import uo2_thermal_stress_main
 
@@ -768,6 +779,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.moose.material_export import main as moose_qha_md_material_main
 
         moose_qha_md_material_main(args.moose_material_args)
+        return
+
+    if args.subcommand == "moose-thermal-stress":
+        from atomi.moose.workflow import thermal_stress_main
+
+        thermal_stress_main(args.moose_workflow_args)
         return
 
     if args.subcommand == "moose-uo2-thermal-stress":

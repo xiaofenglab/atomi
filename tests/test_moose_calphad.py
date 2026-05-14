@@ -8,9 +8,11 @@ from atomi.moose.material_export import main as moose_material_main
 from atomi.moose.workflow import (
     build_info,
     load_moose_profile,
+    render_thermal_stress_input,
     render_uo2_thermal_stress_input,
     render_slurm_submit,
     run_smoke,
+    thermal_stress_main,
     uo2_thermal_stress_main,
     validate_moose_material_csv,
 )
@@ -131,6 +133,26 @@ def test_uo2_thermal_stress_input_uses_material_include() -> None:
     assert "229223369.676" in text
 
 
+def test_generic_thermal_stress_input_uses_material_function_names() -> None:
+    text = render_thermal_stress_input(
+        material="ZrO2",
+        material_include=Path("zro2_material_functions.i"),
+        function_names={
+            "k_W_mK": "zro2_k",
+            "Cp_J_kgK": "zro2_Cp",
+            "rho_kg_m3": "zro2_rho",
+            "alpha_1_K": "zro2_alpha",
+            "E_Pa": "zro2_E",
+            "nu": "zro2_nu",
+        },
+    )
+
+    assert "!include zro2_material_functions.i" in text
+    assert "standalone ZrO2 pellet/cylinder" in text
+    assert "prop_values = 'zro2_k'" in text
+    assert "thermal_expansion_function = zro2_alpha" in text
+
+
 def test_uo2_thermal_stress_cli_writes_input_and_submit(tmp_path: Path) -> None:
     material_csv = tmp_path / "uo2_moose_material_properties.csv"
     material_csv.write_text(
@@ -181,6 +203,52 @@ def test_uo2_thermal_stress_cli_writes_input_and_submit(tmp_path: Path) -> None:
     submit_text = submit.read_text(encoding="utf-8")
     assert "#SBATCH --partition=gpu" in submit_text
     assert "/private/moose_test-opt -i" in submit_text
+
+
+def test_generic_thermal_stress_cli_reads_material_metadata(tmp_path: Path) -> None:
+    material_csv = tmp_path / "zro2_moose_material_properties.csv"
+    material_csv.write_text(
+        "T_K,k_W_mK,Cp_J_kgK,rho_kg_m3,alpha_1_K,E_Pa,nu\n"
+        "300,2.5,420,5680,1.0e-5,2.0e11,0.30\n",
+        encoding="utf-8",
+    )
+    material_meta = tmp_path / "zro2_moose_material_properties.meta.json"
+    material_meta.write_text(
+        """
+{
+  "material": "ZrO2",
+  "stress_free_T_K": 350,
+  "moose_functions": {
+    "k_W_mK": "zro2_k",
+    "Cp_J_kgK": "zro2_Cp",
+    "rho_kg_m3": "zro2_rho",
+    "alpha_1_K": "zro2_alpha",
+    "E_Pa": "zro2_E",
+    "nu": "zro2_nu"
+  }
+}
+""",
+        encoding="utf-8",
+    )
+    output = tmp_path / "zro2_thermal_stress.i"
+
+    thermal_stress_main(
+        [
+            "--material-csv",
+            str(material_csv),
+            "--material-meta",
+            str(material_meta),
+            "--material-include",
+            "zro2_material_functions.i",
+            "--output",
+            str(output),
+        ]
+    )
+
+    text = output.read_text(encoding="utf-8")
+    assert "standalone ZrO2 pellet/cylinder" in text
+    assert "stress_free_temperature = 350" in text
+    assert "prop_values = 'zro2_E'" in text
 
 
 def test_uo2_material_csv_validation_requires_structural_expansion(tmp_path: Path) -> None:
@@ -251,6 +319,7 @@ def test_moose_qha_md_material_export_merges_hybrid_outputs(tmp_path: Path) -> N
     metadata = json.loads(out_meta.read_text(encoding="utf-8"))
     assert metadata["units"] == "SI"
     assert metadata["target_z_formula_units"] == 4
+    assert metadata["moose_functions"]["k_W_mK"] == "uo2_k"
 
 
 def test_moose_qha_md_material_export_interpolates_property_csv(tmp_path: Path) -> None:
