@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import math
+import multiprocessing as mp
 import re
 from bisect import bisect_left
 from pathlib import Path
@@ -41,6 +42,7 @@ MOOSE_FIELDS = [
 
 REQUIRED_DEFAULT = ["T_K", "k_W_mK", "Cp_J_kgK", "rho_kg_m3", "E_Pa", "nu"]
 STRUCTURAL_REQUIRED = ("alpha_1_K", "dilatation")
+TDB_MERGE_FIELDS = ["Cp_J_kgK"]
 
 ATOMIC_MASSES_G_MOL = {
     "H": 1.00784,
@@ -132,6 +134,19 @@ def formula_mass_g_mol(formula: str) -> float:
         count = float(count_text) if count_text else 1.0
         total += ATOMIC_MASSES_G_MOL[element] * count
     return total
+
+
+def formula_atom_fractions(formula: str) -> dict[str, float]:
+    tokens = re.findall(r"([A-Z][a-z]?)([0-9]*\.?[0-9]*)", formula)
+    counts: dict[str, float] = {}
+    for element, count_text in tokens:
+        counts[element.upper()] = counts.get(element.upper(), 0.0) + (
+            float(count_text) if count_text else 1.0
+        )
+    total = sum(counts.values())
+    if total <= 0.0:
+        return {}
+    return {element: count / total for element, count in counts.items()}
 
 
 def sorted_series(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -295,7 +310,10 @@ def read_volume_lattice(path: Path) -> dict[str, list[tuple[float, float]]]:
     return {key: sorted_series(value) for key, value in data.items()}
 
 
-def merge_structural_rows(rows: list[dict[str, Any]], structural: dict[str, list[tuple[float, float]]]) -> None:
+def merge_structural_rows(
+    rows: list[dict[str, Any]],
+    structural: dict[str, list[tuple[float, float]]],
+) -> None:
     lattice_keys = [key for key in ("a_lattice", "b_lattice", "c_lattice") if key in structural]
     lattice_key = lattice_keys[0] if lattice_keys else None
     alpha_lattice = derivative_series(structural[lattice_key]) if lattice_key else []
@@ -428,11 +446,205 @@ def load_external_properties(
     return series, fixed, provenance
 
 
-def merge_external(row: dict[str, Any], series: dict[str, list[tuple[float, float]]], fixed: dict[str, float]) -> None:
+def parse_csv_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def parse_tdb_composition(values: list[str], material: str) -> dict[str, float]:
+    composition = formula_atom_fractions(material)
+    for item in values:
+        if "=" not in item:
+            raise SystemExit(
+                f"Invalid --tdb-composition {item!r}; expected ELEMENT=ATOMIC_FRACTION"
+            )
+        element, value = item.split("=", 1)
+        parsed = finite_float(value)
+        if parsed is None:
+            raise SystemExit(f"Invalid numeric value in --tdb-composition {item!r}")
+        composition[element.strip().upper()] = parsed
+    return composition
+
+
+def load_tdb_table(path: Path) -> dict[str, list[tuple[float, float]]]:
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        series, _fixed, _provenance = load_external_properties([path], [], [])
+        return {key: value for key, value in series.items() if key in TDB_MERGE_FIELDS}
+    if suffix == ".json":
+        series, _fixed, _provenance = load_external_properties([], [path], [])
+        return {key: value for key, value in series.items() if key in TDB_MERGE_FIELDS}
+    return {}
+
+
+def _finite_difference_cp_from_gibbs(
+    temps: list[float], gibbs_j_mol_formula: list[float]
+) -> list[tuple[float, float]]:
+    points = sorted_series(list(zip(temps, gibbs_j_mol_formula)))
+    if len(points) < 3:
+        return []
+    cp_points = []
+    for idx in range(1, len(points) - 1):
+        t0, g0 = points[idx - 1]
+        temp, g = points[idx]
+        t1, g1 = points[idx + 1]
+        if t1 == temp or temp == t0:
+            continue
+        d1 = (g - g0) / (temp - t0)
+        d2 = (g1 - g) / (t1 - temp)
+        curvature = 2.0 * (d2 - d1) / (t1 - t0)
+        cp_points.append((temp, -temp * curvature))
+    return cp_points
+
+
+def _extract_xarray_property(dataset: Any, name: str) -> list[float]:
+    if not hasattr(dataset, "data_vars") or name not in dataset.data_vars:
+        return []
+    values = dataset[name].values
+    flat = []
+    try:
+        import numpy as np
+
+        array = np.asarray(values, dtype=float)
+        for temp_index in range(array.shape[0]):
+            candidates = array[temp_index].ravel()
+            finite = candidates[np.isfinite(candidates)]
+            flat.append(float(finite[0]) if finite.size else math.nan)
+    except Exception:
+        return []
+    return flat
+
+
+def _pycalphad_tdb_worker(
+    queue: Any,
+    tdb_path: str,
+    components: list[str],
+    phases: list[str],
+    temps: list[float],
+    composition: dict[str, float],
+    molar_mass_g_mol: float,
+) -> None:
+    try:
+        from pycalphad import Database, equilibrium, variables as v
+
+        dbf = Database(tdb_path)
+        conditions: dict[Any, Any] = {v.T: temps, v.P: 101325}
+        for element, fraction in composition.items():
+            if element in {"VA", "/-"}:
+                continue
+            conditions[v.X(element)] = fraction
+        ds = equilibrium(dbf, components, phases, conditions, output="GM")
+        gm_values = _extract_xarray_property(ds, "GM")
+        cp_molar = _finite_difference_cp_from_gibbs(temps, gm_values)
+        cp_mass = [
+            (temp, cp_j_mol_k / (molar_mass_g_mol / 1000.0))
+            for temp, cp_j_mol_k in cp_molar
+            if math.isfinite(cp_j_mol_k)
+        ]
+        queue.put({"series": {"Cp_J_kgK": cp_mass}, "error": None})
+    except Exception as exc:  # pragma: no cover - depends on optional pycalphad/TDBs
+        queue.put({"series": {}, "error": str(exc)})
+
+
+def sample_tdb_properties(
+    *,
+    path: Path | None,
+    temps: list[float],
+    material: str,
+    molar_mass_g_mol: float,
+    components: list[str],
+    phases: list[str],
+    composition: dict[str, float],
+    timeout_s: float,
+) -> tuple[dict[str, list[tuple[float, float]]], dict[str, Any]]:
+    if path is None:
+        return {}, {"enabled": False}
+    path = path.expanduser()
+    metadata: dict[str, Any] = {
+        "enabled": True,
+        "path": str(path),
+        "priority_fields": TDB_MERGE_FIELDS,
+        "components": components,
+        "phases": phases,
+        "composition_atomic_fraction": composition,
+    }
+    if not path.is_file():
+        metadata["error"] = "TDB/property file does not exist"
+        return {}, metadata
+    table_series = load_tdb_table(path)
+    if table_series:
+        metadata["mode"] = f"precomputed_{path.suffix.lower().lstrip('.')}"
+        metadata["fields"] = sorted(table_series.keys())
+        return table_series, metadata
+
+    if path.suffix.lower() != ".tdb":
+        metadata["error"] = "Unsupported TDB source; use .tdb, .csv, or .json"
+        return {}, metadata
+    if not phases:
+        metadata["error"] = "Direct .tdb sampling requires --tdb-phases"
+        return {}, metadata
+    if not components:
+        metadata["error"] = "Direct .tdb sampling requires --tdb-components or formula inference"
+        return {}, metadata
+    ctx = mp.get_context("spawn")
+    queue: Any = ctx.Queue()
+    process = ctx.Process(
+        target=_pycalphad_tdb_worker,
+        args=(
+            queue,
+            str(path),
+            components,
+            phases,
+            sorted(set(float(temp) for temp in temps)),
+            composition,
+            molar_mass_g_mol,
+        ),
+    )
+    process.start()
+    process.join(timeout_s)
+    if process.is_alive():
+        process.terminate()
+        process.join(2.0)
+        metadata["error"] = f"pycalphad sampling timed out after {timeout_s:g} s"
+        return {}, metadata
+    if queue.empty():
+        metadata["error"] = "pycalphad sampling returned no result"
+        return {}, metadata
+    result = queue.get()
+    metadata["mode"] = "pycalphad_finite_difference_GM"
+    if result.get("error"):
+        metadata["error"] = result["error"]
+    series = result.get("series", {}) or {}
+    metadata["fields"] = sorted(series.keys())
+    return series, metadata
+
+
+def merge_external(
+    row: dict[str, Any], series: dict[str, list[tuple[float, float]]], fixed: dict[str, float]
+) -> None:
     temp = row["T_K"]
     for field, value in fixed.items():
         row[field] = value
     for field, points in series.items():
+        value = interpolate(points, temp)
+        if value is not None:
+            row[field] = value
+
+
+def merge_tdb(
+    row: dict[str, Any],
+    series: dict[str, list[tuple[float, float]]],
+    priority: str,
+) -> None:
+    if priority == "off":
+        return
+    temp = row["T_K"]
+    for field, points in series.items():
+        if field not in TDB_MERGE_FIELDS:
+            continue
+        if priority == "fill-missing" and row.get(field) is not None:
+            continue
         value = interpolate(points, temp)
         if value is not None:
             row[field] = value
@@ -494,6 +706,12 @@ def build_moose_rows(
     property_json: list[Path],
     constants: list[str],
     source_tag: str,
+    tdb_path: Path | None,
+    tdb_components: list[str],
+    tdb_phases: list[str],
+    tdb_composition: dict[str, float],
+    tdb_priority: str,
+    tdb_timeout_s: float,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     metadata = load_metadata(qha_md_dir)
     inferred_target_z = infer_target_z(metadata, target_z)
@@ -504,6 +722,19 @@ def build_moose_rows(
 
     series, fixed, external_provenance = load_external_properties(
         property_csv, property_json, constants
+    )
+    inferred_components = tdb_components
+    if tdb_path and not inferred_components:
+        inferred_components = sorted(formula_atom_fractions(material).keys()) + ["VA"]
+    tdb_series, tdb_metadata = sample_tdb_properties(
+        path=tdb_path,
+        temps=[row["T_K"] for row in thermo_rows],
+        material=material,
+        molar_mass_g_mol=molar_mass_g_mol,
+        components=inferred_components,
+        phases=tdb_phases,
+        composition=tdb_composition,
+        timeout_s=tdb_timeout_s,
     )
     add_dilatation(thermo_rows, stress_free_t)
 
@@ -526,6 +757,7 @@ def build_moose_rows(
         row["alpha_1_K"] = source.get("alpha_1_K")
         row["dilatation"] = source.get("dilatation")
         merge_external(row, series, fixed)
+        merge_tdb(row, tdb_series, tdb_priority)
         rows.append(row)
 
     metadata_out = {
@@ -546,6 +778,7 @@ def build_moose_rows(
             "thermo_qha_md": source_info,
             "metadata_files": sorted(metadata.keys()),
             "external_properties": external_provenance,
+            "tdb": tdb_metadata | {"priority": tdb_priority},
         },
         "columns": {
             "k_W_mK": "thermal conductivity",
@@ -577,7 +810,9 @@ def validate_rows(rows: list[dict[str, Any]], allow_partial: bool) -> list[str]:
         for field, value in row.items():
             if field in ("source_tag",):
                 continue
-            if value is not None and (not isinstance(value, (int, float)) or not math.isfinite(value)):
+            if value is not None and (
+                not isinstance(value, (int, float)) or not math.isfinite(value)
+            ):
                 problems.append(f"non-finite {field} at T={temp:g} K")
     if problems and not allow_partial:
         preview = "\n".join(f"- {problem}" for problem in problems[:20])
@@ -673,6 +908,44 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FIELD=VALUE",
         help="Constant literature/user value, e.g. E_Pa=2.05e11.",
     )
+    parser.add_argument(
+        "--tdb",
+        type=Path,
+        help=(
+            "Optional CALPHAD source. .csv/.json may contain precomputed MOOSE fields; "
+            ".tdb is sampled with pycalphad when available."
+        ),
+    )
+    parser.add_argument(
+        "--tdb-priority",
+        choices=("fill-missing", "prefer-tdb", "off"),
+        default="fill-missing",
+        help="How TDB/precomputed CALPHAD values merge with DFT/QHA/MD values.",
+    )
+    parser.add_argument(
+        "--tdb-components",
+        help=(
+            "Comma-separated pycalphad components, e.g. U,O,VA. "
+            "Defaults to formula elements + VA."
+        ),
+    )
+    parser.add_argument(
+        "--tdb-phases",
+        help="Comma-separated pycalphad phases for direct .tdb sampling, e.g. UO2_FCC.",
+    )
+    parser.add_argument(
+        "--tdb-composition",
+        action="append",
+        default=[],
+        metavar="ELEMENT=ATOMIC_FRACTION",
+        help="Override formula-inferred atomic fractions for direct .tdb sampling.",
+    )
+    parser.add_argument(
+        "--tdb-timeout",
+        type=float,
+        default=30.0,
+        help="Seconds allowed for direct pycalphad .tdb sampling.",
+    )
     parser.add_argument("--source-tag", default="qha_md_moose_bridge")
     parser.add_argument(
         "--allow-partial",
@@ -700,6 +973,12 @@ def main(argv: list[str] | None = None) -> None:
         property_json=args.property_json,
         constants=args.constant,
         source_tag=args.source_tag,
+        tdb_path=args.tdb,
+        tdb_components=parse_csv_list(args.tdb_components),
+        tdb_phases=parse_csv_list(args.tdb_phases),
+        tdb_composition=parse_tdb_composition(args.tdb_composition, args.material),
+        tdb_priority=args.tdb_priority,
+        tdb_timeout_s=args.tdb_timeout,
     )
     problems = validate_rows(rows, args.allow_partial)
     metadata["validation"] = {

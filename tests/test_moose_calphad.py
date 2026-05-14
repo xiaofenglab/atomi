@@ -228,3 +228,88 @@ def test_moose_qha_md_material_export_requires_literature_fields(tmp_path: Path)
                 str(tmp_path / "out.json"),
             ]
         )
+
+
+def test_moose_qha_md_material_export_uses_tdb_csv_to_fill_missing_cp(tmp_path: Path) -> None:
+    qha_md = tmp_path / "qha_md"
+    qha_md.mkdir()
+    (qha_md / "thermo_functions_grid.csv").write_text(
+        "T_K,density_fit_g_cm3,alpha_L_1_per_K\n"
+        "300,10.9,1.0e-5\n"
+        "600,10.6,1.2e-5\n",
+        encoding="utf-8",
+    )
+    tdb_table = tmp_path / "pycalphad_cp.csv"
+    tdb_table.write_text(
+        "T_K,Cp_J_kgK\n"
+        "300,240\n"
+        "600,320\n",
+        encoding="utf-8",
+    )
+    out_csv = tmp_path / "out.csv"
+
+    moose_material_main(
+        [
+            "--qha-md-dir",
+            str(qha_md),
+            "--tdb",
+            str(tdb_table),
+            "--constant",
+            "k_W_mK=7.5",
+            "--constant",
+            "E_Pa=2.0e11",
+            "--constant",
+            "nu=0.31",
+            "--out-csv",
+            str(out_csv),
+            "--out-meta",
+            str(tmp_path / "out.json"),
+        ]
+    )
+
+    import csv
+
+    rows = list(csv.DictReader(out_csv.open()))
+    assert float(rows[0]["Cp_J_kgK"]) == pytest.approx(240.0)
+    assert float(rows[1]["Cp_J_kgK"]) == pytest.approx(320.0)
+
+
+def test_moose_qha_md_material_export_tdb_priority_can_override_dft_cp(tmp_path: Path) -> None:
+    qha_md = tmp_path / "qha_md"
+    qha_md.mkdir()
+    (qha_md / "thermo_functions_grid.csv").write_text(
+        "T_K,Cp_used_for_integration_J_per_mol_UO2_K,density_fit_g_cm3,alpha_L_1_per_K\n"
+        "300,240,10.9,1.0e-5\n"
+        "600,300,10.6,1.2e-5\n",
+        encoding="utf-8",
+    )
+    tdb_table = tmp_path / "pycalphad_cp.csv"
+    tdb_table.write_text("T_K,Cp_J_kgK\n300,111\n600,222\n", encoding="utf-8")
+    out_csv = tmp_path / "out.csv"
+
+    moose_material_main(
+        [
+            "--qha-md-dir",
+            str(qha_md),
+            "--tdb",
+            str(tdb_table),
+            "--tdb-priority",
+            "prefer-tdb",
+            "--constant",
+            "k_W_mK=7.5",
+            "--constant",
+            "E_Pa=2.0e11",
+            "--constant",
+            "nu=0.31",
+            "--out-csv",
+            str(out_csv),
+            "--out-meta",
+            str(tmp_path / "out.json"),
+        ]
+    )
+
+    import csv
+
+    rows = list(csv.DictReader(out_csv.open()))
+    assert float(rows[0]["Cp_J_kgK"]) == pytest.approx(111.0)
+    assert float(rows[1]["Cp_J_kgK"]) == pytest.approx(222.0)
