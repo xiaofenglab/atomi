@@ -8,8 +8,11 @@ from atomi.moose.material_export import main as moose_material_main
 from atomi.moose.workflow import (
     build_info,
     load_moose_profile,
+    render_uo2_thermal_stress_input,
     render_slurm_submit,
     run_smoke,
+    uo2_thermal_stress_main,
+    validate_moose_material_csv,
 )
 
 
@@ -110,6 +113,86 @@ def test_moose_smoke_runs_configured_app(tmp_path: Path) -> None:
 
     assert report["returncode"] == 0
     assert "fake moose help" in report["output"]
+
+
+def test_uo2_thermal_stress_input_uses_material_include() -> None:
+    text = render_uo2_thermal_stress_input(
+        material_include=Path("uo2_material_functions.i"),
+        radius_m=5.27e-3,
+        height_m=11.0e-3,
+        linear_heat_rate_w_m=2.0e4,
+    )
+
+    assert "!include uo2_material_functions.i" in text
+    assert "coord_type = RZ" in text
+    assert "xmax = 0.00527" in text
+    assert "ymax = 0.011" in text
+    assert "fuel_heat_source" in text
+    assert "229223369.676" in text
+
+
+def test_uo2_thermal_stress_cli_writes_input_and_submit(tmp_path: Path) -> None:
+    material_csv = tmp_path / "uo2_moose_material_properties.csv"
+    material_csv.write_text(
+        "T_K,k_W_mK,Cp_J_kgK,rho_kg_m3,alpha_1_K,E_Pa,nu\n"
+        "300,7.8,235,10970,1.0e-5,2.05e11,0.316\n"
+        "600,5.2,300,10600,1.2e-5,1.95e11,0.318\n",
+        encoding="utf-8",
+    )
+    hpc_config = tmp_path / "hpc.json"
+    hpc_config.write_text(
+        """
+{
+  "profiles": {
+    "moose_gpu_kokkos": {
+      "partition": "gpu",
+      "gres": "gpu:1",
+      "nodes": 1,
+      "ntasks": 1,
+      "cpus_per_task": 8,
+      "time": "00:20:00",
+      "activation_script": "/private/activate.sh",
+      "test_executable": "/private/moose_test-opt"
+    }
+  }
+}
+""",
+        encoding="utf-8",
+    )
+    output = tmp_path / "uo2_pellet_thermal_stress.i"
+    submit = tmp_path / "submit.sh"
+
+    uo2_thermal_stress_main(
+        [
+            "--material-csv",
+            str(material_csv),
+            "--material-include",
+            "uo2_material_functions.i",
+            "--output",
+            str(output),
+            "--write-submit",
+            str(submit),
+            "--hpc-config",
+            str(hpc_config),
+        ]
+    )
+
+    assert "uo2_alpha" in output.read_text(encoding="utf-8")
+    submit_text = submit.read_text(encoding="utf-8")
+    assert "#SBATCH --partition=gpu" in submit_text
+    assert "/private/moose_test-opt -i" in submit_text
+
+
+def test_uo2_material_csv_validation_requires_structural_expansion(tmp_path: Path) -> None:
+    material_csv = tmp_path / "bad.csv"
+    material_csv.write_text(
+        "T_K,k_W_mK,Cp_J_kgK,rho_kg_m3,E_Pa,nu\n"
+        "300,7.8,235,10970,2.05e11,0.316\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit, match="alpha_1_K or dilatation"):
+        validate_moose_material_csv(material_csv)
 
 
 def test_moose_qha_md_material_export_merges_hybrid_outputs(tmp_path: Path) -> None:
