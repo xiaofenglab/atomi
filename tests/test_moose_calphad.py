@@ -566,7 +566,25 @@ def test_moose_material_screen_identifies_missing_thermal_stress_inputs(tmp_path
     assert "Cp_J_kgK" in plan["present_required"]
     assert "rho_kg_m3" in plan["present_required"]
     assert "k_W_mK" in plan["missing_required"]
+    assert plan["qha_md_detected_fields"] == ["Cp_J_kgK", "T_K", "alpha_1_K", "rho_kg_m3"]
+    assert plan["expected_external_csv_columns"] == ["E_Pa", "T_K", "k_W_mK", "nu"]
+    assert any(item["field"] == "k_W_mK" for item in plan["needed_external_inputs"])
     assert any(item["field"] == "E_Pa" for item in plan["recommendations"])
+    assert any(item["step"] == "compile-material-table" for item in plan["next_commands"])
+
+
+def test_moose_material_screen_without_qha_md_requests_qha_and_external_sources() -> None:
+    plan = screen_plan(
+        prediction="thermal-stress",
+        material="UO2",
+        qha_md_dir=None,
+        csv_sources=[],
+    )
+
+    assert plan["qha_md"]["available"] is False
+    assert "Cp_J_kgK" in plan["missing_required"]
+    assert any(item["step"] == "locate-qha-md" for item in plan["next_commands"])
+    assert any(item["field"] == "k_W_mK" for item in plan["needed_external_inputs"])
 
 
 def test_moose_material_screen_cli_writes_plan(tmp_path: Path) -> None:
@@ -609,4 +627,7 @@ def test_moose_material_screen_cli_writes_plan(tmp_path: Path) -> None:
     assert data["ready"] is False
     assert data["present_fields"]["E_Pa"] == ["elastic"]
     assert "k_W_mK" in data["missing_required"]
-    assert "MOOSE Material Screen" in out_md.read_text(encoding="utf-8")
+    md_text = out_md.read_text(encoding="utf-8")
+    assert "MOOSE Material Screen" in md_text
+    assert "## QHA/MD Folder" in md_text
+    assert "## Next Commands" in md_text

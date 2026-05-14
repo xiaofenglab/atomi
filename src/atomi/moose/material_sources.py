@@ -75,6 +75,54 @@ FIELD_SOURCE_HINTS = {
     "chemical_potential": ["pycalphad/TDB", "Thermochimica", "custom MOOSE material model"],
     "mobility": ["diffusion database", "literature", "fitted phase-field kinetics"],
 }
+FIELD_INPUT_DETAILS = {
+    "T_K": {"type": "temperature grid", "units": "K", "columns": ["T_K"]},
+    "Cp_J_kgK": {
+        "type": "specific heat capacity",
+        "units": "J kg^-1 K^-1",
+        "columns": ["T_K", "Cp_J_kgK"],
+    },
+    "rho_kg_m3": {
+        "type": "mass density",
+        "units": "kg m^-3",
+        "columns": ["T_K", "rho_kg_m3"],
+    },
+    "alpha_1_K": {
+        "type": "linear thermal expansion coefficient",
+        "units": "K^-1",
+        "columns": ["T_K", "alpha_1_K"],
+    },
+    "dilatation": {
+        "type": "stress-free relative thermal strain",
+        "units": "dimensionless",
+        "columns": ["T_K", "dilatation"],
+    },
+    "k_W_mK": {
+        "type": "thermal conductivity",
+        "units": "W m^-1 K^-1",
+        "columns": ["T_K", "k_W_mK"],
+    },
+    "E_Pa": {"type": "Young's modulus", "units": "Pa", "columns": ["T_K", "E_Pa"]},
+    "nu": {"type": "Poisson ratio", "units": "dimensionless", "columns": ["T_K", "nu"]},
+    "K_Pa": {"type": "bulk modulus", "units": "Pa", "columns": ["T_K", "K_Pa"]},
+    "G_Pa": {"type": "shear modulus", "units": "Pa", "columns": ["T_K", "G_Pa"]},
+    "phase_free_energy": {
+        "type": "phase Gibbs/free energy model or tabulated function",
+        "units": "J mol^-1 or MOOSE-consistent free-energy density",
+        "columns": ["T_K", "composition", "phase", "phase_free_energy"],
+    },
+    "chemical_potential": {
+        "type": "chemical potential model or table",
+        "units": "J mol^-1",
+        "columns": ["T_K", "composition", "component", "chemical_potential"],
+    },
+    "mobility": {
+        "type": "phase-field mobility or diffusivity-derived kinetic coefficient",
+        "units": "MOOSE model dependent",
+        "columns": ["T_K", "composition", "phase", "mobility"],
+    },
+}
+QHA_MD_NATIVE_FIELDS = {"T_K", "Cp_J_kgK", "rho_kg_m3", "alpha_1_K", "dilatation"}
 
 
 def finite_float(value: Any) -> float | None:
@@ -216,15 +264,47 @@ def screen_plan(
         recommendations.append(
             {
                 "field": field,
+                **FIELD_INPUT_DETAILS.get(
+                    field,
+                    {"type": "material property", "units": "", "columns": ["T_K", field]},
+                ),
                 "candidate_sources": FIELD_SOURCE_HINTS.get(field, ["user-csv"]),
                 "commands": recommendation_commands(field, material),
             }
         )
-    return {
+    qha_detected = [field for field in sorted(QHA_MD_NATIVE_FIELDS) if qha_fields.get(field)]
+    qha_missing_relevant = [
+        field for field in sorted(QHA_MD_NATIVE_FIELDS) if field in required and not qha_fields.get(field)
+    ]
+    for group in spec["one_of"]:
+        native_options = [field for field in group if field in QHA_MD_NATIVE_FIELDS]
+        if native_options and not any(qha_fields.get(field) for field in native_options):
+            qha_missing_relevant.extend(
+                field for field in native_options if not qha_fields.get(field)
+            )
+    needed_external_inputs = [
+        item
+        for item in recommendations
+        if "thermo_qha_md" not in FIELD_SOURCE_HINTS.get(item["field"], [])
+    ]
+    result = {
         "material": material,
         "prediction": prediction,
         "description": spec["description"],
         "qha_md": qha_metadata,
+        "qha_md_detected_fields": qha_detected,
+        "qha_md_missing_relevant_fields": qha_missing_relevant,
+        "qha_md_native_fields": sorted(QHA_MD_NATIVE_FIELDS),
+        "external_sources_provided": bool(csv_sources),
+        "needed_external_inputs": needed_external_inputs,
+        "expected_external_csv_columns": sorted(
+            {
+                column
+                for item in needed_external_inputs
+                for column in item.get("columns", [])
+                if column
+            }
+        ),
         "sources": [{"label": label, "path": str(path)} for label, path in csv_sources],
         "present_fields": {field: sources for field, sources in sorted(present.items())},
         "required_fields": required,
@@ -234,6 +314,97 @@ def screen_plan(
         "ready": not missing_required and all(group["satisfied"] for group in one_of_status),
         "recommendations": recommendations,
     }
+    result["next_commands"] = next_workflow_commands(result)
+    return result
+
+
+def next_workflow_commands(plan: dict[str, Any]) -> list[dict[str, str]]:
+    material = str(plan["material"])
+    material_key = material.lower()
+    qha_dir = plan["qha_md"].get("qha_md_dir") or "analysis/thermo_qha_md"
+    property_csv = f"{material_key}_external_properties.csv"
+    out_csv = f"{material_key}_moose_material_properties.csv"
+    out_meta = f"{material_key}_moose_material_properties.meta.json"
+    include = f"{material_key}_material_functions.i"
+    commands = []
+    if not plan["qha_md"].get("available"):
+        commands.append(
+            {
+                "step": "locate-qha-md",
+                "command": (
+                    "Run or locate the Atomi DFT-QHA/MD thermodynamic analysis directory, "
+                    "then rerun this screen with --qha-md-dir <thermo_qha_md_dir>."
+                ),
+            }
+        )
+    if plan["needed_external_inputs"]:
+        commands.append(
+            {
+                "step": "prepare-external-property-csv",
+                "command": (
+                    "Create a curated CSV with columns "
+                    + ",".join(plan["expected_external_csv_columns"])
+                    + f" and pass it as --property-csv {property_csv}."
+                ),
+            }
+        )
+        seen_source_commands = set()
+        for item in plan["needed_external_inputs"]:
+            for command in item.get("commands", []):
+                if command in seen_source_commands:
+                    continue
+                seen_source_commands.add(command)
+                commands.append({"step": f"source-{item['field']}", "command": command})
+    if plan["prediction"] in {"thermal-stress", "transient-thermal", "elastic-thermal"}:
+        commands.append(
+            {
+                "step": "compile-material-table",
+                "command": (
+                    "moose-qha-md-material "
+                    f"--qha-md-dir {qha_dir} "
+                    f"--property-csv {property_csv} "
+                    f"--out-csv {out_csv} "
+                    f"--out-meta {out_meta} "
+                    f"--moose-include {include}"
+                ),
+            }
+        )
+    if plan["prediction"] == "thermal-stress":
+        commands.append(
+            {
+                "step": "write-moose-input",
+                "command": (
+                    "moose-thermal-stress "
+                    f"--material {material} "
+                    f"--material-csv {out_csv} "
+                    f"--material-meta {out_meta} "
+                    f"--material-include {include}"
+                ),
+            }
+        )
+    elif plan["prediction"] == "phase-redistribution":
+        commands.append(
+            {
+                "step": "build-phase-material-model",
+                "command": (
+                    "Use pycalphad/Thermochimica or a curated phase-thermodynamics table "
+                    "to build MOOSE free-energy, chemical-potential, and mobility inputs."
+                ),
+            }
+        )
+    if plan["needed_external_inputs"] and plan["prediction"] != "phase-redistribution":
+        commands.append(
+            {
+                "step": "compare-sources",
+                "command": (
+                    "moose-material-compare "
+                    f"--source atomi={out_csv} "
+                    f"--source external={property_csv} "
+                    f"--outdir {material_key}_property_comparison"
+                ),
+            }
+        )
+    return commands
 
 
 def recommendation_commands(field: str, material: str) -> list[str]:
@@ -274,8 +445,35 @@ def render_screen_markdown(plan: dict[str, Any]) -> str:
         "",
         f"Ready: {'yes' if plan['ready'] else 'no'}",
         "",
-        "## Present Fields",
+        "## QHA/MD Folder",
     ]
+    if plan["qha_md"].get("available"):
+        lines.append(f"- available: yes ({plan['qha_md'].get('rows', 0)} rows)")
+        temp_range = plan["qha_md"].get("temperature_range_K")
+        if temp_range:
+            lines.append(f"- temperature range: {temp_range[0]} to {temp_range[1]} K")
+        if plan["qha_md_detected_fields"]:
+            lines.append(
+                "- detected fields: "
+                + ", ".join(f"`{field}`" for field in plan["qha_md_detected_fields"])
+            )
+        else:
+            lines.append("- detected fields: none")
+        if plan["qha_md_missing_relevant_fields"]:
+            lines.append(
+                "- QHA/MD fields still missing for this prediction: "
+                + ", ".join(f"`{field}`" for field in plan["qha_md_missing_relevant_fields"])
+            )
+    else:
+        lines.append("- available: no")
+        if plan["qha_md"].get("error"):
+            lines.append(f"- reason: {plan['qha_md']['error']}")
+    lines.extend(
+        [
+            "",
+        "## Present Fields",
+        ]
+    )
     if plan["present_fields"]:
         for field, sources in plan["present_fields"].items():
             lines.append(f"- `{field}`: {', '.join(sources)}")
@@ -293,11 +491,22 @@ def render_screen_markdown(plan: dict[str, Any]) -> str:
     lines.extend(["", "## Recommendations"])
     if plan["recommendations"]:
         for item in plan["recommendations"]:
-            lines.append(f"- `{item['field']}`: {', '.join(item['candidate_sources'])}")
+            detail = item.get("type", "material property")
+            units = item.get("units")
+            columns = ", ".join(f"`{column}`" for column in item.get("columns", []))
+            lines.append(f"- `{item['field']}` ({detail}; {units}): {', '.join(item['candidate_sources'])}")
+            if columns:
+                lines.append(f"  - expected columns: {columns}")
             for command in item["commands"]:
                 lines.append(f"  - `{command}`")
     else:
         lines.append("- all required inputs are present")
+    lines.extend(["", "## Next Commands"])
+    if plan["next_commands"]:
+        for item in plan["next_commands"]:
+            lines.append(f"- {item['step']}: `{item['command']}`")
+    else:
+        lines.append("- none")
     return "\n".join(lines) + "\n"
 
 
