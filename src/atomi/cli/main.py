@@ -228,6 +228,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     moose_write_submit.add_argument("moose_args", nargs=argparse.REMAINDER)
 
+    moose_qha_md_material = subparsers.add_parser(
+        "moose-qha-md-material",
+        help="Export thermo_qha_md data as MOOSE material-property inputs.",
+    )
+    moose_qha_md_material.add_argument("moose_material_args", nargs=argparse.REMAINDER)
+
     calphad_doctor = subparsers.add_parser(
         "calphad-doctor",
         help="Inspect pycalphad availability and optional TDB database metadata.",
@@ -486,6 +492,11 @@ def main(argv: list[str] | None = None) -> None:
 
         moose_write_submit_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "moose-qha-md-material":
+        from atomi.moose.material_export import main as moose_qha_md_material_main
+
+        moose_qha_md_material_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "calphad-doctor":
         from atomi.calphad.env import main as calphad_doctor_main
 
@@ -740,6 +751,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.moose.workflow import write_submit_main as moose_write_submit_main
 
         moose_write_submit_main(args.moose_args)
+        return
+
+    if args.subcommand == "moose-qha-md-material":
+        from atomi.moose.material_export import main as moose_qha_md_material_main
+
+        moose_qha_md_material_main(args.moose_material_args)
         return
 
     if args.subcommand == "calphad-doctor":
