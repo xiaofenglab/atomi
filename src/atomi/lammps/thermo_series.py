@@ -148,6 +148,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from atomi.core.archive import archive_output_dir
 from atomi.thermo_db import jaea_anchor
 
 
@@ -3696,6 +3697,17 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--timestep-ps", type=float, default=None, help="Override timestep for all configs; otherwise each config timestep is used")
 
     ap.add_argument("--outdir", default="analysis/temperature_series_thermo")
+    ap.add_argument(
+        "--archive-path",
+        type=Path,
+        default=None,
+        help="Optional tar.gz archive path. Default: <outdir>.tar.gz",
+    )
+    ap.add_argument(
+        "--no-archive-output",
+        action="store_true",
+        help="Do not create a tar.gz archive of the output directory.",
+    )
     ap.add_argument("--natoms", type=int, default=96)
     ap.add_argument("--atoms-per-formula-unit", type=int, default=3)
     ap.add_argument("--target-z", type=float, default=4.0, help="Formula units in the normalized structural target cell, e.g. 4 for fluorite UO2.")
@@ -3970,6 +3982,9 @@ def main(argv: list[str] | None = None) -> None:
         except ValueError as exc:
             ap.error(str(exc))
         print(f"Done. Comparison outputs written to: {outdir.resolve()}")
+        if not args.no_archive_output:
+            archive = archive_output_dir(outdir, args.archive_path)
+            print(f"Download archive written to: {archive}")
         return
 
     if args.config:
@@ -4211,6 +4226,9 @@ def main(argv: list[str] | None = None) -> None:
         ap.error(str(exc))
 
     print(f"Done. Outputs written to: {outdir.resolve()}")
+    if not args.no_archive_output:
+        archive = archive_output_dir(outdir, args.archive_path)
+        print(f"Download archive written to: {archive}")
 
 
 if __name__ == "__main__":

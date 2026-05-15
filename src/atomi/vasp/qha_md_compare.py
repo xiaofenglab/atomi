@@ -5,6 +5,7 @@ import math
 import sys
 from pathlib import Path
 
+from atomi.core.archive import archive_output_dir
 from atomi.thermo_db import jaea_anchor
 
 
@@ -2176,6 +2177,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--qha-dir", type=Path, required=True)
     parser.add_argument("--md-dir", type=Path, required=True)
     parser.add_argument("--outdir", type=Path, required=True)
+    parser.add_argument(
+        "--archive-path",
+        type=Path,
+        default=None,
+        help="Optional tar.gz archive path. Default: <outdir>.tar.gz",
+    )
+    parser.add_argument(
+        "--no-archive-output",
+        action="store_true",
+        help="Do not create a tar.gz archive of the output directory.",
+    )
     parser.add_argument("--target-z", type=float, default=4.0)
     parser.add_argument("--qha-formula-units", type=float, required=True)
     parser.add_argument("--md-formula-units", type=float, required=True)
@@ -2535,6 +2547,9 @@ def main(argv: list[str] | None = None) -> None:
     write_availability_report(args.outdir / "availability_report.csv", availability_rows)
     if not index_rows:
         print("No matching QHA/MD quantities found to plot.")
+    if not args.no_archive_output:
+        archive = archive_output_dir(args.outdir, args.archive_path)
+        print(f"Download archive written to: {archive}")
 
 
 if __name__ == "__main__":

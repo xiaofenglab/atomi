@@ -1,5 +1,6 @@
 import csv
 import json
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -83,6 +84,12 @@ def test_qha_md_compare_normalizes_to_target_cell_and_units(tmp_path: Path) -> N
     assert (out / "overlay_index.csv").exists()
     assert (out / "normalization_metadata.json").exists()
     assert (out / "availability_report.csv").exists()
+    archive = out.with_name(f"{out.name}.tar.gz")
+    assert archive.exists()
+    with tarfile.open(archive, "r:gz") as handle:
+        names = set(handle.getnames())
+    assert f"{out.name}/overlay_index.csv" in names
+    assert f"{out.name}/volume_qha_md_overlay.png" in names
 
 
 def test_qha_md_compare_shifts_energy_at_minimal_overlap(tmp_path: Path) -> None:

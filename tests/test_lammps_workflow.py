@@ -1,5 +1,6 @@
 import csv
 import json
+import tarfile
 
 import numpy as np
 import pytest
@@ -666,3 +667,49 @@ def test_lammps_compare_series_normalizes_different_box_sizes(tmp_path) -> None:
     assert (out / "compare_Cp.png").exists()
     index = list(csv.DictReader((out / "compare_index.csv").open()))
     assert next(row for row in index if row["quantity"] == "V_target_cell_A3")["written"] == "True"
+
+
+def test_lammps_compare_series_cli_writes_download_archive(tmp_path) -> None:
+    pytest.importorskip("matplotlib")
+    small = tmp_path / "small"
+    large = tmp_path / "large"
+    out = tmp_path / "compare_cli"
+    small.mkdir()
+    large.mkdir()
+
+    header = (
+        "T_K,n_formula_units,V_fit_A3,a_fit_A,Cp_used_for_integration_J_per_mol_UO2_K,"
+        "S_rel_J_per_mol_UO2_K,H_rel_J_per_mol_UO2,G_rel_J_per_mol_UO2,"
+        "alpha_V_micro_per_K,alpha_L_micro_per_K,qha_md_blend_weight\n"
+    )
+    (small / "thermo_functions_grid.csv").write_text(
+        header + "300,32,800,5.0,60,70,1000,-2000,30,10,1\n",
+        encoding="utf-8",
+    )
+    (small / "all_T_summary.csv").write_text("target_T_K,n_formula_units\n300,32\n", encoding="utf-8")
+    (large / "thermo_functions_grid.csv").write_text(
+        header + "300,256,6400,5.0,61,71,1100,-2100,31,10.5,1\n",
+        encoding="utf-8",
+    )
+    (large / "all_T_summary.csv").write_text("target_T_K,n_formula_units\n300,256\n", encoding="utf-8")
+
+    thermo_series.main(
+        [
+            "--compare-series",
+            str(small),
+            str(large),
+            "--compare-label",
+            "small",
+            "--compare-label",
+            "large",
+            "--outdir",
+            str(out),
+        ]
+    )
+
+    archive = out.with_name(f"{out.name}.tar.gz")
+    assert archive.exists()
+    with tarfile.open(archive, "r:gz") as handle:
+        names = set(handle.getnames())
+    assert f"{out.name}/compare_index.csv" in names
+    assert f"{out.name}/compare_metadata.json" in names
