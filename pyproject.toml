@@ -4,14 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "atomi"
-version = "0.3.3"
+version = "0.3.4"
 description = "Reusable HPC automation tools for atomistic modeling workflows."
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [
   { name = "Your Name" }
 ]
-dependencies = []
+dependencies = [
+  "xraydb",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -28,7 +30,6 @@ calphad = [
 scattering = [
   "ase>=3.23",
   "periodictable",
-  "xraydb",
 ]
 
 [project.scripts]
