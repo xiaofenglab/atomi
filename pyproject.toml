@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "atomi"
-version = "0.3.1"
+version = "0.3.2"
 description = "Reusable HPC automation tools for atomistic modeling workflows."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -24,6 +24,11 @@ materials = [
 ]
 calphad = [
   "pycalphad",
+]
+scattering = [
+  "ase>=3.23",
+  "periodictable",
+  "xraydb",
 ]
 
 [project.scripts]
@@ -86,6 +91,8 @@ lammps-md-init = "atomi.lammps.workflow_cli:init_workflow"
 lammps-md-workflow = "atomi.lammps.workflow_cli:run_workflow"
 lammps-md-array = "atomi.lammps.workflow_cli:production_array"
 lammps-postprocess = "atomi.lammps.postprocess:main"
+lammps-rdf-pdf = "atomi.lammps.rdf_pdf:main"
+lammps-total-scattering = "atomi.lammps.rdf_pdf:main"
 lammps-thermo-series = "atomi.lammps.thermo_series:main"
 thermo_lammps = "atomi.lammps.thermo_series:main"
 mace-build-dataset = "atomi.ml.mace.datasets:main"

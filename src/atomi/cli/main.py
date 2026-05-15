@@ -140,6 +140,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     lammps_postprocess.add_argument("postprocess_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("lammps-rdf-pdf", "lammps-total-scattering"):
+        lammps_rdf_pdf = subparsers.add_parser(
+            command_name,
+            help="Compute RDF/PDF/S(Q)/F(Q) from LAMMPS trajectories.",
+        )
+        lammps_rdf_pdf.add_argument("rdf_pdf_args", nargs=argparse.REMAINDER)
+
     for command_name in ("thermo_lammps", "lammps-thermo-series"):
         lammps_thermo_series = subparsers.add_parser(
             command_name,
@@ -472,6 +479,11 @@ def main(argv: list[str] | None = None) -> None:
 
         lammps_postprocess_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("lammps-rdf-pdf", "lammps-total-scattering"):
+        from atomi.lammps.rdf_pdf import main as lammps_rdf_pdf_main
+
+        lammps_rdf_pdf_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] in ("thermo_lammps", "lammps-thermo-series"):
         from atomi.lammps.thermo_series import main as thermo_series_main
 
@@ -737,6 +749,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.lammps.postprocess import main as lammps_postprocess_main
 
         lammps_postprocess_main(args.postprocess_args)
+        return
+
+    if args.subcommand in ("lammps-rdf-pdf", "lammps-total-scattering"):
+        from atomi.lammps.rdf_pdf import main as lammps_rdf_pdf_main
+
+        lammps_rdf_pdf_main(args.rdf_pdf_args)
         return
 
     if args.subcommand in ("thermo_lammps", "lammps-thermo-series"):

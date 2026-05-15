@@ -80,7 +80,7 @@ Atomi currently includes command families for:
 - VASP result checks, energy/convergence summaries, magnetic-moment utilities, and DFT input preparation.
 - VASP structural-variance generation for phonopy, near-equilibrium, prefail-MD, stress/force, defect, and MD snapshot datasets.
 - MACE/MLIP dataset construction, validation, outlier detection, extxyz updating, and model conversion.
-- LAMMPS MD engine setup, staged equilibration/production workflows, post-processing, and thermodynamic analysis.
+- LAMMPS MD engine setup, staged equilibration/production workflows, post-processing, thermodynamic analysis, and RDF/PDF/S(Q)/F(Q) total-scattering outputs.
 - CP2K input preparation, trajectory extraction, molecular box construction, bond analysis, and run cleanup.
 - MOOSE and CALPHAD environment discovery modules for project-specific app executables and pycalphad database checks.
 - HPC environment diagnostics and local configuration discovery.
