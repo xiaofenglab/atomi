@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Shared-folder guard for editing Atomi from multiple Codex sessions.
+"""Shared-folder guard for editing Atomi from multiple sessions.
 
 This does not prove Google Drive has uploaded every byte to every device.
-It gives Codex sessions a practical protocol:
+It gives editing sessions a practical protocol:
 
-- acquire: write CODEX_EDIT_LOCK.json before editing
+- acquire: write ATOMI_EDIT_LOCK.json before editing
 - release: mark clean/synced and remove the lock after pushing or pausing
 - status: show whether the folder is safe to edit
 
@@ -26,9 +26,9 @@ import time
 from pathlib import Path
 
 
-LOCK_FILE = "CODEX_EDIT_LOCK.json"
-STATUS_FILE = "CODEX_SYNC_STATUS.json"
-PROBE_FILE = "CODEX_SYNC_PROBE.txt"
+LOCK_FILE = "ATOMI_EDIT_LOCK.json"
+STATUS_FILE = "ATOMI_SYNC_STATUS.json"
+PROBE_FILE = "ATOMI_SYNC_PROBE.txt"
 
 
 def now() -> str:
@@ -176,7 +176,7 @@ def release(root: Path, note: str, keep_lock: bool = False) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Coordinate multi-Codex editing in a Google Drive repo copy.")
+    parser = argparse.ArgumentParser(description="Coordinate multi-session editing in a Google Drive repo copy.")
     parser.add_argument("--root", type=Path, default=None, help="Repository root. Default: git top-level or cwd.")
     sub = parser.add_subparsers(dest="command", required=True)
 
