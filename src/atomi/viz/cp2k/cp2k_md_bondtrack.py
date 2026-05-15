@@ -195,6 +195,7 @@ def main():
         metal_idx,
     )
     distance_labels = label_shell(display_shell0)
+    display_indices = [idx for _, idx, _ in display_shell0]
     summary_ligand_type, summary_ligand_count, summary_label = choose_summary_ligand(shell0)
     dynamic_display_count = len(distance_labels)
     track_idx = parse_track_atom(track_atom_arg, syms0)
@@ -203,7 +204,6 @@ def main():
     track_replace_position = None
     if track_idx is not None:
         track_label = tracked_atom_label(syms0, track_idx)
-        display_indices = [idx for _, idx, _ in display_shell0]
         if track_idx in display_indices:
             track_replace_position = display_indices.index(track_idx)
             distance_labels[track_replace_position] = track_label
@@ -217,20 +217,12 @@ def main():
 
     for iframe, (_, syms, pos) in enumerate(frames, start=1):
         mpos = pos[metal_idx]
-        cand = []
-        for i, s in enumerate(syms):
-            if i == metal_idx:
-                continue
-            if s in COMMON_EXCLUDE:
-                continue
-            if s not in display_ligand_types:
-                continue
-            cand.append((dist(mpos, pos[i]), i, s))
-        cand.sort(key=lambda x: x[0])
-
-        dvals = [x[0] for x in cand[:dynamic_display_count]]
-        if len(dvals) < dynamic_display_count:
-            dvals += [float("nan")] * (dynamic_display_count - len(dvals))
+        dvals = []
+        for idx in display_indices:
+            if idx < len(pos):
+                dvals.append(dist(mpos, pos[idx]))
+            else:
+                dvals.append(float("nan"))
 
         if track_idx is not None:
             if track_idx < len(pos):
@@ -285,6 +277,8 @@ def main():
         f.write(f"dynamic_display_count={dynamic_display_count}\n")
         f.write(f"display_ligand_types={','.join(display_ligand_types)}\n")
         f.write(f"distance_labels={','.join(distance_labels)}\n")
+        f.write("distance_atom_indices=" + ",".join(str(i + 1) for i in display_indices) + "\n")
+        f.write("distance_tracking=fixed_first_frame_atoms\n")
         f.write(f"summary_ligand_type={summary_ligand_type or 'displayed'}\n")
         f.write(f"summary_ligand_count={summary_ligand_count}\n")
         f.write(f"summary_label={summary_label}\n")

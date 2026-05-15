@@ -121,3 +121,49 @@ def test_bondtrack_appends_tracked_atom_outside_display_shell(tmp_path: Path) ->
     assert "track_atom=8" in meta
     assert "track_label=O8" in meta
     assert "track_in_default_shell=no" in meta
+
+
+def test_bondtrack_keeps_default_labels_on_first_frame_atoms(tmp_path: Path) -> None:
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "atomi"
+        / "viz"
+        / "cp2k"
+        / "cp2k_md_bondtrack.py"
+    )
+    log = tmp_path / "cp2k.log"
+    xyz = tmp_path / "cp2k-pos.xyz"
+    out = tmp_path / "cp2k_md_bonds.dat"
+    log.write_text("", encoding="utf-8")
+    xyz.write_text(
+        "6\n"
+        "frame 1\n"
+        "Ga 0.0 0.0 0.0\n"
+        "Cl 2.10 0.0 0.0\n"
+        "Cl 0.0 2.20 0.0\n"
+        "Cl 0.0 0.0 2.30\n"
+        "Cl -2.40 0.0 0.0\n"
+        "O 2.80 0.0 0.0\n"
+        "6\n"
+        "frame 2\n"
+        "Ga 0.0 0.0 0.0\n"
+        "Cl 2.10 0.0 0.0\n"
+        "Cl 0.0 2.20 0.0\n"
+        "Cl 0.0 0.0 2.30\n"
+        "Cl -2.95 0.0 0.0\n"
+        "O 2.45 0.0 0.0\n",
+        encoding="utf-8",
+    )
+
+    subprocess.run([sys.executable, str(script), str(log), str(xyz), str(out)], check=True)
+
+    rows = [line.split() for line in out.read_text(encoding="utf-8").splitlines()[1:]]
+    assert rows[1][7] == "2.95000000"
+    assert rows[1][8] == "2.45000000"
+    assert rows[1][1:4] == ["2.10000000", "2.95000000", "2.38750000"]
+
+    meta = out.with_suffix(".meta").read_text(encoding="utf-8")
+    assert "distance_labels=Cl1,Cl2,Cl3,Cl4,O1" in meta
+    assert "distance_atom_indices=2,3,4,5,6" in meta
+    assert "distance_tracking=fixed_first_frame_atoms" in meta
