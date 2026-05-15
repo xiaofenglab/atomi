@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 import atomi.lammps.thermo_series as thermo_series
+from atomi.lammps import production_array
 from atomi.lammps.workflow import (
     create_stage_wrapper,
     check_not_exploded_for_max_chunk,
@@ -713,3 +714,80 @@ def test_lammps_compare_series_cli_writes_download_archive(tmp_path) -> None:
         names = set(handle.getnames())
     assert f"{out.name}/compare_index.csv" in names
     assert f"{out.name}/compare_metadata.json" in names
+
+
+def test_md_engine_array_generates_selected_production_manifest_and_script(tmp_path) -> None:
+    wrapper = tmp_path / "run_lammps_gpu.sh"
+    wrapper.write_text(
+        "#!/bin/bash\n"
+        "#SBATCH --job-name=md-engine\n"
+        "#SBATCH --nodes=1\n"
+        "#SBATCH --ntasks=1\n"
+        "#SBATCH --time=01:00:00\n"
+        'echo "$1"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    model = tmp_path / "model.pt"
+    model.write_text("model\n", encoding="utf-8")
+    stages_dir = tmp_path / "stages"
+    stages_dir.mkdir()
+    for temp in (300, 400, 500):
+        eqm = stages_dir / f"npt_eqm_{temp}K"
+        eqm.mkdir()
+        (eqm / f"npt_eqm_{temp}K.restart").write_text("restart\n", encoding="utf-8")
+
+    config = tmp_path / "config_production.json"
+    stages = [
+        {
+            "name": f"npt_prod_{temp}K",
+            "type": "npt",
+            "temperature": temp,
+            "input_structure": f"stages/npt_eqm_{temp}K/npt_eqm_{temp}K.restart",
+            "fixed_steps": 1000,
+            "production_run": True,
+        }
+        for temp in (300, 400, 500)
+    ]
+    config.write_text(
+        json.dumps(
+            {
+                "wrapper_script": str(wrapper),
+                "model_file": str(model),
+                "timestep": 0.001,
+                "mass_O": 15.999,
+                "mass_U": 238.0289,
+                "performance": {
+                    "reference_atoms": 96,
+                    "reference_steps": 100000,
+                    "reference_hours": 0.75,
+                    "safety_factor": 1.0,
+                },
+                "stages": stages,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    production_array.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--config",
+            str(config),
+            "--T-range",
+            "350:550",
+            "--array-limit",
+            "2",
+        ]
+    )
+
+    outdir = tmp_path / "analysis" / "md_engine_array"
+    manifest = outdir / "md_engine_array_manifest.tsv"
+    script = outdir / "run_md_production_array.sh"
+    rows = list(csv.DictReader(manifest.open(), delimiter="\t"))
+    assert [row["stage_name"] for row in rows] == ["npt_prod_400K", "npt_prod_500K"]
+    assert [row["task_id"] for row in rows] == ["1", "2"]
+    script_text = script.read_text(encoding="utf-8")
+    assert "#SBATCH --array=1-2%2" in script_text
+    assert "--run-task" in script_text

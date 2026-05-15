@@ -388,6 +388,12 @@ def submit_job(wrapper, input_file, workdir):
     return int(m.group(1))
 
 
+def run_job_direct(wrapper, input_file, workdir):
+    env = os.environ.copy()
+    env["SLURM_SUBMIT_DIR"] = str(Path(workdir).resolve())
+    subprocess.check_call([str(wrapper), str(input_file)], cwd=workdir, env=env)
+
+
 def wait_job(job_id, poll):
     while True:
         out = subprocess.check_output(
@@ -1013,7 +1019,7 @@ def _resolve_stage_input(stage):
     )
 
 
-def run_production_stage(cfg, stage, resume_mode=False):
+def run_production_stage(cfg, stage, resume_mode=False, submit_mode=True):
     stage_name = stage["name"]
     stage_dir = STAGES / stage_name
     stage_dir.mkdir(parents=True, exist_ok=True)
@@ -1058,9 +1064,12 @@ def run_production_stage(cfg, stage, resume_mode=False):
     print(f"  steps: {run_steps}", flush=True)
     print(f"  walltime: {walltime}", flush=True)
 
-    job = submit_job(wrapper, inputfile.name, chunk_dir)
-    wait_job(job, cfg.get("poll_seconds", 10))
-    check_slurm_outputs(chunk_dir)
+    if submit_mode:
+        job = submit_job(wrapper, inputfile.name, chunk_dir)
+        wait_job(job, cfg.get("poll_seconds", 10))
+        check_slurm_outputs(chunk_dir)
+    else:
+        run_job_direct(wrapper, inputfile.name, chunk_dir)
 
     log = chunk_dir / f"log.{inputfile.name}"
     if not log.exists():

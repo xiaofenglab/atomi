@@ -46,3 +46,9 @@ def init_workflow(argv: list[str] | None = None) -> None:
 
 def run_workflow(argv: list[str] | None = None) -> None:
     workflow_main(argv)
+
+
+def production_array(argv: list[str] | None = None) -> None:
+    from atomi.lammps.production_array import main
+
+    main(argv)

@@ -110,6 +110,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     md_engine.add_argument("workflow_args", nargs=argparse.REMAINDER)
 
+    md_engine_array = subparsers.add_parser(
+        "md-engine-array",
+        help="Generate or submit a Slurm array for independent production MD stages.",
+    )
+    md_engine_array.add_argument("workflow_args", nargs=argparse.REMAINDER)
+
     lammps_md_init = subparsers.add_parser(
         "lammps-md-init",
         help="Compatibility alias for md-engine-init.",
@@ -121,6 +127,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compatibility alias for md-engine.",
     )
     lammps_md_workflow.add_argument("workflow_args", nargs=argparse.REMAINDER)
+
+    lammps_md_array = subparsers.add_parser(
+        "lammps-md-array",
+        help="Compatibility alias for md-engine-array.",
+    )
+    lammps_md_array.add_argument("workflow_args", nargs=argparse.REMAINDER)
 
     lammps_postprocess = subparsers.add_parser(
         "lammps-postprocess",
@@ -449,6 +461,12 @@ def main(argv: list[str] | None = None) -> None:
 
         run_workflow(raw_args[1:])
         return
+
+    if raw_args and raw_args[0] in ("md-engine-array", "lammps-md-array"):
+        from atomi.lammps.workflow_cli import production_array
+
+        production_array(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "lammps-postprocess":
         from atomi.lammps.postprocess import main as lammps_postprocess_main
 
@@ -707,6 +725,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.lammps.workflow_cli import run_workflow
 
         run_workflow(args.workflow_args)
+        return
+
+    if args.subcommand in ("md-engine-array", "lammps-md-array"):
+        from atomi.lammps.workflow_cli import production_array
+
+        production_array(args.workflow_args)
         return
 
     if args.subcommand == "lammps-postprocess":
