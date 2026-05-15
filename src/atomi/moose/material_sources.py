@@ -520,6 +520,51 @@ def formula_to_aflow_compound(formula: str) -> str:
     return "".join(parts)
 
 
+def load_api_key_json(path: Path, provider: str, env_name: str) -> tuple[str | None, str | None]:
+    if not path.exists():
+        raise SystemExit(f"API key JSON not found: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Could not parse API key JSON {path}: {exc}") from exc
+
+    candidates = [
+        payload.get(env_name),
+        payload.get("materials_project_api_key") if provider == "materials_project" else None,
+        payload.get("materials_project_api_key") if provider == "materials-project" else None,
+    ]
+    for provider_key in {provider, provider.replace("-", "_")}:
+        nested = payload.get(provider_key)
+        if isinstance(nested, dict):
+            candidates.extend(
+                [
+                    nested.get("api_key"),
+                    nested.get(env_name),
+                    nested.get("materials_project_api_key"),
+                ]
+            )
+
+    for value in candidates:
+        if isinstance(value, str) and value.strip():
+            return value.strip(), str(path)
+    return None, str(path)
+
+
+def resolve_materials_project_api_key(args: argparse.Namespace) -> tuple[str | None, str]:
+    if args.api_key_env:
+        value = os.environ.get(args.api_key_env)
+        if value:
+            return value, f"env:{args.api_key_env}"
+    json_path = args.api_key_json or (
+        Path(os.environ["ATOMI_API_KEYS_JSON"]) if os.environ.get("ATOMI_API_KEYS_JSON") else None
+    )
+    if json_path is not None:
+        key, source = load_api_key_json(json_path, "materials_project", args.api_key_env)
+        if key:
+            return key, f"json:{source}"
+    return None, "none"
+
+
 def elastic_row_from_kg(
     *,
     provider: str,
@@ -558,7 +603,7 @@ def fetch_materials_project(args: argparse.Namespace) -> tuple[list[dict[str, An
             "Materials Project fetching requires the optional mp-api package. "
             "Install mp-api and set MP_API_KEY, or provide --api-key-env."
         ) from exc
-    api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
+    api_key, api_key_source = resolve_materials_project_api_key(args)
     material_ids = [args.material_id] if args.material_id else None
     fields = [
         "material_id",
@@ -591,6 +636,7 @@ def fetch_materials_project(args: argparse.Namespace) -> tuple[list[dict[str, An
         "material": args.material,
         "material_id": row["material_id"],
         "fields": ["k_vrh", "g_vrh", "homogeneous_poisson"],
+        "api_key_source": api_key_source,
         "source_url": "https://docs.materialsproject.org/",
     }
     return [row], metadata
@@ -675,6 +721,14 @@ def source_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--out-csv", type=Path, default=Path("material_source_properties.csv"))
     parser.add_argument("--out-meta", type=Path, default=Path("material_source_properties.meta.json"))
     parser.add_argument("--api-key-env", default="MP_API_KEY")
+    parser.add_argument(
+        "--api-key-json",
+        type=Path,
+        help=(
+            "Local-only JSON containing a Materials Project key. Also configurable "
+            "with ATOMI_API_KEYS_JSON. The key is never written to output metadata."
+        ),
+    )
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--source-label")
     parser.add_argument("--citation", default="")

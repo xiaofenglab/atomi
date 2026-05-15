@@ -5,7 +5,14 @@ import pytest
 from atomi.calphad.env import _parse_csv, inspect_calphad_environment
 from atomi.moose.env import inspect_moose_environment
 from atomi.moose.material_export import main as moose_material_main
-from atomi.moose.material_sources import compare_main, screen_main, screen_plan, source_main
+from atomi.moose.material_sources import (
+    compare_main,
+    load_api_key_json,
+    resolve_materials_project_api_key,
+    screen_main,
+    screen_plan,
+    source_main,
+)
 from atomi.moose.workflow import (
     build_info,
     load_moose_profile,
@@ -503,6 +510,27 @@ def test_moose_material_source_normalizes_user_csv(tmp_path: Path) -> None:
     assert rows[0]["citation"] == "BISON UO2Thermal documentation"
     meta = json.loads(out_meta.read_text(encoding="utf-8"))
     assert meta["provider"] == "user-csv"
+
+
+def test_moose_material_source_loads_materials_project_key_json(tmp_path: Path, monkeypatch) -> None:
+    key_json = tmp_path / "atomi_api_keys.local.json"
+    key_json.write_text(
+        '{"materials_project": {"api_key_env": "MP_API_KEY", "api_key": "secret-key"}}\n',
+        encoding="utf-8",
+    )
+    key, source = load_api_key_json(key_json, "materials_project", "MP_API_KEY")
+    assert key == "secret-key"
+    assert source == str(key_json)
+
+    args = type(
+        "Args",
+        (),
+        {"api_key_env": "MP_API_KEY", "api_key_json": key_json},
+    )()
+    monkeypatch.delenv("MP_API_KEY", raising=False)
+    resolved, resolved_source = resolve_materials_project_api_key(args)
+    assert resolved == "secret-key"
+    assert resolved_source == f"json:{key_json}"
 
 
 def test_moose_material_compare_writes_table_and_plots_optional(tmp_path: Path) -> None:
