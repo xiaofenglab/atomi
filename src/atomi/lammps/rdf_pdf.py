@@ -15,6 +15,8 @@ from typing import Optional
 
 import numpy as np
 
+from atomi.core.archive import archive_output_dir, default_archive_path
+
 
 def parse_type_map(items: list[str]) -> dict[int, str]:
     out: dict[int, str] = {}
@@ -517,6 +519,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--window-function", choices=("lorch", "none"), default="lorch")
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument(
+        "--archive-path",
+        type=Path,
+        help="Optional tar.gz archive path. Default: <outdir>.tar.gz",
+    )
+    parser.add_argument(
+        "--no-archive-output",
+        action="store_true",
+        help="Do not create a tar.gz archive of the output directory.",
+    )
+    parser.add_argument(
         "--no-selected-extxyz",
         dest="write_selected_extxyz",
         action="store_false",
@@ -703,6 +715,9 @@ def run(args: argparse.Namespace) -> dict:
         "window_function": args.window_function,
         "scattering": scattering_meta,
         "plots": plots,
+        "archive": str(args.archive_path.resolve() if args.archive_path else default_archive_path(args.outdir).resolve())
+        if not args.no_archive_output
+        else None,
         "outputs": {
             "partial_rdfs_csv": str(args.outdir / f"{args.prefix}_partial_rdfs.csv"),
             "total_g": str(args.outdir / f"{args.prefix}_gtot.dat"),
@@ -717,6 +732,9 @@ def run(args: argparse.Namespace) -> dict:
         },
     }
     write_json(args.outdir / f"{args.prefix}_summary.json", summary)
+    if not args.no_archive_output:
+        archive = archive_output_dir(args.outdir, args.archive_path)
+        summary["archive"] = str(archive)
     return summary
 
 
@@ -733,6 +751,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     print(f"Wrote PDFgui G(r): {outputs['pdfgui_GofR']}")
     print(f"Wrote RMCProfile S(Q): {outputs['rmcprofile_SofQ']}")
     print(f"Wrote RMCProfile F(Q): {outputs['rmcprofile_FofQ']}")
+    if summary.get("archive"):
+        print(f"Download archive written to: {summary['archive']}")
 
 
 if __name__ == "__main__":

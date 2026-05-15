@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tarfile
 from types import SimpleNamespace
 
 import numpy as np
@@ -107,6 +108,8 @@ def test_run_from_existing_traj_can_use_custom_reader(tmp_path, monkeypatch) -> 
         weights=["U=92", "O=8"],
         window_function="lorch",
         no_plots=True,
+        archive_path=None,
+        no_archive_output=False,
         write_selected_extxyz=False,
     )
     summary = rdf_pdf.run(args)
@@ -116,3 +119,10 @@ def test_run_from_existing_traj_can_use_custom_reader(tmp_path, monkeypatch) -> 
     assert (tmp_path / "uo2_SofQ.dat").exists()
     assert (tmp_path / "uo2_FofQ_windowed.dat").exists()
     assert (tmp_path / "uo2_summary.json").exists()
+    archive = tmp_path.with_name(f"{tmp_path.name}.tar.gz")
+    assert summary["archive"] == str(archive.resolve())
+    assert archive.exists()
+    with tarfile.open(archive, "r:gz") as handle:
+        names = set(handle.getnames())
+    assert f"{tmp_path.name}/uo2_summary.json" in names
+    assert f"{tmp_path.name}/uo2_pdfgui_GofR.gr" in names
