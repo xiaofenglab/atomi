@@ -315,6 +315,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     calphad_doctor.add_argument("calphad_args", nargs=argparse.REMAINDER)
 
+    zentropy_commands = (
+        "zentropy_motif_db",
+        "zentropy-motif-db",
+        "defect_motif_db",
+        "defect-motif-db",
+    )
+    for command_name in zentropy_commands:
+        zentropy_motif_db = subparsers.add_parser(
+            command_name,
+            help="Index and export defect motifs for zentropy-guided thermodynamics.",
+        )
+        zentropy_motif_db.add_argument("zentropy_args", nargs=argparse.REMAINDER)
+
     mace_live = subparsers.add_parser(
         "mace-live",
         help="Live terminal plot for MACE training logs.",
@@ -657,6 +670,17 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.calphad.env import main as calphad_doctor_main
 
         calphad_doctor_main(raw_args[1:])
+        return
+    zentropy_commands = (
+        "zentropy_motif_db",
+        "zentropy-motif-db",
+        "defect_motif_db",
+        "defect-motif-db",
+    )
+    if raw_args and raw_args[0] in zentropy_commands:
+        from atomi.zentropy.motif_db import main as zentropy_motif_db_main
+
+        zentropy_motif_db_main(raw_args[1:])
         return
     if raw_args and raw_args[0] == "vasp-outcar":
         extv(raw_args[1:])
@@ -1015,6 +1039,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.calphad.env import main as calphad_doctor_main
 
         calphad_doctor_main(args.calphad_args)
+        return
+
+    if args.subcommand in zentropy_commands:
+        from atomi.zentropy.motif_db import main as zentropy_motif_db_main
+
+        zentropy_motif_db_main(args.zentropy_args)
         return
 
     if args.subcommand == "mace-live":
