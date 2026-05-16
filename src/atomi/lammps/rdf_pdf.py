@@ -643,7 +643,7 @@ def plot_frame_overlay(
     colors = cmap(np.linspace(0.08, 0.92, max(len(columns), 1)))
     for color, (label, values) in zip(colors, columns.items()):
         ax.plot(x, values, color=color, alpha=0.35, linewidth=0.8, label=label)
-    ax.plot(x, average, color="black", linewidth=2.6, label="averaged structure")
+    ax.plot(x, average, color="black", linewidth=1.0, label="averaged structure")
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
