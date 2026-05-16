@@ -306,8 +306,10 @@ def quantity_note(quantity: str) -> str:
 def ensure_md_series(args: argparse.Namespace, mode: str) -> Path:
     if args.pdf_series is not None:
         series_dir = args.pdf_series.resolve()
-        if not (series_dir / "series_summary.json").exists():
-            raise FileNotFoundError(f"Missing series_summary.json in {series_dir}")
+        if not (series_dir / "series_summary.json").exists() and find_single_pdf_summary(series_dir) is None:
+            raise FileNotFoundError(
+                f"Missing series_summary.json or single pdf_lammps *_summary.json in {series_dir}"
+            )
         return series_dir
 
     series_dir = args.outdir / f"{mode}_md_pdf_series"
@@ -351,8 +353,71 @@ def ensure_md_series(args: argparse.Namespace, mode: str) -> Path:
     return series_dir
 
 
+def infer_temperature_from_path(path: Path) -> float | None:
+    for part in [path.name, *[parent.name for parent in path.parents]]:
+        match = re.search(r"(?<![A-Za-z0-9])([0-9]+(?:\.[0-9]+)?)\s*K(?![A-Za-z0-9])", part, flags=re.IGNORECASE)
+        if match:
+            return float(match.group(1))
+    return None
+
+
+def find_single_pdf_summary(pdf_dir: Path) -> Path | None:
+    if not pdf_dir.exists():
+        return None
+    for path in sorted(pdf_dir.glob("*_summary.json")):
+        if path.name == "series_summary.json":
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        outputs = payload.get("outputs", {}) if isinstance(payload, dict) else {}
+        if isinstance(outputs, dict) and {"GofR_from_FQ", "SofQ", "FofQ"}.issubset(outputs):
+            return path
+    return None
+
+
+def single_summary_to_item(summary_path: Path, summary: dict) -> dict:
+    outputs = summary.get("outputs", {})
+    if not isinstance(outputs, dict):
+        raise ValueError(f"Single pdf_lammps summary has no outputs mapping: {summary_path}")
+    temperature = finite_float(summary.get("temperature"))
+    if temperature is None:
+        source = summary.get("source", {})
+        if isinstance(source, dict):
+            temperature = finite_float(source.get("temperature"))
+    if temperature is None:
+        temperature = infer_temperature_from_path(summary_path.parent)
+    item = {
+        "temperature": temperature if temperature is not None else math.nan,
+        "stage_name": summary.get("stage_name") or summary_path.parent.name,
+        "summary_json": str(summary_path),
+        "avg_volume_A3": summary.get("avg_volume_A3"),
+        "GofR_from_FQ": outputs.get("GofR_from_FQ"),
+        "GofR_direct": outputs.get("direct_GofR"),
+        "SofQ": outputs.get("SofQ"),
+        "FofQ": outputs.get("FofQ"),
+        "FofQ_windowed": outputs.get("FofQ_windowed"),
+        "pdfgui_GofR": outputs.get("pdfgui_GofR"),
+        "rmcprofile_SofQ": outputs.get("rmcprofile_SofQ"),
+        "rmcprofile_FofQ": outputs.get("rmcprofile_FofQ"),
+        "source_mode": "single-pdf-lammps",
+    }
+    missing = [key for key in ("GofR_from_FQ", "GofR_direct", "SofQ", "FofQ", "FofQ_windowed") if not item.get(key)]
+    if missing:
+        raise ValueError(f"Single pdf_lammps summary is missing required outputs {missing}: {summary_path}")
+    return item
+
+
 def load_series_items(series_dir: Path) -> list[dict]:
-    metadata = json.loads((series_dir / "series_summary.json").read_text(encoding="utf-8"))
+    series_summary = series_dir / "series_summary.json"
+    if not series_summary.exists():
+        single_summary = find_single_pdf_summary(series_dir)
+        if single_summary is None:
+            raise FileNotFoundError(f"Missing series_summary.json or single pdf_lammps *_summary.json in {series_dir}")
+        metadata = json.loads(single_summary.read_text(encoding="utf-8"))
+        return [single_summary_to_item(single_summary, metadata)]
+    metadata = json.loads(series_summary.read_text(encoding="utf-8"))
     series = metadata.get("series", [])
     if not series:
         raise ValueError(f"No series entries found in {series_dir / 'series_summary.json'}")
@@ -1362,7 +1427,7 @@ def write_reweight_outputs(
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--pdf-series", type=Path, help="Existing pdf_lammps_series output directory.")
+    source.add_argument("--pdf-series", type=Path, help="Existing pdf_lammps_series output directory, or one single pdf_lammps output directory.")
     source.add_argument("--config", nargs="+", help="One or more production config JSON files.")
     source.add_argument("--md-root", type=Path, help="MD engine root. NPT folders are scanned; NVT folders are ignored.")
     exp = parser.add_argument_group("experimental input")

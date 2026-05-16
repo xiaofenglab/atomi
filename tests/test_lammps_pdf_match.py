@@ -46,6 +46,35 @@ def make_series(tmp_path):
     return series_dir, exp_path
 
 
+def make_single_pdf_run(tmp_path):
+    single_dir = tmp_path / "pdf_300K"
+    single_dir.mkdir()
+    x = np.linspace(1.0, 6.0, 101)
+    exp = np.exp(-0.5 * ((x - 3.0) / 0.35) ** 2)
+    model = 0.8 * exp + 0.1
+    outputs = {}
+    for key, name in (
+        ("GofR_from_FQ", "lammps_pdf_GofR_from_FQ.dat"),
+        ("direct_GofR", "lammps_pdf_GofR_direct.dat"),
+        ("SofQ", "lammps_pdf_SofQ.dat"),
+        ("FofQ", "lammps_pdf_FofQ.dat"),
+        ("FofQ_windowed", "lammps_pdf_FofQ_windowed.dat"),
+    ):
+        path = single_dir / name
+        write_xy(path, x, model)
+        outputs[key] = str(path)
+    summary = {
+        "n_frames": 4,
+        "avg_volume_A3": 40.0,
+        "avg_counts": {"U": 1, "O": 2},
+        "outputs": outputs,
+    }
+    (single_dir / "lammps_pdf_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    exp_path = tmp_path / "experiment.gr"
+    write_xy(exp_path, x, exp)
+    return single_dir, exp_path
+
+
 def common_args(tmp_path, series_dir, exp_path, outdir_name):
     return SimpleNamespace(
         pdf_series=series_dir,
@@ -95,6 +124,19 @@ def test_compare_ranks_best_pdf_window(tmp_path) -> None:
     assert summary["best"]["temperature"] == 300.0
     assert (args.outdir / "compare_rank.csv").exists()
     assert (args.outdir / "best_compare_curve.csv").exists()
+    assert (args.outdir / "best_compare_overlay.png").exists()
+
+
+def test_compare_accepts_single_pdf_lammps_output(tmp_path) -> None:
+    single_dir, exp_path = make_single_pdf_run(tmp_path)
+    args = common_args(tmp_path, single_dir, exp_path, "compare_single")
+    quantity = pdf_match.validate_args(pdf_match.build_compare_parser(), args)
+    summary = pdf_match.write_compare_outputs(args, single_dir, quantity)
+
+    assert summary["n_candidates"] == 1
+    assert summary["best"]["temperature"] == 300.0
+    assert summary["best"]["stage_name"] == "pdf_300K"
+    assert (args.outdir / "compare_rank.csv").exists()
     assert (args.outdir / "best_compare_overlay.png").exists()
 
 
