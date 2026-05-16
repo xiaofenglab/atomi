@@ -271,6 +271,36 @@ def infer_quantity(exp_path: Path, quantity: str) -> str:
     return "G"
 
 
+def canonical_quantity(quantity: str) -> str:
+    if quantity == "IQ":
+        return "IQ"
+    return quantity
+
+
+def model_quantity(quantity: str) -> str:
+    if quantity == "IQ":
+        return "iQ"
+    return quantity
+
+
+def quantity_note(quantity: str) -> str:
+    if quantity == "IQ":
+        return (
+            "PDFgetX .iq is treated as a reduced intensity-like q-space curve. "
+            "The MD model uses i(Q)=S(Q)-1 as a pseudo-I(Q) comparison; it is not "
+            "a reconstructed detector/raw intensity because that would require "
+            "instrument, background, container, absorption, polarization, and "
+            "normalization assumptions."
+        )
+    if quantity == "iQ":
+        return "MD iQ is computed as S(Q)-1."
+    if quantity == "FQ":
+        return "MD F(Q) is computed as Q[S(Q)-1]."
+    if quantity == "SQ":
+        return "MD S(Q) is the normalized total structure factor from the RDF/PDF workflow."
+    return "MD G(r) comparison uses the selected G(r) source."
+
+
 def ensure_md_series(args: argparse.Namespace, mode: str) -> Path:
     if args.pdf_series is not None:
         series_dir = args.pdf_series.resolve()
@@ -343,6 +373,7 @@ def select_series_items(series: list[dict], md_temperature: float | None, tolera
 
 
 def read_model_curve(item: dict, quantity: str, g_source: str, fq_source: str) -> tuple[np.ndarray, np.ndarray, str]:
+    quantity = model_quantity(quantity)
     if quantity == "G":
         key = "GofR_from_FQ" if g_source == "from-fq" else "GofR_direct"
         path = Path(item[key])
@@ -514,6 +545,8 @@ def plot_reweight(path: Path, x: np.ndarray, exp: np.ndarray, prior: np.ndarray,
 def quantity_labels(quantity: str) -> tuple[str, str]:
     if quantity == "G":
         return "r (A)", "G(r)"
+    if quantity == "IQ":
+        return "Q (A^-1)", "I(Q) / pseudo i(Q)"
     if quantity in ("SQ", "FQ", "iQ"):
         return "Q (A^-1)", quantity
     return "x", quantity
@@ -526,7 +559,7 @@ def quantity_extension(quantity: str) -> str:
         return "sq"
     if quantity == "FQ":
         return "fq"
-    if quantity == "iQ":
+    if quantity in ("iQ", "IQ"):
         return "iq"
     return "gr"
 
@@ -823,6 +856,7 @@ def write_compare_outputs(
         "experiment": str(args.exp.resolve()),
         "experiment_info": experiment_info or {"mode": "reduced-data", "input": str(args.exp.resolve())},
         "quantity": quantity,
+        "quantity_note": quantity_note(quantity),
         "series_dir": str(series_dir.resolve()),
         "best": rows[0],
         "n_candidates": len(rows),
@@ -958,6 +992,7 @@ def write_reweight_outputs(
         "experiment": str(args.exp.resolve()),
         "experiment_info": experiment_info or {"mode": "reduced-data", "input": str(args.exp.resolve())},
         "quantity": quantity,
+        "quantity_note": quantity_note(quantity),
         "series_dir": str(series_dir.resolve()),
         "n_candidates": len(rows),
         "md_temperature_filter": {
@@ -1015,7 +1050,12 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     exp.add_argument("--pdfgetx-rmin", type=float)
     exp.add_argument("--pdfgetx-rmax", type=float)
     exp.add_argument("--pdfgetx-rstep", type=float)
-    parser.add_argument("--quantity", choices=["auto", "G", "SQ", "FQ", "iQ"], default="auto")
+    parser.add_argument(
+        "--quantity",
+        choices=["auto", "G", "SQ", "FQ", "iQ", "IQ"],
+        default="auto",
+        help="Compare G(r), S(Q), F(Q), iQ=S(Q)-1, or PDFgetX .iq-style IQ using MD pseudo-iQ.",
+    )
     parser.add_argument("--g-source", choices=["from-fq", "direct"], default="from-fq")
     parser.add_argument("--fq-source", choices=["raw", "windowed"], default="raw")
     parser.add_argument("--x-min", type=float)

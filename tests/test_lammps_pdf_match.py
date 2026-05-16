@@ -157,3 +157,17 @@ def test_compare_prepares_pdfgetx3_raw_chi_from_md_density(tmp_path) -> None:
     prep = json.loads((outdir / "pdfgetx3_exp" / "pdfgetx3_prep_metadata.json").read_text(encoding="utf-8"))
     assert prep["prep"]["density_source"] == "md"
     assert prep["output_ready"] is False
+
+
+def test_compare_accepts_pdfgetx_iq_alias_with_warning(tmp_path) -> None:
+    series_dir, exp_path = make_series(tmp_path)
+    iq_path = tmp_path / "experiment.iq"
+    write_xy(iq_path, np.linspace(1.0, 6.0, 101), np.zeros(101))
+    args = common_args(tmp_path, series_dir, iq_path, "compare_iq")
+    args.quantity = "IQ"
+    quantity = pdf_match.validate_args(pdf_match.build_compare_parser(), args)
+    summary = pdf_match.write_compare_outputs(args, series_dir, quantity)
+
+    assert summary["quantity"] == "IQ"
+    assert "pseudo-I(Q)" in summary["quantity_note"]
+    assert (args.outdir / "best_compare_overlay.png").exists()
