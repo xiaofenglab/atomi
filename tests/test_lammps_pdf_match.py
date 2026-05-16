@@ -81,6 +81,9 @@ def common_args(tmp_path, series_dir, exp_path, outdir_name):
         config=None,
         md_root=None,
         exp=exp_path,
+        exp_raw_sample=None,
+        experiment_scattering="auto",
+        experiment_label=None,
         quantity="auto",
         g_source="from-fq",
         fq_source="raw",
@@ -138,6 +141,21 @@ def test_compare_accepts_single_pdf_lammps_output(tmp_path) -> None:
     assert summary["best"]["stage_name"] == "pdf_300K"
     assert (args.outdir / "compare_rank.csv").exists()
     assert (args.outdir / "best_compare_overlay.png").exists()
+
+
+def test_compare_records_neutron_experiment_labels(tmp_path) -> None:
+    series_dir, exp_path = make_series(tmp_path)
+    args = common_args(tmp_path, series_dir, exp_path, "compare_neutron")
+    args.scattering = "neutron"
+    args.experiment_scattering = "neutron"
+    args.experiment_label = "neutron PDF experiment"
+    quantity = pdf_match.validate_args(pdf_match.build_compare_parser(), args)
+    summary = pdf_match.write_compare_outputs(args, series_dir, quantity)
+
+    assert summary["scattering"]["experiment"] == "neutron"
+    assert summary["scattering"]["md"] == "neutron"
+    assert summary["scattering"]["experiment_label"] == "neutron PDF experiment"
+    assert summary["scattering"]["compatible"] is True
 
 
 def test_reweight_outputs_weights_and_curve(tmp_path) -> None:

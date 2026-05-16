@@ -539,7 +539,17 @@ def metrics(y_exp: np.ndarray, y_model: np.ndarray) -> dict:
     }
 
 
-def plot_compare(path: Path, x: np.ndarray, y_exp: np.ndarray, y_model: np.ndarray, title: str, xlabel: str, ylabel: str) -> bool:
+def plot_compare(
+    path: Path,
+    x: np.ndarray,
+    y_exp: np.ndarray,
+    y_model: np.ndarray,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    experiment_label: str = "experiment",
+    model_label: str = "MD model",
+) -> bool:
     try:
         cache = Path(tempfile.gettempdir()) / "atomi-matplotlib"
         cache.mkdir(parents=True, exist_ok=True)
@@ -563,9 +573,9 @@ def plot_compare(path: Path, x: np.ndarray, y_exp: np.ndarray, y_model: np.ndarr
         markerfacecolor="white",
         markeredgecolor="black",
         markeredgewidth=0.9,
-        label="experiment",
+        label=experiment_label,
     )
-    axes[0].plot(x, y_model, color="#d62728", linewidth=1.4, label="MD model")
+    axes[0].plot(x, y_model, color="#d62728", linewidth=1.4, label=model_label)
     axes[0].set_ylabel(ylabel)
     axes[0].set_title(title)
     axes[0].legend(frameon=False)
@@ -579,7 +589,18 @@ def plot_compare(path: Path, x: np.ndarray, y_exp: np.ndarray, y_model: np.ndarr
     return True
 
 
-def plot_reweight(path: Path, x: np.ndarray, exp: np.ndarray, prior: np.ndarray, weighted: np.ndarray, corrected: np.ndarray, xlabel: str, ylabel: str) -> bool:
+def plot_reweight(
+    path: Path,
+    x: np.ndarray,
+    exp: np.ndarray,
+    prior: np.ndarray,
+    weighted: np.ndarray,
+    corrected: np.ndarray,
+    xlabel: str,
+    ylabel: str,
+    experiment_label: str = "experiment",
+    md_label: str = "MD",
+) -> bool:
     try:
         cache = Path(tempfile.gettempdir()) / "atomi-matplotlib"
         cache.mkdir(parents=True, exist_ok=True)
@@ -593,10 +614,10 @@ def plot_reweight(path: Path, x: np.ndarray, exp: np.ndarray, prior: np.ndarray,
         return False
 
     fig, axes = plt.subplots(2, 1, figsize=(7, 6), sharex=True, gridspec_kw={"height_ratios": [2, 1]})
-    axes[0].plot(x, exp, color="black", linewidth=1.8, label="experiment")
-    axes[0].plot(x, prior, color="0.6", linestyle="--", linewidth=1.2, label="uniform MD")
-    axes[0].plot(x, weighted, color="#1f77b4", linewidth=1.4, label="reweighted MD")
-    axes[0].plot(x, corrected, color="#d62728", linewidth=1.3, label="corrected reweighted")
+    axes[0].plot(x, exp, color="black", linewidth=1.8, label=experiment_label)
+    axes[0].plot(x, prior, color="0.6", linestyle="--", linewidth=1.2, label=f"uniform {md_label}")
+    axes[0].plot(x, weighted, color="#1f77b4", linewidth=1.4, label=f"reweighted {md_label}")
+    axes[0].plot(x, corrected, color="#d62728", linewidth=1.3, label=f"corrected reweighted {md_label}")
     axes[0].set_ylabel(ylabel)
     axes[0].legend(frameon=False)
     axes[1].plot(x, corrected - exp, color="#d62728", linewidth=1.2)
@@ -633,6 +654,66 @@ def quantity_extension(quantity: str) -> str:
 
 def raw_quantity(args: argparse.Namespace) -> str:
     return "G" if args.quantity == "auto" else args.quantity
+
+
+def resolve_experiment_scattering(args: argparse.Namespace) -> str:
+    requested = getattr(args, "experiment_scattering", "auto") or "auto"
+    if requested != "auto":
+        return str(requested)
+    if getattr(args, "exp_raw_sample", None) is not None:
+        return "xray"
+    return str(getattr(args, "scattering", "xray"))
+
+
+def default_experiment_label(scattering: str) -> str:
+    if scattering == "xray":
+        return "X-ray experiment"
+    if scattering == "neutron":
+        return "neutron experiment"
+    return "experiment"
+
+
+def default_md_label(scattering: str) -> str:
+    if scattering == "xray":
+        return "X-ray-weighted MD"
+    if scattering == "neutron":
+        return "neutron-weighted MD"
+    if scattering == "custom":
+        return "custom-weighted MD"
+    return "MD model"
+
+
+def scattering_compare_metadata(args: argparse.Namespace, experiment_info: dict | None = None) -> dict:
+    md_scattering = str(getattr(args, "scattering", "xray"))
+    exp_scattering = resolve_experiment_scattering(args)
+    exp_label = getattr(args, "experiment_label", None) or default_experiment_label(exp_scattering)
+    md_label = default_md_label(md_scattering)
+    compatible = exp_scattering == md_scattering or md_scattering == "custom"
+    note = None
+    if exp_scattering == "neutron":
+        note = (
+            "Neutron MD curves use coherent bound scattering lengths from "
+            "periodictable. Pass isotope-specific/custom weights with "
+            "--scattering custom --weights when needed."
+        )
+    elif exp_scattering == "xray":
+        note = "X-ray MD curves use xraydb form factors when available."
+    warning = None
+    if not compatible:
+        warning = (
+            f"Experimental data are labeled as {exp_scattering}, but MD curves "
+            f"were generated with {md_scattering} scattering weights."
+        )
+    return {
+        "experiment": exp_scattering,
+        "md": md_scattering,
+        "experiment_label": exp_label,
+        "md_label": md_label,
+        "compatible": compatible,
+        "note": note,
+        "warning": warning,
+        "experiment_info_scattering": (experiment_info or {}).get("scattering"),
+    }
 
 
 def resolve_pdfgetx_composition_density(args: argparse.Namespace, series_dir: Path) -> dict:
@@ -1050,10 +1131,23 @@ def write_pdfgetx3_process_log(path: Path, info: dict) -> None:
 
 
 def prepare_experiment_input(args: argparse.Namespace, series_dir: Path, quantity: str) -> tuple[Path, dict]:
+    exp_scattering = resolve_experiment_scattering(args)
+    exp_label = getattr(args, "experiment_label", None) or default_experiment_label(exp_scattering)
     if args.exp is not None:
-        return args.exp, {"mode": "reduced-data", "input": str(args.exp.resolve())}
+        return args.exp, {
+            "mode": "reduced-data",
+            "input": str(args.exp.resolve()),
+            "scattering": exp_scattering,
+            "label": exp_label,
+        }
     if args.exp_raw_sample is None:
         raise ValueError("Pass --exp for reduced data or --exp-raw-sample for raw .chi data.")
+    if exp_scattering != "xray":
+        raise ValueError(
+            "Raw .chi reduction is handled through PDFgetX3 and is X-ray-only in Atomi. "
+            "For neutron comparison, pass reduced neutron data with --exp and "
+            "--experiment-scattering neutron."
+        )
     if args.pdfgetx_dataformat == "twotheta" and args.wavelength is None:
         raise ValueError("--wavelength is required when --pdfgetx-dataformat twotheta")
 
@@ -1121,6 +1215,8 @@ def prepare_experiment_input(args: argparse.Namespace, series_dir: Path, quantit
     output_ready = expected.exists()
     info = {
         "mode": "raw-chi-pdfgetx3",
+        "scattering": "xray",
+        "label": exp_label,
         "raw_sample": str(args.exp_raw_sample.resolve()),
         "raw_empty": str(args.exp_raw_empty.resolve()) if args.exp_raw_empty else None,
         "raw_background": str(args.exp_raw_background.resolve()) if args.exp_raw_background else None,
@@ -1245,6 +1341,7 @@ def write_compare_outputs(
         },
     )
     xlabel, ylabel = quantity_labels(quantity)
+    scattering = scattering_compare_metadata(args, experiment_info)
     plots = []
     plot_path = args.outdir / "best_compare_overlay.png"
     if plot_compare(
@@ -1255,6 +1352,8 @@ def write_compare_outputs(
         f"Best MD-PDF Match ({quantity})",
         xlabel,
         ylabel,
+        experiment_label=scattering["experiment_label"],
+        model_label=scattering["md_label"],
     ):
         plots.append(str(plot_path))
 
@@ -1262,6 +1361,7 @@ def write_compare_outputs(
         "mode": "compare",
         "experiment": str(args.exp.resolve()),
         "experiment_info": experiment_info or {"mode": "reduced-data", "input": str(args.exp.resolve())},
+        "scattering": scattering,
         "quantity": quantity,
         "quantity_note": quantity_note(quantity),
         "series_dir": str(series_dir.resolve()),
@@ -1389,15 +1489,28 @@ def write_reweight_outputs(
     )
 
     xlabel, ylabel = quantity_labels(quantity)
+    scattering = scattering_compare_metadata(args, experiment_info)
     plots = []
     plot_path = args.outdir / "reweighted_overlay.png"
-    if plot_reweight(plot_path, x_ref, exp_ref, uniform_curve, weighted_curve, corrected_curve, xlabel, ylabel):
+    if plot_reweight(
+        plot_path,
+        x_ref,
+        exp_ref,
+        uniform_curve,
+        weighted_curve,
+        corrected_curve,
+        xlabel,
+        ylabel,
+        experiment_label=scattering["experiment_label"],
+        md_label=scattering["md_label"],
+    ):
         plots.append(str(plot_path))
 
     metadata = {
         "mode": "reweight",
         "experiment": str(args.exp.resolve()),
         "experiment_info": experiment_info or {"mode": "reduced-data", "input": str(args.exp.resolve())},
+        "scattering": scattering,
         "quantity": quantity,
         "quantity_note": quantity_note(quantity),
         "series_dir": str(series_dir.resolve()),
@@ -1434,6 +1547,16 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     exp_source = exp.add_mutually_exclusive_group(required=True)
     exp_source.add_argument("--exp", type=Path, help="Reduced experimental PDFgetX/PDFgui/RMC-style two-column data.")
     exp_source.add_argument("--exp-raw-sample", type=Path, help="Raw experimental sample .chi file for pdfgetx3 reduction.")
+    exp.add_argument(
+        "--experiment-scattering",
+        choices=("auto", "xray", "neutron"),
+        default="auto",
+        help=(
+            "Scattering mode for experimental data labels/metadata. Auto uses xray "
+            "for raw pdfgetx3 .chi input and otherwise follows --scattering."
+        ),
+    )
+    exp.add_argument("--experiment-label", help="Legend label for experimental data, e.g. 'neutron PDF experiment'.")
     exp.add_argument("--exp-raw-empty", type=Path, help="Optional empty container/cell .chi file for pdfgetx3.")
     exp.add_argument("--exp-raw-background", type=Path, help="Optional air/instrument background .chi file for pdfgetx3.")
     exp.add_argument("--exp-raw-reference", type=Path, help="Optional reference .chi file for pdfgetx3.")
@@ -1553,6 +1676,8 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     raw_sample = getattr(args, "exp_raw_sample", None)
     if exp_path is None and raw_sample is None:
         parser.error("pass --exp for reduced data or --exp-raw-sample for raw .chi data")
+    if raw_sample is not None and getattr(args, "experiment_scattering", "auto") == "neutron":
+        parser.error("raw .chi reduction uses PDFgetX3 and must be X-ray; pass reduced neutron data with --exp")
     if exp_path is not None:
         return infer_quantity(exp_path, args.quantity)
     return raw_quantity(args)

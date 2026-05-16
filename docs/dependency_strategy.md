@@ -16,6 +16,10 @@ Base dependencies from `pyproject.toml`:
 - `periodictable`
 - `xraydb`
 
+`xraydb` supplies X-ray form-factor data for X-ray PDF/XAFS workflows.
+`periodictable` supplies neutron coherent scattering lengths for neutron PDF
+weighting.
+
 Recommended update command:
 
 ```bash

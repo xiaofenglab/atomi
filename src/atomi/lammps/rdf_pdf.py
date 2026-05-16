@@ -374,6 +374,27 @@ def neutron_weights(species_order: list[str]) -> dict[str, float]:
     return weights
 
 
+def neutron_scattering_metadata(species_order: list[str]) -> dict:
+    weights = neutron_weights(species_order)
+    return {
+        "mode": "neutron",
+        "weights": weights,
+        "weight_type": "coherent bound neutron scattering length",
+        "weight_unit": "fm",
+        "data_source": "periodictable neutron tables",
+        "data_source_note": (
+            "periodictable provides programmatic coherent neutron scattering "
+            "lengths, commonly traceable to NIST/NCNR tabulations. ADDIE is an "
+            "ORNL reduction/workflow tool, not the runtime table used here."
+        ),
+        "isotope_note": (
+            "Element-average/natural-abundance values are used unless the user "
+            "supplies custom weights with --scattering custom --weights."
+        ),
+        "normalization": "S(Q) uses concentration-weighted b_i b_j terms normalized by <b>^2.",
+    }
+
+
 def xray_form_factors(species_order: list[str], q_values: np.ndarray) -> Optional[dict[str, np.ndarray]]:
     try:
         import xraydb
@@ -1434,6 +1455,10 @@ def run_series(args: argparse.Namespace) -> dict:
         "dump_format": args.dump_format,
         "type_map": args.type_map,
         "scattering": args.scattering,
+        "scattering_note": (
+            "Per-temperature summary JSON files include the actual scattering "
+            "weights/form-factor metadata used for each averaged MD PDF."
+        ),
         "series": series_items,
         "structure_adp_outputs": structure_adp_outputs,
         "overlay_plots": overlay_plots,
@@ -1633,10 +1658,10 @@ def run(args: argparse.Namespace) -> dict:
         sq, _ = partials_to_sq_constant(species_order, partial, avg_counts, weights, rho0, r, q_values)
         scattering_meta["weights"] = weights
     elif args.scattering == "neutron":
-        weights = neutron_weights(species_order)
+        scattering_meta = neutron_scattering_metadata(species_order)
+        weights = scattering_meta["weights"]
         g_total, conc = weighted_total_gr_constant(species_order, partial, avg_counts, weights)
         sq, _ = partials_to_sq_constant(species_order, partial, avg_counts, weights, rho0, r, q_values)
-        scattering_meta["weights"] = weights
     else:
         form_factors = xray_form_factors(species_order, q_values)
         if form_factors is None:
