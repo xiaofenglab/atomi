@@ -100,6 +100,7 @@ def test_elastic_qha_md_compare_uses_qha_elastic_table(tmp_path: Path) -> None:
     assert metadata["readiness"]["can_compare_elastic_constants"] is True
     rows = list(csv.DictReader((out / "elastic_qha_md_overlay.csv").open(encoding="utf-8")))
     c11 = [row for row in rows if row["component"] == "C11"]
-    assert {row["source"] for row in c11} == {"QHA/static", "MD elastic"}
+    assert {row["source"] for row in c11} == {"VASP/static", "MD elastic"}
     written = json.loads((out / "elastic_qha_md_metadata.json").read_text(encoding="utf-8"))
     assert written["qha_elastic"]["elasticity_ready"] is True
+    assert (out / "elastic_vasp_md_metadata.json").exists()

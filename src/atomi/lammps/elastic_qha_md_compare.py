@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare LAMMPS finite-T elastic results against VASP/QHA structural or elastic data."""
+"""Compare LAMMPS finite-T elastic results against VASP/static or QHA data."""
 
 from __future__ import annotations
 
@@ -189,12 +189,12 @@ def discover_qha_elastic(qha_dir: Path, explicit: Optional[Path]) -> tuple[list[
     used_files: list[str] = []
     for path in candidates:
         if path.exists():
-            parsed = read_elastic_csv(path, "QHA/static")
+            parsed = read_elastic_csv(path, "VASP/static")
             if parsed:
                 rows.extend(parsed)
                 used_files.append(str(path))
                 break
-    dat_rows = read_component_dat_files(qha_dir, "QHA/static")
+    dat_rows = read_component_dat_files(qha_dir, "VASP/static")
     if dat_rows:
         rows.extend(dat_rows)
         used_files.extend(sorted({row["input_file"] for row in dat_rows}))
@@ -204,9 +204,12 @@ def discover_qha_elastic(qha_dir: Path, explicit: Optional[Path]) -> tuple[list[
         "files": used_files,
         "components": components,
         "note": (
-            "QHA/static elastic data found."
+            "VASP/static elastic data found."
             if rows
-            else "Standard phonopy-QHA outputs do not contain Cij(T). Provide static/quasi-static elastic tables to compare elastic constants."
+            else (
+                "Standard phonopy-QHA outputs do not contain Cij(T). Provide "
+                "VASP/static elastic tables to compare elastic constants."
+            )
         ),
     }
 
@@ -317,6 +320,7 @@ def plot_component(path: Path, rows: list[dict], component: str, ylabel: str, ti
         return False
     fig, ax = plt.subplots(figsize=(6.5, 4.0))
     styles = {
+        "VASP/static": {"color": "tab:blue", "linestyle": "-", "marker": "o", "mfc": "white"},
         "QHA/static": {"color": "tab:blue", "linestyle": "-", "marker": "o", "mfc": "white"},
         "QHA": {"color": "tab:blue", "linestyle": "-", "marker": "o", "mfc": "white"},
         "MD elastic": {"color": "tab:red", "linestyle": "--", "marker": "s", "mfc": "tab:red"},
@@ -348,14 +352,33 @@ def plot_component(path: Path, rows: list[dict], component: str, ylabel: str, ti
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="elastic_qha_md_compare",
-        description="Check whether QHA outputs contain elastic data and compare QHA/static elasticity with LAMMPS MD elasticity.",
+        prog="elastic_vasp_md_compare",
+        description="Compare VASP/static or QHA structural/elastic data with LAMMPS MD elasticity.",
     )
-    parser.add_argument("--qha-dir", type=Path, required=True, help="phonopy-qha output directory.")
+    parser.add_argument(
+        "--qha-dir",
+        "--vasp-elastic-dir",
+        dest="qha_dir",
+        type=Path,
+        required=True,
+        help="VASP elastic analyze directory or phonopy-qha output directory.",
+    )
     parser.add_argument("--elastic-md-dir", type=Path, required=True, help="elastic_lammps analyze output directory.")
     parser.add_argument("--outdir", type=Path, required=True)
-    parser.add_argument("--qha-elastic-file", type=Path, help="Optional explicit QHA/static elastic CSV.")
-    parser.add_argument("--qha-formula-units", type=float, required=True)
+    parser.add_argument(
+        "--qha-elastic-file",
+        "--vasp-elastic-file",
+        dest="qha_elastic_file",
+        type=Path,
+        help="Optional explicit VASP/static elastic CSV.",
+    )
+    parser.add_argument(
+        "--qha-formula-units",
+        "--vasp-formula-units",
+        dest="qha_formula_units",
+        type=float,
+        required=True,
+    )
     parser.add_argument("--md-formula-units", type=float, required=True)
     parser.add_argument("--target-z", type=float, default=4.0)
     parser.add_argument("--t-min", type=float)
@@ -384,29 +407,47 @@ def main(argv: Optional[list[str]] = None) -> dict:
 
     if elastic_rows:
         write_csv(args.outdir / "elastic_qha_md_overlay.csv", elastic_rows)
+        write_csv(args.outdir / "elastic_vasp_md_overlay.csv", elastic_rows)
     if structural_rows:
         write_csv(args.outdir / "structure_qha_md_overlay.csv", structural_rows)
 
     plot_files: list[str] = []
     if not args.no_plots:
         for component in PLOT_COMPONENTS:
+            new_plot = args.outdir / f"{component}_vasp_md_overlay.png"
             if plot_component(
-                args.outdir / f"{component}_qha_md_overlay.png",
+                new_plot,
                 elastic_rows,
                 component,
                 "dimensionless" if component == "nu_H" else "GPa",
-                f"{component} QHA/static vs MD",
+                f"{component} VASP/static vs MD",
             ):
-                plot_files.append(str(args.outdir / f"{component}_qha_md_overlay.png"))
+                plot_files.append(str(new_plot))
+                # Compatibility filename for older scripts.
+                plot_component(
+                    args.outdir / f"{component}_qha_md_overlay.png",
+                    elastic_rows,
+                    component,
+                    "dimensionless" if component == "nu_H" else "GPa",
+                    f"{component} VASP/static vs MD",
+                )
         for key, ylabel in (("V", "Volume (A^3 target-cell)"), ("a", "a (A)"), ("b", "b (A)"), ("c", "c (A)")):
+            new_plot = args.outdir / f"{key}_vasp_md_structure_overlay.png"
             if plot_component(
-                args.outdir / f"{key}_qha_md_structure_overlay.png",
+                new_plot,
                 structural_rows,
                 key,
                 ylabel,
                 f"{key} QHA vs MD elastic-cell check",
             ):
-                plot_files.append(str(args.outdir / f"{key}_qha_md_structure_overlay.png"))
+                plot_files.append(str(new_plot))
+                plot_component(
+                    args.outdir / f"{key}_qha_md_structure_overlay.png",
+                    structural_rows,
+                    key,
+                    ylabel,
+                    f"{key} QHA vs MD elastic-cell check",
+                )
 
     md_components = sorted({row["component"] for row in md_rows})
     metadata = {
@@ -427,25 +468,36 @@ def main(argv: Optional[list[str]] = None) -> dict:
             "recommendation": (
                 "Compare Cij/moduli directly."
                 if qha_elastic_rows
-                else "QHA structure can cross-check MD equilibrium V/a, but phonopy-QHA alone is not enough for Cij. Add static elastic calculations at QHA volumes or Cij(T) tables."
+                else (
+                    "QHA structure can cross-check MD equilibrium V/a, but phonopy-QHA "
+                    "alone is not enough for Cij. Add VASP static elastic calculations "
+                    "at selected parent volumes or provide Cij tables."
+                )
             ),
         },
         "outputs": {
             "elastic_overlay_csv": str(args.outdir / "elastic_qha_md_overlay.csv") if elastic_rows else "",
+            "elastic_vasp_md_overlay_csv": (
+                str(args.outdir / "elastic_vasp_md_overlay.csv") if elastic_rows else ""
+            ),
             "structure_overlay_csv": str(args.outdir / "structure_qha_md_overlay.csv") if structural_rows else "",
             "plots": plot_files,
         },
     }
     write_json(args.outdir / "elastic_qha_md_metadata.json", metadata)
+    write_json(args.outdir / "elastic_vasp_md_metadata.json", metadata)
 
     print(f"QHA structural data: {'yes' if structural_rows else 'no'}")
-    print(f"QHA/static elastic data: {'yes' if qha_elastic_rows else 'no'}")
+    print(f"VASP/static elastic data: {'yes' if qha_elastic_rows else 'no'}")
     print(f"MD elastic data: yes ({len(md_components)} components)")
     if not qha_elastic_rows:
-        print("QHA readiness: structure-only. Standard phonopy-QHA cannot provide Cij without additional static/quasi-static elastic calculations.")
+        print(
+            "Static readiness: structure-only. Standard phonopy-QHA cannot provide Cij "
+            "without additional VASP static elastic calculations."
+        )
     else:
-        print("QHA readiness: elastic constants available for comparison.")
-    print(f"Wrote metadata: {args.outdir / 'elastic_qha_md_metadata.json'}")
+        print("Static readiness: elastic constants available for comparison.")
+    print(f"Wrote metadata: {args.outdir / 'elastic_vasp_md_metadata.json'}")
     return metadata
 
 
