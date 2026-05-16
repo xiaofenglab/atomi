@@ -121,6 +121,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from atomi.lammps.box import flatten_box_summary, format_box_summary, summarize_lammps_box_arrays
+
 
 KB_EV_PER_K = 8.617333262145e-5
 EV_TO_J = 1.602176634e-19
@@ -308,6 +310,7 @@ def summarize_window(data: dict[str, np.ndarray],
     a_mean, a_sem = block_average_sem(a_proxy, nblocks=nblocks)
 
     time_ps = (sel["step"] - sel["step"][0]) * timestep_ps
+    box_summary = summarize_lammps_box_arrays(sel["lx_A"], sel["ly_A"], sel["lz_A"], volume=V)
 
     summary = {
         "window_label": label,
@@ -340,6 +343,8 @@ def summarize_window(data: dict[str, np.ndarray],
         "V_slope_A3_per_ps": linear_slope(time_ps, V),
         "PE_slope_eV_per_ps": linear_slope(time_ps, PE),
         "H_slope_eV_per_ps": linear_slope(time_ps, H_eV),
+        "md_box": box_summary,
+        **flatten_box_summary(box_summary),
     }
 
     series = {
@@ -533,6 +538,10 @@ def analyze_one(log_path: Path,
             w.writerow(row)
 
     plot_window_summaries(outdir / "window_summary_trends.png", all_summaries)
+    if full_summary is not None:
+        print(format_box_summary(full_summary["md_box"]))
+        if full_summary["md_box"].get("box_warning"):
+            print(f"WARNING: {full_summary['md_box']['box_warning']}")
 
     return full_summary
 

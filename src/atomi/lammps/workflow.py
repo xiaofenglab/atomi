@@ -23,6 +23,8 @@ import argparse
 import os
 import shutil
 
+from atomi.lammps.box import format_box_summary, summarize_lammps_box_arrays
+
 
 ROOT = Path.cwd()
 STAGES = ROOT / "stages"
@@ -458,6 +460,28 @@ def parse_thermo(logfile):
     return steps, T, P, V, PE
 
 
+def parse_box_thermo(logfile):
+    lx = []
+    ly = []
+    lz = []
+    vol = []
+
+    pattern = re.compile(
+        r"^\s*(\d+)\s+([-0-9.eE]+)\s+([-0-9.eE]+)\s+([-0-9.eE]+)\s+([-0-9.eE]+)\s+([-0-9.eE]+)(?:\s+([-0-9.eE]+)\s+([-0-9.eE]+)\s+([-0-9.eE]+))?"
+    )
+
+    with open(logfile) as fh:
+        for line in fh:
+            m = pattern.match(line)
+            if m and m.group(7) is not None:
+                vol.append(float(m.group(6)))
+                lx.append(float(m.group(7)))
+                ly.append(float(m.group(8)))
+                lz.append(float(m.group(9)))
+
+    return summarize_lammps_box_arrays(lx, ly, lz, volume=vol)
+
+
 # ---------------------------------------------------
 # EQUILIBRIUM RULES
 # ---------------------------------------------------
@@ -675,6 +699,17 @@ def write_chunk_summary(chunk_dir, stage, steps, T, P, V, PE, note=""):
             lines.append(f"{k}: {v}")
 
     (chunk_dir / "summary.txt").write_text("\n".join(lines) + "\n")
+
+
+def write_box_summary(chunk_dir, log):
+    box = parse_box_thermo(log)
+    lines = [format_box_summary(box)]
+    if box.get("box_warning"):
+        lines.append(f"WARNING: {box['box_warning']}")
+    (chunk_dir / "box_summary.txt").write_text("\n".join(lines) + "\n")
+    print("  " + lines[0], flush=True)
+    if len(lines) > 1:
+        print("  " + lines[1], flush=True)
 
 
 def write_decision(chunk_dir, lines):
@@ -1136,6 +1171,7 @@ def run_production_stage(cfg, stage, resume_mode=False, submit_mode=True):
         raise RuntimeError(f"LAMMPS produced no thermo output in {log}")
 
     plot_thermo(chunk_dir, steps, T, P, V, PE)
+    write_box_summary(chunk_dir, log)
     write_production_chunk_summary(
         chunk_dir,
         stage,
@@ -1439,6 +1475,7 @@ def run_stage(cfg, stage, structure, resume_mode=False):
             raise RuntimeError(f"LAMMPS produced no thermo output in {log}")
 
         plot_thermo(chunk_dir, steps, T, P, V, PE)
+        write_box_summary(chunk_dir, log)
         write_chunk_summary(chunk_dir, stage, steps, T, P, V, PE, note=f"chunk {chunk}")
 
         final_data_path = (chunk_dir / final_data_name).resolve()

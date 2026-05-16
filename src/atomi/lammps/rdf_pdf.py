@@ -20,6 +20,12 @@ from typing import Optional
 import numpy as np
 
 from atomi.core.archive import archive_output_dir, default_archive_path
+from atomi.lammps.box import (
+    cell_parameters as box_cell_parameters,
+    flatten_box_summary,
+    format_box_summary,
+    summarize_cells,
+)
 from atomi.lammps.thermo_series import (
     collect_config_paths,
     discover_npt_records_from_md_root,
@@ -207,27 +213,7 @@ def summarize_array(values: np.ndarray, prefix: str) -> dict[str, float]:
 
 
 def cell_parameters(cell: np.ndarray) -> dict[str, float]:
-    a_vec, b_vec, c_vec = np.asarray(cell, dtype=float)
-    a = float(np.linalg.norm(a_vec))
-    b = float(np.linalg.norm(b_vec))
-    c = float(np.linalg.norm(c_vec))
-
-    def angle(u: np.ndarray, v: np.ndarray) -> float:
-        denom = np.linalg.norm(u) * np.linalg.norm(v)
-        if denom == 0.0:
-            return math.nan
-        cosine = float(np.clip(np.dot(u, v) / denom, -1.0, 1.0))
-        return math.degrees(math.acos(cosine))
-
-    return {
-        "a_A": a,
-        "b_A": b,
-        "c_A": c,
-        "alpha_deg": angle(b_vec, c_vec),
-        "beta_deg": angle(a_vec, c_vec),
-        "gamma_deg": angle(a_vec, b_vec),
-        "volume_A3": float(abs(np.linalg.det(cell))),
-    }
+    return box_cell_parameters(cell)
 
 
 def compute_structure_stats(frames: list) -> dict:
@@ -236,6 +222,9 @@ def compute_structure_stats(frames: list) -> dict:
     for key in ("volume_A3", "a_A", "b_A", "c_A", "alpha_deg", "beta_deg", "gamma_deg"):
         values = np.asarray([p[key] for p in params], dtype=float)
         out.update(summarize_array(values, key))
+    box_summary = summarize_cells((np.asarray(atoms.cell.array, dtype=float) for atoms in frames))
+    out["md_box"] = box_summary
+    out.update(flatten_box_summary(box_summary))
     return out
 
 
@@ -930,6 +919,12 @@ def write_series_structure_adp_outputs(outdir: Path, series_items: list[dict], n
             "beta_deg_sem",
             "gamma_deg_mean",
             "gamma_deg_sem",
+            "box_symmetry",
+            "box_status",
+            "n_box_samples",
+            "length_rel_tol",
+            "angle_tol_deg",
+            "tilt_source",
         ]
         write_rows_csv(structure_path, structure_rows, structure_fields)
         outputs["structure_csv"] = str(structure_path)
@@ -1359,6 +1354,7 @@ def run_series(args: argparse.Namespace) -> dict:
             write_selected_extxyz=args.write_selected_extxyz,
         )
         summary = run(item_args)
+        print("  " + format_box_summary(summary["structure_stats"]["md_box"], label=f"MD box {record['stage_name']}"))
         outputs = summary["outputs"]
         item = {
             "temperature": temperature,
@@ -1900,6 +1896,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     outputs = summary["outputs"]
     print(f"Frames used: {summary['n_frames']}")
     print(f"Average volume: {summary['avg_volume_A3']:.6f} A^3")
+    print(format_box_summary(summary["structure_stats"]["md_box"]))
     print(f"rho0: {summary['rho0_atoms_per_A3']:.6f} atoms/A^3")
     print(f"Species: {', '.join(summary['species_order'])}")
     print(f"Wrote summary: {args.outdir / (args.prefix + '_summary.json')}")

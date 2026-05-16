@@ -13,6 +13,7 @@ from typing import Optional
 
 import numpy as np
 
+from atomi.lammps.box import format_box_summary, summarize_lammps_box_arrays
 from atomi.lammps.thermo_series import (
     collect_config_paths,
     discover_npt_records_from_md_root,
@@ -403,6 +404,12 @@ def summarize_elastic_stage(root: Path, stage: dict, timestep_ps: float, window_
     mask = select_tail_mask(data, timestep_ps, window_ps)
     pressure = np.array([data["Pxx"], data["Pyy"], data["Pzz"], data["Pyz"], data["Pxz"], data["Pxy"]], dtype=float)
     stress = -pressure[:, mask].mean(axis=1) * BAR_TO_GPA
+    box_summary = summarize_lammps_box_arrays(
+        data["Lx"][mask],
+        data["Ly"][mask],
+        data["Lz"][mask],
+        volume=thermo_column(data, "Vol", "Volume")[mask],
+    )
     return {
         "stage_name": stage["name"],
         "temperature_K": float(stage["temperature"]),
@@ -416,23 +423,13 @@ def summarize_elastic_stage(root: Path, stage: dict, timestep_ps: float, window_
         "lx_mean_A": float(data["Lx"][mask].mean()),
         "ly_mean_A": float(data["Ly"][mask].mean()),
         "lz_mean_A": float(data["Lz"][mask].mean()),
+        "md_box": box_summary,
         "stress_GPa": stress.tolist(),
     }
 
 
 def infer_symmetry_from_cell(summary: dict, tolerance: float) -> str:
-    lx = float(summary["lx_mean_A"])
-    ly = float(summary["ly_mean_A"])
-    lz = float(summary["lz_mean_A"])
-    scale = max(lx, ly, lz, 1.0)
-    xy = abs(lx - ly) / scale
-    xz = abs(lx - lz) / scale
-    yz = abs(ly - lz) / scale
-    if max(xy, xz, yz) <= tolerance:
-        return "cubic"
-    if xy <= tolerance and max(xz, yz) > tolerance:
-        return "tetragonal"
-    return "orthorhombic"
+    return str(summary.get("md_box", {}).get("box_symmetry", "unknown"))
 
 
 def fit_elastic_tensor(stage_summaries: list[dict]) -> tuple[np.ndarray, dict]:
@@ -599,6 +596,7 @@ def analyze_main(args: argparse.Namespace) -> dict:
             "temperature_K": t,
             "symmetry": symmetry,
             "inferred_symmetry": inferred,
+            "md_box": ref.get("md_box", {}),
             "voigt_order": list(VOIGT),
             "C_raw_GPa": raw_c,
             "C_symmetry_reduced_GPa": c,
@@ -606,6 +604,7 @@ def analyze_main(args: argparse.Namespace) -> dict:
             "fit_diagnostics": fit_diag,
         }
         print(f"T={t:g} K symmetry={symmetry} inferred={inferred} E={moduli['E_H_GPa']:.3f} GPa nu={moduli['nu_H']:.4f}")
+        print("  " + format_box_summary(ref.get("md_box", {}), label="MD box"))
     write_rows(outdir / "elastic_moduli_T.csv", rows)
     write_json(outdir / "elastic_tensors.json", tensor_payload)
     write_json(

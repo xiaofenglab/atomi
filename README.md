@@ -97,6 +97,8 @@ Experimental PDF matching starts with `pdf_md_compare` for ranking MD-derived G(
 
 Finite-temperature mechanical properties start with `elastic_lammps prepare`, which scans completed NPT stages from config JSON files or an MD root, selects a default 100 K + 200 K grid, and writes `config_elastic.json` for independent strained NVT runs that can be submitted with `md-engine-array`. After those jobs finish, `elastic_lammps analyze` reads the elastic logs, averages the last 10 ps by default, fits the stress-strain tensor, checks/infer symmetry, and writes `elastic_tensors.json` plus `elastic_moduli_T.csv` with Voigt-Reuss-Hill `K`, `G`, Young's modulus, and Poisson's ratio for MOOSE/BISON-style mechanics inputs.
 
+LAMMPS workflows now print and record a common MD-box diagnostic whenever box vectors are available. `md-engine`, `thermo_lammps`, `pdf_lammps`, `pdf_lammps_series`, `lammps-postprocess`, and `elastic_lammps analyze` report the inferred box metric symmetry, mean `a/b/c`, angles, volume, sample count, and tolerance so NPT cell-shape drift is visible before using thermodynamic, PDF, or elastic post-analysis.
+
 ## HPC Environment Check
 
 Before using Atomi on a new cluster, run the environment doctor and review the generated report. The report checks common executables, scheduler commands, plotting tools, atomistic engine names, and Python packages used by the packaged workflows.

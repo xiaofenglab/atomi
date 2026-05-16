@@ -149,6 +149,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from atomi.core.archive import archive_output_dir
+from atomi.lammps.box import flatten_box_summary, format_box_summary, summarize_lammps_box_arrays
 from atomi.thermo_db import jaea_anchor
 
 
@@ -853,6 +854,12 @@ def summarize_selected_window(data: dict[str, np.ndarray],
     a_mean, a_sem = block_average_sem(a, nblocks)
     H_mean, H_sem = block_average_sem(H, nblocks)
     PE_mean, PE_sem = block_average_sem(PE, nblocks)
+    box_summary = summarize_lammps_box_arrays(
+        sel.get("lx_A", []),
+        sel.get("ly_A", []),
+        sel.get("lz_A", []),
+        volume=V,
+    )
 
     return {
         "target_T_K": float(target_T),
@@ -893,6 +900,8 @@ def summarize_selected_window(data: dict[str, np.ndarray],
         "V_slope_A3_per_ps": linear_slope(time_ps, V),
         "PE_slope_eV_per_ps": linear_slope(time_ps, PE),
         "H_slope_eV_per_ps": linear_slope(time_ps, H),
+        "md_box": box_summary,
+        **flatten_box_summary(box_summary),
     }
 
 
@@ -1682,6 +1691,9 @@ def process_records(records: list[dict],
             "selection_score": sel_metrics["score"],
             "selection_metrics": sel_metrics,
         })
+        print("  " + format_box_summary(summary["md_box"]))
+        if summary["md_box"].get("box_warning"):
+            print(f"  WARNING: {summary['md_box']['box_warning']}")
 
         dump_json(stage_out / "thermo_summary.json", summary)
         dump_json(stage_out / "window_candidates.json", window_table)
