@@ -81,47 +81,20 @@ Public documentation intentionally avoids detailed project recipes, molecule nam
 
 Atomi currently includes command families for:
 
-- Visualization and live monitoring for VASP, LAMMPS, CP2K, and MACE logs.
-- VASP result checks, energy/convergence summaries, magnetic-moment utilities, and DFT input preparation.
-- VASP structural-variance generation for phonopy, near-equilibrium, prefail-MD, stress/force, defect, and MD snapshot datasets.
-- MACE/MLIP dataset construction, validation, outlier detection, extxyz updating, and model conversion.
-- LAMMPS MD engine setup, staged equilibration/production workflows, post-processing, thermodynamic analysis, and RDF/PDF/S(Q)/F(Q) total-scattering outputs.
-- CP2K input preparation, trajectory extraction, molecular box construction, bond analysis, and run cleanup.
-- MOOSE and CALPHAD environment discovery modules for project-specific app executables and pycalphad database checks.
-- HPC environment diagnostics and local configuration discovery.
+- VASP preparation, monitoring, phonopy/QHA helpers, and run summaries.
+- CP2K input generation, AIMD trajectory tools, and visualization helpers.
+- LAMMPS workflow setup, production-array support, and post-processing.
+- MLIP/MACE dataset utilities and model conversion helpers.
+- Total-scattering, XAFS, finite-temperature elasticity, MOOSE, and CALPHAD support.
+- HPC environment discovery and local configuration helpers.
 
-The command names and options may evolve as workflows are cleaned up, so use `--help` from the installed version you are actually running.
+Public documentation intentionally stays high-level. Use `atomi --help` and
+`command-name --help` from the installed version for current command options,
+and keep project-specific recipes, raw data paths, scheduler partitions, API
+keys, and local executable paths in private notes or `*.local.json` configs.
 
-For LAMMPS total-scattering analysis, `pdf_lammps` accepts a single dump or trajectory, while `pdf_lammps_series` can scan a config file or MD root and analyze only NPT stages. Series outputs include per-temperature RDF/PDF/S(Q)/F(Q) files, explicit PDFgui/RMC-style fitting exports, transition-colored overlay plots, a `series_index.csv`, `series_summary.json`, and a default `.tar.gz` archive.
-
-Single-temperature `pdf_lammps` averages RDF/PDF/S(Q)/F(Q) over the selected time window. Optional `--frame-overlays` writes per-frame overlay curves from that same window, with the averaged structure shown as a black solid curve, and `--adp` writes per-atom and per-species Uiso/Biso displacement summaries in Angstrom-squared units.
-
-For `pdf_lammps_series`, `--frame-overlays` writes those dynamic per-frame G(r)/S(Q) overlay plots inside each temperature folder. `--adp` also aggregates selected-window volume, lattice parameters, and per-element Uiso versus temperature, with uncertainty plots from frame-window/statistical spreads and one combined all-element Uiso plot. Long series analyses can be prepared for Slurm with `--write-sbatch` or submitted directly with `--submit`.
-
-Experimental PDF matching starts with `pdf_md_compare` for ranking MD-derived G(r), S(Q), F(Q), and iQ=S(Q)-1 curves against PDFgetX/PDFgui/RMC-style two-column data, followed by `pdf_md_reweight` for conservative maximum-entropy-style reweighting of MD temperature/window candidates. `--pdf-series` accepts either a multi-temperature `pdf_lammps_series` directory or one single-temperature `pdf_lammps` output directory such as `analysis/pdf_300K`. `pdf_md_compare` can also reduce raw `.chi` sample/empty/background/reference data with `pdfgetx3`, deriving composition and density from the selected MD box when available, or using user/API density overrides. For raw `.chi` input it auto-runs PDFGetX3 when the expected reduced file is missing; if a cluster does not provide `pdfgetx3`, use `--pdfgetx3-auto-install --pdfgetx3-wheel /path/to/wheelhouse` to install into a local workflow virtual environment, or pass `--pdfgetx3 /path/to/pdfgetx3`. Empty-container and background files are recorded as the implicit carriers of container/instrument/background corrections. The raw workflow writes `pdfgetx3_exp/logs`, native and CSV reduced data in `pdfgetx3_exp/final_data`, publication-style PNG/PDF quick plots in `pdfgetx3_exp/plots`, and process metadata/logs; PDFgetX `.iq` comparisons are treated as reduced/pseudo intensity comparisons, not reconstructed raw detector intensity.
-
-MD-ensemble XAFS starts with `xafs_lammps_prepare`, which reuses the PDF/LAMMPS frame-window machinery to write absorber-centered FEFF inputs from one MD run, a config JSON, an MD root, or an existing `pdf_lammps` output. `xafs_cp2k_prepare` provides the same FEFF-cluster preparation for CP2K AIMD `*-pos.xyz` trajectories, with optional CP2K input-derived `&CELL ABC`, `--box`, or `--cell` metadata for minimum-image clusters. The default absorber is the first metal in the selected frame, and `xraydb` is part of the normal install for edge metadata and X-ray tables. `xafs_larch_run` then runs or collects FEFF/Larch `chi(k)` outputs and averages the MD frame/site ensemble; `xafs_md_compare` overlays the resulting `chi(k)` against experimental XAFS data. Larch is intentionally kept out of the base install because current `xraylarch` releases require a newer, larger scientific stack; install the `xafs` extra only in environments where Larch should manage those dependencies, while FEFF execution still depends on a usable `feff8l`/`feff6l` executable in the active environment. The roadmap is to combine `pdf_md_compare`/`pdf_md_reweight` with absorber-specific XAFS ranking so one MD ensemble can be constrained by both total scattering PDF and edge-specific XAFS.
-
-Use `xafs_status` after `--no-deps` updates to see whether Larch is importable in the active Atomi environment or configured through `ATOMI_XAFS_LARCH_PYTHON`/`ATOMI_XAFS_LARCH_ENV`. If the active environment lacks Larch but an external Larch Python is configured, `xafs_larch_run --larch-python /path/to/larch_env/bin/python` can use that external Python for the Larch `xftf` transform while keeping the main Atomi/LAMMPS environment unchanged.
-
-For stable HPC updates, the normal package refresh should avoid unnecessary dependency churn:
-
-```bash
-python -m pip install --upgrade --upgrade-strategy only-if-needed git+https://github.com/xiaofenglab/atomi.git@main
-```
-
-Install the heavier Larch/XAFS stack only when that environment will run Larch directly:
-
-```bash
-python -m pip install --upgrade --upgrade-strategy only-if-needed \
-  "atomi[xafs] @ git+https://github.com/xiaofenglab/atomi.git@main"
-```
-
-Finite-temperature mechanical properties start with `elastic_lammps prepare`, which scans completed NPT stages from config JSON files or an MD root, selects a default 100 K + 200 K grid, and writes `config_elastic.json` for independent strained NVT runs that can be submitted with `md-engine-array`. After those jobs finish, `elastic_lammps analyze` reads the elastic logs, averages the last 10 ps by default, fits the stress-strain tensor, checks/infer symmetry, and writes `elastic_tensors.json` plus `elastic_moduli_T.csv` with Voigt-Reuss-Hill `K`, `G`, Young's modulus, and Poisson's ratio for MOOSE/BISON-style mechanics inputs.
-
-LAMMPS workflows now print and record a common MD-box diagnostic whenever box vectors are available. `md-engine`, `thermo_lammps`, `pdf_lammps`, `pdf_lammps_series`, `lammps-postprocess`, and `elastic_lammps analyze` report the inferred box metric symmetry, mean `a/b/c`, angles, volume, sample count, and tolerance so NPT cell-shape drift is visible before using thermodynamic, PDF, or elastic post-analysis.
-
-Elastic QHA/MD comparison starts with `elastic_qha_md_compare`. Standard phonopy-QHA outputs are used to cross-check equilibrium `V(T)` and lattice parameters against `elastic_lammps` MD cells, while the script explicitly reports that Cij are not available from phonopy-QHA alone unless a static/quasi-static elastic table such as `elastic_moduli_T.csv`, `elastic_constants_T.csv`, or component files like `C11-temperature.dat` is supplied in the QHA directory.
+See [Dependency Strategy](docs/dependency_strategy.md) for optional extras such
+as XAFS/Larch and for stable HPC install guidance.
 
 ## HPC Environment Check
 

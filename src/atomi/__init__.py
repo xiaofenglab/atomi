@@ -1,3 +1,3 @@
 """Reusable HPC automation tools for atomistic modeling workflows."""
 
-__version__ = "0.3.30"
+__version__ = "0.3.31"
