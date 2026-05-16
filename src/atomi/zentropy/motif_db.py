@@ -56,6 +56,18 @@ def parse_key_values(items: list[str] | None, cast=float) -> dict[str, Any]:
     return result
 
 
+def parse_moment_state_specs(items: list[str] | None) -> dict[str, list[tuple[float, str]]]:
+    """Parse Element:magnitude=label mappings for spin-index site labels."""
+    result: dict[str, list[tuple[float, str]]] = {}
+    for item in items or []:
+        if "=" not in item or ":" not in item.split("=", 1)[0]:
+            raise ValueError(f"Expected Element:MAG=LABEL item, got: {item}")
+        left, label = item.split("=", 1)
+        element, raw_magnitude = left.split(":", 1)
+        result.setdefault(element.strip(), []).append((abs(float(raw_magnitude)), label.strip()))
+    return result
+
+
 def parse_metadata_csv(path: Path | None) -> dict[str, dict[str, str]]:
     if path is None:
         return {}
@@ -89,6 +101,122 @@ def parse_site_state_csv(path: Path | None) -> dict[str, list[dict[str, Any]]]:
                     clean[float_key] = float(clean[float_key])
             grouped.setdefault(key, []).append(clean)
     return grouped
+
+
+def merge_metadata_rows(
+    base: dict[str, dict[str, str]],
+    override: dict[str, dict[str, str]],
+) -> dict[str, dict[str, str]]:
+    merged = {key: dict(value) for key, value in base.items()}
+    for key, row in override.items():
+        merged.setdefault(key, {}).update(row)
+    return merged
+
+
+def merge_site_state_rows(
+    base: dict[str, list[dict[str, Any]]],
+    extra: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    merged = {key: list(value) for key, value in base.items()}
+    for key, rows in extra.items():
+        merged.setdefault(key, []).extend(rows)
+    return merged
+
+
+def spin_label_for_moment(
+    element: str,
+    magmom: float,
+    moment_states: dict[str, list[tuple[float, str]]],
+    tolerance: float,
+) -> str:
+    sign = "up" if magmom > 0 else "down" if magmom < 0 else "zero"
+    magnitude = abs(float(magmom))
+    best_label = None
+    best_delta = None
+    for ref, label in moment_states.get(element, []):
+        delta = abs(magnitude - ref)
+        if delta <= tolerance and (best_delta is None or delta < best_delta):
+            best_label = label
+            best_delta = delta
+    if best_label:
+        return f"{best_label}_{sign}"
+    return f"{element}|m={magnitude:.3f}|{sign}"
+
+
+def spin_index_aliases(run_dir: str, motif_id: str) -> set[str]:
+    aliases = {run_dir, motif_id}
+    if run_dir:
+        path = Path(run_dir).expanduser()
+        aliases.add(path.name)
+        try:
+            aliases.add(str(path.resolve()))
+        except OSError:
+            pass
+    return {item for item in aliases if item}
+
+
+def parse_spin_index_csv(
+    path: Path | None,
+    moment_states: dict[str, list[tuple[float, str]]],
+    tolerance: float,
+) -> tuple[dict[str, dict[str, str]], dict[str, list[dict[str, Any]]]]:
+    """Convert magit enum spin_index.csv into motif metadata and site-state rows."""
+    if path is None:
+        return {}, {}
+    metadata: dict[str, dict[str, str]] = {}
+    site_states: dict[str, list[dict[str, Any]]] = {}
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            run_dir = (row.get("run_dir") or "").strip()
+            motif_id = (row.get("name") or Path(run_dir).name or "spin_variant").strip()
+            dopant_mode = (row.get("dopant_mode") or "").strip()
+            host_mode = (row.get("host_mode") or "").strip()
+            tags = ["magit", "spin_enum"]
+            if dopant_mode:
+                tags.append(f"dopant_{dopant_mode}")
+            if host_mode:
+                tags.append(f"host_{host_mode}")
+            metadata_row = {
+                "motif_id": motif_id,
+                "motif_family": "magit_spin_variant",
+                "motif_type": "magnetic_spin_configuration",
+                "defect_label": row.get("defect_label", ""),
+                "tags": ";".join(tags),
+                "notes": f"Imported from magit spin index: {path}",
+            }
+            states: list[dict[str, Any]] = []
+            try:
+                moments = json.loads(row.get("moments_by_atom") or "[]")
+            except json.JSONDecodeError:
+                moments = []
+            for item in moments:
+                try:
+                    atom_index = int(item.get("atom"))
+                    element = str(item.get("element", "")).strip()
+                    magmom = float(item.get("magmom", 0.0))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if not element:
+                    continue
+                states.append(
+                    {
+                        "atom_index_1based": atom_index,
+                        "element": element,
+                        "magmom": magmom,
+                        "spin_label": spin_label_for_moment(
+                            element,
+                            magmom,
+                            moment_states,
+                            tolerance,
+                        ),
+                        "role": "magit_spin_variant_site",
+                    }
+                )
+            for key in spin_index_aliases(run_dir, motif_id):
+                metadata[key] = dict(metadata_row)
+                site_states[key] = [dict(state) for state in states]
+    return metadata, site_states
 
 
 def candidate_keys(run_dir: Path, motif_id: str) -> set[str]:
@@ -479,9 +607,15 @@ def index_main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     args.guest_cation = args.guest_cation or []
     args.valence = parse_key_values(args.valence, float)
+    args.moment_state = parse_moment_state_specs(args.moment_state)
     parent_counts = parse_formula(args.parent_formula)
-    metadata_rows = parse_metadata_csv(args.metadata_csv)
-    site_state_rows = parse_site_state_csv(args.site_state_csv)
+    spin_metadata, spin_site_states = parse_spin_index_csv(
+        args.spin_index,
+        args.moment_state,
+        args.moment_state_tolerance,
+    )
+    metadata_rows = merge_metadata_rows(spin_metadata, parse_metadata_csv(args.metadata_csv))
+    site_state_rows = merge_site_state_rows(spin_site_states, parse_site_state_csv(args.site_state_csv))
     records = [
         build_record(run, args, parent_counts, metadata_rows, site_state_rows)
         for run in discover_runs(args)
@@ -659,6 +793,23 @@ def build_index_parser() -> argparse.ArgumentParser:
     parser.add_argument("--csv", type=Path, default=Path("defect_motif_index.csv"))
     parser.add_argument("--metadata-csv", type=Path, help="Optional per-run motif metadata CSV.")
     parser.add_argument("--site-state-csv", type=Path, help="Optional site valence/spin-state CSV.")
+    parser.add_argument(
+        "--spin-index",
+        type=Path,
+        help="Optional magit enum spin_index.csv to annotate spin/MAGMOM variants.",
+    )
+    parser.add_argument(
+        "--moment-state",
+        action="append",
+        default=[],
+        help="Map spin-index magnitudes to labels, e.g. --moment-state U:2=U4+.",
+    )
+    parser.add_argument(
+        "--moment-state-tolerance",
+        type=float,
+        default=0.25,
+        help="Tolerance for matching --moment-state magnitudes.",
+    )
     parser.add_argument("--material", default="(Gd,U)O2")
     parser.add_argument("--phase", default="defect_fluorite")
     parser.add_argument("--parent-formula", default="UO2")
@@ -714,9 +865,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="action")
     sub.add_parser("index", help="Index refined VASP defect motifs.")
+    sub.add_parser("generate-spins", help="Generate magit spin-variant VASP folders.")
     sub.add_parser("summarize", help="Print a compact database readout.")
     sub.add_parser("export-mlip", help="Export selected motifs as MLIP/VASP structures.")
     return parser
+
+
+def generate_spins_main(argv: list[str] | None = None) -> None:
+    from atomi.vasp.magmom import build_enum_parser, enumerate_spin_configs
+
+    parser = build_enum_parser()
+    parser.prog = "zentropy_motif_db generate-spins"
+    parser.description = (
+        "Generate physics-informed spin/MAGMOM motif variants using the magit enum engine."
+    )
+    args = parser.parse_args(argv)
+    enumerate_spin_configs(args)
+    spin_index = args.index.resolve() if args.index else args.output_root.resolve() / "spin_index.csv"
+    print("Next zentropy step:")
+    print(f"  zentropy_motif_db index --root {args.output_root.resolve()} --spin-index {spin_index}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -727,6 +894,8 @@ def main(argv: list[str] | None = None) -> None:
     action, rest = raw[0], raw[1:]
     if action == "index":
         index_main(rest)
+    elif action == "generate-spins":
+        generate_spins_main(rest)
     elif action == "summarize":
         summarize_main(rest)
     elif action == "export-mlip":

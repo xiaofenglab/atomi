@@ -115,6 +115,8 @@ def default_stage_config(stage: dict[str, Any], args: argparse.Namespace) -> dic
             "mlip_inputs": "mlip_inputs/",
         }
         base["notes"] = [
+            "Use zentropy_motif_db generate-spins to create magit/MAGMOM spin variants "
+            "from a VASP template, then index them with --spin-index.",
             "Use metadata_csv/site_state_csv to carry defect labels, site valence, "
             "MAGMOM, charge state, degeneracy, and motif-family tags.",
             "DFT motifs from different supercell sizes should be compared through "

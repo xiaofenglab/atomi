@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 
@@ -109,6 +110,57 @@ def test_motif_db_indexes_size_normalized_defect_motif(tmp_path: Path) -> None:
     assert record["magmom"]["by_element"]["Gd"]["mean"] == 7.1
     assert record["site_states"][0]["spin_label"] == "U3+"
     assert "energy_per_formula_unit_eV" in index.read_text(encoding="utf-8")
+
+
+def test_motif_db_imports_magit_spin_index_as_site_states(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    spin_index = tmp_path / "spin_index.csv"
+    moments = [
+        {"atom": 1, "element": "Gd", "magmom": 7.0},
+        {"atom": 2, "element": "U", "magmom": -2.0},
+        {"atom": 3, "element": "O", "magmom": 0.0},
+    ]
+    with spin_index.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=("run_dir", "name", "dopant_mode", "host_mode", "moments_by_atom"),
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "run_dir": str(run.resolve()),
+                "name": "spin_001",
+                "dopant_mode": "all",
+                "host_mode": "afm",
+                "moments_by_atom": json.dumps(moments),
+            }
+        )
+    db = tmp_path / "defect_motif_db.json"
+
+    motif_db.main(
+        [
+            "index",
+            "--run",
+            str(run),
+            "--db",
+            str(db),
+            "--csv",
+            str(tmp_path / "index.csv"),
+            "--spin-index",
+            str(spin_index),
+            "--moment-state",
+            "Gd:7=Gd3+",
+            "--moment-state",
+            "U:2=U4+",
+        ]
+    )
+
+    record = json.loads(db.read_text(encoding="utf-8"))["records"][0]
+    assert record["motif_id"] == "spin_001"
+    assert record["motif_family"] == "magit_spin_variant"
+    assert "magit" in record["tags"]
+    assert record["site_states"][0]["spin_label"] == "Gd3+_up"
+    assert record["site_states"][1]["spin_label"] == "U4+_down"
 
 
 def test_motif_db_exports_repeated_mlip_poscar_and_magmom(tmp_path: Path) -> None:
