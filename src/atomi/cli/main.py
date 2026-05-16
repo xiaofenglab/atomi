@@ -167,6 +167,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     elastic_lammps.add_argument("elastic_args", nargs=argparse.REMAINDER)
 
+    elastic_qha_md_compare = subparsers.add_parser(
+        "elastic_qha_md_compare",
+        help="Check QHA elastic readiness and compare QHA/static elasticity with LAMMPS MD elasticity.",
+    )
+    elastic_qha_md_compare.add_argument("elastic_compare_args", nargs=argparse.REMAINDER)
+
     cp2k_live = subparsers.add_parser(
         "cp2k-live",
         help="Auto-detect CP2K MD/GEO logs and launch the terminal monitor.",
@@ -517,6 +523,11 @@ def main(argv: list[str] | None = None) -> None:
 
         elastic_lammps_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "elastic_qha_md_compare":
+        from atomi.lammps.elastic_qha_md_compare import main as elastic_qha_md_compare_main
+
+        elastic_qha_md_compare_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "doctor":
         doctor_main(raw_args[1:])
         return
@@ -807,6 +818,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.lammps.elastic import main as elastic_lammps_main
 
         elastic_lammps_main(args.elastic_args)
+        return
+
+    if args.subcommand == "elastic_qha_md_compare":
+        from atomi.lammps.elastic_qha_md_compare import main as elastic_qha_md_compare_main
+
+        elastic_qha_md_compare_main(args.elastic_compare_args)
         return
 
     if args.subcommand == "cp2k-live":

@@ -99,6 +99,8 @@ Finite-temperature mechanical properties start with `elastic_lammps prepare`, wh
 
 LAMMPS workflows now print and record a common MD-box diagnostic whenever box vectors are available. `md-engine`, `thermo_lammps`, `pdf_lammps`, `pdf_lammps_series`, `lammps-postprocess`, and `elastic_lammps analyze` report the inferred box metric symmetry, mean `a/b/c`, angles, volume, sample count, and tolerance so NPT cell-shape drift is visible before using thermodynamic, PDF, or elastic post-analysis.
 
+Elastic QHA/MD comparison starts with `elastic_qha_md_compare`. Standard phonopy-QHA outputs are used to cross-check equilibrium `V(T)` and lattice parameters against `elastic_lammps` MD cells, while the script explicitly reports that Cij are not available from phonopy-QHA alone unless a static/quasi-static elastic table such as `elastic_moduli_T.csv`, `elastic_constants_T.csv`, or component files like `C11-temperature.dat` is supplied in the QHA directory.
+
 ## HPC Environment Check
 
 Before using Atomi on a new cluster, run the environment doctor and review the generated report. The report checks common executables, scheduler commands, plotting tools, atomistic engine names, and Python packages used by the packaged workflows.
