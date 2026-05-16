@@ -23,8 +23,13 @@ python -m pip install git+https://github.com/xiaofenglab/atomi.git
 To update an existing Atomi install on an HPC system:
 
 ```bash
-python -m pip install --upgrade --force-reinstall git+https://github.com/xiaofenglab/atomi.git
+python -m pip install --upgrade --upgrade-strategy only-if-needed git+https://github.com/xiaofenglab/atomi.git@main
 ```
+
+See [Dependency Strategy](docs/dependency_strategy.md) for the public dependency
+map, optional extras, and HPC install recommendations. Use `--force-reinstall`
+only when rebuilding a clean environment or when a normal update did not replace
+the installed package.
 
 Check the installed version after updating:
 
