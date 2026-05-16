@@ -83,6 +83,13 @@ def minimum_image_deltas(frac_diff: np.ndarray) -> np.ndarray:
     return frac_diff - np.rint(frac_diff)
 
 
+def trapz_compat(y: np.ndarray, x: np.ndarray) -> float:
+    integrator = getattr(np, "trapezoid", None)
+    if integrator is None:
+        integrator = np.trapz
+    return float(integrator(y, x))
+
+
 def average_frame(frames: list):
     if len(frames) == 1:
         return frames[0].copy()
@@ -299,7 +306,7 @@ def partials_to_sq_constant(
                 sinc = np.ones_like(r)
                 nonzero = qr != 0.0
                 sinc[nonzero] = np.sin(qr[nonzero]) / qr[nonzero]
-                part[iq] = 4.0 * np.pi * rho0 * np.trapz(r**2 * h_ab * sinc, r)
+                part[iq] = 4.0 * np.pi * rho0 * trapz_compat(r**2 * h_ab * sinc, r)
             sq += pref * part
     return sq, conc
 
@@ -365,7 +372,7 @@ def partials_to_sq_xray(
                 sinc = np.ones_like(r)
                 nonzero = qr != 0.0
                 sinc[nonzero] = np.sin(qr[nonzero]) / qr[nonzero]
-                part[iq] = 4.0 * np.pi * rho0 * np.trapz(r**2 * h_ab * sinc, r)
+                part[iq] = 4.0 * np.pi * rho0 * trapz_compat(r**2 * h_ab * sinc, r)
             sq += pref * part
     return sq, conc
 
@@ -385,7 +392,7 @@ def apply_window(q_values: np.ndarray, fq: np.ndarray, mode: str, qmax: float):
 def fq_to_gr(q_values: np.ndarray, fq_windowed: np.ndarray, r_out: np.ndarray) -> np.ndarray:
     gr = np.zeros_like(r_out, dtype=float)
     for i, r_value in enumerate(r_out):
-        gr[i] = (2.0 / np.pi) * np.trapz(fq_windowed * np.sin(q_values * r_value), q_values)
+        gr[i] = (2.0 / np.pi) * trapz_compat(fq_windowed * np.sin(q_values * r_value), q_values)
     return gr
 
 

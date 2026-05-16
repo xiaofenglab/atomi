@@ -78,6 +78,21 @@ def test_partial_rdf_and_structure_factor_core_are_finite() -> None:
     assert window[0] < 1.0
 
 
+def test_trapz_compat_uses_trapezoid_when_available(monkeypatch) -> None:
+    called = {}
+
+    def fake_trapezoid(y, x):
+        called["used"] = True
+        return 42.0
+
+    monkeypatch.setattr(rdf_pdf.np, "trapezoid", fake_trapezoid, raising=False)
+
+    value = rdf_pdf.trapz_compat(np.asarray([0.0, 1.0]), np.asarray([0.0, 1.0]))
+
+    assert value == 42.0
+    assert called["used"]
+
+
 def test_run_from_existing_traj_can_use_custom_reader(tmp_path, monkeypatch) -> None:
     frames = [
         FakeAtoms(
