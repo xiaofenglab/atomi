@@ -91,6 +91,8 @@ For LAMMPS total-scattering analysis, `pdf_lammps` accepts a single dump or traj
 
 Single-temperature `pdf_lammps` averages RDF/PDF/S(Q)/F(Q) over the selected time window. Optional `--frame-overlays` writes per-frame overlay curves from that same window, and `--adp` writes per-atom and per-species Uiso/Biso displacement summaries in Angstrom-squared units.
 
+For `pdf_lammps_series`, `--adp` also aggregates selected-window volume, lattice parameters, and per-element Uiso versus temperature, with uncertainty plots from frame-window/statistical spreads.
+
 Experimental PDF matching starts with `pdf_md_compare` for ranking MD-derived curves against PDFgetX/PDFgui/RMC-style two-column data, followed by `pdf_md_reweight` for conservative maximum-entropy-style reweighting of MD temperature/window candidates.
 
 ## HPC Environment Check

@@ -29,6 +29,9 @@ class FakeAtoms:
     def get_volume(self):
         return self._volume
 
+    def __len__(self):
+        return len(self._symbols)
+
 
 def test_partial_rdf_and_structure_factor_core_are_finite() -> None:
     frames = [
@@ -171,6 +174,11 @@ def test_series_mode_uses_npt_records_and_writes_overlays(tmp_path, monkeypatch)
             ["U", "U", "O", "O"],
             [(0, 0, 0), (3, 0, 0), (1.5, 1.5, 0), (4.5, 1.5, 0)],
             8.0,
+        ),
+        FakeAtoms(
+            ["U", "U", "O", "O"],
+            [(0.05, 0, 0), (3.05, 0, 0), (1.5, 1.55, 0), (4.5, 1.55, 0)],
+            8.1,
         )
     ]
     records = []
@@ -229,7 +237,7 @@ def test_series_mode_uses_npt_records_and_writes_overlays(tmp_path, monkeypatch)
         frame_overlays=False,
         frame_overlay_step=1,
         frame_overlay_max=0,
-        adp=False,
+        adp=True,
         no_plots=False,
         archive_path=None,
         no_archive_output=True,
@@ -241,6 +249,10 @@ def test_series_mode_uses_npt_records_and_writes_overlays(tmp_path, monkeypatch)
     assert len(summary["series"]) == 2
     assert (args.outdir / "series_index.csv").exists()
     assert (args.outdir / "series_summary.json").exists()
+    assert (args.outdir / "series_structure_vs_T.csv").exists()
+    assert (args.outdir / "series_adp_Uiso_vs_T.csv").exists()
+    assert (args.outdir / "series_volume_vs_T_UQ.png").exists()
+    assert (args.outdir / "series_Uiso_U_vs_T_UQ.png").exists()
     assert (args.outdir / "overlay_weighted_gr.png").exists()
     assert (args.outdir / "T_300K" / "T_300K_pdfgui_GofR.gr").exists()
     assert (args.outdir / "T_300K" / "T_300K_pdfgui_GofR_direct_4col.gr").exists()

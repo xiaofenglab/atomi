@@ -190,6 +190,52 @@ def write_selected_frames(outdir: Path, prefix: str, frames: list) -> dict[str, 
     }
 
 
+def summarize_array(values: np.ndarray, prefix: str) -> dict[str, float]:
+    values = np.asarray(values, dtype=float)
+    n = len(values)
+    std = float(np.std(values, ddof=1)) if n > 1 else 0.0
+    return {
+        f"{prefix}_mean": float(np.mean(values)),
+        f"{prefix}_std": std,
+        f"{prefix}_sem": std / math.sqrt(n) if n > 1 else 0.0,
+        f"{prefix}_p16": float(np.percentile(values, 16)) if n else math.nan,
+        f"{prefix}_p84": float(np.percentile(values, 84)) if n else math.nan,
+    }
+
+
+def cell_parameters(cell: np.ndarray) -> dict[str, float]:
+    a_vec, b_vec, c_vec = np.asarray(cell, dtype=float)
+    a = float(np.linalg.norm(a_vec))
+    b = float(np.linalg.norm(b_vec))
+    c = float(np.linalg.norm(c_vec))
+
+    def angle(u: np.ndarray, v: np.ndarray) -> float:
+        denom = np.linalg.norm(u) * np.linalg.norm(v)
+        if denom == 0.0:
+            return math.nan
+        cosine = float(np.clip(np.dot(u, v) / denom, -1.0, 1.0))
+        return math.degrees(math.acos(cosine))
+
+    return {
+        "a_A": a,
+        "b_A": b,
+        "c_A": c,
+        "alpha_deg": angle(b_vec, c_vec),
+        "beta_deg": angle(a_vec, c_vec),
+        "gamma_deg": angle(a_vec, b_vec),
+        "volume_A3": float(abs(np.linalg.det(cell))),
+    }
+
+
+def compute_structure_stats(frames: list) -> dict:
+    params = [cell_parameters(np.asarray(atoms.cell.array, dtype=float)) for atoms in frames]
+    out: dict[str, float | int] = {"n_frames": len(frames)}
+    for key in ("volume_A3", "a_A", "b_A", "c_A", "alpha_deg", "beta_deg", "gamma_deg"):
+        values = np.asarray([p[key] for p in params], dtype=float)
+        out.update(summarize_array(values, key))
+    return out
+
+
 def compute_partial_histograms(frames: list, species_order: list[str], r_edges: np.ndarray):
     nbins = len(r_edges) - 1
     pair_hist = {
@@ -738,6 +784,161 @@ def compute_adp_from_frames(frames: list) -> tuple[list[dict], list[dict]]:
     return atom_rows, species_rows
 
 
+def read_csv_dicts(path: Path) -> list[dict]:
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def plot_temperature_uq(
+    path: Path,
+    T: np.ndarray,
+    y: np.ndarray,
+    yerr: Optional[np.ndarray],
+    xlabel: str,
+    ylabel: str,
+    title: str,
+) -> bool:
+    try:
+        cache = Path(tempfile.gettempdir()) / "atomi-matplotlib"
+        cache.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("MPLCONFIGDIR", str(cache))
+        os.environ.setdefault("XDG_CACHE_HOME", str(cache))
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return False
+
+    order = np.argsort(T)
+    T = T[order]
+    y = y[order]
+    if yerr is not None:
+        yerr = np.asarray(yerr, dtype=float)[order]
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    if yerr is not None:
+        ax.fill_between(T, y - yerr, y + yerr, color="#1f77b4", alpha=0.18, label="window UQ (SEM)")
+        ax.errorbar(T, y, yerr=yerr, fmt="o", color="#1f77b4", capsize=3, linewidth=1.0)
+    ax.plot(T, y, color="#1f77b4", linewidth=1.5)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    if yerr is not None:
+        ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return True
+
+
+def write_series_structure_adp_outputs(outdir: Path, series_items: list[dict], no_plots: bool) -> dict:
+    structure_rows = []
+    adp_rows = []
+    for item in series_items:
+        stats = item.get("structure_stats", {})
+        if stats:
+            row = {
+                "temperature": item["temperature"],
+                "stage_name": item.get("stage_name", ""),
+                "n_frames": stats.get("n_frames", item.get("n_frames", "")),
+            }
+            for key, value in stats.items():
+                if key != "n_frames":
+                    row[key] = value
+            structure_rows.append(row)
+        adp = item.get("adp", {})
+        species_csv = adp.get("species_adp_csv") if isinstance(adp, dict) else None
+        if species_csv and Path(species_csv).exists():
+            for row in read_csv_dicts(Path(species_csv)):
+                values = {k: float(v) if k not in ("symbol", "") and v != "" else v for k, v in row.items()}
+                values["temperature"] = item["temperature"]
+                values["stage_name"] = item.get("stage_name", "")
+                adp_rows.append(values)
+
+    outputs: dict[str, object] = {"plots": []}
+    if structure_rows:
+        structure_path = outdir / "series_structure_vs_T.csv"
+        structure_fields = [
+            "temperature",
+            "stage_name",
+            "n_frames",
+            "volume_A3_mean",
+            "volume_A3_std",
+            "volume_A3_sem",
+            "a_A_mean",
+            "a_A_std",
+            "a_A_sem",
+            "b_A_mean",
+            "b_A_std",
+            "b_A_sem",
+            "c_A_mean",
+            "c_A_std",
+            "c_A_sem",
+            "alpha_deg_mean",
+            "alpha_deg_sem",
+            "beta_deg_mean",
+            "beta_deg_sem",
+            "gamma_deg_mean",
+            "gamma_deg_sem",
+        ]
+        write_rows_csv(structure_path, structure_rows, structure_fields)
+        outputs["structure_csv"] = str(structure_path)
+        if not no_plots:
+            T = np.asarray([row["temperature"] for row in structure_rows], dtype=float)
+            for key, ylabel, title, filename in [
+                ("volume_A3", "Volume (A^3)", "Selected-window volume vs T", "series_volume_vs_T_UQ.png"),
+                ("a_A", "a (A)", "Lattice a vs T", "series_lattice_a_vs_T_UQ.png"),
+                ("b_A", "b (A)", "Lattice b vs T", "series_lattice_b_vs_T_UQ.png"),
+                ("c_A", "c (A)", "Lattice c vs T", "series_lattice_c_vs_T_UQ.png"),
+            ]:
+                y = np.asarray([row.get(f"{key}_mean", math.nan) for row in structure_rows], dtype=float)
+                yerr = np.asarray([row.get(f"{key}_sem", math.nan) for row in structure_rows], dtype=float)
+                path = outdir / filename
+                if plot_temperature_uq(path, T, y, yerr, "Temperature (K)", ylabel, title):
+                    outputs["plots"].append(str(path))
+
+    if adp_rows:
+        adp_path = outdir / "series_adp_Uiso_vs_T.csv"
+        adp_fields = [
+            "temperature",
+            "stage_name",
+            "symbol",
+            "n_atoms",
+            "Uiso_mean_A2",
+            "Uiso_std_A2",
+            "Uiso_min_A2",
+            "Uiso_max_A2",
+            "Biso_mean_A2",
+            "rms_displacement_mean_A",
+        ]
+        write_rows_csv(adp_path, adp_rows, adp_fields)
+        outputs["adp_csv"] = str(adp_path)
+        if not no_plots:
+            for symbol in sorted({str(row["symbol"]) for row in adp_rows}):
+                rows = [row for row in adp_rows if str(row["symbol"]) == symbol]
+                T = np.asarray([row["temperature"] for row in rows], dtype=float)
+                y = np.asarray([float(row["Uiso_mean_A2"]) for row in rows], dtype=float)
+                yerr = np.asarray(
+                    [
+                        float(row["Uiso_std_A2"]) / math.sqrt(float(row["n_atoms"]))
+                        if float(row["n_atoms"]) > 1
+                        else 0.0
+                        for row in rows
+                    ],
+                    dtype=float,
+                )
+                path = outdir / f"series_Uiso_{symbol}_vs_T_UQ.png"
+                if plot_temperature_uq(path, T, y, yerr, "Temperature (K)", f"{symbol} Uiso (A^2)", f"{symbol} Uiso vs T"):
+                    outputs["plots"].append(str(path))
+    if outputs.get("plots"):
+        outputs["uncertainty_note"] = (
+            "Volume/lattice UQ uses selected-frame SEM within each NPT window. "
+            "Uiso UQ uses the species atom-to-atom SEM at each temperature."
+        )
+    return outputs
+
+
 def plot_outputs(
     outdir: Path,
     prefix: str,
@@ -1015,6 +1216,7 @@ def run_series(args: argparse.Namespace) -> dict:
             "window_ps_used": summary["source"].get("window_ps_used"),
             "n_frames": summary["n_frames"],
             "avg_volume_A3": summary["avg_volume_A3"],
+            "structure_stats": summary.get("structure_stats", {}),
             "outdir": str(temp_dir),
             "summary_json": str(temp_dir / f"{prefix}_summary.json"),
             "gtot": outputs["total_g"],
@@ -1027,6 +1229,7 @@ def run_series(args: argparse.Namespace) -> dict:
             "rmcprofile_SofQ": outputs["rmcprofile_SofQ"],
             "rmcprofile_FofQ": outputs["rmcprofile_FofQ"],
             "fitting_exports": outputs.get("fitting_exports", {}),
+            "adp": outputs.get("adp", {}),
         }
         series_items.append(item)
 
@@ -1045,6 +1248,8 @@ def run_series(args: argparse.Namespace) -> dict:
         writer.writeheader()
         for item in series_items:
             writer.writerow({key: item.get(key, "") for key in fieldnames})
+
+    structure_adp_outputs = write_series_structure_adp_outputs(args.outdir, series_items, args.no_plots)
 
     overlay_plots: list[str] = []
     if not args.no_plots:
@@ -1080,6 +1285,7 @@ def run_series(args: argparse.Namespace) -> dict:
         "type_map": args.type_map,
         "scattering": args.scattering,
         "series": series_items,
+        "structure_adp_outputs": structure_adp_outputs,
         "overlay_plots": overlay_plots,
         "archive": str(args.archive_path.resolve() if args.archive_path else default_archive_path(args.outdir).resolve())
         if not args.no_archive_output
@@ -1237,6 +1443,7 @@ def run(args: argparse.Namespace) -> dict:
     if args.write_selected_extxyz:
         selected_outputs = write_selected_frames(args.outdir, args.prefix, frames)
 
+    structure_stats = compute_structure_stats(frames)
     species_order = sorted(set(frames[0].get_chemical_symbols()))
     r_edges = np.arange(0.0, args.rmax + args.dr, args.dr)
     q_values = np.arange(args.dq, args.qmax + args.dq, args.dq)
@@ -1444,6 +1651,7 @@ def run(args: argparse.Namespace) -> dict:
         "selected_outputs": selected_outputs,
         "n_frames": n_frames,
         "avg_volume_A3": avg_volume,
+        "structure_stats": structure_stats,
         "rho0_atoms_per_A3": rho0,
         "avg_counts": avg_counts,
         "concentrations": conc,
