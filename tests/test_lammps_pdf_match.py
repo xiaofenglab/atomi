@@ -153,10 +153,59 @@ def test_compare_prepares_pdfgetx3_raw_chi_from_md_density(tmp_path) -> None:
     assert "composition = U 1 O 2" in text
     assert "density =" in text
     assert "outputtype = iq sq fq gr" in text
-    assert (outdir / "pdfgetx3_exp" / "run_pdfgetx3.sh").exists()
+    run_script = outdir / "pdfgetx3_exp" / "run_pdfgetx3.sh"
+    assert run_script.exists()
+    assert "logs/pdfgetx3.stdout.log" in run_script.read_text(encoding="utf-8")
+    assert (outdir / "pdfgetx3_exp" / "pdfgetx3_process.log").exists()
     prep = json.loads((outdir / "pdfgetx3_exp" / "pdfgetx3_prep_metadata.json").read_text(encoding="utf-8"))
     assert prep["prep"]["density_source"] == "md"
     assert prep["output_ready"] is False
+
+
+def test_compare_collects_pdfgetx3_reduced_outputs(tmp_path) -> None:
+    series_dir, _ = make_series(tmp_path)
+    tdir = series_dir / "T_300K"
+    summary_path = tdir / "T_300K_summary.json"
+    summary_path.write_text(
+        json.dumps({"avg_counts": {"U": 1, "O": 2}, "avg_volume_A3": 40.0}),
+        encoding="utf-8",
+    )
+    metadata = json.loads((series_dir / "series_summary.json").read_text(encoding="utf-8"))
+    metadata["series"][0]["summary_json"] = str(summary_path)
+    metadata["series"][0]["avg_volume_A3"] = 40.0
+    (series_dir / "series_summary.json").write_text(json.dumps(metadata), encoding="utf-8")
+    sample = tmp_path / "sample.chi"
+    write_xy(sample, np.linspace(0.5, 5.0, 10), np.ones(10))
+    outdir = tmp_path / "raw_compare_ready"
+    exp_dir = outdir / "pdfgetx3_exp"
+    exp_dir.mkdir(parents=True)
+    write_xy(exp_dir / "sample.gr", np.linspace(1.0, 6.0, 101), np.exp(-0.5 * ((np.linspace(1.0, 6.0, 101) - 3.0) / 0.35) ** 2))
+
+    pdf_match.compare_main(
+        [
+            "--pdf-series",
+            str(series_dir),
+            "--exp-raw-sample",
+            str(sample),
+            "--outdir",
+            str(outdir),
+            "--quantity",
+            "G",
+            "--md-temperature",
+            "300",
+            "--density-source",
+            "md",
+            "--no-archive-output",
+        ]
+    )
+
+    assert (exp_dir / "final_data" / "sample.gr").exists()
+    assert (exp_dir / "final_data" / "sample_gr.csv").exists()
+    assert (exp_dir / "plots" / "sample_gr.png").exists()
+    assert (exp_dir / "plots" / "sample_gr.pdf").exists()
+    assert (exp_dir / "pdfgetx3_process.log").exists()
+    metadata = json.loads((outdir / "compare_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["experiment_info"]["reduced_outputs"]["csv"]["gr"].endswith("sample_gr.csv")
 
 
 def test_compare_accepts_pdfgetx_iq_alias_with_warning(tmp_path) -> None:

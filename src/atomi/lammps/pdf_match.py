@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import shutil
 import shlex
 import subprocess
 import tempfile
@@ -678,18 +679,136 @@ def write_pdfgetx3_config(path: Path, args: argparse.Namespace, prep: dict, quan
 
 
 def write_pdfgetx3_run_script(path: Path, pdfgetx3: str, cfg: Path) -> None:
+    logs_dir = cfg.parent / "logs"
     command = [pdfgetx3, "-c", cfg.name]
     text = "\n".join(
         [
             "#!/usr/bin/env bash",
             "set -euo pipefail",
             f"cd {shlex.quote(str(cfg.parent.resolve()))}",
-            " ".join(shlex.quote(part) for part in command),
+            "mkdir -p logs",
+            " ".join(shlex.quote(part) for part in command)
+            + " > "
+            + shlex.quote(str((logs_dir / "pdfgetx3.stdout.log").relative_to(cfg.parent)))
+            + " 2> "
+            + shlex.quote(str((logs_dir / "pdfgetx3.stderr.log").relative_to(cfg.parent))),
             "",
         ]
     )
     path.write_text(text, encoding="utf-8")
     path.chmod(0o755)
+
+
+def plot_reduced_experiment(path_base: Path, x: np.ndarray, y: np.ndarray, xlabel: str, ylabel: str, title: str) -> list[str]:
+    try:
+        cache = Path(tempfile.gettempdir()) / "atomi-matplotlib"
+        cache.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("MPLCONFIGDIR", str(cache))
+        os.environ.setdefault("XDG_CACHE_HOME", str(cache))
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return []
+
+    stride = max(1, len(x) // 450)
+    fig, ax = plt.subplots(figsize=(6.5, 4.0))
+    ax.plot(x, y, color="0.25", linewidth=0.9, alpha=0.75)
+    ax.plot(
+        x[::stride],
+        y[::stride],
+        linestyle="none",
+        marker="o",
+        markersize=3.5,
+        markerfacecolor="white",
+        markeredgecolor="black",
+        markeredgewidth=0.85,
+    )
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    fig.tight_layout()
+    outputs = []
+    for suffix in (".png", ".pdf"):
+        out = path_base.with_suffix(suffix)
+        fig.savefig(out, dpi=220)
+        outputs.append(str(out))
+    plt.close(fig)
+    return outputs
+
+
+def collect_pdfgetx3_outputs(exp_dir: Path, stem: str) -> dict:
+    final_dir = exp_dir / "final_data"
+    plots_dir = exp_dir / "plots"
+    final_dir.mkdir(parents=True, exist_ok=True)
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    labels = {
+        "gr": ("r_A", "G_r", "r (A)", "G(r)"),
+        "fq": ("Q_A^-1", "F_Q", "Q (A^-1)", "F(Q)"),
+        "sq": ("Q_A^-1", "S_Q", "Q (A^-1)", "S(Q)"),
+        "iq": ("Q_A^-1", "I_Q_or_i_Q", "Q (A^-1)", "I(Q) / i(Q)"),
+    }
+    outputs: dict[str, object] = {"raw": {}, "csv": {}, "plots": []}
+    for ext, (xname, yname, xlabel, ylabel) in labels.items():
+        source = exp_dir / f"{stem}.{ext}"
+        if not source.exists():
+            continue
+        raw_copy = final_dir / f"{stem}.{ext}"
+        shutil.copyfile(source, raw_copy)
+        x, y = load_xy_columns(source)
+        csv_path = final_dir / f"{stem}_{ext}.csv"
+        write_xy_csv(csv_path, xname, x, {yname: y})
+        plot_paths = plot_reduced_experiment(plots_dir / f"{stem}_{ext}", x, y, xlabel, ylabel, f"PDFgetX3 {ext.upper()}")
+        outputs["raw"][ext] = str(raw_copy)
+        outputs["csv"][ext] = str(csv_path)
+        outputs["plots"].extend(plot_paths)
+    outputs["note"] = (
+        "final_data keeps PDFgetX3-native files plus CSV copies. plots contains PNG/PDF "
+        "quick-look figures with hollow markers for publication-style inspection."
+    )
+    return outputs
+
+
+def write_pdfgetx3_process_log(path: Path, info: dict) -> None:
+    prep = info.get("prep", {})
+    pdfgetx = info.get("pdfgetx3", {})
+    run_result = info.get("run_result", {})
+    lines = [
+        "PDFgetX3 Reduction Process",
+        "=" * 32,
+        f"mode: {info.get('mode')}",
+        f"raw_sample: {info.get('raw_sample')}",
+        f"raw_empty: {info.get('raw_empty')}",
+        f"raw_background: {info.get('raw_background')}",
+        f"raw_reference: {info.get('raw_reference')}",
+        f"config: {pdfgetx.get('config')}",
+        f"run_script: {info.get('run_script')}",
+        f"expected_output: {pdfgetx.get('expected_output')}",
+        f"output_ready: {info.get('output_ready')}",
+        "",
+        "Composition / Density",
+        f"composition: {prep.get('composition')}",
+        f"composition_source: {prep.get('composition_source')}",
+        f"density_g_cm3: {prep.get('density_g_cm3')}",
+        f"density_source: {prep.get('density_source')}",
+        f"formula: {prep.get('formula')}",
+        "",
+        "Ranges",
+        f"q_range_A^-1: {pdfgetx.get('q_range_A^-1')}",
+        f"r_range_A: {pdfgetx.get('r_range_A')}",
+        "",
+        "Run",
+        f"run_pdfgetx3: {run_result.get('run')}",
+        f"returncode: {run_result.get('returncode')}",
+        f"stdout_log: {run_result.get('stdout_log')}",
+        f"stderr_log: {run_result.get('stderr_log')}",
+        "",
+        "Reduced Outputs",
+        json.dumps(info.get("reduced_outputs", {}), indent=2),
+        "",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def prepare_experiment_input(args: argparse.Namespace, series_dir: Path, quantity: str) -> tuple[Path, dict]:
@@ -708,14 +827,20 @@ def prepare_experiment_input(args: argparse.Namespace, series_dir: Path, quantit
     run_script = exp_dir / "run_pdfgetx3.sh"
     write_pdfgetx3_run_script(run_script, args.pdfgetx3, cfg)
     expected = Path(pdfgetx_info["expected_output"])
+    logs_dir = exp_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
     run_result: dict[str, object] = {"run": False}
     if args.run_pdfgetx3:
         proc = subprocess.run([args.pdfgetx3, "-c", cfg.name], cwd=exp_dir, text=True, capture_output=True)
+        stdout_log = logs_dir / "pdfgetx3.stdout.log"
+        stderr_log = logs_dir / "pdfgetx3.stderr.log"
+        stdout_log.write_text(proc.stdout, encoding="utf-8")
+        stderr_log.write_text(proc.stderr, encoding="utf-8")
         run_result = {
             "run": True,
             "returncode": proc.returncode,
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
+            "stdout_log": str(stdout_log),
+            "stderr_log": str(stderr_log),
         }
         if proc.returncode != 0:
             raise RuntimeError(f"pdfgetx3 failed; see {run_script} and pdfgetx3 metadata in {exp_dir}")
@@ -739,7 +864,9 @@ def prepare_experiment_input(args: argparse.Namespace, series_dir: Path, quantit
         "run_result": run_result,
         "output_ready": output_ready,
     }
+    info["reduced_outputs"] = collect_pdfgetx3_outputs(exp_dir, args.exp_raw_sample.stem) if output_ready else {}
     write_json(exp_dir / "pdfgetx3_prep_metadata.json", info)
+    write_pdfgetx3_process_log(exp_dir / "pdfgetx3_process.log", info)
     return expected, info
 
 
