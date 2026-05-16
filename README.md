@@ -85,7 +85,7 @@ Atomi currently includes command families for:
 - CP2K input generation, AIMD trajectory tools, and visualization helpers.
 - LAMMPS workflow setup, production-array support, and post-processing.
 - MLIP/MACE dataset utilities and model conversion helpers.
-- Zentropy-guided defect motif indexing and MLIP structure export.
+- Zentropy-guided defect motif indexing, staged workflow scaffolding, and optional runtime checks.
 - Total-scattering, XAFS, finite-temperature elasticity, MOOSE, and CALPHAD support.
 - HPC environment discovery and local configuration helpers.
 

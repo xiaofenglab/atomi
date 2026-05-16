@@ -120,6 +120,7 @@ PYTHON_PACKAGES = [
     "torch",
     "mace",
     "pycalphad",
+    "pyzentropy",
 ]
 
 SENSITIVE_CONFIG_KEYS = {
@@ -177,6 +178,14 @@ HPC_ASSUMPTIONS = [
         "key": "pycalphad_database_paths",
         "applies_to": ["calphad-doctor"],
         "note": "CALPHAD workflows need pycalphad installed and explicit local paths to thermodynamic database files.",
+    },
+    {
+        "key": "zentropy_runtime",
+        "applies_to": ["zentropy_status", "zentropy_workflow", "zentropy_motif_db"],
+        "note": (
+            "Zentropy runtime execution is optional; use pyzentropy in the active "
+            "environment or configure an external Python in the local HPC config."
+        ),
     },
 ]
 
@@ -651,6 +660,25 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
         for field in ("feff_executable", "feff_exe"):
             if _nonempty(xafs_larch.get(field)):
                 exports.setdefault("ATOMI_XAFS_FEFF_EXE", str(xafs_larch[field]))
+                break
+
+    zentropy = profiles.get("zentropy", {})
+    if isinstance(zentropy, dict):
+        env = zentropy.get("environment", {})
+        if isinstance(env, dict):
+            for key, value in env.items():
+                if _nonempty(value) and str(key).startswith("ATOMI_"):
+                    exports[str(key)] = str(value)
+        python_fields = ("python", "python_executable", "pyzentropy_python", "executable")
+        for field in python_fields:
+            if _nonempty(zentropy.get(field)):
+                exports.setdefault("ATOMI_ZENTROPY_PYTHON", str(zentropy[field]))
+                break
+        if _nonempty(zentropy.get("env_path")):
+            exports.setdefault("ATOMI_ZENTROPY_ENV", str(zentropy["env_path"]))
+        for field in ("zentropy_executable", "pyzentropy_executable", "command"):
+            if _nonempty(zentropy.get(field)):
+                exports.setdefault("ATOMI_ZENTROPY_EXE", str(zentropy[field]))
                 break
 
     if config_path is not None:

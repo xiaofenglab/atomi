@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "atomi"
-version = "0.3.33"
+version = "0.3.34"
 description = "Reusable HPC automation tools for atomistic modeling workflows."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -39,6 +39,9 @@ xafs = [
   "xraydb",
   "xraylarch; python_version >= '3.10'",
 ]
+zentropy = [
+  "pyzentropy; python_version >= '3.10'",
+]
 
 [project.scripts]
 atomi = "atomi.cli.main:main"
@@ -72,6 +75,10 @@ zentropy_motif_db = "atomi.zentropy.motif_db:main"
 zentropy-motif-db = "atomi.zentropy.motif_db:main"
 defect_motif_db = "atomi.zentropy.motif_db:main"
 defect-motif-db = "atomi.zentropy.motif_db:main"
+zentropy_status = "atomi.zentropy.status:main"
+zentropy-status = "atomi.zentropy.status:main"
+zentropy_workflow = "atomi.zentropy.workflow:main"
+zentropy-workflow = "atomi.zentropy.workflow:main"
 convertmace = "atomi.ml.mace.convert:main"
 extv = "atomi.cli.vasp:extv"
 checkvasp = "atomi.vasp.checks:checkvasp"

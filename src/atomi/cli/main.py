@@ -328,6 +328,22 @@ def build_parser() -> argparse.ArgumentParser:
         )
         zentropy_motif_db.add_argument("zentropy_args", nargs=argparse.REMAINDER)
 
+    zentropy_status_commands = ("zentropy_status", "zentropy-status")
+    for command_name in zentropy_status_commands:
+        zentropy_status = subparsers.add_parser(
+            command_name,
+            help="Report active/external optional pyzentropy runtime availability.",
+        )
+        zentropy_status.add_argument("zentropy_status_args", nargs=argparse.REMAINDER)
+
+    zentropy_workflow_commands = ("zentropy_workflow", "zentropy-workflow")
+    for command_name in zentropy_workflow_commands:
+        zentropy_workflow = subparsers.add_parser(
+            command_name,
+            help="Create or inspect staged zentropy-guided defect thermodynamics workflows.",
+        )
+        zentropy_workflow.add_argument("zentropy_workflow_args", nargs=argparse.REMAINDER)
+
     mace_live = subparsers.add_parser(
         "mace-live",
         help="Live terminal plot for MACE training logs.",
@@ -681,6 +697,18 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.zentropy.motif_db import main as zentropy_motif_db_main
 
         zentropy_motif_db_main(raw_args[1:])
+        return
+    zentropy_status_commands = ("zentropy_status", "zentropy-status")
+    if raw_args and raw_args[0] in zentropy_status_commands:
+        from atomi.zentropy.status import main as zentropy_status_main
+
+        zentropy_status_main(raw_args[1:])
+        return
+    zentropy_workflow_commands = ("zentropy_workflow", "zentropy-workflow")
+    if raw_args and raw_args[0] in zentropy_workflow_commands:
+        from atomi.zentropy.workflow import main as zentropy_workflow_main
+
+        zentropy_workflow_main(raw_args[1:])
         return
     if raw_args and raw_args[0] == "vasp-outcar":
         extv(raw_args[1:])
@@ -1045,6 +1073,18 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.zentropy.motif_db import main as zentropy_motif_db_main
 
         zentropy_motif_db_main(args.zentropy_args)
+        return
+
+    if args.subcommand in zentropy_status_commands:
+        from atomi.zentropy.status import main as zentropy_status_main
+
+        zentropy_status_main(args.zentropy_status_args)
+        return
+
+    if args.subcommand in zentropy_workflow_commands:
+        from atomi.zentropy.workflow import main as zentropy_workflow_main
+
+        zentropy_workflow_main(args.zentropy_workflow_args)
         return
 
     if args.subcommand == "mace-live":

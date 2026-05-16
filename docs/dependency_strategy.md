@@ -40,6 +40,7 @@ Atomi keeps heavier or less-universal workflows behind extras:
 - `scattering`: explicit scattering-analysis stack with `ase`,
   `periodictable`, and `xraydb`.
 - `xafs`: XAFS/Larch workflow support with `xraydb` and `xraylarch`.
+- `zentropy`: optional materials zentropy runtime bridge with `pyzentropy`.
 
 Examples:
 
@@ -80,6 +81,42 @@ export ATOMI_XAFS_LARCH_ENV="$HOME/atomi_hpc/larch_env"
 `xafs_larch_run` will use active-env Larch when available, otherwise it can
 fall back to the configured external Larch Python for the Larch `xftf`
 transform.
+
+## Zentropy Guidance
+
+Atomi's zentropy tools are organized as a staged workflow:
+
+- Stage 1 indexes DFT defect motifs and exports MLIP-ready structures.
+- Later stages attach microstate free energies, solve ensemble statistics,
+  export CALPHAD/MOOSE-ready tables, and drive active-learning loops.
+
+The materials zentropy runtime is treated as optional because it is less
+universal than the base MD/DFT workflow stack. Prefer the same strategy used
+for Larch:
+
+- Use base Atomi for motif databases, manifests, and workflow scaffolding.
+- Install `atomi[zentropy]` only in Python 3.10+ environments meant to run
+  `pyzentropy` directly.
+- Or keep `pyzentropy` in a separate environment and point Atomi to it through
+  local HPC config or environment variables.
+
+Useful status check:
+
+```bash
+zentropy_status
+```
+
+External runtime configuration:
+
+```bash
+export ATOMI_ZENTROPY_PYTHON="$HOME/atomi_hpc/zentropy_env/bin/python"
+export ATOMI_ZENTROPY_ENV="$HOME/atomi_hpc/zentropy_env"
+export ATOMI_ZENTROPY_EXE="$HOME/atomi_hpc/zentropy_env/bin/pyzentropy"
+```
+
+The package named `zentropy` is not assumed to be the materials workflow
+runtime; Atomi checks for `pyzentropy` and warns when only a plain `zentropy`
+package is visible.
 
 ## When To Keep Existing Packages
 
