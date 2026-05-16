@@ -10,10 +10,12 @@ from atomi.xafs.larch_md import (
     build_compare_parser,
     build_larch_run_parser,
     build_prepare_parser,
+    larch_xftf,
     run_compare,
     run_larch,
     run_prepare,
 )
+from atomi.xafs.status import build_xafs_status
 
 
 def test_xafs_prepare_writes_metal_absorber_feff_inputs(tmp_path) -> None:
@@ -82,6 +84,36 @@ def test_xafs_larch_run_collects_existing_chi_without_larch(tmp_path) -> None:
     assert summary["n_chi_curves_used"] == 1
     assert (outdir / "ensemble_chi_k.dat").exists()
     assert "larch_transform_status" in summary
+
+
+def test_xafs_status_reports_missing_larch_without_failure(monkeypatch) -> None:
+    monkeypatch.delenv("ATOMI_XAFS_LARCH_PYTHON", raising=False)
+    monkeypatch.delenv("ATOMI_XAFS_LARCH_ENV", raising=False)
+
+    status = build_xafs_status()
+
+    assert "active_environment" in status
+    assert "external_larch_environment" in status
+    assert status["larch_mode"] in {"active-python", "external-python", "missing"}
+    assert status["suggestions"]
+
+
+def test_larch_xftf_reports_external_probe_when_active_larch_missing(monkeypatch, tmp_path) -> None:
+    fake_python = tmp_path / "missing-python"
+    monkeypatch.setenv("ATOMI_XAFS_LARCH_PYTHON", str(fake_python))
+
+    transform, status = larch_xftf(
+        np.linspace(1.0, 4.0, 6),
+        np.linspace(0.0, 1.0, 6),
+        1.0,
+        4.0,
+        2,
+        1.0,
+        "kaiser",
+    )
+
+    assert transform is None
+    assert "xraylarch import failed" in status or "external Larch probe failed" in status
 
 
 def test_xafs_md_compare_fits_scale_and_writes_metrics(tmp_path) -> None:

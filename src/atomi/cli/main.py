@@ -154,7 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
         lammps_pdf_match.add_argument("pdf_match_args", nargs=argparse.REMAINDER)
 
-    for command_name in ("xafs_lammps_prepare", "xafs_cp2k_prepare", "xafs_larch_run", "xafs_md_compare"):
+    for command_name in ("xafs_lammps_prepare", "xafs_cp2k_prepare", "xafs_larch_run", "xafs_md_compare", "xafs_status"):
         xafs_command = subparsers.add_parser(
             command_name,
             help="Prepare, run, or compare MD-ensemble XAFS through Larch/FEFF.",
@@ -540,6 +540,11 @@ def main(argv: list[str] | None = None) -> None:
 
         compare_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "xafs_status":
+        from atomi.xafs.status import main as xafs_status_main
+
+        xafs_status_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] in ("thermo_lammps", "lammps-thermo-series"):
         from atomi.lammps.thermo_series import main as thermo_series_main
 
@@ -857,6 +862,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.xafs.larch_md import compare_main
 
         compare_main(args.xafs_args)
+        return
+
+    if args.subcommand == "xafs_status":
+        from atomi.xafs.status import main as xafs_status_main
+
+        xafs_status_main(args.xafs_args)
         return
 
     if args.subcommand in ("thermo_lammps", "lammps-thermo-series"):

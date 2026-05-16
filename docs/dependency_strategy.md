@@ -60,6 +60,23 @@ Recommended options:
 - Keep FEFF executables such as `feff8l` or `feff6l` outside of package
   dependencies and configure them with local paths or environment variables.
 
+After a `--no-deps` Atomi update, use:
+
+```bash
+xafs_status
+```
+
+If Larch lives in a separate environment, configure one of:
+
+```bash
+export ATOMI_XAFS_LARCH_PYTHON="$HOME/atomi_hpc/larch_env/bin/python"
+export ATOMI_XAFS_LARCH_ENV="$HOME/atomi_hpc/larch_env"
+```
+
+`xafs_larch_run` will use active-env Larch when available, otherwise it can
+fall back to the configured external Larch Python for the Larch `xftf`
+transform.
+
 ## When To Keep Existing Packages
 
 If the cluster environment already has working versions of NumPy, SciPy,
@@ -82,4 +99,3 @@ python -m pip install --upgrade --force-reinstall \
 
 Use `--force-reinstall` sparingly on shared or long-lived HPC environments
 because it can rebuild the full dependency tree and disturb unrelated packages.
-

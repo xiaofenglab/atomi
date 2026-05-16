@@ -129,6 +129,10 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
                     },
                     "mace_training_gpu": {"env_path": "/private/mlip_env"},
                     "phonopy": {"module": "private/phonopy"},
+                    "xafs_larch": {
+                        "python": "/private/larch/bin/python",
+                        "feff_executable": "/private/feff8l",
+                    },
                 },
             }
         ),
@@ -139,7 +143,7 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
     env_text = env_path.read_text(encoding="utf-8")
 
     assert result["config_found"] is True
-    assert result["profile_names"] == ["cp2k", "lammps_md_engine", "mace_training_gpu", "phonopy"]
+    assert result["profile_names"] == ["cp2k", "lammps_md_engine", "mace_training_gpu", "phonopy", "xafs_larch"]
     assert "source" in result["next_steps"][0]
     assert "export ATOMI_HPC_CONFIG=" in env_text
     assert "export ATOMI_LAMMPS_ENV=/private/env" in env_text
@@ -153,6 +157,8 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
     assert "export ATOMI_CP2K_INTEL_RUNTIME_LIB=/private/intel/lib" in env_text
     assert "export ATOMI_MACE_TRAIN_ENV=/private/mlip_env" in env_text
     assert "export ATOMI_PHONOPY_MODULE=private/phonopy" in env_text
+    assert "export ATOMI_XAFS_LARCH_PYTHON=/private/larch/bin/python" in env_text
+    assert "export ATOMI_XAFS_FEFF_EXE=/private/feff8l" in env_text
     assert "export CP2K_DATA_DIR=/private/cp2k/data" in env_text
     assert "OMP_NUM_THREADS" not in env_text
 

@@ -115,6 +115,8 @@ PYTHON_PACKAGES = [
     "numpy",
     "ase",
     "matplotlib",
+    "xraydb",
+    "larch",
     "torch",
     "mace",
     "pycalphad",
@@ -632,6 +634,25 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
         if _nonempty(phonopy.get("module")):
             exports.setdefault("ATOMI_PHONOPY_MODULE", str(phonopy["module"]))
 
+    xafs_larch = profiles.get("xafs_larch", {})
+    if isinstance(xafs_larch, dict):
+        env = xafs_larch.get("environment", {})
+        if isinstance(env, dict):
+            for key, value in env.items():
+                if _nonempty(value) and str(key).startswith("ATOMI_"):
+                    exports[str(key)] = str(value)
+        python_fields = ("python", "python_executable", "larch_python", "executable")
+        for field in python_fields:
+            if _nonempty(xafs_larch.get(field)):
+                exports.setdefault("ATOMI_XAFS_LARCH_PYTHON", str(xafs_larch[field]))
+                break
+        if _nonempty(xafs_larch.get("env_path")):
+            exports.setdefault("ATOMI_XAFS_LARCH_ENV", str(xafs_larch["env_path"]))
+        for field in ("feff_executable", "feff_exe"):
+            if _nonempty(xafs_larch.get(field)):
+                exports.setdefault("ATOMI_XAFS_FEFF_EXE", str(xafs_larch[field]))
+                break
+
     if config_path is not None:
         exports[CONFIG_ENV_VAR] = str(config_path.expanduser().resolve())
 
@@ -1133,6 +1154,12 @@ def build_report(
         },
         "hpc_assumptions": HPC_ASSUMPTIONS,
     }
+    try:
+        from atomi.xafs.status import build_xafs_status
+
+        report["optional_workflows"] = {"xafs": build_xafs_status()}
+    except Exception as exc:
+        report["optional_workflows"] = {"xafs": {"error": str(exc)}}
     if include_hpc_probe:
         report["hpc_probe"] = hpc_probe_report()
     config_path = find_config_path(hpc_config_path)
@@ -1165,6 +1192,19 @@ def print_summary(report: dict[str, Any]) -> None:
     for name, item in report["python_packages"].items():
         status = item["version"] if item["available"] else "missing"
         print(f"  {name}: {status}")
+    xafs_status = report.get("optional_workflows", {}).get("xafs")
+    if xafs_status:
+        print("")
+        print("Optional XAFS/Larch:")
+        print(f"  selected mode: {xafs_status.get('larch_mode', 'unknown')}")
+        print(f"  ready for transform: {xafs_status.get('ready_for_larch_transform', False)}")
+        active = xafs_status.get("active_environment", {})
+        print(f"  active xraydb: {active.get('xraydb', {}).get('version') if active.get('xraydb', {}).get('available') else 'missing'}")
+        print(f"  active Larch: {active.get('larch', {}).get('version') if active.get('larch', {}).get('available') else 'missing'}")
+        external = xafs_status.get("external_larch_environment", {})
+        if external.get("configured"):
+            print(f"  external Larch python: {external.get('requested_python') or external.get('python')}")
+            print(f"  external Larch xftf: {'yes' if external.get('xftf_available') else 'no'}")
     print("")
     print("Cluster-specific assumptions to review:")
     for item in report["hpc_assumptions"]:

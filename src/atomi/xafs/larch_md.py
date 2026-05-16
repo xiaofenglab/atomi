@@ -23,6 +23,7 @@ import numpy as np
 from atomi.core.archive import archive_output_dir, default_archive_path
 from atomi.lammps import rdf_pdf
 from atomi.lammps.box import format_box_summary
+from atomi.xafs.status import configured_larch_python, probe_larch_python
 
 
 METAL_SYMBOLS = {
@@ -703,6 +704,14 @@ def larch_xftf(
         from larch import Group  # type: ignore
         from larch.xafs import xftf  # type: ignore
     except Exception as exc:
+        external_python = configured_larch_python()
+        if external_python:
+            transform, status = external_larch_xftf(
+                Path(external_python), k, chi, k_min, k_max, k_weight, dk, window
+            )
+            if transform is not None:
+                return transform, status
+            return None, f"xraylarch import failed in active env: {exc}; {status}"
         return None, f"xraylarch import failed: {exc}"
     try:
         group = Group(k=k, chi=chi)
@@ -718,6 +727,69 @@ def larch_xftf(
         )
     except Exception as exc:
         return None, f"xraylarch xftf failed: {exc}"
+
+
+def external_larch_xftf(
+    python_executable: Path,
+    k: np.ndarray,
+    chi: np.ndarray,
+    k_min: float,
+    k_max: float,
+    k_weight: int,
+    dk: float,
+    window: str,
+) -> tuple[dict | None, str]:
+    probe = probe_larch_python(python_executable)
+    if not probe.get("available"):
+        return None, f"external Larch probe failed: {probe}"
+    with tempfile.TemporaryDirectory(prefix="atomi-larch-xftf-") as tmp:
+        tmpdir = Path(tmp)
+        input_path = tmpdir / "chi_input.csv"
+        output_path = tmpdir / "xftf_output.npz"
+        np.savetxt(input_path, np.column_stack([k, chi]), delimiter=",", header="k,chi", comments="")
+        script = (
+            "import numpy as np, sys\n"
+            "from larch import Group\n"
+            "from larch.xafs import xftf\n"
+            "inp, out = sys.argv[1], sys.argv[2]\n"
+            "kmin, kmax, kweight, dk, window = float(sys.argv[3]), float(sys.argv[4]), int(sys.argv[5]), float(sys.argv[6]), sys.argv[7]\n"
+            "data = np.loadtxt(inp, delimiter=',', skiprows=1)\n"
+            "k = data[:, 0]\n"
+            "chi = data[:, 1]\n"
+            "group = Group(k=k, chi=chi)\n"
+            "xftf(k, chi=chi, group=group, kmin=kmin, kmax=kmax, dk=dk, kweight=kweight, window=window)\n"
+            "np.savez(out, r_A=np.asarray(group.r), chir_mag=np.asarray(group.chir_mag), chir_re=np.asarray(group.chir_re), chir_im=np.asarray(group.chir_im))\n"
+        )
+        proc = subprocess.run(
+            [
+                str(python_executable.expanduser()),
+                "-c",
+                script,
+                str(input_path),
+                str(output_path),
+                str(k_min),
+                str(k_max),
+                str(k_weight),
+                str(dk),
+                str(window),
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if proc.returncode != 0 or not output_path.exists():
+            return None, f"external xraylarch xftf failed: {proc.stderr.strip() or proc.stdout.strip()}"
+        data = np.load(output_path)
+        return (
+            {
+                "r_A": np.asarray(data["r_A"], dtype=float),
+                "chir_mag": np.asarray(data["chir_mag"], dtype=float),
+                "chir_re": np.asarray(data["chir_re"], dtype=float),
+                "chir_im": np.asarray(data["chir_im"], dtype=float),
+            },
+            f"ok via external Larch python: {python_executable}",
+        )
 
 
 def plot_xy(path: Path, x: np.ndarray, y: np.ndarray, xlabel: str, ylabel: str, title: str) -> bool:
@@ -785,6 +857,8 @@ def plot_compare(
 
 def run_larch(args: argparse.Namespace) -> dict:
     args.outdir.mkdir(parents=True, exist_ok=True)
+    if getattr(args, "larch_python", None):
+        os.environ["ATOMI_XAFS_LARCH_PYTHON"] = str(args.larch_python)
     cluster_dirs = read_cluster_dirs(args.prepared_dir)
     run_rows = run_feff_if_requested(cluster_dirs, args.feff_exe, args.no_run_feff)
     write_rows_csv(
@@ -1009,7 +1083,14 @@ def build_larch_run_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--prepared-dir", type=Path, required=True)
     parser.add_argument("--outdir", type=Path, default=Path("xafs_larch_run"))
-    parser.add_argument("--feff-exe", default="feff8l")
+    default_feff = os.environ.get("ATOMI_XAFS_FEFF_EXE") or os.environ.get("ATOMI_FEFF_EXE") or "feff8l"
+    parser.add_argument("--feff-exe", default=default_feff)
+    parser.add_argument(
+        "--larch-python",
+        type=Path,
+        default=os.environ.get("ATOMI_XAFS_LARCH_PYTHON"),
+        help="Python executable for an external Larch environment; defaults to ATOMI_XAFS_LARCH_PYTHON.",
+    )
     parser.add_argument("--no-run-feff", action="store_true", help="Only collect existing chi.dat files.")
     parser.add_argument("--k-step", type=float, default=0.05)
     parser.add_argument("--k-min", type=float, default=2.5)
