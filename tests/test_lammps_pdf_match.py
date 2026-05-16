@@ -111,3 +111,49 @@ def test_reweight_outputs_weights_and_curve(tmp_path) -> None:
     assert (args.outdir / "frame_window_weights.csv").exists()
     assert (args.outdir / "reweighted_curve.csv").exists()
     assert (args.outdir / "reweighted_overlay.png").exists()
+
+
+def test_compare_prepares_pdfgetx3_raw_chi_from_md_density(tmp_path) -> None:
+    series_dir, _ = make_series(tmp_path)
+    tdir = series_dir / "T_300K"
+    summary_path = tdir / "T_300K_summary.json"
+    summary_path.write_text(
+        json.dumps({"avg_counts": {"U": 1, "O": 2}, "avg_volume_A3": 40.0}),
+        encoding="utf-8",
+    )
+    metadata = json.loads((series_dir / "series_summary.json").read_text(encoding="utf-8"))
+    metadata["series"][0]["summary_json"] = str(summary_path)
+    metadata["series"][0]["avg_volume_A3"] = 40.0
+    (series_dir / "series_summary.json").write_text(json.dumps(metadata), encoding="utf-8")
+    sample = tmp_path / "sample.chi"
+    write_xy(sample, np.linspace(0.5, 5.0, 10), np.ones(10))
+    outdir = tmp_path / "raw_compare"
+
+    pdf_match.compare_main(
+        [
+            "--pdf-series",
+            str(series_dir),
+            "--exp-raw-sample",
+            str(sample),
+            "--outdir",
+            str(outdir),
+            "--quantity",
+            "G",
+            "--md-temperature",
+            "300",
+            "--density-source",
+            "md",
+            "--prepare-pdfgetx3-only",
+        ]
+    )
+
+    cfg = outdir / "pdfgetx3_exp" / "pdfgetx3.cfg"
+    assert cfg.exists()
+    text = cfg.read_text(encoding="utf-8")
+    assert "composition = U 1 O 2" in text
+    assert "density =" in text
+    assert "outputtype = iq sq fq gr" in text
+    assert (outdir / "pdfgetx3_exp" / "run_pdfgetx3.sh").exists()
+    prep = json.loads((outdir / "pdfgetx3_exp" / "pdfgetx3_prep_metadata.json").read_text(encoding="utf-8"))
+    assert prep["prep"]["density_source"] == "md"
+    assert prep["output_ready"] is False

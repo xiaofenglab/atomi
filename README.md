@@ -93,7 +93,7 @@ Single-temperature `pdf_lammps` averages RDF/PDF/S(Q)/F(Q) over the selected tim
 
 For `pdf_lammps_series`, `--frame-overlays` writes those dynamic per-frame G(r)/S(Q) overlay plots inside each temperature folder. `--adp` also aggregates selected-window volume, lattice parameters, and per-element Uiso versus temperature, with uncertainty plots from frame-window/statistical spreads and one combined all-element Uiso plot. Long series analyses can be prepared for Slurm with `--write-sbatch` or submitted directly with `--submit`.
 
-Experimental PDF matching starts with `pdf_md_compare` for ranking MD-derived curves against PDFgetX/PDFgui/RMC-style two-column data, followed by `pdf_md_reweight` for conservative maximum-entropy-style reweighting of MD temperature/window candidates.
+Experimental PDF matching starts with `pdf_md_compare` for ranking MD-derived curves against PDFgetX/PDFgui/RMC-style two-column data, followed by `pdf_md_reweight` for conservative maximum-entropy-style reweighting of MD temperature/window candidates. `pdf_md_compare` can also prepare raw `.chi` sample/empty/background/reference inputs for `pdfgetx3`, deriving composition and density from the selected MD box when available, or using user/API density overrides.
 
 ## HPC Environment Check
 
