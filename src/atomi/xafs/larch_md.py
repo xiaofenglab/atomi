@@ -375,6 +375,9 @@ def load_frames_for_prepare(args: argparse.Namespace) -> tuple[list, dict]:
 def minimum_image_relative_positions(atoms, absorber_index: int) -> tuple[np.ndarray, np.ndarray]:
     positions = atoms.get_positions()
     cell = np.asarray(atoms.cell.array, dtype=float)
+    if not np.any(atoms.pbc) or abs(float(np.linalg.det(cell))) < 1.0e-12:
+        rel = positions - positions[absorber_index]
+        return rel, np.linalg.norm(rel, axis=1)
     inv_cell = np.linalg.inv(cell)
     frac = positions @ inv_cell
     dfrac = frac - frac[absorber_index]
