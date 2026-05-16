@@ -403,6 +403,60 @@ def write_xy(path: Path, x: np.ndarray, y: np.ndarray, xname: str, yname: str) -
             handle.write(f"{xi:.10e} {yi:.10e}\n")
 
 
+def write_xy_plain(path: Path, x: np.ndarray, y: np.ndarray) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        for xi, yi in zip(x, y):
+            handle.write(f"{xi:.10e} {yi:.10e}\n")
+
+
+def write_pdfgui_gr(path: Path, r: np.ndarray, gr: np.ndarray, dr_unc: float, dgr: float) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write("# PDFgui/PDFfit2 format: r_A G_r dr dG_r\n")
+        handle.write("# dr and dG_r are placeholder uncertainties from command options.\n")
+        for ri, gi in zip(r, gr):
+            handle.write(f"{ri:.10e} {gi:.10e} {dr_unc:.10e} {dgr:.10e}\n")
+
+
+def write_fitting_exports(
+    outdir: Path,
+    prefix: str,
+    r: np.ndarray,
+    gr_direct: np.ndarray,
+    r_from_fq: np.ndarray,
+    gr_from_fq: np.ndarray,
+    q_values: np.ndarray,
+    sq: np.ndarray,
+    fq: np.ndarray,
+    fq_windowed: np.ndarray,
+    pdfgui_dr_uncertainty: float,
+    pdfgui_dgr: float,
+) -> dict[str, str]:
+    """Write explicit convention files for PDFgui and RMC-style fitting tools."""
+    iq = sq - 1.0
+    rmc_gr_direct = np.divide(gr_direct, r, out=np.zeros_like(gr_direct), where=r != 0.0)
+    rmc_gr_from_fq = np.divide(gr_from_fq, r_from_fq, out=np.zeros_like(gr_from_fq), where=r_from_fq != 0.0)
+
+    paths = {
+        "pdfgui_GofR_direct_4col": outdir / f"{prefix}_pdfgui_GofR_direct_4col.gr",
+        "pdfgui_GofR_from_FQ_4col": outdir / f"{prefix}_pdfgui_GofR_from_FQ_4col.gr",
+        "rmcprofile_SQ": outdir / f"{prefix}_rmcprofile_SQ.dat",
+        "rmcprofile_iQ": outdir / f"{prefix}_rmcprofile_iQ_Sminus1.dat",
+        "rmcprofile_pdfgetx_FQ": outdir / f"{prefix}_rmcprofile_pdfgetx_FQ_QSminus1.dat",
+        "rmcprofile_pdfgetx_FQ_windowed": outdir / f"{prefix}_rmcprofile_pdfgetx_FQ_QSminus1_windowed.dat",
+        "rmcprofile_GofR_direct_flat": outdir / f"{prefix}_rmcprofile_GofR_direct_flat.dat",
+        "rmcprofile_GofR_from_FQ_flat": outdir / f"{prefix}_rmcprofile_GofR_from_FQ_flat.dat",
+    }
+    write_pdfgui_gr(paths["pdfgui_GofR_direct_4col"], r, gr_direct, pdfgui_dr_uncertainty, pdfgui_dgr)
+    write_pdfgui_gr(paths["pdfgui_GofR_from_FQ_4col"], r_from_fq, gr_from_fq, pdfgui_dr_uncertainty, pdfgui_dgr)
+    write_xy_plain(paths["rmcprofile_SQ"], q_values, sq)
+    write_xy_plain(paths["rmcprofile_iQ"], q_values, iq)
+    write_xy_plain(paths["rmcprofile_pdfgetx_FQ"], q_values, fq)
+    write_xy_plain(paths["rmcprofile_pdfgetx_FQ_windowed"], q_values, fq_windowed)
+    write_xy_plain(paths["rmcprofile_GofR_direct_flat"], r, rmc_gr_direct)
+    write_xy_plain(paths["rmcprofile_GofR_from_FQ_flat"], r_from_fq, rmc_gr_from_fq)
+    return {key: str(path) for key, path in paths.items()}
+
+
 def write_multi_csv(path: Path, xname: str, x: np.ndarray, columns: dict[str, np.ndarray]) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
@@ -695,6 +749,9 @@ def run_series(args: argparse.Namespace) -> dict:
             scattering=args.scattering,
             weights=args.weights,
             window_function=args.window_function,
+            fitting_exports=args.fitting_exports,
+            pdfgui_dr_uncertainty=args.pdfgui_dr_uncertainty,
+            pdfgui_dgr=args.pdfgui_dgr,
             no_plots=args.no_plots,
             archive_path=None,
             no_archive_output=True,
@@ -723,6 +780,7 @@ def run_series(args: argparse.Namespace) -> dict:
             "pdfgui_GofR": outputs["pdfgui_GofR"],
             "rmcprofile_SofQ": outputs["rmcprofile_SofQ"],
             "rmcprofile_FofQ": outputs["rmcprofile_FofQ"],
+            "fitting_exports": outputs.get("fitting_exports", {}),
         }
         series_items.append(item)
 
@@ -838,6 +896,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scattering", choices=("xray", "neutron", "custom"), default="xray")
     parser.add_argument("--weights", nargs="*", default=[], help="Custom weights, e.g. U=92 O=8")
     parser.add_argument("--window-function", choices=("lorch", "none"), default="lorch")
+    parser.add_argument(
+        "--fitting-exports",
+        choices=("auto", "none"),
+        default="auto",
+        help="Write explicit PDFgui and RMC-style fitting export files. Default: auto.",
+    )
+    parser.add_argument(
+        "--pdfgui-dr-uncertainty",
+        type=float,
+        default=0.0,
+        help="Placeholder dr uncertainty column for PDFgui four-column .gr exports.",
+    )
+    parser.add_argument(
+        "--pdfgui-dgr",
+        type=float,
+        default=1.0,
+        help="Placeholder dG uncertainty column for PDFgui four-column .gr exports.",
+    )
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument(
         "--archive-path",
@@ -978,6 +1054,22 @@ def run(args: argparse.Namespace) -> dict:
     write_xy(args.outdir / f"{args.prefix}_pdfgui_GofR.gr", r_from_fq, gr_from_fq, "r_A", "G_r")
     write_xy(args.outdir / f"{args.prefix}_rmcprofile_SofQ.sq", q_values, sq, "Q_A^-1", "S_Q")
     write_xy(args.outdir / f"{args.prefix}_rmcprofile_FofQ.fq", q_values, fq_windowed, "Q_A^-1", "F_Q_windowed")
+    fitting_exports = {}
+    if args.fitting_exports == "auto":
+        fitting_exports = write_fitting_exports(
+            args.outdir,
+            args.prefix,
+            r,
+            gr_direct,
+            r_from_fq,
+            gr_from_fq,
+            q_values,
+            sq,
+            fq,
+            fq_windowed,
+            args.pdfgui_dr_uncertainty,
+            args.pdfgui_dgr,
+        )
     write_multi_csv(
         args.outdir / f"{args.prefix}_totals.csv",
         "r_A",
@@ -1039,6 +1131,13 @@ def run(args: argparse.Namespace) -> dict:
         "gr_dr_A": gr_dr,
         "window_function": args.window_function,
         "scattering": scattering_meta,
+        "fitting_export_notes": {
+            "pdfgui_4col": "PDFgui/PDFfit2-style r, G(r), dr, dG(r). The dr and dG columns are placeholder uncertainties.",
+            "rmcprofile_SQ": "Two-column normalized S(Q), expected to approach 1 at high Q.",
+            "rmcprofile_iQ": "Two-column i(Q)=S(Q)-1, the flat-low-Q convention often used by RMCProfile/Keen-style inputs.",
+            "pdfgetx_FQ": "Two-column F(Q)=Q[S(Q)-1], common in PDFgetX/PDFgui workflows; verify before using as RMCProfile F(Q).",
+            "rmcprofile_GofR_flat": "Two-column G_pdf(r)/r, included as a flat-low-r real-space diagnostic for RMC-style convention checks.",
+        },
         "plots": plots,
         "archive": str(args.archive_path.resolve() if args.archive_path else default_archive_path(args.outdir).resolve())
         if not args.no_archive_output
@@ -1054,6 +1153,7 @@ def run(args: argparse.Namespace) -> dict:
             "pdfgui_GofR": str(args.outdir / f"{args.prefix}_pdfgui_GofR.gr"),
             "rmcprofile_SofQ": str(args.outdir / f"{args.prefix}_rmcprofile_SofQ.sq"),
             "rmcprofile_FofQ": str(args.outdir / f"{args.prefix}_rmcprofile_FofQ.fq"),
+            "fitting_exports": fitting_exports,
         },
     }
     write_json(args.outdir / f"{args.prefix}_summary.json", summary)
@@ -1091,6 +1191,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     print(f"Wrote PDFgui G(r): {outputs['pdfgui_GofR']}")
     print(f"Wrote RMCProfile S(Q): {outputs['rmcprofile_SofQ']}")
     print(f"Wrote RMCProfile F(Q): {outputs['rmcprofile_FofQ']}")
+    if outputs.get("fitting_exports"):
+        print("Wrote explicit PDFgui/RMC-style fitting exports.")
     if summary.get("archive"):
         print(f"Download archive written to: {summary['archive']}")
 

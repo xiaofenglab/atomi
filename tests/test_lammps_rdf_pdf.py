@@ -122,6 +122,9 @@ def test_run_from_existing_traj_can_use_custom_reader(tmp_path, monkeypatch) -> 
         scattering="custom",
         weights=["U=92", "O=8"],
         window_function="lorch",
+        fitting_exports="auto",
+        pdfgui_dr_uncertainty=0.0,
+        pdfgui_dgr=1.0,
         no_plots=True,
         archive_path=None,
         no_archive_output=False,
@@ -133,6 +136,13 @@ def test_run_from_existing_traj_can_use_custom_reader(tmp_path, monkeypatch) -> 
     assert (tmp_path / "uo2_partial_rdfs.csv").exists()
     assert (tmp_path / "uo2_SofQ.dat").exists()
     assert (tmp_path / "uo2_FofQ_windowed.dat").exists()
+    assert (tmp_path / "uo2_pdfgui_GofR_direct_4col.gr").exists()
+    assert (tmp_path / "uo2_pdfgui_GofR_from_FQ_4col.gr").exists()
+    assert (tmp_path / "uo2_rmcprofile_iQ_Sminus1.dat").exists()
+    assert (tmp_path / "uo2_rmcprofile_pdfgetx_FQ_QSminus1.dat").exists()
+    assert summary["outputs"]["fitting_exports"]["pdfgui_GofR_direct_4col"].endswith(
+        "uo2_pdfgui_GofR_direct_4col.gr"
+    )
     assert (tmp_path / "uo2_summary.json").exists()
     archive = tmp_path.with_name(f"{tmp_path.name}.tar.gz")
     assert summary["archive"] == str(archive.resolve())
@@ -141,6 +151,7 @@ def test_run_from_existing_traj_can_use_custom_reader(tmp_path, monkeypatch) -> 
         names = set(handle.getnames())
     assert f"{tmp_path.name}/uo2_summary.json" in names
     assert f"{tmp_path.name}/uo2_pdfgui_GofR.gr" in names
+    assert f"{tmp_path.name}/uo2_pdfgui_GofR_direct_4col.gr" in names
 
 
 def test_series_mode_uses_npt_records_and_writes_overlays(tmp_path, monkeypatch) -> None:
@@ -201,6 +212,9 @@ def test_series_mode_uses_npt_records_and_writes_overlays(tmp_path, monkeypatch)
         scattering="custom",
         weights=["U=92", "O=8"],
         window_function="lorch",
+        fitting_exports="auto",
+        pdfgui_dr_uncertainty=0.0,
+        pdfgui_dgr=1.0,
         no_plots=False,
         archive_path=None,
         no_archive_output=True,
@@ -214,4 +228,6 @@ def test_series_mode_uses_npt_records_and_writes_overlays(tmp_path, monkeypatch)
     assert (args.outdir / "series_summary.json").exists()
     assert (args.outdir / "overlay_weighted_gr.png").exists()
     assert (args.outdir / "T_300K" / "T_300K_pdfgui_GofR.gr").exists()
+    assert (args.outdir / "T_300K" / "T_300K_pdfgui_GofR_direct_4col.gr").exists()
+    assert (args.outdir / "T_300K" / "T_300K_rmcprofile_iQ_Sminus1.dat").exists()
     assert (args.outdir / "T_600K" / "T_600K_rmcprofile_SofQ.sq").exists()
