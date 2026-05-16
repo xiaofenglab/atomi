@@ -11,11 +11,18 @@ import os
 import tempfile
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 import numpy as np
 
 from atomi.core.archive import archive_output_dir, default_archive_path
+from atomi.lammps.thermo_series import (
+    collect_config_paths,
+    discover_npt_records_from_md_root,
+    discover_production_records,
+    filter_records_by_T,
+)
 
 
 def parse_type_map(items: list[str]) -> dict[int, str]:
@@ -412,6 +419,22 @@ def write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(normalize(data), indent=2), encoding="utf-8")
 
 
+def read_xy(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    x_values: list[float] = []
+    y_values: list[float] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            parts = stripped.split()
+            if len(parts) < 2:
+                continue
+            x_values.append(float(parts[0]))
+            y_values.append(float(parts[1]))
+    return np.asarray(x_values, dtype=float), np.asarray(y_values, dtype=float)
+
+
 def plot_outputs(
     outdir: Path,
     prefix: str,
@@ -490,22 +513,313 @@ def plot_outputs(
     return written
 
 
+def plot_series_overlay(
+    path: Path,
+    series: list[dict],
+    file_key: str,
+    title: str,
+    x_label: str,
+    y_label: str,
+) -> bool:
+    try:
+        cache = Path(tempfile.gettempdir()) / "atomi-matplotlib"
+        cache.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("MPLCONFIGDIR", str(cache))
+        os.environ.setdefault("XDG_CACHE_HOME", str(cache))
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.colors import Normalize
+        from matplotlib.cm import ScalarMappable
+    except ImportError:
+        return False
+
+    available = [item for item in series if item.get(file_key)]
+    if not available:
+        return False
+
+    temperatures = np.asarray([item["temperature"] for item in available], dtype=float)
+    norm = Normalize(vmin=float(np.min(temperatures)), vmax=float(np.max(temperatures)))
+    cmap = plt.get_cmap("viridis")
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    for item in available:
+        x, y = read_xy(Path(item[file_key]))
+        ax.plot(x, y, color=cmap(norm(item["temperature"])), linewidth=1.7, alpha=0.95)
+
+    ax.set_title(title)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    cbar = fig.colorbar(ScalarMappable(norm=norm, cmap=cmap), ax=ax)
+    cbar.set_label("Temperature (K)")
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return True
+
+
+def find_record_dump(record: dict) -> Path:
+    log_path = Path(record["log_path"])
+    chunk_dir = log_path.parent
+    stage_name = str(record.get("stage_name", ""))
+    patterns = [
+        "dump.*.lammpstrj",
+        "*.lammpstrj",
+        "dump.*",
+    ]
+
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for pattern in patterns:
+        for path in sorted(chunk_dir.glob(pattern)):
+            if path.is_file() and path not in seen:
+                candidates.append(path)
+                seen.add(path)
+
+    if not candidates:
+        stage_dir = chunk_dir.parent
+        for pattern in patterns:
+            for path in sorted(stage_dir.glob(pattern)):
+                if path.is_file() and path not in seen:
+                    candidates.append(path)
+                    seen.add(path)
+
+    if not candidates:
+        raise FileNotFoundError(f"No LAMMPS dump trajectory found near {log_path}")
+
+    if stage_name:
+        named = [path for path in candidates if stage_name in path.name]
+        if named:
+            candidates = named
+
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def record_dump_every(record: dict, default_dump_every: Optional[int]) -> int:
+    stage = record.get("stage") or {}
+    if stage.get("dump_every") is not None:
+        return int(stage["dump_every"])
+    config_path = record.get("config_path")
+    if config_path:
+        try:
+            cfg = json.loads(Path(config_path).read_text(encoding="utf-8"))
+            if cfg.get("dump_every") is not None:
+                return int(cfg["dump_every"])
+        except Exception:
+            pass
+    if default_dump_every is not None:
+        return int(default_dump_every)
+    return 500
+
+
+def discover_series_records(args: argparse.Namespace) -> tuple[list[dict], list[dict]]:
+    if args.config:
+        config_paths = collect_config_paths(args.config, args.config_dir, args.config_glob)
+        records_all = discover_production_records(config_paths, duplicate_policy=args.duplicate_policy)
+    else:
+        if args.config_dir:
+            raise ValueError("--config-dir can only be used with --config")
+        records_all = discover_npt_records_from_md_root(
+            args.md_root,
+            duplicate_policy=args.duplicate_policy,
+            timestep_ps=args.dt,
+        )
+    records = filter_records_by_T(records_all, args.t_min, args.t_max)
+    return records_all, records
+
+
+def run_series(args: argparse.Namespace) -> dict:
+    args.outdir.mkdir(parents=True, exist_ok=True)
+    records_all, records = discover_series_records(args)
+
+    discovered_rows = [
+        {
+            "temperature": record["temperature"],
+            "stage_name": record["stage_name"],
+            "log_path": str(record["log_path"]),
+            "config_path": str(record.get("config_path") or ""),
+            "md_root": str(record.get("md_root") or ""),
+        }
+        for record in records_all
+    ]
+    used_rows = [
+        {
+            "temperature": record["temperature"],
+            "stage_name": record["stage_name"],
+            "log_path": str(record["log_path"]),
+            "config_path": str(record.get("config_path") or ""),
+            "md_root": str(record.get("md_root") or ""),
+        }
+        for record in records
+    ]
+    write_json(args.outdir / "discovered_stage_records.json", {"records": discovered_rows})
+    write_json(args.outdir / "used_stage_records.json", {"records": used_rows})
+
+    series_items: list[dict] = []
+    for record in records:
+        temperature = float(record["temperature"])
+        temp_label = f"{temperature:g}K".replace(".", "p")
+        temp_dir = args.outdir / f"T_{temp_label}"
+        prefix = f"T_{temp_label}"
+        dump_path = find_record_dump(record)
+        dump_every = record_dump_every(record, args.dump_every)
+        timestep_ps = float(args.dt if args.dt is not None else record.get("timestep_ps", 0.0001))
+
+        item_args = SimpleNamespace(
+            dump=dump_path,
+            traj=None,
+            dump_format=args.dump_format,
+            type_map=args.type_map,
+            dt=timestep_ps,
+            dump_every=dump_every,
+            window_ps=args.window_ps,
+            start=None,
+            stop=None,
+            step=args.frame_step,
+            outdir=temp_dir,
+            prefix=prefix,
+            rmax=args.rmax,
+            dr=args.dr,
+            qmax=args.qmax,
+            dq=args.dq,
+            gr_rmax=args.gr_rmax,
+            gr_dr=args.gr_dr,
+            scattering=args.scattering,
+            weights=args.weights,
+            window_function=args.window_function,
+            no_plots=args.no_plots,
+            archive_path=None,
+            no_archive_output=True,
+            write_selected_extxyz=args.write_selected_extxyz,
+        )
+        summary = run(item_args)
+        outputs = summary["outputs"]
+        item = {
+            "temperature": temperature,
+            "stage_name": record["stage_name"],
+            "log_path": str(record["log_path"]),
+            "dump_path": str(dump_path),
+            "dump_every": dump_every,
+            "dt_ps": timestep_ps,
+            "window_ps_used": summary["source"].get("window_ps_used"),
+            "n_frames": summary["n_frames"],
+            "avg_volume_A3": summary["avg_volume_A3"],
+            "outdir": str(temp_dir),
+            "summary_json": str(temp_dir / f"{prefix}_summary.json"),
+            "gtot": outputs["total_g"],
+            "GofR_direct": outputs["direct_GofR"],
+            "SofQ": outputs["SofQ"],
+            "FofQ": outputs["FofQ"],
+            "FofQ_windowed": outputs["FofQ_windowed"],
+            "GofR_from_FQ": outputs["GofR_from_FQ"],
+            "pdfgui_GofR": outputs["pdfgui_GofR"],
+            "rmcprofile_SofQ": outputs["rmcprofile_SofQ"],
+            "rmcprofile_FofQ": outputs["rmcprofile_FofQ"],
+        }
+        series_items.append(item)
+
+    with (args.outdir / "series_index.csv").open("w", newline="", encoding="utf-8") as handle:
+        fieldnames = [
+            "temperature",
+            "stage_name",
+            "dump_path",
+            "n_frames",
+            "window_ps_used",
+            "avg_volume_A3",
+            "outdir",
+            "summary_json",
+        ]
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for item in series_items:
+            writer.writerow({key: item.get(key, "") for key in fieldnames})
+
+    overlay_plots: list[str] = []
+    if not args.no_plots:
+        overlay_defs = [
+            ("gtot", "overlay_weighted_gr.png", "Weighted RDF", "r (A)", "g(r)"),
+            ("GofR_direct", "overlay_pdf_GofR_direct.png", "Direct PDF G(r)", "r (A)", "G(r)"),
+            ("GofR_from_FQ", "overlay_pdf_GofR_from_FQ.png", "PDF G(r) from F(Q)", "r (A)", "G(r)"),
+            ("SofQ", "overlay_SofQ.png", "Total Scattering S(Q)", "Q (A^-1)", "S(Q)"),
+            ("FofQ", "overlay_FofQ.png", "Reduced Structure Function F(Q)", "Q (A^-1)", "F(Q)"),
+            (
+                "FofQ_windowed",
+                "overlay_FofQ_windowed.png",
+                "Windowed Reduced Structure Function F(Q)",
+                "Q (A^-1)",
+                "F(Q)",
+            ),
+        ]
+        for key, filename, title, xlabel, ylabel in overlay_defs:
+            path = args.outdir / filename
+            if plot_series_overlay(path, series_items, key, title, xlabel, ylabel):
+                overlay_plots.append(str(path))
+
+    metadata = {
+        "mode": "series",
+        "source": "config" if args.config else "md_root",
+        "config": [str(Path(p).resolve()) for p in args.config] if args.config else [],
+        "md_root": str(args.md_root.resolve()) if args.md_root else None,
+        "npt_only": True,
+        "nvt_ignored": True,
+        "temperature_filter": {"t_min": args.t_min, "t_max": args.t_max},
+        "window_ps": args.window_ps,
+        "dump_format": args.dump_format,
+        "type_map": args.type_map,
+        "scattering": args.scattering,
+        "series": series_items,
+        "overlay_plots": overlay_plots,
+        "archive": str(args.archive_path.resolve() if args.archive_path else default_archive_path(args.outdir).resolve())
+        if not args.no_archive_output
+        else None,
+    }
+    write_json(args.outdir / "series_summary.json", metadata)
+    if not args.no_archive_output:
+        archive = archive_output_dir(args.outdir, args.archive_path)
+        metadata["archive"] = str(archive)
+        write_json(args.outdir / "series_summary.json", metadata)
+    return metadata
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="lammps-rdf-pdf",
-        description="Compute RDF/PDF/S(Q)/F(Q) from LAMMPS MD trajectories.",
+        prog="pdf_lammps",
+        description="Compute RDF/PDF/S(Q)/F(Q) from one LAMMPS trajectory or an NPT MD series.",
     )
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--dump", type=Path, help="LAMMPS dump trajectory")
     source.add_argument("--traj", type=Path, help="ASE-readable trajectory, usually extxyz")
+    source.add_argument("--config", nargs="+", help="One or more production config JSON files for NPT series mode")
+    source.add_argument(
+        "--md-root",
+        type=Path,
+        help="Folder containing MD run folders. Series mode scans NPT folders only and ignores NVT folders.",
+    )
+    parser.add_argument("--config-dir", default=None, help="Optional directory containing more config JSON files")
+    parser.add_argument("--config-glob", default="*.json", help="Glob pattern used with --config-dir")
+    parser.add_argument(
+        "--duplicate-policy",
+        choices=["highest_config_order", "first", "error"],
+        default="highest_config_order",
+        help="How to handle duplicate temperatures in series mode.",
+    )
     parser.add_argument("--dump-format", default="lammps-dump-text")
     parser.add_argument("--type-map", nargs="*", default=[], help="LAMMPS type map, e.g. 1=U 2=O")
     parser.add_argument("--dt", type=float, help="MD timestep in ps for --dump")
-    parser.add_argument("--dump-every", type=int, help="LAMMPS steps between dump frames for --dump")
+    parser.add_argument("--dump-every", type=int, help="LAMMPS steps between dump frames for --dump or --md-root")
     parser.add_argument("--window-ps", type=float, default=5.0, help="Last trajectory window for --dump")
+    parser.add_argument("--t-min", type=float, help="Lowest NPT series temperature to include")
+    parser.add_argument("--t-max", type=float, help="Highest requested NPT series temperature to include")
     parser.add_argument("--start", type=int)
     parser.add_argument("--stop", type=int)
     parser.add_argument("--step", type=int)
+    parser.add_argument(
+        "--frame-step",
+        type=int,
+        default=None,
+        help="Optional frame stride for each series dump after the last-window selection.",
+    )
     parser.add_argument("--outdir", type=Path, default=Path("rdf_pdf_analysis"))
     parser.add_argument("--prefix", default="lammps_pdf")
     parser.add_argument("--rmax", type=float, default=12.0)
@@ -555,6 +869,10 @@ def run(args: argparse.Namespace) -> dict:
             args.dump_every,
             args.window_ps,
         )
+        if args.step is not None:
+            frames = frames[:: args.step]
+            source_summary["post_window_frame_step"] = args.step
+            source_summary["n_selected_frames_after_step"] = len(frames)
     else:
         frames = read_frames_from_traj(args.traj, args.start, args.stop, args.step)
         source_summary = {
@@ -741,6 +1059,21 @@ def run(args: argparse.Namespace) -> dict:
 def main(argv: Optional[list[str]] = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.config or args.md_root:
+        if not args.type_map:
+            parser.error("--type-map is required for series mode because LAMMPS dump files store atom types")
+        if args.start is not None or args.stop is not None or args.step is not None:
+            parser.error("Use --frame-step for series mode; --start/--stop/--step are single-trajectory options")
+        summary = run_series(args)
+        print(f"Series temperatures: {len(summary['series'])}")
+        if summary["series"]:
+            temps = [item["temperature"] for item in summary["series"]]
+            print(f"Temperature range used: {min(temps):g} to {max(temps):g} K")
+        print(f"Wrote series summary: {args.outdir / 'series_summary.json'}")
+        print(f"Wrote series index: {args.outdir / 'series_index.csv'}")
+        if summary.get("archive"):
+            print(f"Download archive written to: {summary['archive']}")
+        return
     summary = run(args)
     outputs = summary["outputs"]
     print(f"Frames used: {summary['n_frames']}")

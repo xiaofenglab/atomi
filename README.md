@@ -87,6 +87,8 @@ Atomi currently includes command families for:
 
 The command names and options may evolve as workflows are cleaned up, so use `--help` from the installed version you are actually running.
 
+For LAMMPS total-scattering analysis, `pdf_lammps` accepts a single dump or trajectory, while `pdf_lammps_series` can scan a config file or MD root and analyze only NPT stages. Series outputs include per-temperature RDF/PDF/S(Q)/F(Q) files, transition-colored overlay plots, a `series_index.csv`, `series_summary.json`, and a default `.tar.gz` archive.
+
 ## HPC Environment Check
 
 Before using Atomi on a new cluster, run the environment doctor and review the generated report. The report checks common executables, scheduler commands, plotting tools, atomistic engine names, and Python packages used by the packaged workflows.

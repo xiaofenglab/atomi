@@ -126,3 +126,77 @@ def test_run_from_existing_traj_can_use_custom_reader(tmp_path, monkeypatch) -> 
         names = set(handle.getnames())
     assert f"{tmp_path.name}/uo2_summary.json" in names
     assert f"{tmp_path.name}/uo2_pdfgui_GofR.gr" in names
+
+
+def test_series_mode_uses_npt_records_and_writes_overlays(tmp_path, monkeypatch) -> None:
+    frames = [
+        FakeAtoms(
+            ["U", "U", "O", "O"],
+            [(0, 0, 0), (3, 0, 0), (1.5, 1.5, 0), (4.5, 1.5, 0)],
+            8.0,
+        )
+    ]
+    records = []
+    for temp in (300.0, 600.0):
+        chunk = tmp_path / f"stages/npt_prod_{int(temp)}K/chunk_production"
+        chunk.mkdir(parents=True)
+        log = chunk / f"log.in.npt_prod_{int(temp)}K_production"
+        dump = chunk / f"dump.npt_prod_{int(temp)}K_production.lammpstrj"
+        log.write_text("log\n", encoding="utf-8")
+        dump.write_text("dump\n", encoding="utf-8")
+        records.append(
+            {
+                "temperature": temp,
+                "stage": {"name": f"npt_prod_{int(temp)}K", "type": "npt", "temperature": temp},
+                "stage_name": f"npt_prod_{int(temp)}K",
+                "config_path": None,
+                "config_root": tmp_path,
+                "config_index": 0,
+                "log_path": log,
+                "timestep_ps": 0.001,
+                "md_root": tmp_path,
+            }
+        )
+
+    monkeypatch.setattr(rdf_pdf, "discover_npt_records_from_md_root", lambda *args, **kwargs: records)
+    monkeypatch.setattr(rdf_pdf, "read_frames_from_dump", lambda *args, **kwargs: (frames, {"window_ps_used": 5.0}))
+    monkeypatch.setattr(rdf_pdf, "write_selected_frames", lambda *args, **kwargs: {})
+
+    args = SimpleNamespace(
+        config=None,
+        md_root=tmp_path,
+        config_dir=None,
+        config_glob="*.json",
+        duplicate_policy="highest_config_order",
+        t_min=None,
+        t_max=None,
+        dump_format="lammps-dump-text",
+        type_map=["1=O", "2=U"],
+        dt=None,
+        dump_every=500,
+        window_ps=5.0,
+        frame_step=None,
+        outdir=tmp_path / "series",
+        rmax=6.0,
+        dr=0.1,
+        qmax=6.0,
+        dq=0.2,
+        gr_rmax=None,
+        gr_dr=None,
+        scattering="custom",
+        weights=["U=92", "O=8"],
+        window_function="lorch",
+        no_plots=False,
+        archive_path=None,
+        no_archive_output=True,
+        write_selected_extxyz=False,
+    )
+
+    summary = rdf_pdf.run_series(args)
+
+    assert len(summary["series"]) == 2
+    assert (args.outdir / "series_index.csv").exists()
+    assert (args.outdir / "series_summary.json").exists()
+    assert (args.outdir / "overlay_weighted_gr.png").exists()
+    assert (args.outdir / "T_300K" / "T_300K_pdfgui_GofR.gr").exists()
+    assert (args.outdir / "T_600K" / "T_600K_rmcprofile_SofQ.sq").exists()
