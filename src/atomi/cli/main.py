@@ -154,6 +154,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         lammps_pdf_match.add_argument("pdf_match_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("xafs_lammps_prepare", "xafs_larch_run", "xafs_md_compare"):
+        xafs_command = subparsers.add_parser(
+            command_name,
+            help="Prepare, run, or compare MD-ensemble XAFS through Larch/FEFF.",
+        )
+        xafs_command.add_argument("xafs_args", nargs=argparse.REMAINDER)
+
     for command_name in ("thermo_lammps", "lammps-thermo-series"):
         lammps_thermo_series = subparsers.add_parser(
             command_name,
@@ -513,6 +520,21 @@ def main(argv: list[str] | None = None) -> None:
 
         reweight_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "xafs_lammps_prepare":
+        from atomi.xafs.larch_md import prepare_main
+
+        prepare_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "xafs_larch_run":
+        from atomi.xafs.larch_md import larch_run_main
+
+        larch_run_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "xafs_md_compare":
+        from atomi.xafs.larch_md import compare_main
+
+        compare_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] in ("thermo_lammps", "lammps-thermo-series"):
         from atomi.lammps.thermo_series import main as thermo_series_main
 
@@ -806,6 +828,24 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.lammps.pdf_match import reweight_main
 
         reweight_main(args.pdf_match_args)
+        return
+
+    if args.subcommand == "xafs_lammps_prepare":
+        from atomi.xafs.larch_md import prepare_main
+
+        prepare_main(args.xafs_args)
+        return
+
+    if args.subcommand == "xafs_larch_run":
+        from atomi.xafs.larch_md import larch_run_main
+
+        larch_run_main(args.xafs_args)
+        return
+
+    if args.subcommand == "xafs_md_compare":
+        from atomi.xafs.larch_md import compare_main
+
+        compare_main(args.xafs_args)
         return
 
     if args.subcommand in ("thermo_lammps", "lammps-thermo-series"):
