@@ -639,13 +639,19 @@ def plot_frame_overlay(
         return False
 
     fig, ax = plt.subplots(figsize=(7, 4))
-    for values in columns.values():
-        ax.plot(x, values, color="0.65", alpha=0.35, linewidth=0.7)
-    ax.plot(x, average, color="black", linewidth=1.8, label="window average")
+    cmap = plt.get_cmap("viridis")
+    colors = cmap(np.linspace(0.08, 0.92, max(len(columns), 1)))
+    for color, (label, values) in zip(colors, columns.items()):
+        ax.plot(x, values, color=color, alpha=0.35, linewidth=0.8, label=label)
+    ax.plot(x, average, color="black", linewidth=2.6, label="averaged structure")
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
-    ax.legend(frameon=False)
+    handles, labels = ax.get_legend_handles_labels()
+    if len(handles) > 8:
+        handles = [handles[0], handles[-2], handles[-1]]
+        labels = [labels[0], labels[-2], labels[-1]]
+    ax.legend(handles, labels, frameon=False)
     fig.tight_layout()
     fig.savefig(path, dpi=180)
     plt.close(fig)
@@ -835,6 +841,46 @@ def plot_temperature_uq(
     return True
 
 
+def plot_multi_temperature_uq(
+    path: Path,
+    series: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]],
+    xlabel: str,
+    ylabel: str,
+    title: str,
+) -> bool:
+    try:
+        cache = Path(tempfile.gettempdir()) / "atomi-matplotlib"
+        cache.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("MPLCONFIGDIR", str(cache))
+        os.environ.setdefault("XDG_CACHE_HOME", str(cache))
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return False
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    cmap = plt.get_cmap("tab10")
+    for i, (label, (T, y, yerr)) in enumerate(sorted(series.items())):
+        order = np.argsort(T)
+        T = np.asarray(T, dtype=float)[order]
+        y = np.asarray(y, dtype=float)[order]
+        yerr = np.asarray(yerr, dtype=float)[order]
+        color = cmap(i % 10)
+        ax.fill_between(T, y - yerr, y + yerr, color=color, alpha=0.12)
+        ax.errorbar(T, y, yerr=yerr, fmt="o", color=color, capsize=3, linewidth=1.0, label=label)
+        ax.plot(T, y, color=color, linewidth=1.5)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return True
+
+
 def write_series_structure_adp_outputs(outdir: Path, series_items: list[dict], no_plots: bool) -> dict:
     structure_rows = []
     adp_rows = []
@@ -918,6 +964,7 @@ def write_series_structure_adp_outputs(outdir: Path, series_items: list[dict], n
         write_rows_csv(adp_path, adp_rows, adp_fields)
         outputs["adp_csv"] = str(adp_path)
         if not no_plots:
+            combined: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
             for symbol in sorted({str(row["symbol"]) for row in adp_rows}):
                 rows = [row for row in adp_rows if str(row["symbol"]) == symbol]
                 T = np.asarray([row["temperature"] for row in rows], dtype=float)
@@ -934,6 +981,16 @@ def write_series_structure_adp_outputs(outdir: Path, series_items: list[dict], n
                 path = outdir / f"series_Uiso_{symbol}_vs_T_UQ.png"
                 if plot_temperature_uq(path, T, y, yerr, "Temperature (K)", f"{symbol} Uiso (A^2)", f"{symbol} Uiso vs T"):
                     outputs["plots"].append(str(path))
+                combined[symbol] = (T, y, yerr)
+            combined_path = outdir / "series_Uiso_all_elements_vs_T_UQ.png"
+            if combined and plot_multi_temperature_uq(
+                combined_path,
+                combined,
+                "Temperature (K)",
+                "Uiso (A^2)",
+                "Element Uiso vs T",
+            ):
+                outputs["plots"].append(str(combined_path))
     if outputs.get("plots"):
         outputs["uncertainty_note"] = (
             "Volume/lattice UQ uses selected-frame SEM within each NPT window. "
@@ -1466,7 +1523,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--frame-overlays",
         action="store_true",
-        help="Write per-frame overlay CSV/PNG curves for the selected time window.",
+        help="Write per-frame overlay CSV/PNG curves for the selected time window. In series mode this is done inside each T folder.",
     )
     parser.add_argument(
         "--frame-overlay-step",

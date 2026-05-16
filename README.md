@@ -89,9 +89,9 @@ The command names and options may evolve as workflows are cleaned up, so use `--
 
 For LAMMPS total-scattering analysis, `pdf_lammps` accepts a single dump or trajectory, while `pdf_lammps_series` can scan a config file or MD root and analyze only NPT stages. Series outputs include per-temperature RDF/PDF/S(Q)/F(Q) files, explicit PDFgui/RMC-style fitting exports, transition-colored overlay plots, a `series_index.csv`, `series_summary.json`, and a default `.tar.gz` archive.
 
-Single-temperature `pdf_lammps` averages RDF/PDF/S(Q)/F(Q) over the selected time window. Optional `--frame-overlays` writes per-frame overlay curves from that same window, and `--adp` writes per-atom and per-species Uiso/Biso displacement summaries in Angstrom-squared units.
+Single-temperature `pdf_lammps` averages RDF/PDF/S(Q)/F(Q) over the selected time window. Optional `--frame-overlays` writes per-frame overlay curves from that same window, with the averaged structure shown as a thick solid curve, and `--adp` writes per-atom and per-species Uiso/Biso displacement summaries in Angstrom-squared units.
 
-For `pdf_lammps_series`, `--adp` also aggregates selected-window volume, lattice parameters, and per-element Uiso versus temperature, with uncertainty plots from frame-window/statistical spreads. Long series analyses can be prepared for Slurm with `--write-sbatch` or submitted directly with `--submit`.
+For `pdf_lammps_series`, `--frame-overlays` writes those dynamic per-frame G(r)/S(Q) overlay plots inside each temperature folder. `--adp` also aggregates selected-window volume, lattice parameters, and per-element Uiso versus temperature, with uncertainty plots from frame-window/statistical spreads and one combined all-element Uiso plot. Long series analyses can be prepared for Slurm with `--write-sbatch` or submitted directly with `--submit`.
 
 Experimental PDF matching starts with `pdf_md_compare` for ranking MD-derived curves against PDFgetX/PDFgui/RMC-style two-column data, followed by `pdf_md_reweight` for conservative maximum-entropy-style reweighting of MD temperature/window candidates.
 

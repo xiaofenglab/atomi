@@ -253,6 +253,7 @@ def test_series_mode_uses_npt_records_and_writes_overlays(tmp_path, monkeypatch)
     assert (args.outdir / "series_adp_Uiso_vs_T.csv").exists()
     assert (args.outdir / "series_volume_vs_T_UQ.png").exists()
     assert (args.outdir / "series_Uiso_U_vs_T_UQ.png").exists()
+    assert (args.outdir / "series_Uiso_all_elements_vs_T_UQ.png").exists()
     assert (args.outdir / "overlay_weighted_gr.png").exists()
     assert (args.outdir / "T_300K" / "T_300K_pdfgui_GofR.gr").exists()
     assert (args.outdir / "T_300K" / "T_300K_pdfgui_GofR_direct_4col.gr").exists()
@@ -308,3 +309,19 @@ def test_series_mode_writes_sbatch_without_running(tmp_path, monkeypatch) -> Non
     assert "#SBATCH --cpus-per-task=16" in sbatch_text
     assert "#SBATCH --mem=128G" in sbatch_text
     assert (outdir / "series_sbatch_summary.json").exists()
+
+
+def test_frame_overlay_plot_writes_average_and_frame_curves(tmp_path) -> None:
+    x = np.linspace(0.0, 4.0, 10)
+    path = tmp_path / "overlay.png"
+    ok = rdf_pdf.plot_frame_overlay(
+        path,
+        x,
+        {"frame_000000": np.sin(x), "frame_000001": np.cos(x)},
+        0.5 * (np.sin(x) + np.cos(x)),
+        "x",
+        "G(r)",
+        "Frame overlay",
+    )
+    assert ok
+    assert path.exists()
