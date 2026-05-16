@@ -89,6 +89,8 @@ The command names and options may evolve as workflows are cleaned up, so use `--
 
 For LAMMPS total-scattering analysis, `pdf_lammps` accepts a single dump or trajectory, while `pdf_lammps_series` can scan a config file or MD root and analyze only NPT stages. Series outputs include per-temperature RDF/PDF/S(Q)/F(Q) files, explicit PDFgui/RMC-style fitting exports, transition-colored overlay plots, a `series_index.csv`, `series_summary.json`, and a default `.tar.gz` archive.
 
+Experimental PDF matching starts with `pdf_md_compare` for ranking MD-derived curves against PDFgetX/PDFgui/RMC-style two-column data, followed by `pdf_md_reweight` for conservative maximum-entropy-style reweighting of MD temperature/window candidates.
+
 ## HPC Environment Check
 
 Before using Atomi on a new cluster, run the environment doctor and review the generated report. The report checks common executables, scheduler commands, plotting tools, atomistic engine names, and Python packages used by the packaged workflows.

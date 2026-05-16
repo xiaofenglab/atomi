@@ -147,6 +147,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         lammps_rdf_pdf.add_argument("rdf_pdf_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("pdf_md_compare", "pdf_md_reweight"):
+        lammps_pdf_match = subparsers.add_parser(
+            command_name,
+            help="Compare or reweight MD-derived PDF/S(Q)/F(Q) against experiment.",
+        )
+        lammps_pdf_match.add_argument("pdf_match_args", nargs=argparse.REMAINDER)
+
     for command_name in ("thermo_lammps", "lammps-thermo-series"):
         lammps_thermo_series = subparsers.add_parser(
             command_name,
@@ -484,6 +491,16 @@ def main(argv: list[str] | None = None) -> None:
 
         lammps_rdf_pdf_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "pdf_md_compare":
+        from atomi.lammps.pdf_match import compare_main
+
+        compare_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "pdf_md_reweight":
+        from atomi.lammps.pdf_match import reweight_main
+
+        reweight_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] in ("thermo_lammps", "lammps-thermo-series"):
         from atomi.lammps.thermo_series import main as thermo_series_main
 
@@ -755,6 +772,18 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.lammps.rdf_pdf import main as lammps_rdf_pdf_main
 
         lammps_rdf_pdf_main(args.rdf_pdf_args)
+        return
+
+    if args.subcommand == "pdf_md_compare":
+        from atomi.lammps.pdf_match import compare_main
+
+        compare_main(args.pdf_match_args)
+        return
+
+    if args.subcommand == "pdf_md_reweight":
+        from atomi.lammps.pdf_match import reweight_main
+
+        reweight_main(args.pdf_match_args)
         return
 
     if args.subcommand in ("thermo_lammps", "lammps-thermo-series"):
