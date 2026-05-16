@@ -770,10 +770,58 @@ def collect_pdfgetx3_outputs(exp_dir: Path, stem: str) -> dict:
     return outputs
 
 
+def instrument_correction_metadata(args: argparse.Namespace) -> dict:
+    files = {
+        "sample": {
+            "path": str(args.exp_raw_sample.resolve()) if args.exp_raw_sample else None,
+            "role": "sample plus all measured sample-environment contributions",
+            "provided": args.exp_raw_sample is not None,
+        },
+        "empty_container": {
+            "path": str(args.exp_raw_empty.resolve()) if args.exp_raw_empty else None,
+            "role": "empty cell/capillary/container response; implicitly carries matching container geometry and instrument state",
+            "provided": args.exp_raw_empty is not None,
+        },
+        "background": {
+            "path": str(args.exp_raw_background.resolve()) if args.exp_raw_background else None,
+            "role": "air/instrument/background response; implicitly carries beamline and detector background information",
+            "provided": args.exp_raw_background is not None,
+        },
+        "reference": {
+            "path": str(args.exp_raw_reference.resolve()) if args.exp_raw_reference else None,
+            "role": "optional standard/reference response for calibration or normalization checks",
+            "provided": args.exp_raw_reference is not None,
+        },
+    }
+    provided = [name for name, payload in files.items() if payload["provided"]]
+    note = (
+        "Instrument/background information is represented by the supplied empty-container, "
+        "background, and reference measurements. Atomi records those files as correction "
+        "carriers and passes them to PDFGetX3; no separate instrument metadata file is "
+        "required for this workflow."
+    )
+    if not args.exp_raw_empty and not args.exp_raw_background:
+        note += (
+            " No empty/background correction file was supplied, so instrument/background "
+            "correction is limited to the sample file and PDFGetX3 defaults."
+        )
+    return {
+        "provided_roles": provided,
+        "files": files,
+        "note": note,
+        "pdfgetx3_mapping": {
+            "containerfile": files["empty_container"]["path"],
+            "backgroundfile": files["background"]["path"],
+            "referencefile": files["reference"]["path"],
+        },
+    }
+
+
 def write_pdfgetx3_process_log(path: Path, info: dict) -> None:
     prep = info.get("prep", {})
     pdfgetx = info.get("pdfgetx3", {})
     run_result = info.get("run_result", {})
+    instrument = info.get("instrument_corrections", {})
     lines = [
         "PDFgetX3 Reduction Process",
         "=" * 32,
@@ -786,6 +834,11 @@ def write_pdfgetx3_process_log(path: Path, info: dict) -> None:
         f"run_script: {info.get('run_script')}",
         f"expected_output: {pdfgetx.get('expected_output')}",
         f"output_ready: {info.get('output_ready')}",
+        "",
+        "Instrument / Correction Provenance",
+        instrument.get("note", ""),
+        f"provided_roles: {instrument.get('provided_roles')}",
+        json.dumps(instrument.get("files", {}), indent=2),
         "",
         "Composition / Density",
         f"composition: {prep.get('composition')}",
@@ -858,6 +911,7 @@ def prepare_experiment_input(args: argparse.Namespace, series_dir: Path, quantit
         "raw_empty": str(args.exp_raw_empty.resolve()) if args.exp_raw_empty else None,
         "raw_background": str(args.exp_raw_background.resolve()) if args.exp_raw_background else None,
         "raw_reference": str(args.exp_raw_reference.resolve()) if args.exp_raw_reference else None,
+        "instrument_corrections": instrument_correction_metadata(args),
         "run_script": str(run_script),
         "prep": prep,
         "pdfgetx3": pdfgetx_info,

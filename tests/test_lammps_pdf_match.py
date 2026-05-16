@@ -127,6 +127,10 @@ def test_compare_prepares_pdfgetx3_raw_chi_from_md_density(tmp_path) -> None:
     (series_dir / "series_summary.json").write_text(json.dumps(metadata), encoding="utf-8")
     sample = tmp_path / "sample.chi"
     write_xy(sample, np.linspace(0.5, 5.0, 10), np.ones(10))
+    empty = tmp_path / "empty.chi"
+    background = tmp_path / "background.chi"
+    write_xy(empty, np.linspace(0.5, 5.0, 10), np.zeros(10))
+    write_xy(background, np.linspace(0.5, 5.0, 10), np.zeros(10))
     outdir = tmp_path / "raw_compare"
 
     pdf_match.compare_main(
@@ -135,6 +139,10 @@ def test_compare_prepares_pdfgetx3_raw_chi_from_md_density(tmp_path) -> None:
             str(series_dir),
             "--exp-raw-sample",
             str(sample),
+            "--exp-raw-empty",
+            str(empty),
+            "--exp-raw-background",
+            str(background),
             "--outdir",
             str(outdir),
             "--quantity",
@@ -153,13 +161,19 @@ def test_compare_prepares_pdfgetx3_raw_chi_from_md_density(tmp_path) -> None:
     assert "composition = U 1 O 2" in text
     assert "density =" in text
     assert "outputtype = iq sq fq gr" in text
+    assert "containerfile =" in text
+    assert "backgroundfile =" in text
     run_script = outdir / "pdfgetx3_exp" / "run_pdfgetx3.sh"
     assert run_script.exists()
     assert "logs/pdfgetx3.stdout.log" in run_script.read_text(encoding="utf-8")
-    assert (outdir / "pdfgetx3_exp" / "pdfgetx3_process.log").exists()
+    process_log = (outdir / "pdfgetx3_exp" / "pdfgetx3_process.log").read_text(encoding="utf-8")
+    assert "Instrument / Correction Provenance" in process_log
+    assert "empty-container" in process_log
     prep = json.loads((outdir / "pdfgetx3_exp" / "pdfgetx3_prep_metadata.json").read_text(encoding="utf-8"))
     assert prep["prep"]["density_source"] == "md"
     assert prep["output_ready"] is False
+    assert prep["instrument_corrections"]["files"]["empty_container"]["provided"] is True
+    assert prep["instrument_corrections"]["files"]["background"]["provided"] is True
 
 
 def test_compare_collects_pdfgetx3_reduced_outputs(tmp_path) -> None:
