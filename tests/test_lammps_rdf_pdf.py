@@ -125,6 +125,10 @@ def test_run_from_existing_traj_can_use_custom_reader(tmp_path, monkeypatch) -> 
         fitting_exports="auto",
         pdfgui_dr_uncertainty=0.0,
         pdfgui_dgr=1.0,
+        frame_overlays=True,
+        frame_overlay_step=1,
+        frame_overlay_max=0,
+        adp=True,
         no_plots=True,
         archive_path=None,
         no_archive_output=False,
@@ -140,6 +144,12 @@ def test_run_from_existing_traj_can_use_custom_reader(tmp_path, monkeypatch) -> 
     assert (tmp_path / "uo2_pdfgui_GofR_from_FQ_4col.gr").exists()
     assert (tmp_path / "uo2_rmcprofile_iQ_Sminus1.dat").exists()
     assert (tmp_path / "uo2_rmcprofile_pdfgetx_FQ_QSminus1.dat").exists()
+    assert (tmp_path / "uo2_frame_overlay_gtot.csv").exists()
+    assert (tmp_path / "uo2_frame_overlay_SofQ.csv").exists()
+    assert (tmp_path / "uo2_adp_atoms.csv").exists()
+    assert (tmp_path / "uo2_adp_species.csv").exists()
+    assert summary["outputs"]["adp"]["species_adp_csv"].endswith("uo2_adp_species.csv")
+    assert summary["outputs"]["frame_overlays"]["n_overlay_frames"] == 1
     assert summary["outputs"]["fitting_exports"]["pdfgui_GofR_direct_4col"].endswith(
         "uo2_pdfgui_GofR_direct_4col.gr"
     )
@@ -152,6 +162,7 @@ def test_run_from_existing_traj_can_use_custom_reader(tmp_path, monkeypatch) -> 
     assert f"{tmp_path.name}/uo2_summary.json" in names
     assert f"{tmp_path.name}/uo2_pdfgui_GofR.gr" in names
     assert f"{tmp_path.name}/uo2_pdfgui_GofR_direct_4col.gr" in names
+    assert f"{tmp_path.name}/uo2_adp_species.csv" in names
 
 
 def test_series_mode_uses_npt_records_and_writes_overlays(tmp_path, monkeypatch) -> None:
@@ -215,6 +226,10 @@ def test_series_mode_uses_npt_records_and_writes_overlays(tmp_path, monkeypatch)
         fitting_exports="auto",
         pdfgui_dr_uncertainty=0.0,
         pdfgui_dgr=1.0,
+        frame_overlays=False,
+        frame_overlay_step=1,
+        frame_overlay_max=0,
+        adp=False,
         no_plots=False,
         archive_path=None,
         no_archive_output=True,

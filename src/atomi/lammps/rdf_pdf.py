@@ -465,6 +465,14 @@ def write_multi_csv(path: Path, xname: str, x: np.ndarray, columns: dict[str, np
             writer.writerow([xi] + [columns[key][i] for key in columns])
 
 
+def write_rows_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+
 def write_json(path: Path, data: dict) -> None:
     def normalize(value):
         if isinstance(value, np.generic):
@@ -494,6 +502,240 @@ def read_xy(path: Path) -> tuple[np.ndarray, np.ndarray]:
             x_values.append(float(parts[0]))
             y_values.append(float(parts[1]))
     return np.asarray(x_values, dtype=float), np.asarray(y_values, dtype=float)
+
+
+def compute_total_curve_bundle(
+    frames: list,
+    species_order: list[str],
+    r_edges: np.ndarray,
+    q_values: np.ndarray,
+    r_from_fq: np.ndarray,
+    scattering: str,
+    weights_items: list[str],
+    window_function: str,
+    qmax: float,
+    form_factors: Optional[dict[str, np.ndarray]] = None,
+) -> dict:
+    pair_hist, avg_counts, avg_volume, n_frames = compute_partial_histograms(frames, species_order, r_edges)
+    r, partial = normalize_partial_rdfs(pair_hist, avg_counts, avg_volume, n_frames, r_edges)
+    rho0 = sum(avg_counts.values()) / avg_volume
+    if scattering == "custom":
+        weights = parse_weights(weights_items)
+        g_total, conc = weighted_total_gr_constant(species_order, partial, avg_counts, weights)
+        sq, _ = partials_to_sq_constant(species_order, partial, avg_counts, weights, rho0, r, q_values)
+    elif scattering == "neutron":
+        weights = neutron_weights(species_order)
+        g_total, conc = weighted_total_gr_constant(species_order, partial, avg_counts, weights)
+        sq, _ = partials_to_sq_constant(species_order, partial, avg_counts, weights, rho0, r, q_values)
+    else:
+        if form_factors is None:
+            form_factors = xray_form_factors(species_order, q_values)
+        if form_factors is None:
+            weights = atomic_number_weights(species_order)
+            g_total, conc = weighted_total_gr_constant(species_order, partial, avg_counts, weights)
+            sq, _ = partials_to_sq_constant(species_order, partial, avg_counts, weights, rho0, r, q_values)
+        else:
+            sq, conc = partials_to_sq_xray(species_order, partial, avg_counts, form_factors, rho0, r, q_values)
+            q0_weights = {s: float(form_factors[s][0]) for s in species_order}
+            g_total, _ = weighted_total_gr_constant(species_order, partial, avg_counts, q0_weights)
+    gr_direct = gr_to_gr_direct(r, g_total, rho0)
+    fq = q_values * (sq - 1.0)
+    fq_windowed, _ = apply_window(q_values, fq, window_function, qmax)
+    gr_from_fq = fq_to_gr(q_values, fq_windowed, r_from_fq)
+    return {
+        "r": r,
+        "q": q_values,
+        "g_total": g_total,
+        "GofR_direct": gr_direct,
+        "SofQ": sq,
+        "FofQ": fq,
+        "FofQ_windowed": fq_windowed,
+        "r_from_fq": r_from_fq,
+        "GofR_from_FQ": gr_from_fq,
+        "avg_counts": avg_counts,
+        "avg_volume_A3": avg_volume,
+        "rho0_atoms_per_A3": rho0,
+        "concentrations": conc,
+    }
+
+
+def select_frame_overlay_indices(n_frames: int, step: int, max_frames: int) -> list[int]:
+    step = max(1, int(step))
+    indices = list(range(0, n_frames, step))
+    if max_frames > 0 and len(indices) > max_frames:
+        stride = int(math.ceil(len(indices) / max_frames))
+        indices = indices[::stride][:max_frames]
+    return indices
+
+
+def plot_frame_overlay(
+    path: Path,
+    x: np.ndarray,
+    columns: dict[str, np.ndarray],
+    average: np.ndarray,
+    xlabel: str,
+    ylabel: str,
+    title: str,
+) -> bool:
+    try:
+        cache = Path(tempfile.gettempdir()) / "atomi-matplotlib"
+        cache.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("MPLCONFIGDIR", str(cache))
+        os.environ.setdefault("XDG_CACHE_HOME", str(cache))
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return False
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    for values in columns.values():
+        ax.plot(x, values, color="0.65", alpha=0.35, linewidth=0.7)
+    ax.plot(x, average, color="black", linewidth=1.8, label="window average")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return True
+
+
+def write_frame_overlay_outputs(
+    outdir: Path,
+    prefix: str,
+    frames: list,
+    species_order: list[str],
+    r_edges: np.ndarray,
+    q_values: np.ndarray,
+    r_from_fq: np.ndarray,
+    args: argparse.Namespace,
+    averages: dict[str, np.ndarray],
+) -> dict:
+    indices = select_frame_overlay_indices(len(frames), args.frame_overlay_step, args.frame_overlay_max)
+    form_factors = xray_form_factors(species_order, q_values) if args.scattering == "xray" else None
+    bundles = []
+    for idx in indices:
+        bundles.append(
+            (
+                idx,
+                compute_total_curve_bundle(
+                    [frames[idx]],
+                    species_order,
+                    r_edges,
+                    q_values,
+                    r_from_fq,
+                    args.scattering,
+                    args.weights,
+                    args.window_function,
+                    args.qmax,
+                    form_factors=form_factors,
+                ),
+            )
+        )
+    written: dict[str, object] = {
+        "n_total_frames": len(frames),
+        "n_overlay_frames": len(indices),
+        "frame_indices_0based": indices,
+        "csv": {},
+        "plots": [],
+    }
+    curve_defs = [
+        ("g_total", "r", "frame_overlay_gtot.csv", "frame_overlay_gtot.png", "r (A)", "g(r)", averages["g_total"]),
+        (
+            "GofR_direct",
+            "r",
+            "frame_overlay_GofR_direct.csv",
+            "frame_overlay_GofR_direct.png",
+            "r (A)",
+            "G(r)",
+            averages["GofR_direct"],
+        ),
+        (
+            "GofR_from_FQ",
+            "r_from_fq",
+            "frame_overlay_GofR_from_FQ.csv",
+            "frame_overlay_GofR_from_FQ.png",
+            "r (A)",
+            "G(r)",
+            averages["GofR_from_FQ"],
+        ),
+        ("SofQ", "q", "frame_overlay_SofQ.csv", "frame_overlay_SofQ.png", "Q (A^-1)", "S(Q)", averages["SofQ"]),
+        ("FofQ", "q", "frame_overlay_FofQ.csv", "frame_overlay_FofQ.png", "Q (A^-1)", "F(Q)", averages["FofQ"]),
+    ]
+    for key, x_key, csv_name, png_name, xlabel, ylabel, avg in curve_defs:
+        columns = {f"frame_{idx:06d}": bundle[key] for idx, bundle in bundles}
+        x = bundles[0][1][x_key]
+        csv_path = outdir / f"{prefix}_{csv_name}"
+        write_multi_csv(csv_path, x_key, x, columns)
+        written["csv"][key] = str(csv_path)
+        if not args.no_plots:
+            png_path = outdir / f"{prefix}_{png_name}"
+            if plot_frame_overlay(png_path, x, columns, avg, xlabel, ylabel, f"Per-frame {ylabel} overlay"):
+                written["plots"].append(str(png_path))
+    return written
+
+
+def compute_adp_from_frames(frames: list) -> tuple[list[dict], list[dict]]:
+    if len(frames) < 2:
+        return [], []
+    ref = frames[0]
+    symbols = ref.get_chemical_symbols()
+    natoms = len(symbols)
+    ref_cell = np.asarray(ref.cell.array, dtype=float)
+    ref_frac = ref.get_positions() @ np.linalg.inv(ref_cell)
+
+    unwrapped_fracs = []
+    cells = []
+    for atoms in frames:
+        if len(atoms) != natoms or atoms.get_chemical_symbols() != symbols:
+            raise ValueError("ADP calculation needs fixed atom order and species across frames.")
+        cell = np.asarray(atoms.cell.array, dtype=float)
+        frac = atoms.get_positions() @ np.linalg.inv(cell)
+        unwrapped_fracs.append(ref_frac + minimum_image_deltas(frac - ref_frac))
+        cells.append(cell)
+
+    fracs = np.asarray(unwrapped_fracs, dtype=float)
+    mean_frac = np.mean(fracs, axis=0)
+    atom_rows = []
+    for i, symbol in enumerate(symbols):
+        displacements = np.asarray([(fracs[j, i] - mean_frac[i]) @ cells[j] for j in range(len(frames))], dtype=float)
+        cov = displacements.T @ displacements / len(frames)
+        uiso = float(np.trace(cov) / 3.0)
+        atom_rows.append(
+            {
+                "atom_index_1based": i + 1,
+                "symbol": symbol,
+                "U11_A2": cov[0, 0],
+                "U22_A2": cov[1, 1],
+                "U33_A2": cov[2, 2],
+                "U12_A2": cov[0, 1],
+                "U13_A2": cov[0, 2],
+                "U23_A2": cov[1, 2],
+                "Uiso_A2": uiso,
+                "Biso_A2": 8.0 * math.pi**2 * uiso,
+                "rms_displacement_A": math.sqrt(max(uiso * 3.0, 0.0)),
+            }
+        )
+
+    species_rows = []
+    for symbol in sorted(set(symbols)):
+        values = np.asarray([row["Uiso_A2"] for row in atom_rows if row["symbol"] == symbol], dtype=float)
+        species_rows.append(
+            {
+                "symbol": symbol,
+                "n_atoms": len(values),
+                "Uiso_mean_A2": float(np.mean(values)),
+                "Uiso_std_A2": float(np.std(values)),
+                "Uiso_min_A2": float(np.min(values)),
+                "Uiso_max_A2": float(np.max(values)),
+                "Biso_mean_A2": float(8.0 * math.pi**2 * np.mean(values)),
+                "rms_displacement_mean_A": float(np.mean(np.sqrt(np.maximum(values * 3.0, 0.0)))),
+            }
+        )
+    return atom_rows, species_rows
 
 
 def plot_outputs(
@@ -752,6 +994,10 @@ def run_series(args: argparse.Namespace) -> dict:
             fitting_exports=args.fitting_exports,
             pdfgui_dr_uncertainty=args.pdfgui_dr_uncertainty,
             pdfgui_dgr=args.pdfgui_dgr,
+            frame_overlays=args.frame_overlays,
+            frame_overlay_step=args.frame_overlay_step,
+            frame_overlay_max=args.frame_overlay_max,
+            adp=args.adp,
             no_plots=args.no_plots,
             archive_path=None,
             no_archive_output=True,
@@ -913,6 +1159,28 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="Placeholder dG uncertainty column for PDFgui four-column .gr exports.",
+    )
+    parser.add_argument(
+        "--frame-overlays",
+        action="store_true",
+        help="Write per-frame overlay CSV/PNG curves for the selected time window.",
+    )
+    parser.add_argument(
+        "--frame-overlay-step",
+        type=int,
+        default=1,
+        help="Use every Nth selected frame for --frame-overlays.",
+    )
+    parser.add_argument(
+        "--frame-overlay-max",
+        type=int,
+        default=0,
+        help="Maximum frames to overlay after stepping; 0 means all selected frames.",
+    )
+    parser.add_argument(
+        "--adp",
+        action="store_true",
+        help="Estimate per-atom and per-species Uiso/Biso from selected-frame displacements.",
     )
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument(
@@ -1097,6 +1365,63 @@ def run(args: argparse.Namespace) -> dict:
         {"G_r_from_FQ": gr_from_fq},
     )
 
+    frame_overlay_outputs = {}
+    if args.frame_overlays:
+        frame_overlay_outputs = write_frame_overlay_outputs(
+            args.outdir,
+            args.prefix,
+            frames,
+            species_order,
+            r_edges,
+            q_values,
+            r_from_fq,
+            args,
+            {
+                "g_total": g_total,
+                "GofR_direct": gr_direct,
+                "GofR_from_FQ": gr_from_fq,
+                "SofQ": sq,
+                "FofQ": fq,
+            },
+        )
+
+    adp_outputs = {}
+    if args.adp:
+        atom_rows, species_rows = compute_adp_from_frames(frames)
+        atom_path = args.outdir / f"{args.prefix}_adp_atoms.csv"
+        species_path = args.outdir / f"{args.prefix}_adp_species.csv"
+        atom_fields = [
+            "atom_index_1based",
+            "symbol",
+            "U11_A2",
+            "U22_A2",
+            "U33_A2",
+            "U12_A2",
+            "U13_A2",
+            "U23_A2",
+            "Uiso_A2",
+            "Biso_A2",
+            "rms_displacement_A",
+        ]
+        species_fields = [
+            "symbol",
+            "n_atoms",
+            "Uiso_mean_A2",
+            "Uiso_std_A2",
+            "Uiso_min_A2",
+            "Uiso_max_A2",
+            "Biso_mean_A2",
+            "rms_displacement_mean_A",
+        ]
+        write_rows_csv(atom_path, atom_rows, atom_fields)
+        write_rows_csv(species_path, species_rows, species_fields)
+        adp_outputs = {
+            "atom_adp_csv": str(atom_path),
+            "species_adp_csv": str(species_path),
+            "n_frames": len(frames),
+            "note": "U values are in Angstrom^2 from selected-window Cartesian displacements; Biso = 8*pi^2*Uiso.",
+        }
+
     plots = []
     if not args.no_plots:
         plots = plot_outputs(
@@ -1131,6 +1456,9 @@ def run(args: argparse.Namespace) -> dict:
         "gr_dr_A": gr_dr,
         "window_function": args.window_function,
         "scattering": scattering_meta,
+        "window_average_note": "RDF/PDF/S(Q)/F(Q) outputs are averaged over all selected frames in the time window.",
+        "frame_overlay_outputs": frame_overlay_outputs,
+        "adp_outputs": adp_outputs,
         "fitting_export_notes": {
             "pdfgui_4col": "PDFgui/PDFfit2-style r, G(r), dr, dG(r). The dr and dG columns are placeholder uncertainties.",
             "rmcprofile_SQ": "Two-column normalized S(Q), expected to approach 1 at high Q.",
@@ -1154,6 +1482,8 @@ def run(args: argparse.Namespace) -> dict:
             "rmcprofile_SofQ": str(args.outdir / f"{args.prefix}_rmcprofile_SofQ.sq"),
             "rmcprofile_FofQ": str(args.outdir / f"{args.prefix}_rmcprofile_FofQ.fq"),
             "fitting_exports": fitting_exports,
+            "frame_overlays": frame_overlay_outputs,
+            "adp": adp_outputs,
         },
     }
     write_json(args.outdir / f"{args.prefix}_summary.json", summary)
