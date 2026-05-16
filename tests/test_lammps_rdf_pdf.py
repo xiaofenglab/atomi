@@ -258,3 +258,53 @@ def test_series_mode_uses_npt_records_and_writes_overlays(tmp_path, monkeypatch)
     assert (args.outdir / "T_300K" / "T_300K_pdfgui_GofR_direct_4col.gr").exists()
     assert (args.outdir / "T_300K" / "T_300K_rmcprofile_iQ_Sminus1.dat").exists()
     assert (args.outdir / "T_600K" / "T_600K_rmcprofile_SofQ.sq").exists()
+
+
+def test_series_mode_writes_sbatch_without_running(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path / "config.json"
+    config.write_text("{}", encoding="utf-8")
+    outdir = tmp_path / "pdf_jobs"
+
+    rdf_pdf.main(
+        [
+            "--config",
+            str(config),
+            "--outdir",
+            str(outdir),
+            "--type-map",
+            "1=O",
+            "2=U",
+            "--window-ps",
+            "20",
+            "--adp",
+            "--write-sbatch",
+            "--job-name",
+            "uo2_pdf",
+            "--time",
+            "24:00:00",
+            "--cpus",
+            "16",
+            "--mem",
+            "128G",
+            "--module",
+            "chem/python",
+        ]
+    )
+
+    run_script = outdir / "run_pdf_lammps_series.sh"
+    sbatch_script = outdir / "submit_pdf_lammps_series.sbatch"
+    assert run_script.exists()
+    assert sbatch_script.exists()
+    run_text = run_script.read_text(encoding="utf-8")
+    assert "python -m atomi.cli.main pdf_lammps_series" in run_text
+    assert "--window-ps 20" in run_text
+    assert "--adp" in run_text
+    assert "--write-sbatch" not in run_text
+    assert "module load chem/python" in run_text
+    sbatch_text = sbatch_script.read_text(encoding="utf-8")
+    assert "#SBATCH --job-name=uo2_pdf" in sbatch_text
+    assert "#SBATCH --time=24:00:00" in sbatch_text
+    assert "#SBATCH --cpus-per-task=16" in sbatch_text
+    assert "#SBATCH --mem=128G" in sbatch_text
+    assert (outdir / "series_sbatch_summary.json").exists()

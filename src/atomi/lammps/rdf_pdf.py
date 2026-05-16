@@ -8,6 +8,9 @@ import csv
 import json
 import math
 import os
+import shlex
+import subprocess
+import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
@@ -1133,6 +1136,100 @@ def discover_series_records(args: argparse.Namespace) -> tuple[list[dict], list[
     return records_all, records
 
 
+def strip_sbatch_generation_args(argv: list[str]) -> list[str]:
+    value_flags = {
+        "--run-script",
+        "--sbatch-script",
+        "--job-name",
+        "--time",
+        "--cpus",
+        "--mem",
+        "--module",
+    }
+    bool_flags = {"--write-sbatch", "--submit", "--module-purge"}
+    stripped: list[str] = []
+    skip_next = False
+    for item in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if item in bool_flags:
+            continue
+        if item in value_flags:
+            skip_next = True
+            continue
+        if any(item.startswith(flag + "=") for flag in value_flags):
+            continue
+        stripped.append(item)
+    return stripped
+
+
+def write_series_run_script(path: Path, argv: list[str], cwd: Path, module: str | None, module_purge: bool) -> None:
+    command = ["python", "-m", "atomi.cli.main", "pdf_lammps_series", *strip_sbatch_generation_args(argv)]
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "",
+        f"cd {shlex.quote(str(cwd))}",
+    ]
+    if module_purge:
+        lines.append("module purge")
+    if module:
+        lines.append(f"module load {shlex.quote(module)}")
+    lines.extend(
+        [
+            "",
+            " ".join(shlex.quote(part) for part in command),
+            "",
+        ]
+    )
+    path.write_text("\n".join(lines), encoding="utf-8")
+    path.chmod(0o755)
+
+
+def write_series_sbatch_script(
+    path: Path,
+    run_script: Path,
+    job_name: str,
+    time_limit: str,
+    cpus: int,
+    mem: str,
+) -> None:
+    logs_dir = path.parent / "logs"
+    content = f"""#!/usr/bin/env bash
+#SBATCH --job-name={job_name}
+#SBATCH --output={logs_dir.resolve()}/{job_name}_%j.out
+#SBATCH --error={logs_dir.resolve()}/{job_name}_%j.err
+#SBATCH --time={time_limit}
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task={cpus}
+#SBATCH --mem={mem}
+
+set -euo pipefail
+mkdir -p {shlex.quote(str(logs_dir.resolve()))}
+bash {shlex.quote(str(run_script.resolve()))}
+"""
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def prepare_series_sbatch(args: argparse.Namespace, argv: list[str], cwd: Path) -> dict:
+    args.outdir.mkdir(parents=True, exist_ok=True)
+    run_script = args.outdir / args.run_script
+    sbatch_script = args.outdir / args.sbatch_script
+    write_series_run_script(run_script, argv, cwd, args.module, args.module_purge)
+    write_series_sbatch_script(sbatch_script, run_script, args.job_name, args.time, args.cpus, args.mem)
+    payload = {
+        "run_script": str(run_script.resolve()),
+        "sbatch_script": str(sbatch_script.resolve()),
+        "submit_command": f"sbatch {shlex.quote(str(sbatch_script.resolve()))}",
+        "cwd": str(cwd),
+    }
+    write_json(args.outdir / "series_sbatch_summary.json", payload)
+    return payload
+
+
 def run_series(args: argparse.Namespace) -> dict:
     args.outdir.mkdir(parents=True, exist_ok=True)
     records_all, records = discover_series_records(args)
@@ -1388,6 +1485,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Estimate per-atom and per-species Uiso/Biso from selected-frame displacements.",
     )
+    parser.add_argument(
+        "--write-sbatch",
+        action="store_true",
+        help="For series mode, write run/Slurm scripts and exit instead of running analysis interactively.",
+    )
+    parser.add_argument("--run-script", default="run_pdf_lammps_series.sh")
+    parser.add_argument("--sbatch-script", default="submit_pdf_lammps_series.sbatch")
+    parser.add_argument("--job-name", default="pdf_lammps_series")
+    parser.add_argument("--time", default="12:00:00")
+    parser.add_argument("--cpus", type=int, default=8)
+    parser.add_argument("--mem", default="96G")
+    parser.add_argument("--module", default=None, help="Optional environment module to load in the run script.")
+    parser.add_argument("--module-purge", action="store_true", help="Write module purge before --module.")
+    parser.add_argument("--submit", action="store_true", help="Write the Slurm script and submit it with sbatch.")
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument(
         "--archive-path",
@@ -1702,13 +1813,22 @@ def run(args: argparse.Namespace) -> dict:
 
 
 def main(argv: Optional[list[str]] = None) -> None:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
     if args.config or args.md_root:
         if not args.type_map:
             parser.error("--type-map is required for series mode because LAMMPS dump files store atom types")
         if args.start is not None or args.stop is not None or args.step is not None:
             parser.error("Use --frame-step for series mode; --start/--stop/--step are single-trajectory options")
+        if args.write_sbatch or args.submit:
+            scripts = prepare_series_sbatch(args, raw_argv, Path.cwd())
+            print(f"Wrote run script    : {scripts['run_script']}")
+            print(f"Wrote sbatch script : {scripts['sbatch_script']}")
+            print(f"Submit with         : {scripts['submit_command']}")
+            if args.submit:
+                subprocess.run(["sbatch", scripts["sbatch_script"]], cwd=args.outdir, check=True)
+            return
         summary = run_series(args)
         print(f"Series temperatures: {len(summary['series'])}")
         if summary["series"]:
