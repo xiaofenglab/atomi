@@ -161,6 +161,12 @@ def build_parser() -> argparse.ArgumentParser:
         )
         lammps_thermo_series.add_argument("analysis_args", nargs=argparse.REMAINDER)
 
+    elastic_lammps = subparsers.add_parser(
+        "elastic_lammps",
+        help="Prepare and fit finite-temperature LAMMPS elastic tensors.",
+    )
+    elastic_lammps.add_argument("elastic_args", nargs=argparse.REMAINDER)
+
     cp2k_live = subparsers.add_parser(
         "cp2k-live",
         help="Auto-detect CP2K MD/GEO logs and launch the terminal monitor.",
@@ -506,6 +512,11 @@ def main(argv: list[str] | None = None) -> None:
 
         thermo_series_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "elastic_lammps":
+        from atomi.lammps.elastic import main as elastic_lammps_main
+
+        elastic_lammps_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "doctor":
         doctor_main(raw_args[1:])
         return
@@ -790,6 +801,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.lammps.thermo_series import main as thermo_series_main
 
         thermo_series_main(args.analysis_args)
+        return
+
+    if args.subcommand == "elastic_lammps":
+        from atomi.lammps.elastic import main as elastic_lammps_main
+
+        elastic_lammps_main(args.elastic_args)
         return
 
     if args.subcommand == "cp2k-live":

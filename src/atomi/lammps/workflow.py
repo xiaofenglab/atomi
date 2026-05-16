@@ -882,6 +882,16 @@ def generate_production_input(cfg, stage, structure_path, chunk_tag):
         velocity_text = (
             f"velocity        all create {temperature} {seed} mom yes rot yes dist gaussian\n"
         )
+    deformation_text = elastic_deformation_commands(stage)
+    if stage["type"] == "nvt":
+        fix_text = f"fix             1 all nvt temp {temperature} {temperature} {tdamp}"
+    elif stage["type"] == "npt":
+        fix_text = f"fix             1 all npt temp {temperature} {temperature} {tdamp} iso {pressure} {pressure} {pdamp}"
+    else:
+        raise ValueError(f"Production stage {stage['name']} has unsupported type {stage['type']!r}; expected npt or nvt")
+    thermo_style = "custom step temp pe etotal press vol lx ly lz"
+    if stage.get("elastic_run", False) or stage.get("thermo_stress", False):
+        thermo_style += " pxx pyy pzz pyz pxz pxy xy xz yz"
 
     txt = f"""units           metal
 dimension       3
@@ -903,11 +913,11 @@ neigh_modify    every 1 delay 0 check yes
 
 timestep        {timestep}
 
-{velocity_text}fix             2 all momentum 1000 linear 1 1 1
-fix             1 all npt temp {temperature} {temperature} {tdamp} iso {pressure} {pressure} {pdamp}
+{deformation_text}{velocity_text}fix             2 all momentum 1000 linear 1 1 1
+{fix_text}
 
 thermo          100
-thermo_style    custom step temp pe etotal press vol lx ly lz
+thermo_style    {thermo_style}
 thermo_modify   flush yes
 
 dump            1 all custom {dump_every} {dump_name} id type x y z
@@ -920,6 +930,52 @@ write_restart   {final_restart}
 write_data      {final_data}
 """
     return txt, final_data, final_restart, run_steps
+
+
+def elastic_deformation_commands(stage):
+    deformation = stage.get("deformation") or {}
+    mode = deformation.get("mode", "ref")
+    strain = float(deformation.get("strain", 0.0) or 0.0)
+    if abs(strain) < 1.0e-15 or mode in ("ref", "none"):
+        return ""
+    if mode not in ("xx", "yy", "zz", "yz", "xz", "xy"):
+        raise ValueError(f"Unsupported elastic deformation mode {mode!r} in stage {stage['name']}")
+    lines = [
+        f"# Atomi elastic deformation: mode={mode} strain={strain:.12g}",
+        f"variable        atomi_eps equal {strain:.16g}",
+    ]
+    if mode in ("xx", "yy", "zz"):
+        axis = mode[0]
+        lines.extend(
+            [
+                "variable        atomi_scale equal 1.0+v_atomi_eps",
+                f"change_box      all {axis} scale ${{atomi_scale}} remap units box",
+            ]
+        )
+    else:
+        lines.append("change_box      all triclinic")
+        if mode == "xy":
+            lines.extend(
+                [
+                    "variable        atomi_delta equal v_atomi_eps*ly",
+                    "change_box      all xy delta ${atomi_delta} remap units box",
+                ]
+            )
+        elif mode == "xz":
+            lines.extend(
+                [
+                    "variable        atomi_delta equal v_atomi_eps*lz",
+                    "change_box      all xz delta ${atomi_delta} remap units box",
+                ]
+            )
+        elif mode == "yz":
+            lines.extend(
+                [
+                    "variable        atomi_delta equal v_atomi_eps*lz",
+                    "change_box      all yz delta ${atomi_delta} remap units box",
+                ]
+            )
+    return "\n".join(lines) + "\n\n"
 
 
 # ---------------------------------------------------
@@ -1088,7 +1144,7 @@ def run_production_stage(cfg, stage, resume_mode=False, submit_mode=True):
         P,
         V,
         PE,
-        note="production fixed-length NPT",
+        note=f"production fixed-length {stage['type'].upper()}",
     )
 
     final_data_path = (chunk_dir / final_data_name).resolve()
