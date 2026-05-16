@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from atomi.lammps import pdf_match
 
@@ -220,6 +221,50 @@ def test_compare_collects_pdfgetx3_reduced_outputs(tmp_path) -> None:
     assert (exp_dir / "pdfgetx3_process.log").exists()
     metadata = json.loads((outdir / "compare_metadata.json").read_text(encoding="utf-8"))
     assert metadata["experiment_info"]["reduced_outputs"]["csv"]["gr"].endswith("sample_gr.csv")
+    assert metadata["experiment_info"]["run_result"]["reason"] == "expected output already exists"
+
+
+def test_compare_raw_chi_missing_pdfgetx3_reports_install_hint(tmp_path) -> None:
+    series_dir, _ = make_series(tmp_path)
+    tdir = series_dir / "T_300K"
+    summary_path = tdir / "T_300K_summary.json"
+    summary_path.write_text(
+        json.dumps({"avg_counts": {"U": 1, "O": 2}, "avg_volume_A3": 40.0}),
+        encoding="utf-8",
+    )
+    metadata = json.loads((series_dir / "series_summary.json").read_text(encoding="utf-8"))
+    metadata["series"][0]["summary_json"] = str(summary_path)
+    metadata["series"][0]["avg_volume_A3"] = 40.0
+    (series_dir / "series_summary.json").write_text(json.dumps(metadata), encoding="utf-8")
+    sample = tmp_path / "sample.chi"
+    write_xy(sample, np.linspace(0.5, 5.0, 10), np.ones(10))
+    outdir = tmp_path / "raw_compare_missing_pdfgetx3"
+
+    with pytest.raises(RuntimeError, match="PDFGetX3 executable not found"):
+        pdf_match.compare_main(
+            [
+                "--pdf-series",
+                str(series_dir),
+                "--exp-raw-sample",
+                str(sample),
+                "--outdir",
+                str(outdir),
+                "--quantity",
+                "G",
+                "--md-temperature",
+                "300",
+                "--density-source",
+                "md",
+                "--pdfgetx3",
+                "definitely_missing_pdfgetx3_for_atomi_test",
+                "--no-archive-output",
+            ]
+        )
+
+    process_log = (outdir / "pdfgetx3_exp" / "pdfgetx3_process.log").read_text(encoding="utf-8")
+    assert "--pdfgetx3-auto-install" in process_log
+    prep = json.loads((outdir / "pdfgetx3_exp" / "pdfgetx3_prep_metadata.json").read_text(encoding="utf-8"))
+    assert prep["run_result"]["reason"] == "pdfgetx3 executable not found"
 
 
 def test_compare_accepts_pdfgetx_iq_alias_with_warning(tmp_path) -> None:

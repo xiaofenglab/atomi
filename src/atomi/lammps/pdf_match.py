@@ -12,6 +12,7 @@ import re
 import shutil
 import shlex
 import subprocess
+import sys
 import tempfile
 import urllib.parse
 import urllib.request
@@ -699,6 +700,115 @@ def write_pdfgetx3_run_script(path: Path, pdfgetx3: str, cfg: Path) -> None:
     path.chmod(0o755)
 
 
+def find_pdfgetx3_executable(command: str) -> tuple[str | None, dict]:
+    requested = str(command)
+    expanded = Path(requested).expanduser()
+    explicit_path = expanded.is_absolute() or expanded.parent != Path(".")
+    info = {"requested": requested, "available": False, "source": None, "resolved": None}
+    if explicit_path:
+        resolved = expanded.resolve() if expanded.exists() else expanded
+        info["source"] = "explicit-path"
+        info["resolved"] = str(resolved)
+        if resolved.exists():
+            info["available"] = True
+            return str(resolved), info
+        info["error"] = "explicit executable path does not exist"
+        return None, info
+    found = shutil.which(requested)
+    info["source"] = "PATH"
+    info["resolved"] = found
+    info["available"] = found is not None
+    return found, info
+
+
+def venv_bin_dir(venv_dir: Path) -> Path:
+    return venv_dir / ("Scripts" if os.name == "nt" else "bin")
+
+
+def install_pdfgetx3(args: argparse.Namespace, exp_dir: Path, logs_dir: Path) -> tuple[str | None, dict]:
+    install_dir = (args.pdfgetx3_install_dir or (exp_dir / "pdfgetx3_env")).expanduser()
+    stdout_log = logs_dir / "pdfgetx3_install.stdout.log"
+    stderr_log = logs_dir / "pdfgetx3_install.stderr.log"
+    wheel_paths = [Path(path).expanduser() for path in getattr(args, "pdfgetx3_wheel", []) or []]
+    info: dict[str, object] = {
+        "attempted": True,
+        "install_dir": str(install_dir),
+        "wheel_paths": [str(path) for path in wheel_paths],
+        "pip_package": args.pdfgetx3_pip_package,
+        "stdout_log": str(stdout_log),
+        "stderr_log": str(stderr_log),
+    }
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+
+    try:
+        install_dir.parent.mkdir(parents=True, exist_ok=True)
+        venv_cmd = [sys.executable, "-m", "venv", str(install_dir)]
+        info["venv_command"] = " ".join(shlex.quote(part) for part in venv_cmd)
+        venv_proc = subprocess.run(venv_cmd, text=True, capture_output=True)
+        stdout_chunks.append("# python -m venv\n" + venv_proc.stdout)
+        stderr_chunks.append("# python -m venv\n" + venv_proc.stderr)
+        info["venv_returncode"] = venv_proc.returncode
+        if venv_proc.returncode != 0:
+            info["error"] = "venv creation failed"
+            return None, info
+
+        pip = venv_bin_dir(install_dir) / "pip"
+        pip_cmd = [str(pip), "install"]
+        install_items: list[str] = []
+        if wheel_paths:
+            pip_cmd.append("--no-index")
+            for path in wheel_paths:
+                if path.is_dir():
+                    pip_cmd.extend(["--find-links", str(path)])
+                else:
+                    install_items.append(str(path))
+        if install_items:
+            pip_cmd.extend(install_items)
+        else:
+            pip_cmd.append(args.pdfgetx3_pip_package)
+        info["pip_command"] = " ".join(shlex.quote(part) for part in pip_cmd)
+        pip_proc = subprocess.run(pip_cmd, text=True, capture_output=True)
+        stdout_chunks.append("# pip install\n" + pip_proc.stdout)
+        stderr_chunks.append("# pip install\n" + pip_proc.stderr)
+        info["pip_returncode"] = pip_proc.returncode
+        if pip_proc.returncode != 0:
+            info["error"] = "pip install failed"
+            return None, info
+
+        candidate = venv_bin_dir(install_dir) / "pdfgetx3"
+        if candidate.exists():
+            info["executable"] = str(candidate)
+            return str(candidate), info
+        info["error"] = f"pdfgetx3 executable was not created in {venv_bin_dir(install_dir)}"
+        return None, info
+    except Exception as exc:
+        info["error"] = str(exc)
+        return None, info
+    finally:
+        stdout_log.write_text("\n".join(stdout_chunks), encoding="utf-8")
+        stderr_log.write_text("\n".join(stderr_chunks), encoding="utf-8")
+
+
+def resolve_or_install_pdfgetx3(args: argparse.Namespace, exp_dir: Path, logs_dir: Path) -> tuple[str | None, dict, dict]:
+    executable, resolution = find_pdfgetx3_executable(args.pdfgetx3)
+    install_info: dict[str, object] = {"attempted": False}
+    if executable is not None:
+        return executable, resolution, install_info
+    if getattr(args, "pdfgetx3_auto_install", False):
+        executable, install_info = install_pdfgetx3(args, exp_dir, logs_dir)
+        if executable is not None:
+            resolution = {
+                "requested": args.pdfgetx3,
+                "available": True,
+                "source": "auto-installed-venv",
+                "resolved": executable,
+            }
+        else:
+            resolution["auto_install_error"] = install_info.get("error")
+    return executable, resolution, install_info
+
+
 def plot_reduced_experiment(path_base: Path, x: np.ndarray, y: np.ndarray, xlabel: str, ylabel: str, title: str) -> list[str]:
     try:
         cache = Path(tempfile.gettempdir()) / "atomi-matplotlib"
@@ -821,6 +931,8 @@ def write_pdfgetx3_process_log(path: Path, info: dict) -> None:
     prep = info.get("prep", {})
     pdfgetx = info.get("pdfgetx3", {})
     run_result = info.get("run_result", {})
+    executable = info.get("pdfgetx3_executable", {})
+    install = info.get("pdfgetx3_install", {})
     instrument = info.get("instrument_corrections", {})
     lines = [
         "PDFgetX3 Reduction Process",
@@ -852,7 +964,15 @@ def write_pdfgetx3_process_log(path: Path, info: dict) -> None:
         f"r_range_A: {pdfgetx.get('r_range_A')}",
         "",
         "Run",
+        f"executable_requested: {executable.get('requested')}",
+        f"executable_resolved: {executable.get('resolved')}",
+        f"executable_source: {executable.get('source')}",
+        f"auto_install_attempted: {install.get('attempted')}",
+        f"auto_install_dir: {install.get('install_dir')}",
+        f"auto_install_error: {install.get('error')}",
         f"run_pdfgetx3: {run_result.get('run')}",
+        f"run_reason: {run_result.get('reason')}",
+        f"run_hint: {run_result.get('hint')}",
         f"returncode: {run_result.get('returncode')}",
         f"stdout_log: {run_result.get('stdout_log')}",
         f"stderr_log: {run_result.get('stderr_log')}",
@@ -882,29 +1002,58 @@ def prepare_experiment_input(args: argparse.Namespace, series_dir: Path, quantit
     expected = Path(pdfgetx_info["expected_output"])
     logs_dir = exp_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
+    output_ready_before = expected.exists()
     run_result: dict[str, object] = {"run": False}
-    if args.run_pdfgetx3:
-        proc = subprocess.run([args.pdfgetx3, "-c", cfg.name], cwd=exp_dir, text=True, capture_output=True)
-        stdout_log = logs_dir / "pdfgetx3.stdout.log"
-        stderr_log = logs_dir / "pdfgetx3.stderr.log"
-        stdout_log.write_text(proc.stdout, encoding="utf-8")
-        stderr_log.write_text(proc.stderr, encoding="utf-8")
-        run_result = {
-            "run": True,
-            "returncode": proc.returncode,
-            "stdout_log": str(stdout_log),
-            "stderr_log": str(stderr_log),
-        }
-        if proc.returncode != 0:
-            raise RuntimeError(f"pdfgetx3 failed; see {run_script} and pdfgetx3 metadata in {exp_dir}")
+    executable_info: dict[str, object] = {"requested": args.pdfgetx3, "available": False, "source": None, "resolved": None}
+    install_info: dict[str, object] = {"attempted": False}
+    pending_error: Exception | None = None
+    force_run = bool(getattr(args, "run_pdfgetx3", False))
+    should_run = force_run or (
+        not output_ready_before
+        and not getattr(args, "prepare_pdfgetx3_only", False)
+        and not getattr(args, "no_run_pdfgetx3", False)
+    )
+    if should_run:
+        executable, executable_info, install_info = resolve_or_install_pdfgetx3(args, exp_dir, logs_dir)
+        if executable is None:
+            run_result = {
+                "run": False,
+                "reason": "pdfgetx3 executable not found",
+                "hint": (
+                    "Install PDFGetX3 on PATH, pass --pdfgetx3 /path/to/pdfgetx3, or use "
+                    "--pdfgetx3-auto-install with --pdfgetx3-wheel /path/to/wheelhouse."
+                ),
+            }
+            pending_error = RuntimeError(
+                "PDFGetX3 executable not found. Pass --pdfgetx3 /path/to/pdfgetx3, "
+                "or use --pdfgetx3-auto-install with --pdfgetx3-wheel /path/to/wheelhouse."
+            )
+        else:
+            write_pdfgetx3_run_script(run_script, executable, cfg)
+            proc = subprocess.run([executable, "-c", cfg.name], cwd=exp_dir, text=True, capture_output=True)
+            stdout_log = logs_dir / "pdfgetx3.stdout.log"
+            stderr_log = logs_dir / "pdfgetx3.stderr.log"
+            stdout_log.write_text(proc.stdout, encoding="utf-8")
+            stderr_log.write_text(proc.stderr, encoding="utf-8")
+            run_result = {
+                "run": True,
+                "reason": "forced by --run-pdfgetx3" if force_run else "auto-run because reduced output was missing",
+                "returncode": proc.returncode,
+                "stdout_log": str(stdout_log),
+                "stderr_log": str(stderr_log),
+                "executable": executable,
+            }
+            if proc.returncode != 0:
+                pending_error = RuntimeError(f"pdfgetx3 failed; see {run_script} and pdfgetx3 metadata in {exp_dir}")
+    elif output_ready_before:
+        run_result["reason"] = "expected output already exists"
+    elif getattr(args, "prepare_pdfgetx3_only", False):
+        run_result["reason"] = "prepare-pdfgetx3-only"
+    elif getattr(args, "no_run_pdfgetx3", False):
+        run_result["reason"] = "no-run-pdfgetx3"
+    if should_run and executable_info.get("resolved"):
+        pdfgetx_info["executable"] = executable_info.get("resolved")
     output_ready = expected.exists()
-    if not output_ready and getattr(args, "prepare_pdfgetx3_only", False):
-        pass
-    elif not output_ready:
-        raise FileNotFoundError(
-            f"Expected PDFgetX3 output not found: {expected}. "
-            f"Run {run_script} on the HPC, or pass --run-pdfgetx3 when pdfgetx3 is available."
-        )
     info = {
         "mode": "raw-chi-pdfgetx3",
         "raw_sample": str(args.exp_raw_sample.resolve()),
@@ -915,12 +1064,24 @@ def prepare_experiment_input(args: argparse.Namespace, series_dir: Path, quantit
         "run_script": str(run_script),
         "prep": prep,
         "pdfgetx3": pdfgetx_info,
+        "pdfgetx3_executable": executable_info,
+        "pdfgetx3_install": install_info,
         "run_result": run_result,
         "output_ready": output_ready,
     }
     info["reduced_outputs"] = collect_pdfgetx3_outputs(exp_dir, args.exp_raw_sample.stem) if output_ready else {}
     write_json(exp_dir / "pdfgetx3_prep_metadata.json", info)
     write_pdfgetx3_process_log(exp_dir / "pdfgetx3_process.log", info)
+    if pending_error is not None:
+        raise pending_error
+    if not output_ready and getattr(args, "prepare_pdfgetx3_only", False):
+        return expected, info
+    if not output_ready:
+        raise FileNotFoundError(
+            f"Expected PDFGetX3 output not found: {expected}. "
+            f"Run {run_script}, remove --no-run-pdfgetx3, or pass --pdfgetx3-auto-install "
+            f"with --pdfgetx3-wheel /path/to/wheelhouse when pdfgetx3 is unavailable."
+        )
     return expected, info
 
 
@@ -1212,7 +1373,33 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     exp.add_argument("--exp-raw-background", type=Path, help="Optional air/instrument background .chi file for pdfgetx3.")
     exp.add_argument("--exp-raw-reference", type=Path, help="Optional reference .chi file for pdfgetx3.")
     exp.add_argument("--pdfgetx3", default="pdfgetx3", help="pdfgetx3 executable name/path.")
-    exp.add_argument("--run-pdfgetx3", action="store_true", help="Run pdfgetx3 after writing the generated config.")
+    exp.add_argument(
+        "--run-pdfgetx3",
+        action="store_true",
+        help="Force pdfgetx3 to run after writing the generated config. Raw .chi workflows auto-run when output is missing.",
+    )
+    exp.add_argument("--no-run-pdfgetx3", action="store_true", help="Do not auto-run pdfgetx3 for raw .chi input.")
+    exp.add_argument(
+        "--pdfgetx3-auto-install",
+        action="store_true",
+        help="If pdfgetx3 is missing, install it into a local virtual environment before running.",
+    )
+    exp.add_argument(
+        "--pdfgetx3-wheel",
+        action="append",
+        type=Path,
+        help="Wheel file or wheelhouse directory for offline PDFGetX3 installation. Repeat as needed.",
+    )
+    exp.add_argument(
+        "--pdfgetx3-install-dir",
+        type=Path,
+        help="Local virtual environment directory for --pdfgetx3-auto-install. Default: <outdir>/pdfgetx3_exp/pdfgetx3_env.",
+    )
+    exp.add_argument(
+        "--pdfgetx3-pip-package",
+        default="diffpy.pdfgetx",
+        help="Pip package to install when --pdfgetx3-auto-install is used without wheel files.",
+    )
     exp.add_argument("--prepare-pdfgetx3-only", action="store_true", help="Write pdfgetx3 config/run script and exit before comparison.")
     exp.add_argument("--pdfgetx-cfg-name", default="pdfgetx3.cfg")
     exp.add_argument("--pdfgetx-dataformat", choices=["twotheta", "QA", "Qnm"], default="QA")
