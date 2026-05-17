@@ -335,7 +335,8 @@ def test_motif_db_auto_metadata_materializes_split_input_paths(tmp_path: Path) -
     )
 
     run = materialized / "split_seed"
-    assert (run / "CONTCAR").exists()
+    assert (run / "POSCAR").exists()
     assert (run / "OUTCAR").exists()
+    assert len(read(run / "POSCAR")) == 5
     rows = list(csv.DictReader((tmp_path / "metadata.csv").open(encoding="utf-8")))
     assert rows[0]["run"] == str(run.resolve())

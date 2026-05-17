@@ -854,6 +854,7 @@ def write_rows_with_fields(path: Path, rows: list[dict[str, Any]], fields: list[
 def materialize_scan_run(
     root: Path | None,
     motif_id: str,
+    atoms: Atoms,
     structure: Path,
     outcar: Path | None,
     incar: Path | None,
@@ -867,7 +868,7 @@ def materialize_scan_run(
         outdir = root / f"{safe_motif_slug(motif_id)}_{suffix:03d}"
         suffix += 1
     outdir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(structure, outdir / "CONTCAR")
+    write(outdir / "POSCAR", atoms, format="vasp", direct=True, vasp5=True, sort=False)
     if outcar is not None and outcar.exists():
         shutil.copy2(outcar, outdir / "OUTCAR")
     if incar is not None and incar.exists():
@@ -945,6 +946,7 @@ def auto_metadata_main(argv: list[str] | None = None) -> None:
         materialized = materialize_scan_run(
             materialize_root,
             motif_id,
+            atoms,
             structure,
             outcar,
             incar,
