@@ -74,6 +74,19 @@ conductivity models. Because it is GPLv3 and dependency-heavy, Atomi should not
 vendor or copy its code into the base package. Prefer independent formulas in
 Atomi plus export/call support for users who install ElasTool separately.
 
+Atomi's independent layer now writes the pieces most useful for thermophysical
+coupling:
+
+- `elastic_viz` adds hardness screens, compliance/eigenvalue checks,
+  strain-energy-density screens, Griffith-style K_IC when a fracture/surface
+  energy is supplied, and Cahill/Clarke minimum thermal-conductivity estimates.
+- `thermal_k_lammps` collects thermal conductivity from elastic estimates,
+  direct MD tables, or scaled Green-Kubo HCACF integrals.
+- `moose-elastic-export` converts VASP/MD elastic tensors to SI tables and a
+  MOOSE include template.
+- `calphad_export` and `defect_thermo_export` bridge CALPHAD free-energy
+  tables and zentropy defect motif energetics toward MOOSE app-specific inputs.
+
 ## Larch/XAFS Guidance
 
 `xraylarch` is intentionally not part of the base install. Larch is powerful,

@@ -175,6 +175,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         lammps_thermo_series.add_argument("analysis_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("thermal_k_lammps", "thermal-k-lammps"):
+        thermal_k_lammps = subparsers.add_parser(
+            command_name,
+            help="Collect thermal conductivity from elastic estimates or MD Green-Kubo tables.",
+        )
+        thermal_k_lammps.add_argument("thermal_k_args", nargs=argparse.REMAINDER)
+
     elastic_lammps = subparsers.add_parser(
         "elastic_lammps",
         help="Prepare and fit finite-temperature LAMMPS elastic tensors.",
@@ -313,6 +320,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     moose_qha_md_material.add_argument("moose_material_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("moose-elastic-export", "moose_elastic_export"):
+        moose_elastic_export = subparsers.add_parser(
+            command_name,
+            help="Export VASP/MD elastic tensors as MOOSE-friendly tensor tables.",
+        )
+        moose_elastic_export.add_argument("moose_elastic_args", nargs=argparse.REMAINDER)
+
     moose_material_screen = subparsers.add_parser(
         "moose-material-screen",
         help="Screen which material inputs are present/missing for a MOOSE prediction.",
@@ -350,6 +364,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         calphad_doctor.add_argument("calphad_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("calphad_export", "calphad-export"):
+        calphad_export = subparsers.add_parser(
+            command_name,
+            help="Export CALPHAD property tables and MOOSE phase-field templates.",
+        )
+        calphad_export.add_argument("calphad_export_args", nargs=argparse.REMAINDER)
+
     zentropy_commands = (
         "zentropy_motif_db",
         "zentropy-motif-db",
@@ -378,6 +399,14 @@ def build_parser() -> argparse.ArgumentParser:
             help="Create or inspect staged zentropy-guided defect thermodynamics workflows.",
         )
         zentropy_workflow.add_argument("zentropy_workflow_args", nargs=argparse.REMAINDER)
+
+    defect_thermo_commands = ("defect_thermo_export", "defect-thermo-export")
+    for command_name in defect_thermo_commands:
+        defect_thermo = subparsers.add_parser(
+            command_name,
+            help="Export defect motif energetics for zentropy/CALPHAD/MOOSE coupling.",
+        )
+        defect_thermo.add_argument("defect_thermo_args", nargs=argparse.REMAINDER)
 
     mace_live = subparsers.add_parser(
         "mace-live",
@@ -619,6 +648,11 @@ def main(argv: list[str] | None = None) -> None:
 
         thermo_series_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("thermal_k_lammps", "thermal-k-lammps"):
+        from atomi.lammps.thermal_conductivity import main as thermal_k_lammps_main
+
+        thermal_k_lammps_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "elastic_lammps":
         from atomi.lammps.elastic import main as elastic_lammps_main
 
@@ -716,6 +750,11 @@ def main(argv: list[str] | None = None) -> None:
 
         moose_qha_md_material_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("moose-elastic-export", "moose_elastic_export"):
+        from atomi.moose.elastic_export import main as moose_elastic_export_main
+
+        moose_elastic_export_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "moose-material-screen":
         from atomi.moose.material_sources import screen_main as moose_material_screen_main
 
@@ -746,6 +785,11 @@ def main(argv: list[str] | None = None) -> None:
 
         calphad_doctor_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("calphad_export", "calphad-export"):
+        from atomi.calphad.export import main as calphad_export_main
+
+        calphad_export_main(raw_args[1:])
+        return
     zentropy_commands = (
         "zentropy_motif_db",
         "zentropy-motif-db",
@@ -768,6 +812,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.zentropy.workflow import main as zentropy_workflow_main
 
         zentropy_workflow_main(raw_args[1:])
+        return
+    defect_thermo_commands = ("defect_thermo_export", "defect-thermo-export")
+    if raw_args and raw_args[0] in defect_thermo_commands:
+        from atomi.zentropy.defect_thermo import main as defect_thermo_main
+
+        defect_thermo_main(raw_args[1:])
         return
     if raw_args and raw_args[0] == "vasp-outcar":
         extv(raw_args[1:])
@@ -993,6 +1043,12 @@ def main(argv: list[str] | None = None) -> None:
         thermo_series_main(args.analysis_args)
         return
 
+    if args.subcommand in ("thermal_k_lammps", "thermal-k-lammps"):
+        from atomi.lammps.thermal_conductivity import main as thermal_k_lammps_main
+
+        thermal_k_lammps_main(args.thermal_k_args)
+        return
+
     if args.subcommand == "elastic_lammps":
         from atomi.lammps.elastic import main as elastic_lammps_main
 
@@ -1120,6 +1176,12 @@ def main(argv: list[str] | None = None) -> None:
         moose_qha_md_material_main(args.moose_material_args)
         return
 
+    if args.subcommand in ("moose-elastic-export", "moose_elastic_export"):
+        from atomi.moose.elastic_export import main as moose_elastic_export_main
+
+        moose_elastic_export_main(args.moose_elastic_args)
+        return
+
     if args.subcommand == "moose-material-screen":
         from atomi.moose.material_sources import screen_main as moose_material_screen_main
 
@@ -1156,6 +1218,12 @@ def main(argv: list[str] | None = None) -> None:
         calphad_doctor_main(args.calphad_args)
         return
 
+    if args.subcommand in ("calphad_export", "calphad-export"):
+        from atomi.calphad.export import main as calphad_export_main
+
+        calphad_export_main(args.calphad_export_args)
+        return
+
     if args.subcommand in zentropy_commands:
         from atomi.zentropy.motif_db import main as zentropy_motif_db_main
 
@@ -1172,6 +1240,13 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.zentropy.workflow import main as zentropy_workflow_main
 
         zentropy_workflow_main(args.zentropy_workflow_args)
+        return
+
+    defect_thermo_commands = ("defect_thermo_export", "defect-thermo-export")
+    if args.subcommand in defect_thermo_commands:
+        from atomi.zentropy.defect_thermo import main as defect_thermo_main
+
+        defect_thermo_main(args.defect_thermo_args)
         return
 
     if args.subcommand == "mace-live":

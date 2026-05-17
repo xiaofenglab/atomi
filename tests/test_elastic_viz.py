@@ -29,6 +29,8 @@ def test_derived_debye_temperature_from_formula_volume() -> None:
     assert derived["density_g_cm3"] > 9.0
     assert derived["v_s_km_s"] > 0.0
     assert derived["theta_D_K"] > 0.0
+    assert derived["k_min_cahill_W_mK"] > 0.0
+    assert derived["k_min_clarke_W_mK"] > 0.0
 
 
 def test_elastic_viz_reads_lammps_tensor_payload(tmp_path: Path) -> None:
@@ -73,6 +75,8 @@ def test_elastic_viz_reads_lammps_tensor_payload(tmp_path: Path) -> None:
             "--plot-3d",
             "--surface-npoints",
             "5",
+            "--surface-energy-J-m2",
+            "1.5",
             "--write-debye-thermal",
             "--debye-T-max",
             "20",
@@ -84,6 +88,9 @@ def test_elastic_viz_reads_lammps_tensor_payload(tmp_path: Path) -> None:
     summary = list(csv.DictReader((outdir / "elastic_thermophysical_summary.csv").open(encoding="utf-8")))
     assert summary[0]["source"] == "LAMMPS/MD elastic"
     assert float(summary[0]["theta_D_K"]) > 0.0
+    assert float(summary[0]["hardness_teter_GPa"]) > 0.0
+    assert float(summary[0]["strain_energy_density_1pct_x_MJ_m3"]) > 0.0
+    assert float(summary[0]["fracture_toughness_griffith_MPa_sqrt_m"]) > 0.0
     assert (outdir / "elate_inputs" / "T300K_tensor_GPa.txt").exists()
     assert (outdir / "elate_surfaces" / "T300K_young_3d.html").exists()
     assert (outdir / "debye_thermal_functions.csv").exists()

@@ -108,8 +108,10 @@ environment.
 Atomi can post-process elastic tensors from either `vasp_elastic analyze` or
 `elastic_lammps analyze` with the shared `elastic_viz` command. It reads
 `elastic_tensors.json` and `elastic_moduli_T.csv`, writes an enriched
-thermophysical summary, and can generate optional ELATE-style directional
-Young's modulus and linear-compressibility HTML surfaces:
+thermophysical summary including minimum thermal-conductivity estimates,
+hardness screening values, and strain-energy-density checks, and can generate
+optional ELATE-style directional Young's modulus and linear-compressibility
+HTML surfaces:
 
 ```bash
 elastic_viz --elastic-dir analysis/elastic_lammps/fit --formula Si --formula-units 64 --plot-3d
@@ -120,6 +122,15 @@ active backend with:
 
 ```bash
 elate_status
+```
+
+Downstream bridge commands now include:
+
+```bash
+thermal_k_lammps --elastic-dir analysis/elastic_viz --outdir analysis/thermal_k
+moose-elastic-export --elastic-dir analysis/elastic_lammps/fit --material UO2
+calphad_export --property-csv free_energy.csv --material UO2 --phase FLUORITE
+defect_thermo_export --defect-csv defect_motifs.csv --material Gd_U_O2
 ```
 
 The `elastic-viz` extra is intentionally dependency-light so it does not block

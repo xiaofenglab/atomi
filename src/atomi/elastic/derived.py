@@ -96,8 +96,17 @@ def complete_elastic_derived(row: dict[str, Any], tensor: np.ndarray | None = No
     c12 = _float_or_none(row.get("C12_GPa"))
     c44 = _float_or_none(row.get("C44_GPa"))
     if k_h is not None and g_h is not None and abs(g_h) > 1.0e-12:
-        out["pugh_K_over_G"] = k_h / g_h
-        out["ductility_pugh"] = "ductile" if k_h / g_h >= 1.75 else "brittle"
+        pugh = k_h / g_h
+        out["pugh_K_over_G"] = pugh
+        out["ductility_pugh"] = "ductile" if pugh >= 1.75 else "brittle"
+        if k_h > 0 and g_h > 0:
+            g_over_k = g_h / k_h
+            out["hardness_teter_GPa"] = 0.151 * g_h
+            chen = 2.0 * (g_over_k * g_over_k * g_h) ** 0.585 - 3.0
+            tian = 0.92 * g_over_k**1.137 * g_h**0.708
+            out["hardness_chen_GPa"] = max(0.0, chen)
+            out["hardness_tian_GPa"] = max(0.0, tian)
+            out["hardness_model_note"] = "Empirical screening estimates from elastic moduli; do not treat as calibrated fracture data."
     if c12 is not None and c44 is not None:
         out["cauchy_pressure_GPa"] = c12 - c44
     if c11 is not None and c12 is not None and c44 is not None and abs(c11 - c12) > 1.0e-12:
@@ -110,7 +119,8 @@ def complete_elastic_derived(row: dict[str, Any], tensor: np.ndarray | None = No
     if nu_h is not None:
         out["nu_H"] = nu_h
     if tensor is not None:
-        eigenvalues = np.linalg.eigvalsh(0.5 * (np.asarray(tensor, dtype=float) + np.asarray(tensor, dtype=float).T))
+        c = 0.5 * (np.asarray(tensor, dtype=float) + np.asarray(tensor, dtype=float).T)
+        eigenvalues = np.linalg.eigvalsh(c)
         out["elastic_min_eigenvalue_GPa"] = float(np.min(eigenvalues))
         out["elastic_max_eigenvalue_GPa"] = float(np.max(eigenvalues))
         out["elastic_condition_number"] = (
@@ -118,6 +128,21 @@ def complete_elastic_derived(row: dict[str, Any], tensor: np.ndarray | None = No
             if np.all(np.abs(eigenvalues) > 1.0e-12)
             else math.inf
         )
+        try:
+            compliance = np.linalg.inv(c)
+            compliance_eigenvalues = np.linalg.eigvalsh(0.5 * (compliance + compliance.T))
+            out["compliance_min_eigenvalue_1_GPa"] = float(np.min(compliance_eigenvalues))
+            out["compliance_max_eigenvalue_1_GPa"] = float(np.max(compliance_eigenvalues))
+        except np.linalg.LinAlgError:
+            out["compliance_min_eigenvalue_1_GPa"] = math.nan
+            out["compliance_max_eigenvalue_1_GPa"] = math.nan
+        # Energy density for simple 1% engineering strains. Useful for quick resilience
+        # and elastic stability screening, not a replacement for failure simulations.
+        strain = 0.01
+        for idx, axis in enumerate(("x", "y", "z")):
+            out[f"strain_energy_density_1pct_{axis}_MJ_m3"] = 0.5 * c[idx, idx] * GPA_TO_PA * strain**2 / 1.0e6
+        for idx, mode in zip((3, 4, 5), ("yz", "xz", "xy")):
+            out[f"strain_energy_density_1pct_shear_{mode}_MJ_m3"] = 0.5 * c[idx, idx] * GPA_TO_PA * strain**2 / 1.0e6
     return out
 
 
@@ -134,6 +159,7 @@ def complete_thermophysical_derived(
 
     k_h = _float_or_none(row.get("K_H_GPa"))
     g_h = _float_or_none(row.get("G_H_GPa"))
+    e_h = _float_or_none(row.get("E_H_GPa"))
     if k_h is None or g_h is None or k_h <= 0 or g_h <= 0:
         return {}
     volume_A3 = row_volume_A3(row)
@@ -169,7 +195,47 @@ def complete_thermophysical_derived(
     if atom_number_density is not None and atom_number_density > 0:
         out["atom_number_density_m3"] = atom_number_density
         out["theta_D_K"] = PLANCK / BOLTZMANN * (3.0 * atom_number_density / (4.0 * math.pi)) ** (1.0 / 3.0) * v_m
+        out["k_min_cahill_W_mK"] = (
+            (math.pi / 6.0) ** (1.0 / 3.0)
+            * BOLTZMANN
+            * atom_number_density ** (2.0 / 3.0)
+            * (v_p + 2.0 * v_s)
+            / 2.0
+        )
+    if e_h is not None and e_h > 0 and molar_mass_g_mol is not None and atoms_per_formula_unit is not None:
+        avg_atom_mass_kg = (float(molar_mass_g_mol) * 1.0e-3) / (float(atoms_per_formula_unit) * AVOGADRO)
+        if avg_atom_mass_kg > 0:
+            out["k_min_clarke_W_mK"] = (
+                0.87
+                * BOLTZMANN
+                * avg_atom_mass_kg ** (-2.0 / 3.0)
+                * math.sqrt(e_h * GPA_TO_PA)
+                * density_kg_m3 ** (1.0 / 6.0)
+            )
     return out
+
+
+def fracture_toughness_from_fracture_energy(
+    *,
+    young_GPa: float,
+    poisson: float | None,
+    fracture_energy_J_m2: float,
+    plane_strain: bool = True,
+) -> float:
+    """Return Griffith-style K_IC in MPa sqrt(m) from an energy-release rate.
+
+    The caller must provide a fracture/cleavage energy. Atomi does not infer
+    this quantity from elastic moduli because those empirical estimates are
+    highly material-class dependent.
+    """
+
+    if young_GPa <= 0 or fracture_energy_J_m2 <= 0:
+        return math.nan
+    young_pa = young_GPa * GPA_TO_PA
+    effective_e = young_pa
+    if plane_strain and poisson is not None:
+        effective_e = young_pa / max(1.0e-12, 1.0 - float(poisson) ** 2)
+    return math.sqrt(effective_e * float(fracture_energy_J_m2)) / 1.0e6
 
 
 def debye_cv_J_mol_formula_K(T_K: float, theta_D_K: float, atoms_per_formula_unit: float) -> float:

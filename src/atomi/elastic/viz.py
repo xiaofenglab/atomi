@@ -17,6 +17,7 @@ from atomi.elastic.derived import (
     complete_thermophysical_derived,
     debye_thermal_table,
     formula_atom_count,
+    fracture_toughness_from_fracture_energy,
 )
 from atomi.lammps.elastic import tensor_components
 
@@ -344,6 +345,9 @@ def maybe_plot_lines(outdir: Path, rows: list[dict[str, Any]]) -> list[str]:
         ("elastic_anisotropy_vs_T.png", ["universal_anisotropy_AU", "zener_anisotropy", "pugh_K_over_G"], "Value"),
         ("elastic_sound_velocity_vs_T.png", ["v_s_km_s", "v_p_km_s", "v_m_km_s"], "Velocity (km/s)"),
         ("elastic_debye_density_vs_T.png", ["theta_D_K", "density_g_cm3"], "Value"),
+        ("elastic_min_thermal_conductivity_vs_T.png", ["k_min_cahill_W_mK", "k_min_clarke_W_mK"], "k_min (W/m/K)"),
+        ("elastic_hardness_vs_T.png", ["hardness_teter_GPa", "hardness_chen_GPa", "hardness_tian_GPa"], "Hardness estimate (GPa)"),
+        ("elastic_strain_energy_density_vs_T.png", ["strain_energy_density_1pct_x_MJ_m3", "strain_energy_density_1pct_shear_xy_MJ_m3"], "Energy density (MJ/m^3)"),
     ]
     written: list[str] = []
     for filename, columns, ylabel in plot_specs:
@@ -392,6 +396,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--density-kg-m3", type=float, help="Override density in kg/m^3.")
     parser.add_argument("--density-g-cm3", type=float, help="Override density in g/cm^3.")
+    parser.add_argument(
+        "--fracture-energy-J-m2",
+        type=float,
+        help="Optional fracture/cleavage energy for Griffith K_IC estimate.",
+    )
+    parser.add_argument(
+        "--surface-energy-J-m2",
+        type=float,
+        help="Optional surface energy; K_IC uses fracture energy 2*surface_energy when fracture energy is absent.",
+    )
+    parser.add_argument(
+        "--fracture-plane-stress",
+        action="store_true",
+        help="Use plane-stress E instead of plane-strain E/(1-nu^2) for K_IC estimate.",
+    )
     parser.add_argument(
         "--molar-mass-g-mol",
         type=float,
@@ -457,6 +476,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 atoms_per_formula_unit=atoms_per_formula_unit,
             )
         )
+        fracture_energy = args.fracture_energy_J_m2
+        if fracture_energy is None and args.surface_energy_J_m2 is not None:
+            fracture_energy = 2.0 * args.surface_energy_J_m2
+        if fracture_energy is not None:
+            e_h = float_or_none(row.get("E_H_GPa"))
+            nu_h = float_or_none(row.get("nu_H"))
+            if e_h is not None:
+                row["fracture_energy_J_m2"] = fracture_energy
+                row["fracture_toughness_griffith_MPa_sqrt_m"] = fracture_toughness_from_fracture_energy(
+                    young_GPa=e_h,
+                    poisson=nu_h,
+                    fracture_energy_J_m2=fracture_energy,
+                    plane_strain=not args.fracture_plane_stress,
+                )
         summary_rows.append(row)
         name = safe_label(record.label)
         if not args.no_elate_inputs:
@@ -540,11 +573,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "sound velocities",
                 "Debye temperature",
                 "optional Debye Cv/H/S/F relative table",
+                "minimum thermal conductivity estimates (Cahill/Clarke)",
+                "empirical hardness estimates",
+                "strain-energy-density screening values",
+                "Griffith K_IC when fracture/surface energy is provided",
             ],
             "external_only": [
                 "Christoffel ray surfaces and power-flow angles",
-                "empirical hardness families",
-                "minimum thermal-conductivity models",
+                "calibrated fracture/damage laws",
             ],
         },
         "outputs": {
