@@ -117,9 +117,9 @@ def test_sd_dd_init_prepare_build_and_fit_workflow(tmp_path: Path) -> None:
 
     reference_index = tmp_path / "reference_phases.csv"
     reference_index.write_text(
-        "reference_id,formula,path,energy_eV,n_formula_units,role,phase_model,reference_basis,thermo_role\n"
-        f"parent_UO2,UO2,{seed},-60.0,2,parent,fluorite,stable_phase,parent\n"
-        f"Gd05U05O2,Gd0.5U0.5O2,{seed},-58.0,2,mixed_anchor,fluorite,same_lattice_anchor,pseudo_endmember\n",
+        "reference_id,formula,path,energy_eV,n_formula_units,role,endmember_kind,phase_model,reference_basis,thermo_role\n"
+        f"parent_UO2,UO2,{seed},-60.0,2,parent,true_endmember,fluorite,same_lattice_anchor,parent\n"
+        f"Gd05U05O2,Gd0.5U0.5O2,{seed},-58.0,2,mixed_anchor,pseudo_endmember,fluorite,same_lattice_anchor,pseudo_endmember\n",
         encoding="utf-8",
     )
     reference_csv = tmp_path / "reference_energies.csv"
@@ -135,11 +135,16 @@ def test_sd_dd_init_prepare_build_and_fit_workflow(tmp_path: Path) -> None:
     reference_rows = rows(reference_csv)
     assert reference_rows[0]["reference_id"] == "parent_UO2"
     assert float(reference_rows[0]["energy_eV_per_formula"]) == -30.0
+    assert reference_rows[0]["endmember_kind"] == "true_endmember"
+    assert reference_rows[0]["is_true_endmember"] == "true"
     assert reference_rows[1]["reference_id"] == "Gd05U05O2"
+    assert reference_rows[1]["endmember_kind"] == "pseudo_endmember"
     assert reference_rows[1]["reference_basis"] == "same_lattice_anchor"
     assert reference_rows[1]["thermo_role"] == "pseudo_endmember"
     reference_meta = json.loads(reference_csv.with_suffix(".metadata.json").read_text(encoding="utf-8"))
-    assert reference_meta["reference_summary"]["same_lattice_anchor_ids"] == ["Gd05U05O2"]
+    assert reference_meta["reference_summary"]["true_endmember_ids"] == ["parent_UO2"]
+    assert reference_meta["reference_summary"]["pseudo_endmember_ids"] == ["Gd05U05O2"]
+    assert reference_meta["reference_summary"]["same_lattice_anchor_ids"] == ["parent_UO2", "Gd05U05O2"]
 
     motif_db = tmp_path / "defect_motif_db.json"
     motif_db.write_text(
@@ -228,10 +233,15 @@ def test_sd_dd_init_prepare_build_and_fit_workflow(tmp_path: Path) -> None:
     assert defect_rows[0]["defect_id"] == "V_O_seed"
     assert float(defect_rows[0]["formation_energy_eV"]) == -3.0
     assert defect_rows[0]["parent_reference_id"] == "parent_UO2"
-    assert defect_rows[0]["parent_reference_basis"] == "stable_phase"
-    assert defect_rows[0]["same_lattice_anchor_ids"] == "Gd05U05O2"
+    assert defect_rows[0]["parent_endmember_kind"] == "true_endmember"
+    assert defect_rows[0]["parent_reference_basis"] == "same_lattice_anchor"
+    assert defect_rows[0]["true_endmember_ids"] == "parent_UO2"
+    assert defect_rows[0]["pseudo_endmember_ids"] == "Gd05U05O2"
+    assert defect_rows[0]["same_lattice_anchor_ids"] == "parent_UO2,Gd05U05O2"
     defect_meta = json.loads(defects.with_suffix(".metadata.json").read_text(encoding="utf-8"))
-    assert defect_meta["reference_summary"]["same_lattice_anchor_ids"] == ["Gd05U05O2"]
+    assert defect_meta["reference_summary"]["true_endmember_ids"] == ["parent_UO2"]
+    assert defect_meta["reference_summary"]["pseudo_endmember_ids"] == ["Gd05U05O2"]
+    assert defect_meta["reference_summary"]["same_lattice_anchor_ids"] == ["parent_UO2", "Gd05U05O2"]
 
     solution = tmp_path / "solution.csv"
     solution.write_text(
@@ -241,6 +251,28 @@ def test_sd_dd_init_prepare_build_and_fit_workflow(tmp_path: Path) -> None:
         "0.75,0.03\n",
         encoding="utf-8",
     )
-    sd_dd_thermo.main(["fit-solution", "--solution-csv", str(solution), "--outdir", str(tmp_path / "solution_fit")])
+    sd_dd_thermo.main(
+        [
+            "fit-solution",
+            "--solution-csv",
+            str(solution),
+            "--outdir",
+            str(tmp_path / "solution_fit"),
+            "--reference-csv",
+            str(reference_csv),
+            "--component-a",
+            "UO2",
+            "--component-a-reference-id",
+            "parent_UO2",
+            "--component-b",
+            "Gd0.5U0.5O2",
+            "--component-b-reference-id",
+            "Gd05U05O2",
+        ]
+    )
     fit_rows = rows(tmp_path / "solution_fit" / "solution_model_parameters.csv")
     assert fit_rows[0]["parameter"] == "L0_eV_per_formula"
+    assert fit_rows[0]["component_a_endmember_kind"] == "true_endmember"
+    assert fit_rows[0]["component_b_endmember_kind"] == "pseudo_endmember"
+    fit_meta = json.loads((tmp_path / "solution_fit" / "solution_model_metadata.json").read_text(encoding="utf-8"))
+    assert fit_meta["component_reference_metadata"]["component_b"]["is_pseudo_endmember"] is True

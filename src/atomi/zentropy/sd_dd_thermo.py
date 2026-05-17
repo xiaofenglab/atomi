@@ -40,6 +40,8 @@ def finite_float(value: Any) -> float | None:
 def format_value(value: Any) -> str:
     if value is None:
         return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
     if isinstance(value, str):
         return value
     try:
@@ -212,14 +214,14 @@ def init_main(argv: list[str] | None = None) -> dict[str, Any]:
         encoding="utf-8",
     )
     (dirs["references"] / "reference_phase_index_template.csv").write_text(
-        "reference_id,formula,path,energy_eV,n_formula_units,role,phase_model,reference_basis,thermo_role,source,notes\n"
-        "UO2,UO2,/path/to/UO2_relaxed/OUTCAR,,,parent,fluorite,stable_phase,parent,dft,stoichiometric parent phase\n"
-        "U3O8,U3O8,/path/to/U3O8_relaxed/OUTCAR,,,oxygen_rich_reference,U-O,stable_phase,reservoir,dft,optional reservoir cross-check\n"
-        "U2O5,U2O5,/path/to/U2O5_relaxed/OUTCAR,,,oxygen_rich_reference,U-O,stable_phase,reservoir,dft,optional reservoir cross-check\n"
-        "U_metal,U,/path/to/U_metal_relaxed/OUTCAR,,,element,metal,stable_phase,reservoir,dft,optional metal reservoir\n"
-        "Gd2O3,Gd2O3,/path/to/Gd2O3_relaxed/OUTCAR,,,dopant_oxide,sesquioxide,stable_phase,reservoir,dft,optional Gd reservoir\n"
-        "GdO1.5,GdO1.5,/path/to/Gd_VO_fluorite/OUTCAR,,,dopant_vacancy_anchor,fluorite,same_lattice_anchor,pseudo_endmember,dft,Gd3+ plus oxygen vacancy compensation in fluorite\n"
-        "Gd05U05O2,Gd0.5U0.5O2,/path/to/GdU5_fluorite/OUTCAR,,,mixed_anchor,fluorite,same_lattice_anchor,pseudo_endmember,dft,Gd3+ plus U5+ compensation in fluorite\n",
+        "reference_id,formula,path,energy_eV,n_formula_units,role,endmember_kind,is_true_endmember,is_pseudo_endmember,phase_model,reference_basis,thermo_role,source,notes\n"
+        "UO2,UO2,/path/to/UO2_relaxed/OUTCAR,,,parent,true_endmember,true,false,fluorite,same_lattice_anchor,parent,dft,stoichiometric parent phase and true fluorite endmember\n"
+        "U3O8,U3O8,/path/to/U3O8_relaxed/OUTCAR,,,oxygen_rich_reference,stable_phase_reference,false,false,U-O,stable_phase,reservoir,dft,optional reservoir cross-check\n"
+        "U2O5,U2O5,/path/to/U2O5_relaxed/OUTCAR,,,oxygen_rich_reference,stable_phase_reference,false,false,U-O,stable_phase,reservoir,dft,optional reservoir cross-check\n"
+        "U_metal,U,/path/to/U_metal_relaxed/OUTCAR,,,element,stable_phase_reference,false,false,metal,stable_phase,reservoir,dft,optional metal reservoir\n"
+        "Gd2O3,Gd2O3,/path/to/Gd2O3_relaxed/OUTCAR,,,dopant_oxide,stable_phase_reference,false,false,sesquioxide,stable_phase,reservoir,dft,optional Gd reservoir\n"
+        "GdO1.5,GdO1.5,/path/to/Gd_VO_fluorite/OUTCAR,,,dopant_vacancy_anchor,pseudo_endmember,false,true,fluorite,same_lattice_anchor,pseudo_endmember,dft,Gd3+ plus oxygen vacancy compensation in fluorite\n"
+        "Gd05U05O2,Gd0.5U0.5O2,/path/to/GdU5_fluorite/OUTCAR,,,mixed_anchor,pseudo_endmember,false,true,fluorite,same_lattice_anchor,pseudo_endmember,dft,Gd3+ plus U5+ compensation in fluorite\n",
         encoding="utf-8",
     )
     (dirs["seeds"] / "sd_dd_seed_index_template.csv").write_text(
@@ -498,10 +500,72 @@ def normalize_reference_text(value: Any) -> str:
     return re.sub(r"[^0-9a-zA-Z]+", "_", str(value or "").strip().lower()).strip("_")
 
 
+def true_text(value: Any) -> bool:
+    return normalize_reference_text(value) in {"1", "true", "t", "yes", "y"}
+
+
+def infer_endmember_kind(row: dict[str, Any]) -> str:
+    explicit = normalize_reference_text(row.get("endmember_kind") or row.get("endmember_type"))
+    aliases = {
+        "true": "true_endmember",
+        "real": "true_endmember",
+        "solution": "true_endmember",
+        "solution_endmember": "true_endmember",
+        "true_endmember": "true_endmember",
+        "pseudo": "pseudo_endmember",
+        "hypothetical": "pseudo_endmember",
+        "same_lattice": "pseudo_endmember",
+        "same_lattice_anchor": "pseudo_endmember",
+        "pseudo_endmember": "pseudo_endmember",
+        "stable": "stable_phase_reference",
+        "stable_phase": "stable_phase_reference",
+        "stable_phase_reference": "stable_phase_reference",
+        "reservoir": "stable_phase_reference",
+        "chemical_potential": "chemical_potential",
+        "mu": "chemical_potential",
+        "reference": "reference_only",
+        "reference_only": "reference_only",
+    }
+    if explicit:
+        return aliases.get(explicit, explicit)
+    if true_text(row.get("is_true_endmember")):
+        return "true_endmember"
+    if true_text(row.get("is_pseudo_endmember")):
+        return "pseudo_endmember"
+    basis = normalize_reference_text(row.get("reference_basis") or row.get("basis"))
+    role = normalize_reference_text(row.get("thermo_role") or row.get("role"))
+    if role == "pseudo_endmember":
+        return "pseudo_endmember"
+    if basis == "same_lattice_anchor" and role in {"endmember", "parent", "solution_endmember"}:
+        return "true_endmember"
+    if basis == "same_lattice_anchor":
+        return "pseudo_endmember"
+    if basis == "chemical_potential":
+        return "chemical_potential"
+    if basis == "stable_phase":
+        return "stable_phase_reference"
+    return "reference_only"
+
+
+def is_true_endmember(row: dict[str, Any]) -> bool:
+    return infer_endmember_kind(row) == "true_endmember"
+
+
+def is_pseudo_endmember(row: dict[str, Any]) -> bool:
+    return infer_endmember_kind(row) == "pseudo_endmember"
+
+
 def infer_reference_basis(row: dict[str, Any]) -> str:
     explicit = normalize_reference_text(row.get("reference_basis") or row.get("basis"))
     if explicit:
         return explicit
+    kind = infer_endmember_kind(row)
+    if kind in {"true_endmember", "pseudo_endmember"}:
+        return "same_lattice_anchor"
+    if kind == "stable_phase_reference":
+        return "stable_phase"
+    if kind == "chemical_potential":
+        return "chemical_potential"
     text = normalize_reference_text(
         " ".join(
             str(row.get(key) or "")
@@ -519,6 +583,13 @@ def infer_thermo_role(row: dict[str, Any], reference_basis: str) -> str:
     explicit = normalize_reference_text(row.get("thermo_role"))
     if explicit:
         return explicit
+    kind = infer_endmember_kind(row)
+    if kind == "true_endmember":
+        return "endmember"
+    if kind == "pseudo_endmember":
+        return "pseudo_endmember"
+    if kind == "chemical_potential":
+        return "chemical_potential"
     role = normalize_reference_text(row.get("role"))
     text = normalize_reference_text(
         " ".join(str(row.get(key) or "") for key in ("role", "reference_id", "notes"))
@@ -542,30 +613,45 @@ def reference_summary(references: dict[str, dict[str, Any]]) -> dict[str, Any]:
     rows = []
     basis_counts: dict[str, int] = {}
     role_counts: dict[str, int] = {}
+    kind_counts: dict[str, int] = {}
+    true_endmembers = []
+    pseudo_endmembers = []
     same_lattice = []
     stable = []
     for reference_id, row in references.items():
+        endmember_kind = infer_endmember_kind(row)
         basis = infer_reference_basis(row)
         thermo_role = infer_thermo_role(row, basis)
         phase_model = reference_phase_model(row)
+        kind_counts[endmember_kind] = kind_counts.get(endmember_kind, 0) + 1
         basis_counts[basis] = basis_counts.get(basis, 0) + 1
         role_counts[thermo_role] = role_counts.get(thermo_role, 0) + 1
         item = {
             "reference_id": reference_id,
             "formula": row.get("formula") or "",
             "role": row.get("role") or "",
+            "endmember_kind": endmember_kind,
+            "is_true_endmember": is_true_endmember(row),
+            "is_pseudo_endmember": is_pseudo_endmember(row),
             "phase_model": phase_model,
             "reference_basis": basis,
             "thermo_role": thermo_role,
         }
         rows.append(item)
+        if endmember_kind == "true_endmember":
+            true_endmembers.append(reference_id)
+        if endmember_kind == "pseudo_endmember":
+            pseudo_endmembers.append(reference_id)
         if basis == "same_lattice_anchor" or thermo_role == "pseudo_endmember":
             same_lattice.append(reference_id)
         if basis == "stable_phase":
             stable.append(reference_id)
     return {
+        "endmember_kind_counts": kind_counts,
         "basis_counts": basis_counts,
         "thermo_role_counts": role_counts,
+        "true_endmember_ids": true_endmembers,
+        "pseudo_endmember_ids": pseudo_endmembers,
         "same_lattice_anchor_ids": same_lattice,
         "stable_phase_reference_ids": stable,
         "rows": rows,
@@ -672,6 +758,7 @@ def build_references_main(argv: list[str] | None = None) -> dict[str, Any]:
             warnings.append(message)
         if energy_per_formula is None and formula:
             warnings.append(f"row {row_number} ({reference_id}) has no energy per formula unit")
+        endmember_kind = infer_endmember_kind(row)
         reference_basis = infer_reference_basis(row)
         thermo_role = infer_thermo_role(row, reference_basis)
         phase_model = reference_phase_model(row)
@@ -689,6 +776,9 @@ def build_references_main(argv: list[str] | None = None) -> dict[str, Any]:
                 "natoms": finite_float(calc.get("natoms")) or sum(counts.values()) or "",
                 "volume_A3": finite_float(calc.get("volume_A3")),
                 "role": row.get("role") or "",
+                "endmember_kind": endmember_kind,
+                "is_true_endmember": is_true_endmember(row),
+                "is_pseudo_endmember": is_pseudo_endmember(row),
                 "phase_model": phase_model,
                 "reference_basis": reference_basis,
                 "thermo_role": thermo_role,
@@ -707,6 +797,9 @@ def build_references_main(argv: list[str] | None = None) -> dict[str, Any]:
         "natoms",
         "volume_A3",
         "role",
+        "endmember_kind",
+        "is_true_endmember",
+        "is_pseudo_endmember",
         "phase_model",
         "reference_basis",
         "thermo_role",
@@ -811,12 +904,17 @@ def build_defects_main(argv: list[str] | None = None) -> dict[str, Any]:
             break
     ref_summary = reference_summary(references)
     same_lattice_anchor_ids = ",".join(ref_summary["same_lattice_anchor_ids"])
+    true_endmember_ids = ",".join(ref_summary["true_endmember_ids"])
+    pseudo_endmember_ids = ",".join(ref_summary["pseudo_endmember_ids"])
     parent_reference_basis = infer_reference_basis(parent_reference_row) if parent_reference_row else ""
+    parent_endmember_kind = infer_endmember_kind(parent_reference_row) if parent_reference_row else ""
     parent_reference_phase = reference_phase_model(parent_reference_row) if parent_reference_row else ""
     reference_context = "; ".join(
         item
         for item in (
             f"parent={parent_reference_id}" if parent_reference_id else "",
+            f"true_endmembers={true_endmember_ids}" if true_endmember_ids else "",
+            f"pseudo_endmembers={pseudo_endmember_ids}" if pseudo_endmember_ids else "",
             f"same_lattice_anchors={same_lattice_anchor_ids}" if same_lattice_anchor_ids else "",
         )
         if item
@@ -853,8 +951,11 @@ def build_defects_main(argv: list[str] | None = None) -> dict[str, Any]:
             "spin_order_all": meta.get("spin_order_all", ""),
             "source": record.get("run_dir", ""),
             "parent_reference_id": parent_reference_id,
+            "parent_endmember_kind": parent_endmember_kind,
             "parent_reference_basis": parent_reference_basis,
             "parent_reference_phase_model": parent_reference_phase,
+            "true_endmember_ids": true_endmember_ids,
+            "pseudo_endmember_ids": pseudo_endmember_ids,
             "same_lattice_anchor_ids": same_lattice_anchor_ids,
             "reference_context": reference_context,
             "notes": "Built from defect_motif_db.json; verify reference chemical potentials before publication.",
@@ -876,8 +977,11 @@ def build_defects_main(argv: list[str] | None = None) -> dict[str, Any]:
         "spin_order_all",
         "source",
         "parent_reference_id",
+        "parent_endmember_kind",
         "parent_reference_basis",
         "parent_reference_phase_model",
+        "true_endmember_ids",
+        "pseudo_endmember_ids",
         "same_lattice_anchor_ids",
         "reference_context",
         "notes",
@@ -890,6 +994,7 @@ def build_defects_main(argv: list[str] | None = None) -> dict[str, Any]:
         "parent_formula": args.parent_formula,
         "parent_reference_energy_eV": parent_energy,
         "parent_reference_id": parent_reference_id,
+        "parent_endmember_kind": parent_endmember_kind,
         "parent_reference_basis": parent_reference_basis,
         "parent_reference_phase_model": parent_reference_phase,
         "reference_summary": ref_summary,
@@ -1177,6 +1282,47 @@ def plan_variants_main(argv: list[str] | None = None) -> dict[str, Any]:
     return metadata
 
 
+def reference_for_component(
+    references: dict[str, dict[str, str]],
+    component: str,
+    explicit_reference_id: str | None,
+) -> tuple[str, dict[str, str]]:
+    if explicit_reference_id:
+        return explicit_reference_id, references.get(explicit_reference_id, {})
+    normalized_component = normalize_reference_text(component)
+    for ref_id, row in references.items():
+        if normalize_reference_text(ref_id) == normalized_component:
+            return ref_id, row
+    for ref_id, row in references.items():
+        if normalize_reference_text(row.get("formula")) == normalized_component:
+            return ref_id, row
+    return "", {}
+
+
+def component_reference_metadata(
+    references: dict[str, dict[str, str]],
+    component: str,
+    explicit_reference_id: str | None,
+    explicit_kind: str | None,
+) -> dict[str, Any]:
+    reference_id, row = reference_for_component(references, component, explicit_reference_id)
+    merged: dict[str, Any] = dict(row)
+    if explicit_kind:
+        merged["endmember_kind"] = explicit_kind
+    return {
+        "reference_id": reference_id,
+        "formula": merged.get("formula") or "",
+        "endmember_kind": infer_endmember_kind(merged) if merged else normalize_reference_text(explicit_kind),
+        "is_true_endmember": is_true_endmember(merged) if merged else normalize_reference_text(explicit_kind) == "true_endmember",
+        "is_pseudo_endmember": (
+            is_pseudo_endmember(merged) if merged else normalize_reference_text(explicit_kind) == "pseudo_endmember"
+        ),
+        "reference_basis": infer_reference_basis(merged) if merged else "",
+        "thermo_role": infer_thermo_role(merged, infer_reference_basis(merged)) if merged else "",
+        "phase_model": reference_phase_model(merged) if merged else "",
+    }
+
+
 def fit_solution_main(argv: list[str] | None = None) -> dict[str, Any]:
     parser = argparse.ArgumentParser(
         prog="defect-chem fit-solution",
@@ -1189,6 +1335,18 @@ def fit_solution_main(argv: list[str] | None = None) -> dict[str, Any]:
     parser.add_argument("--phase", default="DEFECT_FLUORITE")
     parser.add_argument("--component-a", default="UO2")
     parser.add_argument("--component-b", default="GdO1.5")
+    parser.add_argument("--reference-csv", type=Path)
+    parser.add_argument("--reference-json", type=Path)
+    parser.add_argument("--component-a-reference-id")
+    parser.add_argument("--component-b-reference-id")
+    parser.add_argument(
+        "--component-a-endmember-kind",
+        choices=("true_endmember", "pseudo_endmember", "stable_phase_reference", "chemical_potential", "reference_only"),
+    )
+    parser.add_argument(
+        "--component-b-endmember-kind",
+        choices=("true_endmember", "pseudo_endmember", "stable_phase_reference", "chemical_potential", "reference_only"),
+    )
     args = parser.parse_args(argv)
     raw_rows = read_csv(args.solution_csv.resolve())
     points = []
@@ -1216,6 +1374,19 @@ def fit_solution_main(argv: list[str] | None = None) -> dict[str, Any]:
     coeffs, *_ = np.linalg.lstsq(basis, y_arr, rcond=None)
     predicted = basis @ coeffs
     outdir = args.outdir.resolve()
+    _, references = reference_data(args.reference_json or args.reference_csv)
+    component_a_meta = component_reference_metadata(
+        references,
+        args.component_a,
+        args.component_a_reference_id,
+        args.component_a_endmember_kind,
+    )
+    component_b_meta = component_reference_metadata(
+        references,
+        args.component_b,
+        args.component_b_reference_id,
+        args.component_b_endmember_kind,
+    )
     param_rows = [
         {
             "model": args.model,
@@ -1225,6 +1396,16 @@ def fit_solution_main(argv: list[str] | None = None) -> dict[str, Any]:
             "phase": args.phase,
             "component_a": args.component_a,
             "component_b": args.component_b,
+            "component_a_reference_id": component_a_meta["reference_id"],
+            "component_b_reference_id": component_b_meta["reference_id"],
+            "component_a_endmember_kind": component_a_meta["endmember_kind"],
+            "component_b_endmember_kind": component_b_meta["endmember_kind"],
+            "component_a_reference_basis": component_a_meta["reference_basis"],
+            "component_b_reference_basis": component_b_meta["reference_basis"],
+            "component_a_thermo_role": component_a_meta["thermo_role"],
+            "component_b_thermo_role": component_b_meta["thermo_role"],
+            "component_a_phase_model": component_a_meta["phase_model"],
+            "component_b_phase_model": component_b_meta["phase_model"],
         }
         for label, value in zip(labels, coeffs)
     ]
@@ -1246,9 +1427,15 @@ def fit_solution_main(argv: list[str] | None = None) -> dict[str, Any]:
         "phase": args.phase,
         "component_a": args.component_a,
         "component_b": args.component_b,
+        "component_reference_metadata": {
+            "component_a": component_a_meta,
+            "component_b": component_b_meta,
+        },
+        "reference_file": str((args.reference_json or args.reference_csv).resolve()) if (args.reference_json or args.reference_csv) else "",
         "n_points": len(points),
         "notes": [
             "Regular/Redlich-Kister coefficients are CALPHAD seed parameters, not a full assessment.",
+            "true_endmember and pseudo_endmember labels are retained because they carry different CALPHAD assessment meaning.",
             "For a true CEF model, map these parameters onto the selected sublattice endmembers and refit with pycalphad/TDB constraints.",
         ],
         "outputs": {
@@ -1380,6 +1567,9 @@ def evaluate_rows(
                     "site_species": row.get("site_species"),
                     "source": row.get("source"),
                     "parent_reference_id": row.get("parent_reference_id", ""),
+                    "parent_endmember_kind": row.get("parent_endmember_kind", ""),
+                    "true_endmember_ids": row.get("true_endmember_ids", ""),
+                    "pseudo_endmember_ids": row.get("pseudo_endmember_ids", ""),
                     "same_lattice_anchor_ids": row.get("same_lattice_anchor_ids", ""),
                     "reference_context": row.get("reference_context", ""),
                 }
@@ -1490,6 +1680,9 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
             "site_species",
             "source",
             "parent_reference_id",
+            "parent_endmember_kind",
+            "true_endmember_ids",
+            "pseudo_endmember_ids",
             "same_lattice_anchor_ids",
             "reference_context",
         ],

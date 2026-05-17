@@ -92,6 +92,7 @@ def test_motif_paths_reference_mode_builds_defect_chem_reference_index(tmp_path:
             str(index),
             "--reference-id",
             "parent_UO2",
+            "--true-endmember",
             "--role",
             "parent",
             "--phase-model",
@@ -111,6 +112,9 @@ def test_motif_paths_reference_mode_builds_defect_chem_reference_index(tmp_path:
     assert reference_rows[0]["path"] == "references/UO2/OUTCAR"
     assert reference_rows[0]["run_dir"] == "references/UO2"
     assert reference_rows[0]["role"] == "parent"
+    assert reference_rows[0]["endmember_kind"] == "true_endmember"
+    assert reference_rows[0]["is_true_endmember"] == "true"
+    assert reference_rows[0]["is_pseudo_endmember"] == "false"
     assert reference_rows[0]["phase_model"] == "fluorite"
     assert reference_rows[0]["reference_basis"] == "stable_phase"
     assert reference_rows[0]["thermo_role"] == "parent"
@@ -133,6 +137,8 @@ def test_motif_paths_reference_mode_replaces_by_reference_id(tmp_path: Path) -> 
             "Gd2O3",
             "--formula",
             "Gd2O3",
+            "--endmember-kind",
+            "stable_phase_reference",
         ]
     )
     motif_paths.main(
@@ -148,6 +154,8 @@ def test_motif_paths_reference_mode_replaces_by_reference_id(tmp_path: Path) -> 
             "Gd2O3",
             "--role",
             "dopant_oxide",
+            "--endmember-kind",
+            "stable_phase_reference",
             "--phase-model",
             "sesquioxide",
             "--reference-basis",
@@ -162,6 +170,9 @@ def test_motif_paths_reference_mode_replaces_by_reference_id(tmp_path: Path) -> 
     assert len(reference_rows) == 1
     assert reference_rows[0]["reference_id"] == "Gd2O3"
     assert reference_rows[0]["role"] == "dopant_oxide"
+    assert reference_rows[0]["endmember_kind"] == "stable_phase_reference"
+    assert reference_rows[0]["is_true_endmember"] == "false"
+    assert reference_rows[0]["is_pseudo_endmember"] == "false"
     assert reference_rows[0]["phase_model"] == "sesquioxide"
     assert reference_rows[0]["reference_basis"] == "stable_phase"
     assert reference_rows[0]["thermo_role"] == "reservoir"
@@ -183,6 +194,7 @@ def test_motif_paths_reference_mode_can_label_pseudo_endmember(tmp_path: Path) -
             "Gd05U05O2",
             "--formula",
             "Gd0.5U0.5O2",
+            "--pseudo-endmember",
             "--role",
             "mixed_anchor",
             "--phase-model",
@@ -196,6 +208,9 @@ def test_motif_paths_reference_mode_can_label_pseudo_endmember(tmp_path: Path) -
 
     reference_rows = read_rows(index)
     assert reference_rows[0]["reference_id"] == "Gd05U05O2"
+    assert reference_rows[0]["endmember_kind"] == "pseudo_endmember"
+    assert reference_rows[0]["is_true_endmember"] == "false"
+    assert reference_rows[0]["is_pseudo_endmember"] == "true"
     assert reference_rows[0]["phase_model"] == "fluorite"
     assert reference_rows[0]["reference_basis"] == "same_lattice_anchor"
     assert reference_rows[0]["thermo_role"] == "pseudo_endmember"

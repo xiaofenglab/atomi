@@ -20,6 +20,9 @@ REFERENCE_FIELDS = [
     "energy_eV",
     "n_formula_units",
     "role",
+    "endmember_kind",
+    "is_true_endmember",
+    "is_pseudo_endmember",
     "phase_model",
     "reference_basis",
     "thermo_role",
@@ -108,6 +111,67 @@ def reduced_formula(path: Path | None) -> str:
     return "".join(parts)
 
 
+def normalize_endmember_kind(raw: str | None) -> str:
+    text = re.sub(r"[^0-9a-zA-Z]+", "_", str(raw or "").strip().lower()).strip("_")
+    aliases = {
+        "true": "true_endmember",
+        "real": "true_endmember",
+        "solution": "true_endmember",
+        "solution_endmember": "true_endmember",
+        "true_endmember": "true_endmember",
+        "pseudo": "pseudo_endmember",
+        "hypothetical": "pseudo_endmember",
+        "same_lattice": "pseudo_endmember",
+        "same_lattice_anchor": "pseudo_endmember",
+        "pseudo_endmember": "pseudo_endmember",
+        "stable": "stable_phase_reference",
+        "stable_phase": "stable_phase_reference",
+        "stable_phase_reference": "stable_phase_reference",
+        "reservoir": "stable_phase_reference",
+        "chemical_potential": "chemical_potential",
+        "mu": "chemical_potential",
+        "reference": "reference_only",
+        "reference_only": "reference_only",
+        "none": "",
+    }
+    return aliases.get(text, text)
+
+
+def boolean_text(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def reference_mode_labels(args: argparse.Namespace) -> tuple[str, str, str, str, str]:
+    if args.true_endmember and args.pseudo_endmember:
+        raise ValueError("Use only one of --true-endmember and --pseudo-endmember.")
+    kind = normalize_endmember_kind(args.endmember_kind)
+    if args.true_endmember:
+        kind = "true_endmember"
+    if args.pseudo_endmember:
+        kind = "pseudo_endmember"
+    reference_basis = args.reference_basis or ""
+    thermo_role = args.thermo_role or ""
+    if kind == "true_endmember":
+        reference_basis = reference_basis or "same_lattice_anchor"
+        thermo_role = thermo_role or "endmember"
+    elif kind == "pseudo_endmember":
+        reference_basis = reference_basis or "same_lattice_anchor"
+        thermo_role = thermo_role or "pseudo_endmember"
+    elif kind == "stable_phase_reference":
+        reference_basis = reference_basis or "stable_phase"
+        thermo_role = thermo_role or "reservoir"
+    elif kind == "chemical_potential":
+        reference_basis = reference_basis or "chemical_potential"
+        thermo_role = thermo_role or "chemical_potential"
+    return (
+        kind,
+        boolean_text(kind == "true_endmember"),
+        boolean_text(kind == "pseudo_endmember"),
+        reference_basis,
+        thermo_role,
+    )
+
+
 def candidate_directories(root: Path, pattern: str) -> list[Path]:
     root = root.resolve()
     directories = [root] if root.is_dir() else []
@@ -146,6 +210,13 @@ def scan_root(args: argparse.Namespace, root: Path, index_dir: Path) -> tuple[li
         }
         if args.mode == "reference":
             reference_path = outcar or structure or directory
+            (
+                endmember_kind,
+                is_true_endmember,
+                is_pseudo_endmember,
+                reference_basis,
+                thermo_role,
+            ) = reference_mode_labels(args)
             rows.append(
                 {
                     "reference_id": reference_id_for_directory(directory, root, args.reference_id, args.prefix),
@@ -158,9 +229,12 @@ def scan_root(args: argparse.Namespace, root: Path, index_dir: Path) -> tuple[li
                     "energy_eV": args.energy_eV or "",
                     "n_formula_units": args.n_formula_units or "",
                     "role": args.role or "",
+                    "endmember_kind": endmember_kind,
+                    "is_true_endmember": is_true_endmember,
+                    "is_pseudo_endmember": is_pseudo_endmember,
                     "phase_model": args.phase_model or "",
-                    "reference_basis": args.reference_basis or "",
-                    "thermo_role": args.thermo_role or "",
+                    "reference_basis": reference_basis,
+                    "thermo_role": thermo_role,
                     "source": args.source or "",
                     "notes": args.notes or "",
                 }
@@ -294,6 +368,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--energy-eV", help="Optional total reference energy to write directly into reference mode rows.")
     parser.add_argument("--n-formula-units", help="Optional number of formula units for reference mode rows.")
     parser.add_argument("--role", help="Optional reference role, e.g. parent, element, dopant_oxide.")
+    parser.add_argument(
+        "--endmember-kind",
+        choices=(
+            "true_endmember",
+            "pseudo_endmember",
+            "stable_phase_reference",
+            "chemical_potential",
+            "reference_only",
+        ),
+        help="Explicit endmember/reference classification for reference mode.",
+    )
+    parser.add_argument(
+        "--true-endmember",
+        action="store_true",
+        help="Shortcut for --endmember-kind true_endmember.",
+    )
+    parser.add_argument(
+        "--pseudo-endmember",
+        action="store_true",
+        help="Shortcut for --endmember-kind pseudo_endmember.",
+    )
     parser.add_argument(
         "--phase-model",
         help="Optional phase/model label, e.g. fluorite, sesquioxide, metal.",
