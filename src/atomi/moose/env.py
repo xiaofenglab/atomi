@@ -30,6 +30,21 @@ MOOSE_ENV_VARS = [
 ]
 
 
+def configured_moose_app() -> str | None:
+    direct = os.environ.get("ATOMI_MOOSE_APP", "").strip()
+    if direct:
+        return direct
+    return None
+
+
+def configured_moose_env() -> str:
+    return os.environ.get("ATOMI_MOOSE_ENV", "").strip()
+
+
+def configured_moose_modules() -> str:
+    return os.environ.get("ATOMI_MOOSE_MODULES", "").strip()
+
+
 def _resolve_executable(name_or_path: str) -> str | None:
     path = Path(name_or_path).expanduser()
     if path.is_file():
@@ -58,9 +73,10 @@ def _run_command(command: list[str], timeout: int = 5) -> dict[str, Any]:
 
 def inspect_moose_environment(app: str | None = None) -> dict[str, Any]:
     """Build a portable MOOSE environment report without assuming a specific app name."""
+    requested_app = app or configured_moose_app()
     candidates = list(COMMON_MOOSE_EXECUTABLES)
-    if app:
-        candidates.insert(0, app)
+    if requested_app:
+        candidates.insert(0, requested_app)
 
     executables: dict[str, dict[str, Any]] = {}
     for candidate in candidates:
@@ -68,17 +84,39 @@ def inspect_moose_environment(app: str | None = None) -> dict[str, Any]:
             continue
         resolved = _resolve_executable(candidate)
         item: dict[str, Any] = {"path": resolved, "available": resolved is not None}
-        if resolved is not None and candidate == app:
+        if resolved is not None and candidate == requested_app:
             item["version_probe"] = _run_command([resolved, "--version"])
         executables[candidate] = item
+
+    selected = None
+    if requested_app and executables.get(requested_app, {}).get("available"):
+        selected = requested_app
+    else:
+        selected = next((name for name, item in executables.items() if item["available"]), None)
+
+    suggestions: list[str] = []
+    if selected:
+        suggestions.append("A MOOSE executable is available from the active shell/config.")
+    else:
+        suggestions.append("Keep MOOSE installed separately and export ATOMI_MOOSE_APP=/path/to/app-opt.")
+        suggestions.append("Store ATOMI_MOOSE_APP or profiles.moose.app_executable in the local KIT config.")
 
     return {
         "schema_version": 1,
         "module": "moose",
         "cwd": str(Path.cwd()),
-        "app": app,
+        "app": requested_app,
+        "selected_executable": selected,
+        "moose_mode": "configured-app" if selected else "missing",
+        "ready_for_moose": selected is not None,
         "executables": executables,
         "environment": {name: os.environ.get(name, "") for name in MOOSE_ENV_VARS},
+        "atomi_environment": {
+            "ATOMI_MOOSE_APP": os.environ.get("ATOMI_MOOSE_APP", ""),
+            "ATOMI_MOOSE_ENV": configured_moose_env(),
+            "ATOMI_MOOSE_MODULES": configured_moose_modules(),
+        },
+        "suggestions": suggestions,
         "notes": [
             "MOOSE applications are usually project-specific executables such as app-opt.",
             "Use --app /path/to/app-opt when the executable is not on PATH.",
@@ -88,9 +126,13 @@ def inspect_moose_environment(app: str | None = None) -> dict[str, Any]:
 
 
 def print_summary(report: dict[str, Any]) -> None:
-    print("Atomi MOOSE environment")
+    print("Atomi MOOSE status")
     if report.get("app"):
         print(f"Requested app: {report['app']}")
+    print(f"Selected MOOSE mode: {report['moose_mode']}")
+    if report.get("selected_executable"):
+        selected_info = report["executables"].get(report["selected_executable"], {})
+        print(f"Selected executable: {selected_info.get('path')}")
     found = [
         f"{name}={item['path']}"
         for name, item in report["executables"].items()
@@ -101,17 +143,25 @@ def print_summary(report: dict[str, Any]) -> None:
     if missing:
         print(f"Missing candidates: {', '.join(missing)}")
     env = {key: value for key, value in report["environment"].items() if value}
+    atomi_env = {key: value for key, value in report["atomi_environment"].items() if value}
+    if atomi_env:
+        print("Atomi MOOSE config variables:")
+        for key, value in atomi_env.items():
+            print(f"  {key}={value}")
     print("Environment variables:")
     if env:
         for key, value in env.items():
             print(f"  {key}={value}")
     else:
         print("  none of the common MOOSE variables are set")
+    print("Suggestions:")
+    for item in report["suggestions"]:
+        print(f"  - {item}")
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        prog="moose-doctor",
+        prog="moose_status",
         description="Inspect MOOSE application executables and common MOOSE environment variables.",
     )
     parser.add_argument("--app", help="MOOSE application executable name or path, e.g. app-opt.")

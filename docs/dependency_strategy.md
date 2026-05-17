@@ -142,6 +142,41 @@ The package named `zentropy` is not assumed to be the materials workflow
 runtime; Atomi checks for `pyzentropy` and warns when only a plain `zentropy`
 package is visible.
 
+## CALPHAD And MOOSE Guidance
+
+MOOSE applications and pycalphad databases are best kept outside the Atomi base
+environment. This avoids coupling a project-specific MOOSE build, CALPHAD
+database set, or MOOSE-managed Python environment to routine Atomi updates.
+
+Use status checks to confirm what Atomi can see:
+
+```bash
+moose_status
+calphad_status
+```
+
+If pycalphad is installed in a MOOSE/CALPHAD virtual environment, point Atomi
+to that Python instead of installing pycalphad into every MD/DFT environment:
+
+```bash
+export ATOMI_CALPHAD_PYTHON="$HOME/moose_env/bin/python"
+export ATOMI_CALPHAD_DATABASES="$HOME/tdb/database.tdb"
+calphad_status
+```
+
+For MOOSE, point Atomi to the project-specific app executable:
+
+```bash
+export ATOMI_MOOSE_APP="$HOME/moose_projects/app/app-opt"
+moose_status
+```
+
+The same values can live in the local-only HPC config under
+`profiles.calphad` and `profiles.moose`. Applying that config with `confighpc`
+exports the relevant `ATOMI_CALPHAD_*` and `ATOMI_MOOSE_*` variables. Keep
+those local JSON files out of Git when they contain private paths, databases,
+or cluster details.
+
 ## When To Keep Existing Packages
 
 If the cluster environment already has working versions of NumPy, SciPy,

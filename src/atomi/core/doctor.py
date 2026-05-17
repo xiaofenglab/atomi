@@ -363,12 +363,24 @@ def build_hpc_config_template(site: str = "") -> dict[str, Any]:
             },
             "moose": {
                 "modules": [],
+                "env_path": "",
                 "app_executable": "",
-                "environment": {},
+                "environment": {
+                    "ATOMI_MOOSE_APP": "",
+                    "ATOMI_MOOSE_ENV": "",
+                    "ATOMI_MOOSE_MODULES": "",
+                },
             },
             "calphad": {
                 "python_env": "",
+                "python": "",
+                "env_path": "",
                 "database_paths": [],
+                "environment": {
+                    "ATOMI_CALPHAD_PYTHON": "",
+                    "ATOMI_CALPHAD_ENV": "",
+                    "ATOMI_CALPHAD_DATABASES": "",
+                },
             },
         },
         "discovery": {
@@ -680,6 +692,45 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
             if _nonempty(zentropy.get(field)):
                 exports.setdefault("ATOMI_ZENTROPY_EXE", str(zentropy[field]))
                 break
+
+    moose = profiles.get("moose", {})
+    if isinstance(moose, dict):
+        env = moose.get("environment", {})
+        if isinstance(env, dict):
+            for key, value in env.items():
+                if _nonempty(value) and str(key).startswith("ATOMI_"):
+                    exports[str(key)] = str(value)
+        for field in ("app_executable", "executable", "test_executable", "app"):
+            if _nonempty(moose.get(field)):
+                exports.setdefault("ATOMI_MOOSE_APP", str(moose[field]))
+                break
+        if _nonempty(moose.get("env_path")):
+            exports.setdefault("ATOMI_MOOSE_ENV", str(moose["env_path"]))
+        modules = moose.get("modules")
+        if isinstance(modules, list) and modules:
+            exports.setdefault("ATOMI_MOOSE_MODULES", " ".join(str(item) for item in modules if _nonempty(item)))
+
+    calphad = profiles.get("calphad", {})
+    if isinstance(calphad, dict):
+        env = calphad.get("environment", {})
+        if isinstance(env, dict):
+            for key, value in env.items():
+                if _nonempty(value) and str(key).startswith("ATOMI_"):
+                    exports[str(key)] = str(value)
+        for field in ("python", "python_executable", "pycalphad_python"):
+            if _nonempty(calphad.get(field)):
+                exports.setdefault("ATOMI_CALPHAD_PYTHON", str(calphad[field]))
+                break
+        for field in ("env_path", "python_env", "venv"):
+            if _nonempty(calphad.get(field)):
+                exports.setdefault("ATOMI_CALPHAD_ENV", str(calphad[field]))
+                break
+        databases = calphad.get("database_paths") or calphad.get("databases")
+        if isinstance(databases, list) and databases:
+            exports.setdefault(
+                "ATOMI_CALPHAD_DATABASES",
+                ",".join(str(item) for item in databases if _nonempty(item)),
+            )
 
     if config_path is not None:
         exports[CONFIG_ENV_VAR] = str(config_path.expanduser().resolve())

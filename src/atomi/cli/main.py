@@ -275,11 +275,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cp2k_pymol_render.add_argument("render_args", nargs=argparse.REMAINDER)
 
-    moose_doctor = subparsers.add_parser(
-        "moose-doctor",
-        help="Inspect MOOSE app executables and common MOOSE environment variables.",
-    )
-    moose_doctor.add_argument("moose_args", nargs=argparse.REMAINDER)
+    for command_name in ("moose-doctor", "moose_status", "moose-status"):
+        moose_doctor = subparsers.add_parser(
+            command_name,
+            help="Inspect MOOSE app executables and common MOOSE environment variables.",
+        )
+        moose_doctor.add_argument("moose_args", nargs=argparse.REMAINDER)
 
     moose_info = subparsers.add_parser(
         "moose-info",
@@ -335,11 +336,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     moose_uo2_thermal_stress.add_argument("moose_workflow_args", nargs=argparse.REMAINDER)
 
-    calphad_doctor = subparsers.add_parser(
-        "calphad-doctor",
-        help="Inspect pycalphad availability and optional TDB database metadata.",
-    )
-    calphad_doctor.add_argument("calphad_args", nargs=argparse.REMAINDER)
+    for command_name in ("calphad-doctor", "calphad_status", "calphad-status"):
+        calphad_doctor = subparsers.add_parser(
+            command_name,
+            help="Inspect pycalphad availability and optional TDB database metadata.",
+        )
+        calphad_doctor.add_argument("calphad_args", nargs=argparse.REMAINDER)
 
     zentropy_commands = (
         "zentropy_motif_db",
@@ -677,7 +679,7 @@ def main(argv: list[str] | None = None) -> None:
 
         cp2k_pymol_render_main(raw_args[1:])
         return
-    if raw_args and raw_args[0] == "moose-doctor":
+    if raw_args and raw_args[0] in ("moose-doctor", "moose_status", "moose-status"):
         from atomi.moose.env import main as moose_doctor_main
 
         moose_doctor_main(raw_args[1:])
@@ -727,7 +729,7 @@ def main(argv: list[str] | None = None) -> None:
 
         uo2_thermal_stress_main(raw_args[1:])
         return
-    if raw_args and raw_args[0] == "calphad-doctor":
+    if raw_args and raw_args[0] in ("calphad-doctor", "calphad_status", "calphad-status"):
         from atomi.calphad.env import main as calphad_doctor_main
 
         calphad_doctor_main(raw_args[1:])
@@ -1070,7 +1072,7 @@ def main(argv: list[str] | None = None) -> None:
         cp2k_pymol_render_main(args.render_args)
         return
 
-    if args.subcommand == "moose-doctor":
+    if args.subcommand in ("moose-doctor", "moose_status", "moose-status"):
         from atomi.moose.env import main as moose_doctor_main
 
         moose_doctor_main(args.moose_args)
@@ -1130,7 +1132,7 @@ def main(argv: list[str] | None = None) -> None:
         uo2_thermal_stress_main(args.moose_workflow_args)
         return
 
-    if args.subcommand == "calphad-doctor":
+    if args.subcommand in ("calphad-doctor", "calphad_status", "calphad-status"):
         from atomi.calphad.env import main as calphad_doctor_main
 
         calphad_doctor_main(args.calphad_args)

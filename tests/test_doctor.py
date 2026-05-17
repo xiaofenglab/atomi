@@ -137,6 +137,15 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
                         "python": "/private/zentropy/bin/python",
                         "zentropy_executable": "/private/zentropy/bin/pyzentropy",
                     },
+                    "moose": {
+                        "env_path": "/private/moose_env",
+                        "app_executable": "/private/moose/app-opt",
+                        "modules": ["moose/module", "petsc/module"],
+                    },
+                    "calphad": {
+                        "python": "/private/moose_env/bin/python",
+                        "database_paths": ["/private/tdb/uo2.tdb", "/private/tdb/gduo2.tdb"],
+                    },
                 },
             }
         ),
@@ -148,9 +157,11 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
 
     assert result["config_found"] is True
     assert result["profile_names"] == [
+        "calphad",
         "cp2k",
         "lammps_md_engine",
         "mace_training_gpu",
+        "moose",
         "phonopy",
         "xafs_larch",
         "zentropy",
@@ -172,6 +183,11 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
     assert "export ATOMI_XAFS_FEFF_EXE=/private/feff8l" in env_text
     assert "export ATOMI_ZENTROPY_PYTHON=/private/zentropy/bin/python" in env_text
     assert "export ATOMI_ZENTROPY_EXE=/private/zentropy/bin/pyzentropy" in env_text
+    assert "export ATOMI_MOOSE_APP=/private/moose/app-opt" in env_text
+    assert "export ATOMI_MOOSE_ENV=/private/moose_env" in env_text
+    assert "export ATOMI_MOOSE_MODULES='moose/module petsc/module'" in env_text
+    assert "export ATOMI_CALPHAD_PYTHON=/private/moose_env/bin/python" in env_text
+    assert "export ATOMI_CALPHAD_DATABASES=/private/tdb/uo2.tdb,/private/tdb/gduo2.tdb" in env_text
     assert "export CP2K_DATA_DIR=/private/cp2k/data" in env_text
     assert "OMP_NUM_THREADS" not in env_text
 

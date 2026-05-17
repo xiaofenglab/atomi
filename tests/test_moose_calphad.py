@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from atomi.calphad import env as calphad_env
 from atomi.calphad.env import _parse_csv, inspect_calphad_environment
 from atomi.moose.env import inspect_moose_environment
 from atomi.moose.material_export import main as moose_material_main
@@ -43,6 +44,25 @@ def test_moose_environment_reports_requested_app(monkeypatch, tmp_path: Path) ->
     assert report["environment"]["MOOSE_DIR"] == "/apps/moose"
 
 
+def test_moose_environment_uses_atomi_configured_app(monkeypatch, tmp_path: Path) -> None:
+    app = tmp_path / "configured_moose_app-opt"
+    app.write_text("#!/bin/sh\n", encoding="utf-8")
+    app.chmod(0o755)
+
+    monkeypatch.setenv("ATOMI_MOOSE_APP", str(app))
+    monkeypatch.setenv("ATOMI_MOOSE_ENV", "/private/moose_env")
+    monkeypatch.setenv("ATOMI_MOOSE_MODULES", "compiler mpi petsc")
+    monkeypatch.setattr("atomi.moose.env.shutil.which", lambda name: None)
+
+    report = inspect_moose_environment()
+
+    assert report["app"] == str(app)
+    assert report["selected_executable"] == str(app)
+    assert report["ready_for_moose"] is True
+    assert report["atomi_environment"]["ATOMI_MOOSE_ENV"] == "/private/moose_env"
+    assert report["atomi_environment"]["ATOMI_MOOSE_MODULES"] == "compiler mpi petsc"
+
+
 def test_calphad_environment_without_database_records_requested_scope() -> None:
     report = inspect_calphad_environment(
         components=_parse_csv("U,O,VA"),
@@ -54,6 +74,27 @@ def test_calphad_environment_without_database_records_requested_scope() -> None:
     assert report["database"] is None
     assert report["requested_components"] == ["U", "O", "VA"]
     assert report["requested_phases"] == ["FLUORITE", "LIQUID"]
+
+
+def test_calphad_environment_uses_external_pycalphad_python(monkeypatch) -> None:
+    def fake_probe(python_executable, database=None, timeout=20.0):
+        return {
+            "configured": True,
+            "requested_python": str(python_executable),
+            "available": True,
+            "pycalphad": {"available": True, "version": "1.2.3"},
+        }
+
+    monkeypatch.setenv("ATOMI_CALPHAD_PYTHON", "/private/moose_env/bin/python")
+    monkeypatch.setattr(calphad_env.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(calphad_env, "_package_status", lambda *args, **kwargs: {"available": False, "version": None})
+    monkeypatch.setattr(calphad_env, "probe_calphad_python", fake_probe)
+
+    report = calphad_env.inspect_calphad_environment()
+
+    assert report["ready_for_pycalphad"] is True
+    assert report["calphad_mode"] == "external-python"
+    assert report["external_environment"]["requested_python"] == "/private/moose_env/bin/python"
 
 
 def test_calphad_missing_database_is_reported(tmp_path: Path) -> None:

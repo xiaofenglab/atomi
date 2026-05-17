@@ -97,6 +97,10 @@ keys, and local executable paths in private notes or `*.local.json` configs.
 See [Dependency Strategy](docs/dependency_strategy.md) for optional extras such
 as XAFS/Larch and for stable HPC install guidance.
 
+External MOOSE and CALPHAD environments can stay separate from Atomi. Use
+`moose_status` and `calphad_status` to check configured app executables,
+pycalphad Python environments, and database visibility.
+
 ## Elastic Post-Analysis
 
 Atomi can post-process elastic tensors from either `vasp_elastic analyze` or
