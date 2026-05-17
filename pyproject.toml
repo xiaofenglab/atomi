@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "atomi"
-version = "0.3.36"
+version = "0.3.37"
 description = "Reusable HPC automation tools for atomistic modeling workflows."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -41,6 +41,9 @@ xafs = [
 ]
 zentropy = [
   "pyzentropy; python_version >= '3.10'",
+]
+elastic-viz = [
+  "ELATE>=2025.8",
 ]
 
 [project.scripts]
@@ -127,6 +130,8 @@ xafs_status = "atomi.xafs.status:main"
 lammps-thermo-series = "atomi.lammps.thermo_series:main"
 thermo_lammps = "atomi.lammps.thermo_series:main"
 elastic_lammps = "atomi.lammps.elastic:main"
+elastic_viz = "atomi.elastic.viz:main"
+elastic-viz = "atomi.elastic.viz:main"
 elastic_qha_md_compare = "atomi.lammps.elastic_qha_md_compare:main"
 elastic_vasp_md_compare = "atomi.lammps.elastic_qha_md_compare:main"
 elastic-vasp-md-compare = "atomi.lammps.elastic_qha_md_compare:main"

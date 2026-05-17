@@ -41,6 +41,8 @@ Atomi keeps heavier or less-universal workflows behind extras:
   `periodictable`, and `xraydb`.
 - `xafs`: XAFS/Larch workflow support with `xraydb` and `xraylarch`.
 - `zentropy`: optional materials zentropy runtime bridge with `pyzentropy`.
+- `elastic-viz`: optional ELATE bridge for directional elastic tensor
+  visualization.
 
 Examples:
 
@@ -48,7 +50,22 @@ Examples:
 python -m pip install -e ".[dev,materials]"
 python -m pip install --upgrade --upgrade-strategy only-if-needed \
   "atomi[xafs] @ git+https://github.com/xiaofenglab/atomi.git@main"
+python -m pip install --upgrade --upgrade-strategy only-if-needed \
+  "atomi[elastic-viz] @ git+https://github.com/xiaofenglab/atomi.git@main"
 ```
+
+## Elastic Visualization Guidance
+
+The `elastic_viz` command is a post-analysis layer for elastic tensors already
+produced by VASP or MD workflows. It does not need ELATE for its summary tables
+or native directional formulas, but the `elastic-viz` extra allows Atomi to use
+ELATE directly for ELATE-style 3D directional surfaces.
+
+ElasTool is useful as an external reference workflow for broader postprocessing
+such as Christoffel surfaces, hardness estimates, and minimum thermal
+conductivity models. Because it is GPLv3 and dependency-heavy, Atomi should not
+vendor or copy its code into the base package. Prefer independent formulas in
+Atomi plus export/call support for users who install ElasTool separately.
 
 ## Larch/XAFS Guidance
 

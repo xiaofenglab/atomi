@@ -97,6 +97,31 @@ keys, and local executable paths in private notes or `*.local.json` configs.
 See [Dependency Strategy](docs/dependency_strategy.md) for optional extras such
 as XAFS/Larch and for stable HPC install guidance.
 
+## Elastic Post-Analysis
+
+Atomi can post-process elastic tensors from either `vasp_elastic analyze` or
+`elastic_lammps analyze` with the shared `elastic_viz` command. It reads
+`elastic_tensors.json` and `elastic_moduli_T.csv`, writes an enriched
+thermophysical summary, and can generate optional ELATE-style directional
+Young's modulus and linear-compressibility HTML surfaces:
+
+```bash
+elastic_viz --elastic-dir analysis/elastic_lammps/fit --formula Si --formula-units 64 --plot-3d
+```
+
+The base command works without ELATE by using native tensor formulas. Install
+the optional visualization extra when you want Atomi to use ELATE directly:
+
+```bash
+python -m pip install "atomi[elastic-viz] @ git+https://github.com/xiaofenglab/atomi.git@main"
+```
+
+The derived-property table includes VRH moduli, Pugh ratio, Cauchy pressure,
+elastic anisotropy indices, sound velocities, density-derived quantities, and
+Debye temperature when formula/density information is supplied. Heavier
+ElasTool-style post-processing remains an external/reference path rather than a
+base dependency.
+
 ## HPC Environment Check
 
 Before using Atomi on a new cluster, run the environment doctor and review the generated report. The report checks common executables, scheduler commands, plotting tools, atomistic engine names, and Python packages used by the packaged workflows.

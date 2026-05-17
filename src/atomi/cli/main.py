@@ -174,6 +174,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     elastic_lammps.add_argument("elastic_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("elastic_viz", "elastic-viz"):
+        elastic_viz = subparsers.add_parser(
+            command_name,
+            help="Visualize VASP/MD elastic tensors and derive thermophysical properties.",
+        )
+        elastic_viz.add_argument("elastic_viz_args", nargs=argparse.REMAINDER)
+
     for command_name in ("vasp_elastic", "vasp-elastic"):
         vasp_elastic = subparsers.add_parser(
             command_name,
@@ -596,6 +603,11 @@ def main(argv: list[str] | None = None) -> None:
 
         elastic_lammps_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("elastic_viz", "elastic-viz"):
+        from atomi.elastic.viz import main as elastic_viz_main
+
+        elastic_viz_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] in ("vasp_elastic", "vasp-elastic"):
         from atomi.vasp.elastic import main as vasp_elastic_main
 
@@ -953,6 +965,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.lammps.elastic import main as elastic_lammps_main
 
         elastic_lammps_main(args.elastic_args)
+        return
+
+    if args.subcommand in ("elastic_viz", "elastic-viz"):
+        from atomi.elastic.viz import main as elastic_viz_main
+
+        elastic_viz_main(args.elastic_viz_args)
         return
 
     if args.subcommand in ("vasp_elastic", "vasp-elastic"):
