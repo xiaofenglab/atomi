@@ -103,63 +103,6 @@ pycalphad Python environments, and database visibility.
 Use `pdfgetx3_status` for a separately installed PDFGetX3 reduction
 environment.
 
-## Elastic Post-Analysis
-
-Atomi can post-process elastic tensors from either `vasp_elastic analyze` or
-`elastic_lammps analyze` with the shared `elastic_viz` command. It reads
-`elastic_tensors.json` and `elastic_moduli_T.csv`, writes an enriched
-thermophysical summary including minimum thermal-conductivity estimates,
-hardness screening values, and strain-energy-density checks, and can generate
-optional ELATE-style directional Young's modulus and linear-compressibility
-HTML surfaces:
-
-```bash
-elastic_viz --elastic-dir analysis/elastic_lammps/fit --formula Si --formula-units 64 --plot-3d
-```
-
-The base command works without ELATE by using native tensor formulas. Check the
-active backend with:
-
-```bash
-elate_status
-```
-
-Downstream bridge commands now include:
-
-```bash
-thermal_k_lammps --elastic-dir analysis/elastic_viz --outdir analysis/thermal_k
-moose-elastic-export --elastic-dir analysis/elastic_lammps/fit --material UO2
-calphad_export --property-csv free_energy.csv --material UO2 --phase FLUORITE
-defect_thermo_export --defect-csv defect_motifs.csv --material Gd_U_O2
-```
-
-Use the same formula-cell vocabulary across these commands:
-
-```bash
---formula UO2 --natoms 96 --atoms-per-formula-unit 3 --formula-units 32 --target-z 4
-```
-
-For UO2, `target-z 4` means the normalized target cell is the conventional
-fluorite cell with four UO2 formula units. CALPHAD exports can read Atomi
-thermo tables and convert common QHA/MD columns to canonical `G_J_mol`,
-`H_J_mol`, `S_J_molK`, and `Cp_J_molK` fields using this basis metadata.
-The same metadata keys are also written by PDF/XAFS preparation commands when
-these options are provided.
-
-The `elastic-viz` extra is intentionally dependency-light so it does not block
-combined HPC installs. If you want Atomi to use ELATE directly, install ELATE
-from its GitHub repository in the same environment:
-
-```bash
-python -m pip install "ELATE @ git+https://github.com/coudertlab/elate.git@master"
-```
-
-The derived-property table includes VRH moduli, Pugh ratio, Cauchy pressure,
-elastic anisotropy indices, sound velocities, density-derived quantities, and
-Debye temperature when formula/density information is supplied. Heavier
-ElasTool-style post-processing remains an external/reference path rather than a
-base dependency.
-
 ## HPC Environment Check
 
 Before using Atomi on a new cluster, run the environment doctor and review the generated report. The report checks common executables, scheduler commands, plotting tools, atomistic engine names, and Python packages used by the packaged workflows.
