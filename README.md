@@ -100,6 +100,8 @@ as XAFS/Larch and for stable HPC install guidance.
 External MOOSE and CALPHAD environments can stay separate from Atomi. Use
 `moose_status` and `calphad_status` to check configured app executables,
 pycalphad Python environments, and database visibility.
+Use `pdfgetx3_status` for a separately installed PDFGetX3 reduction
+environment.
 
 ## Elastic Post-Analysis
 

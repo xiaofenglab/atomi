@@ -106,6 +106,31 @@ export ATOMI_XAFS_LARCH_ENV="$HOME/atomi_hpc/larch_env"
 fall back to the configured external Larch Python for the Larch `xftf`
 transform.
 
+## PDFGetX3 Guidance
+
+PDFGetX3 can also live in a separate environment from the main Atomi install.
+This is useful when the experimental PDF reduction stack was installed from a
+local wheelhouse or uses a different dependency set than the MD analysis
+environment.
+
+Useful status check:
+
+```bash
+pdfgetx3_status
+```
+
+External runtime configuration:
+
+```bash
+export ATOMI_PDFGETX3_ENV="$HOME/atomi_hpc/pdfgetx3_env"
+export ATOMI_PDFGETX3_EXE="$HOME/atomi_hpc/pdfgetx3_env/bin/pdfgetx3"
+export ATOMI_PDFGETX3_WHEELHOUSE="$HOME/atomi_hpc/wheels/pdfgetx3"
+```
+
+The same values can be stored in local-only config under `profiles.pdfgetx3`.
+`pdf_md_compare` will use the configured executable when reducing raw
+experimental `.chi` data through PDFGetX3.
+
 ## Zentropy Guidance
 
 Atomi's zentropy tools are organized as a staged workflow:
@@ -160,6 +185,7 @@ to that Python instead of installing pycalphad into every MD/DFT environment:
 
 ```bash
 export ATOMI_CALPHAD_PYTHON="$HOME/moose_env/bin/python"
+export ATOMI_CALPHAD_ENV="$HOME/moose_env"
 export ATOMI_CALPHAD_DATABASES="$HOME/tdb/database.tdb"
 calphad_status
 ```

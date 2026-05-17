@@ -361,6 +361,18 @@ def build_hpc_config_template(site: str = "") -> dict[str, Any]:
                 "micromamba_root": "",
                 "micromamba_env": "",
             },
+            "pdfgetx3": {
+                "env_path": "",
+                "python": "",
+                "executable": "",
+                "wheelhouse": "",
+                "environment": {
+                    "ATOMI_PDFGETX3_EXE": "",
+                    "ATOMI_PDFGETX3_ENV": "",
+                    "ATOMI_PDFGETX3_PYTHON": "",
+                    "ATOMI_PDFGETX3_WHEELHOUSE": "",
+                },
+            },
             "moose": {
                 "modules": [],
                 "env_path": "",
@@ -691,6 +703,28 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
         for field in ("zentropy_executable", "pyzentropy_executable", "command"):
             if _nonempty(zentropy.get(field)):
                 exports.setdefault("ATOMI_ZENTROPY_EXE", str(zentropy[field]))
+                break
+
+    pdfgetx3 = profiles.get("pdfgetx3", {})
+    if isinstance(pdfgetx3, dict):
+        env = pdfgetx3.get("environment", {})
+        if isinstance(env, dict):
+            for key, value in env.items():
+                if _nonempty(value) and str(key).startswith("ATOMI_"):
+                    exports[str(key)] = str(value)
+        for field in ("executable", "pdfgetx3_executable", "command"):
+            if _nonempty(pdfgetx3.get(field)):
+                exports.setdefault("ATOMI_PDFGETX3_EXE", str(pdfgetx3[field]))
+                break
+        for field in ("python", "python_executable"):
+            if _nonempty(pdfgetx3.get(field)):
+                exports.setdefault("ATOMI_PDFGETX3_PYTHON", str(pdfgetx3[field]))
+                break
+        if _nonempty(pdfgetx3.get("env_path")):
+            exports.setdefault("ATOMI_PDFGETX3_ENV", str(pdfgetx3["env_path"]))
+        for field in ("wheelhouse", "wheel_dir", "wheels"):
+            if _nonempty(pdfgetx3.get(field)):
+                exports.setdefault("ATOMI_PDFGETX3_WHEELHOUSE", str(pdfgetx3[field]))
                 break
 
     moose = profiles.get("moose", {})

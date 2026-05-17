@@ -137,6 +137,11 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
                         "python": "/private/zentropy/bin/python",
                         "zentropy_executable": "/private/zentropy/bin/pyzentropy",
                     },
+                    "pdfgetx3": {
+                        "env_path": "/private/pdfgetx3_env",
+                        "executable": "/private/pdfgetx3_env/bin/pdfgetx3",
+                        "wheelhouse": "/private/wheels/pdfgetx3",
+                    },
                     "moose": {
                         "env_path": "/private/moose_env",
                         "app_executable": "/private/moose/app-opt",
@@ -162,6 +167,7 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
         "lammps_md_engine",
         "mace_training_gpu",
         "moose",
+        "pdfgetx3",
         "phonopy",
         "xafs_larch",
         "zentropy",
@@ -188,6 +194,9 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
     assert "export ATOMI_MOOSE_MODULES='moose/module petsc/module'" in env_text
     assert "export ATOMI_CALPHAD_PYTHON=/private/moose_env/bin/python" in env_text
     assert "export ATOMI_CALPHAD_DATABASES=/private/tdb/uo2.tdb,/private/tdb/gduo2.tdb" in env_text
+    assert "export ATOMI_PDFGETX3_EXE=/private/pdfgetx3_env/bin/pdfgetx3" in env_text
+    assert "export ATOMI_PDFGETX3_ENV=/private/pdfgetx3_env" in env_text
+    assert "export ATOMI_PDFGETX3_WHEELHOUSE=/private/wheels/pdfgetx3" in env_text
     assert "export CP2K_DATA_DIR=/private/cp2k/data" in env_text
     assert "OMP_NUM_THREADS" not in env_text
 

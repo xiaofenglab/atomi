@@ -147,6 +147,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         lammps_rdf_pdf.add_argument("rdf_pdf_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("pdfgetx3_status", "pdfgetx3-status"):
+        pdfgetx3_status = subparsers.add_parser(
+            command_name,
+            help="Inspect PDFGetX3 executable and configured external environment.",
+        )
+        pdfgetx3_status.add_argument("pdfgetx3_status_args", nargs=argparse.REMAINDER)
+
     for command_name in ("pdf_md_compare", "pdf_md_reweight"):
         lammps_pdf_match = subparsers.add_parser(
             command_name,
@@ -567,6 +574,11 @@ def main(argv: list[str] | None = None) -> None:
 
         lammps_rdf_pdf_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("pdfgetx3_status", "pdfgetx3-status"):
+        from atomi.lammps.pdfgetx3_status import main as pdfgetx3_status_main
+
+        pdfgetx3_status_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "pdf_md_compare":
         from atomi.lammps.pdf_match import compare_main
 
@@ -925,6 +937,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.lammps.rdf_pdf import main as lammps_rdf_pdf_main
 
         lammps_rdf_pdf_main(args.rdf_pdf_args)
+        return
+
+    if args.subcommand in ("pdfgetx3_status", "pdfgetx3-status"):
+        from atomi.lammps.pdfgetx3_status import main as pdfgetx3_status_main
+
+        pdfgetx3_status_main(args.pdfgetx3_status_args)
         return
 
     if args.subcommand == "pdf_md_compare":
