@@ -211,6 +211,16 @@ def init_main(argv: list[str] | None = None) -> dict[str, Any]:
         ",,parent_UO2,,UO2,,energy per parent formula unit or primitive reference\n",
         encoding="utf-8",
     )
+    (dirs["references"] / "reference_phase_index_template.csv").write_text(
+        "reference_id,formula,path,energy_eV,n_formula_units,role,source,notes\n"
+        "UO2,UO2,/path/to/UO2_relaxed/OUTCAR,,,parent,dft,stoichiometric parent phase\n"
+        "U3O8,U3O8,/path/to/U3O8_relaxed/OUTCAR,,,oxygen_rich_reference,dft,optional reservoir cross-check\n"
+        "U2O5,U2O5,/path/to/U2O5_relaxed/OUTCAR,,,oxygen_rich_reference,dft,optional reservoir cross-check\n"
+        "U_metal,U,/path/to/U_metal_relaxed/OUTCAR,,,element,dft,optional metal reservoir\n"
+        "Gd2O3,Gd2O3,/path/to/Gd2O3_relaxed/OUTCAR,,,dopant_oxide,dft,optional Gd reservoir\n"
+        "Gd05U05O2,Gd0.5U0.5O2,/path/to/GdUO2_relaxed/OUTCAR,,,mixed_endmember,dft,optional solution anchor\n",
+        encoding="utf-8",
+    )
     (dirs["seeds"] / "sd_dd_seed_index_template.csv").write_text(
         "case_id,model,seed_poscar,template,defect_a,defect_b,charge,delta_O,degeneracy,capacity_per_formula,notes\n"
         "Gd_U_seed,SD,seed_POSCARs/Gd_U/POSCAR,VASP_TEMPLATE,,,,,2,1.0,Gd substitution seed\n"
@@ -231,6 +241,11 @@ def init_main(argv: list[str] | None = None) -> dict[str, Any]:
         encoding="utf-8",
     )
     commands = [
+        (
+            "defect-chem build-references "
+            f"--reference-index {dirs['references'] / 'reference_phase_index_template.csv'} "
+            f"--out {dirs['references'] / 'reference_energies.csv'}"
+        ),
         f"midx 02_sd_dd_dft --index {dirs['metadata'] / 'motif_paths.csv'}",
         (
             "zentropy_motif_db auto-metadata "
@@ -247,9 +262,16 @@ def init_main(argv: list[str] | None = None) -> dict[str, Any]:
             f"--db {dirs['metadata'] / 'defect_motif_db.json'}"
         ),
         (
+            "defect-chem plan-variants "
+            f"--motif-db-json {dirs['metadata'] / 'defect_motif_db.json'} "
+            f"--out {dirs['defects'] / 'variant_plan.csv'} "
+            f"--seed-index {dirs['seeds'] / 'variant_seed_index.csv'} "
+            "--top-n-per-family 2 --variants-per-candidate 4 --include-spin"
+        ),
+        (
             "defect-chem build-defects "
             f"--motif-db-json {dirs['metadata'] / 'defect_motif_db.json'} "
-            f"--reference-csv {dirs['references'] / 'reference_energies_template.csv'} "
+            f"--reference-csv {dirs['references'] / 'reference_energies.csv'} "
             f"--out {dirs['defects'] / 'defects.csv'}"
         ),
         (
@@ -268,12 +290,14 @@ def init_main(argv: list[str] | None = None) -> dict[str, Any]:
         "",
         "## Stage Order",
         "",
-        "1. Put seed POSCARs and a VASP_TEMPLATE into `01_seed_structures`.",
-        "2. Use `defect-chem prepare-runs` to create array-DFT-ready folders in `02_sd_dd_dft`.",
-        "3. Use `midx`, `auto-metadata`, and `zentropy_motif_db index` after VASP finishes.",
-        "4. Use `defect-chem build-defects` to build `defects.csv` from DFT energies.",
-        "5. Use `defect-chem run` for SD/DD thermodynamics.",
-        "6. Use `defect-chem fit-solution` to seed regular/Redlich-Kister CALPHAD parameters.",
+        "1. Build reference phase energies in `00_references`.",
+        "2. Put seed POSCARs and a VASP_TEMPLATE into `01_seed_structures`.",
+        "3. Use `defect-chem prepare-runs` to create array-DFT-ready folders in `02_sd_dd_dft`.",
+        "4. Use `midx`, `auto-metadata`, and `zentropy_motif_db index` after VASP finishes.",
+        "5. Use `defect-chem plan-variants` to rank low-energy motifs for a small follow-up DFT set.",
+        "6. Use `defect-chem build-defects` to build `defects.csv` from DFT energies.",
+        "7. Use `defect-chem run` for SD/DD thermodynamics.",
+        "8. Use `defect-chem fit-solution` to seed regular/Redlich-Kister CALPHAD parameters.",
         "",
         "## Useful Commands",
         "",
@@ -469,6 +493,159 @@ def reference_data(path: Path | None) -> tuple[dict[str, float], dict[str, dict[
     return chemical_potentials, references
 
 
+def resolve_relative_path(raw: str | None, base: Path) -> Path | None:
+    if raw is None or not str(raw).strip():
+        return None
+    path = Path(str(raw).strip())
+    return path if path.is_absolute() else base / path
+
+
+def structure_path_for_reference(path: Path | None) -> Path | None:
+    if path is None:
+        return None
+    if path.is_file() and path.name in {"POSCAR", "CONTCAR"}:
+        return path
+    folder = path if path.is_dir() else path.parent
+    for name in ("CONTCAR", "POSCAR"):
+        candidate = folder / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def poscar_counts(path: Path | None) -> dict[str, int]:
+    if path is None or not path.exists():
+        return {}
+    from atomi.vasp.magmom import read_poscar_species
+
+    species = read_poscar_species(path)
+    return {symbol: count for symbol, count in zip(species.symbols, species.counts)}
+
+
+def formula_units_from_counts(counts: dict[str, int], formula: str) -> float | None:
+    if not counts or not formula:
+        return None
+    formula_counts = parse_formula(formula)
+    ratios = []
+    for element, stoich in formula_counts.items():
+        if stoich <= 0:
+            continue
+        if element not in counts:
+            return None
+        ratios.append(float(counts[element]) / float(stoich))
+    if not ratios:
+        return None
+    return min(ratios)
+
+
+def calc_record_for_reference(path: Path | None) -> dict[str, Any]:
+    from atomi.vasp.qha_summary import empty_calc_record, parse_calc_folder, parse_outcar, parse_vasprun
+
+    if path is None or not path.exists():
+        return empty_calc_record()
+    if path.is_dir():
+        return parse_calc_folder(path)
+    name = path.name
+    if name.startswith("vasprun.xml"):
+        return parse_vasprun(path)
+    if name.startswith("OUTCAR"):
+        return parse_outcar(path)
+    return parse_calc_folder(path.parent)
+
+
+def build_references_main(argv: list[str] | None = None) -> dict[str, Any]:
+    parser = argparse.ArgumentParser(
+        prog="defect-chem build-references",
+        description="Build a reference-energy table from existing VASP phase/reference calculations.",
+    )
+    parser.add_argument("--reference-index", type=Path, required=True)
+    parser.add_argument("--out", type=Path, default=Path("reference_energies.csv"))
+    parser.add_argument("--json-out", type=Path)
+    parser.add_argument("--strict", action="store_true", help="Fail if any reference energy cannot be resolved.")
+    args = parser.parse_args(argv)
+
+    base = args.reference_index.resolve().parent
+    rows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for row_number, row in enumerate(read_csv(args.reference_index.resolve()), start=1):
+        reference_id = row.get("reference_id") or row.get("id") or row.get("name") or f"reference_{row_number}"
+        formula = row.get("formula") or row.get("phase_formula") or ""
+        raw_path = row.get("path") or row.get("run_dir") or row.get("outcar") or row.get("vasprun") or row.get("directory")
+        path = resolve_relative_path(raw_path, base)
+        calc = calc_record_for_reference(path)
+        energy = finite_float(row.get("energy_eV") or row.get("total_energy_eV"))
+        energy_source = "reference_index"
+        if energy is None:
+            energy = finite_float(calc.get("energy_eV"))
+            energy_source = str(calc.get("parser_used") or "vasp_output") if energy is not None else ""
+        structure_path = structure_path_for_reference(path)
+        counts = poscar_counts(structure_path)
+        n_formula_units = finite_float(row.get("n_formula_units") or row.get("formula_units"))
+        if n_formula_units is None:
+            n_formula_units = formula_units_from_counts(counts, formula)
+        energy_per_formula = finite_float(row.get("energy_eV_per_formula") or row.get("energy_per_formula_eV"))
+        if energy_per_formula is None and energy is not None and n_formula_units is not None and n_formula_units > 0:
+            energy_per_formula = energy / n_formula_units
+        if energy is None:
+            message = f"row {row_number} ({reference_id}) has no resolved energy"
+            if args.strict:
+                raise ValueError(message)
+            warnings.append(message)
+        if energy_per_formula is None and formula:
+            warnings.append(f"row {row_number} ({reference_id}) has no energy per formula unit")
+        rows.append(
+            {
+                "reference_id": reference_id,
+                "formula": formula,
+                "path": str(path.resolve()) if path else "",
+                "source_file": calc.get("source_file") or "",
+                "energy_eV": energy,
+                "n_formula_units": n_formula_units,
+                "energy_eV_per_formula": energy_per_formula,
+                "natoms": finite_float(calc.get("natoms")) or sum(counts.values()) or "",
+                "volume_A3": finite_float(calc.get("volume_A3")),
+                "role": row.get("role") or "",
+                "source": row.get("source") or energy_source,
+                "notes": row.get("notes") or "",
+            }
+        )
+    fields = [
+        "reference_id",
+        "formula",
+        "path",
+        "source_file",
+        "energy_eV",
+        "n_formula_units",
+        "energy_eV_per_formula",
+        "natoms",
+        "volume_A3",
+        "role",
+        "source",
+        "notes",
+    ]
+    out = args.out.resolve()
+    write_csv(out, rows, fields)
+    metadata = {
+        "schema": "atomi.zentropy.sd_dd_references.v1",
+        "reference_index": str(args.reference_index.resolve()),
+        "out": str(out),
+        "n_references": len(rows),
+        "warnings": warnings,
+        "notes": [
+            "energy_eV is the total DFT energy for the supplied reference calculation.",
+            "energy_eV_per_formula is used by defect-chem build-defects when the formula matches the parent phase.",
+            "Chemical potentials/reservoir choices still need thermodynamic review before publication.",
+        ],
+    }
+    json_out = args.json_out.resolve() if args.json_out else out.with_suffix(".metadata.json")
+    write_json(json_out, metadata)
+    print(f"Wrote reference rows : {len(rows)}")
+    print(f"Reference CSV        : {out}")
+    if warnings:
+        print(f"Warnings             : {len(warnings)}")
+    return metadata
+
+
 def record_model(record: dict[str, Any]) -> str:
     text = " ".join(
         str(record.get(key) or "")
@@ -534,7 +711,7 @@ def build_defects_main(argv: list[str] | None = None) -> dict[str, Any]:
     if parent_energy is None:
         for ref in references.values():
             if ref.get("formula") == args.parent_formula:
-                parent_energy = finite_float(ref.get("energy_eV") or ref.get("energy_eV_per_formula"))
+                parent_energy = finite_float(ref.get("energy_eV_per_formula") or ref.get("energy_eV"))
                 break
     rows: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
@@ -604,6 +781,277 @@ def build_defects_main(argv: list[str] | None = None) -> dict[str, Any]:
     print(f"Output                : {args.out.resolve()}")
     if skipped:
         print(f"Skipped records       : {len(skipped)}")
+    return metadata
+
+
+def motif_family(record: dict[str, Any]) -> str:
+    meta = record.get("motif_metadata", {}) or {}
+    return (
+        str(record.get("motif_family") or meta.get("motif_family") or record.get("defect_label") or record.get("motif_type") or "")
+        .strip()
+        or "unlabeled_motif"
+    )
+
+
+def motif_stability_value(record: dict[str, Any]) -> tuple[float, str] | None:
+    meta = record.get("motif_metadata", {}) or {}
+    calc = record.get("calculation", {}) or {}
+    norm = record.get("size_normalization", {}) or {}
+    candidates = [
+        ("formation_energy_eV", record.get("formation_energy_eV")),
+        ("formation_energy_eV", meta.get("formation_energy_eV")),
+        ("energy_per_formula_unit_eV", record.get("energy_per_formula_unit_eV")),
+        ("energy_eV_per_formula", record.get("energy_eV_per_formula")),
+        ("energy_eV", record.get("energy_eV")),
+        ("calculation_energy_eV", calc.get("energy_eV")),
+    ]
+    for label, value in candidates:
+        number = finite_float(value)
+        if number is not None:
+            if label in {"energy_eV", "calculation_energy_eV"}:
+                formula_units = finite_float(norm.get("formula_units"))
+                if formula_units is not None and formula_units > 0:
+                    return number / formula_units, f"{label}_normalized_by_formula_units"
+            return number, label
+    return None
+
+
+def record_source_structure(record: dict[str, Any]) -> str:
+    for key in ("source_structure_file", "seed_poscar", "poscar", "structure"):
+        value = record.get(key)
+        if value:
+            return str(value)
+    run_dir = Path(str(record.get("run_dir") or ""))
+    for name in ("CONTCAR", "POSCAR"):
+        candidate = run_dir / name
+        if candidate.exists():
+            return str(candidate)
+    return ""
+
+
+def record_template(record: dict[str, Any], fallback: Path | None) -> str:
+    if fallback is not None:
+        return str(fallback.resolve())
+    case_info = record.get("case_info", {}) or {}
+    if case_info.get("template"):
+        return str(case_info["template"])
+    run_dir = Path(str(record.get("run_dir") or ""))
+    if all((run_dir / name).exists() for name in ("INCAR", "KPOINTS", "POTCAR")):
+        return str(run_dir)
+    return ""
+
+
+def variant_specs(include_spin: bool) -> list[dict[str, str]]:
+    specs = [
+        {
+            "variant_family": "separation_near",
+            "priority": "1",
+            "reason": "Probe compact/near-neighbor placement for the same defect chemistry.",
+            "suggested_action": "Move paired/charge-compensating defects to a symmetry-distinct short separation, then relax.",
+        },
+        {
+            "variant_family": "separation_far",
+            "priority": "2",
+            "reason": "Probe separated-defect limit and estimate pair binding against compact arrangements.",
+            "suggested_action": "Move paired/charge-compensating defects to a long separation allowed by the cell, then relax.",
+        },
+        {
+            "variant_family": "symmetry_distinct",
+            "priority": "3",
+            "reason": "Check whether another crystallographically distinct placement is lower in energy.",
+            "suggested_action": "Generate a symmetry-distinct site arrangement with the same composition and defect count.",
+        },
+    ]
+    if include_spin:
+        specs.extend(
+            [
+                {
+                    "variant_family": "spin_dopant_fm_afm",
+                    "priority": "4",
+                    "reason": "Dopant FM/AFM alternatives can change the relaxed low-energy ordering.",
+                    "suggested_action": "Use magit/zentropy_motif_db generate-spins on this seed; keep structural defects fixed.",
+                },
+                {
+                    "variant_family": "spin_host_afm_like",
+                    "priority": "5",
+                    "reason": "Host magnetic ions with multiple valence-like MAGMOM magnitudes may have competing AFM-like patterns.",
+                    "suggested_action": "Use host AFM-like spin enumeration near dopants/defects; cap generated configurations.",
+                },
+            ]
+        )
+    return specs
+
+
+def plan_variants_main(argv: list[str] | None = None) -> dict[str, Any]:
+    parser = argparse.ArgumentParser(
+        prog="defect-chem plan-variants",
+        description="Select low-energy existing defect motifs and write a bounded DFT variance plan.",
+    )
+    parser.add_argument("--motif-db-json", type=Path, required=True)
+    parser.add_argument("--out", type=Path, default=Path("variant_plan.csv"))
+    parser.add_argument("--seed-index", type=Path, default=Path("variant_seed_index.csv"))
+    parser.add_argument("--command-script", type=Path, help="Optional shell snippet with the next prepare-runs command.")
+    parser.add_argument("--vasp-template", type=Path, help="Template folder to use for generated seed-index rows.")
+    parser.add_argument("--top-n-per-family", type=int, default=2)
+    parser.add_argument("--variants-per-candidate", type=int, default=4)
+    parser.add_argument("--max-total-variants", type=int, default=50)
+    parser.add_argument("--include-spin", action="store_true")
+    parser.add_argument("--family", action="append", help="Only include this motif family. Repeatable.")
+    args = parser.parse_args(argv)
+
+    if args.top_n_per_family <= 0:
+        raise ValueError("--top-n-per-family must be positive.")
+    if args.variants_per_candidate <= 0:
+        raise ValueError("--variants-per-candidate must be positive.")
+    if args.max_total_variants <= 0:
+        raise ValueError("--max-total-variants must be positive.")
+
+    db = read_json(args.motif_db_json.resolve())
+    wanted_families = {item for raw in (args.family or []) for item in raw.split(",") if item}
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    skipped: list[dict[str, str]] = []
+    for record in db.get("records", []):
+        family = motif_family(record)
+        if wanted_families and family not in wanted_families:
+            continue
+        stability = motif_stability_value(record)
+        if stability is None:
+            skipped.append({"motif_id": str(record.get("motif_id") or ""), "reason": "missing_energy"})
+            continue
+        grouped.setdefault(family, []).append(record)
+
+    selected: list[tuple[str, dict[str, Any], float, str]] = []
+    for family, records in sorted(grouped.items()):
+        ranked = sorted(records, key=lambda item: motif_stability_value(item) or (math.inf, ""))
+        for record in ranked[: args.top_n_per_family]:
+            stability = motif_stability_value(record)
+            if stability is not None:
+                selected.append((family, record, stability[0], stability[1]))
+
+    plan_rows: list[dict[str, Any]] = []
+    seed_rows: list[dict[str, Any]] = []
+    specs = variant_specs(args.include_spin)
+    for family, record, stability, stability_source in selected:
+        motif_id = str(record.get("motif_id") or record.get("run_dir") or "motif")
+        source_structure = record_source_structure(record)
+        template = record_template(record, args.vasp_template)
+        for spec in specs[: args.variants_per_candidate]:
+            if len(plan_rows) >= args.max_total_variants:
+                break
+            case_id = safe_name(f"{motif_id}_{spec['variant_family']}")
+            row = {
+                "case_id": case_id,
+                "source_motif_id": motif_id,
+                "source_family": family,
+                "source_run_dir": record.get("run_dir") or "",
+                "source_structure": source_structure,
+                "template": template,
+                "model": record_model(record),
+                "defect_label": record.get("defect_label") or record.get("motif_metadata", {}).get("defect_label") or "",
+                "variant_family": spec["variant_family"],
+                "variant_priority": spec["priority"],
+                "variant_reason": spec["reason"],
+                "suggested_action": spec["suggested_action"],
+                "stability_value_eV": stability,
+                "stability_source": stability_source,
+                "spin_order_host": record.get("motif_metadata", {}).get("spin_order_host", ""),
+                "spin_order_all": record.get("motif_metadata", {}).get("spin_order_all", ""),
+                "notes": (
+                    "Existing DFT motif treated as a low-energy candidate seed; "
+                    "apply the suggested structural or MAGMOM mutation before final production comparison."
+                ),
+            }
+            plan_rows.append(row)
+            seed_rows.append(
+                {
+                    "case_id": case_id,
+                    "model": row["model"],
+                    "seed_poscar": source_structure,
+                    "template": template,
+                    "defect_a": "",
+                    "defect_b": "",
+                    "charge": record.get("charge_state") or "",
+                    "delta_O": (record.get("size_normalization", {}) or {}).get("oxygen_delta_per_formula_unit", ""),
+                    "variant_family": spec["variant_family"],
+                    "source_motif_id": motif_id,
+                    "notes": spec["suggested_action"],
+                }
+            )
+        if len(plan_rows) >= args.max_total_variants:
+            break
+
+    plan_fields = [
+        "case_id",
+        "source_motif_id",
+        "source_family",
+        "source_run_dir",
+        "source_structure",
+        "template",
+        "model",
+        "defect_label",
+        "variant_family",
+        "variant_priority",
+        "variant_reason",
+        "suggested_action",
+        "stability_value_eV",
+        "stability_source",
+        "spin_order_host",
+        "spin_order_all",
+        "notes",
+    ]
+    seed_fields = [
+        "case_id",
+        "model",
+        "seed_poscar",
+        "template",
+        "defect_a",
+        "defect_b",
+        "charge",
+        "delta_O",
+        "variant_family",
+        "source_motif_id",
+        "notes",
+    ]
+    write_csv(args.out.resolve(), plan_rows, plan_fields)
+    write_csv(args.seed_index.resolve(), seed_rows, seed_fields)
+    command_script = args.command_script.resolve() if args.command_script else args.out.resolve().with_name("prepare_variant_runs.sh")
+    command_script.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                "",
+                "# Review variant_plan.csv before submitting; structural separation rows may need geometry mutation.",
+                "defect-chem prepare-runs \\",
+                f"  --seed-csv {args.seed_index.resolve()} \\",
+                f"  --outdir {args.seed_index.resolve().parent / 'variant_dft_runs'}",
+                "",
+                "# For spin-only variants, run zentropy_motif_db generate-spins on the selected seed/template folders.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    command_script.chmod(0o755)
+    metadata = {
+        "schema": "atomi.zentropy.sd_dd_variant_plan.v1",
+        "motif_db_json": str(args.motif_db_json.resolve()),
+        "out": str(args.out.resolve()),
+        "seed_index": str(args.seed_index.resolve()),
+        "command_script": str(command_script),
+        "top_n_per_family": args.top_n_per_family,
+        "variants_per_candidate": args.variants_per_candidate,
+        "max_total_variants": args.max_total_variants,
+        "n_selected_candidates": len(selected),
+        "n_variants": len(plan_rows),
+        "skipped": skipped,
+    }
+    write_json(args.out.resolve().with_suffix(".metadata.json"), metadata)
+    print(f"Selected low-energy motif seeds : {len(selected)}")
+    print(f"Planned variant rows           : {len(plan_rows)}")
+    print(f"Variant plan                   : {args.out.resolve()}")
+    print(f"Seed index                     : {args.seed_index.resolve()}")
+    print(f"Next command script            : {command_script}")
     return metadata
 
 
@@ -992,8 +1440,10 @@ def build_dispatch_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="action")
     sub.add_parser("init", help="Create a workflow skeleton.")
+    sub.add_parser("build-references", help="Build reference-energy CSV from phase DFT outputs.")
     sub.add_parser("prepare-runs", help="Create VASP folders from seed POSCARs.")
     sub.add_parser("build-defects", help="Build defects.csv from a motif DB.")
+    sub.add_parser("plan-variants", help="Plan a bounded follow-up DFT variance set from low-energy motifs.")
     sub.add_parser("fit-solution", help="Fit regular/Redlich-Kister CALPHAD seed parameters.")
     sub.add_parser("run", help="Run SD/DD dilute thermodynamics.")
     return parser
@@ -1003,10 +1453,14 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     raw = sys.argv[1:] if argv is None else list(argv)
     actions = {
         "init": init_main,
+        "build-references": build_references_main,
+        "references": build_references_main,
         "prepare-runs": prepare_runs_main,
         "prepare": prepare_runs_main,
         "build-defects": build_defects_main,
         "build": build_defects_main,
+        "plan-variants": plan_variants_main,
+        "variants": plan_variants_main,
         "fit-solution": fit_solution_main,
         "fit": fit_solution_main,
         "run": run_main,

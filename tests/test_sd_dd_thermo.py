@@ -115,6 +115,26 @@ def test_sd_dd_init_prepare_build_and_fit_workflow(tmp_path: Path) -> None:
     assert (tmp_path / "runs" / "V_O_seed" / "POSCAR").exists()
     assert (tmp_path / "runs" / "runlist.txt").exists()
 
+    reference_index = tmp_path / "reference_phases.csv"
+    reference_index.write_text(
+        "reference_id,formula,path,energy_eV,n_formula_units,role\n"
+        f"parent_UO2,UO2,{seed},-60.0,2,parent\n",
+        encoding="utf-8",
+    )
+    reference_csv = tmp_path / "reference_energies.csv"
+    sd_dd_thermo.main(
+        [
+            "build-references",
+            "--reference-index",
+            str(reference_index),
+            "--out",
+            str(reference_csv),
+        ]
+    )
+    reference_rows = rows(reference_csv)
+    assert reference_rows[0]["reference_id"] == "parent_UO2"
+    assert float(reference_rows[0]["energy_eV_per_formula"]) == -30.0
+
     motif_db = tmp_path / "defect_motif_db.json"
     motif_db.write_text(
         json.dumps(
@@ -125,6 +145,7 @@ def test_sd_dd_init_prepare_build_and_fit_workflow(tmp_path: Path) -> None:
                         "motif_family": "oxygen_vacancy",
                         "defect_label": "O_V1",
                         "energy_eV": -28.0,
+                        "source_structure_file": str(seed),
                         "counts": {"U": 1, "O": 1},
                         "degeneracy": 1,
                         "size_normalization": {
@@ -133,22 +154,66 @@ def test_sd_dd_init_prepare_build_and_fit_workflow(tmp_path: Path) -> None:
                         },
                         "motif_metadata": {"spin_order_all": "nonmagnetic"},
                         "run_dir": str(tmp_path / "runs" / "V_O_seed"),
+                    },
+                    {
+                        "motif_id": "V_O_higher",
+                        "motif_family": "oxygen_vacancy",
+                        "defect_label": "O_V2",
+                        "energy_eV": -27.0,
+                        "source_structure_file": str(seed),
+                        "counts": {"U": 1, "O": 1},
+                        "size_normalization": {
+                            "formula_units": 1.0,
+                            "oxygen_delta_per_formula_unit": -1.0,
+                        },
+                        "motif_metadata": {"spin_order_all": "nonmagnetic"},
+                        "run_dir": str(tmp_path / "runs" / "V_O_higher"),
                     }
                 ]
             }
         ),
         encoding="utf-8",
     )
+    variant_plan = tmp_path / "variant_plan.csv"
+    variant_seed_index = tmp_path / "variant_seed_index.csv"
+    sd_dd_thermo.main(
+        [
+            "plan-variants",
+            "--motif-db-json",
+            str(motif_db),
+            "--out",
+            str(variant_plan),
+            "--seed-index",
+            str(variant_seed_index),
+            "--top-n-per-family",
+            "1",
+            "--variants-per-candidate",
+            "4",
+            "--include-spin",
+            "--vasp-template",
+            str(template),
+        ]
+    )
+    plan_rows = rows(variant_plan)
+    assert [row["variant_family"] for row in plan_rows] == [
+        "separation_near",
+        "separation_far",
+        "symmetry_distinct",
+        "spin_dopant_fm_afm",
+    ]
+    seed_rows = rows(variant_seed_index)
+    assert seed_rows[0]["seed_poscar"] == str(seed)
+
     defects = tmp_path / "defects.csv"
     sd_dd_thermo.main(
         [
             "build-defects",
             "--motif-db-json",
             str(motif_db),
+            "--reference-csv",
+            str(reference_csv),
             "--out",
             str(defects),
-            "--parent-reference-energy-eV",
-            "-30",
             "--chemical-potential",
             "O=-5",
         ]
