@@ -87,6 +87,13 @@ coupling:
 - `calphad_export` and `defect_thermo_export` bridge CALPHAD free-energy
   tables and zentropy defect motif energetics toward MOOSE app-specific inputs.
 
+The common cell-description convention is `formula`, `natoms`,
+`atoms_per_formula_unit`, `n_formula_units`, `target_z_formula_units`,
+`cell_role`, and `normalization_basis`. For UO2, a 96-atom MD cell has
+`n_formula_units=32`, while `target_z_formula_units=4` represents the
+conventional fluorite cell. CALPHAD bridge outputs use this metadata to convert
+Atomi QHA/MD columns to canonical per-formula or target-cell fields.
+
 ## Larch/XAFS Guidance
 
 `xraylarch` is intentionally not part of the base install. Larch is powerful,

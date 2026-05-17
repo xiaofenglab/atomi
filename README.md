@@ -133,6 +133,17 @@ calphad_export --property-csv free_energy.csv --material UO2 --phase FLUORITE
 defect_thermo_export --defect-csv defect_motifs.csv --material Gd_U_O2
 ```
 
+Use the same formula-cell vocabulary across these commands:
+
+```bash
+--formula UO2 --natoms 96 --atoms-per-formula-unit 3 --formula-units 32 --target-z 4
+```
+
+For UO2, `target-z 4` means the normalized target cell is the conventional
+fluorite cell with four UO2 formula units. CALPHAD exports can read Atomi
+thermo tables and convert common QHA/MD columns to canonical `G_J_mol`,
+`H_J_mol`, `S_J_molK`, and `Cp_J_molK` fields using this basis metadata.
+
 The `elastic-viz` extra is intentionally dependency-light so it does not block
 combined HPC installs. If you want Atomi to use ELATE directly, install ELATE
 from its GitHub repository in the same environment:

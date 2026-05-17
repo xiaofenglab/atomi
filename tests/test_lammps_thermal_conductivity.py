@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 
 from atomi.lammps.thermal_conductivity import main
@@ -15,11 +16,30 @@ def test_thermal_k_lammps_exports_elastic_lower_bound(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     out = tmp_path / "out"
-    main(["--elastic-summary", str(summary), "--elastic-select", "average", "--outdir", str(out), "--no-plot"])
+    main(
+        [
+            "--elastic-summary",
+            str(summary),
+            "--elastic-select",
+            "average",
+            "--outdir",
+            str(out),
+            "--formula",
+            "UO2",
+            "--natoms",
+            "96",
+            "--atoms-per-formula-unit",
+            "3",
+            "--no-plot",
+        ]
+    )
 
     rows = list(csv.DictReader((out / "thermal_conductivity_T.csv").open(encoding="utf-8")))
     assert rows[0]["source"] == "elastic_min_average"
     assert float(rows[0]["k_W_mK"]) == 2.25
+    assert float(rows[0]["n_formula_units"]) == 32.0
+    metadata = json.loads((out / "thermal_conductivity_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["cell_metadata"]["formula"] == "UO2"
 
 
 def test_thermal_k_lammps_integrates_scaled_green_kubo_tail(tmp_path: Path) -> None:

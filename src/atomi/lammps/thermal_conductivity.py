@@ -11,6 +11,8 @@ from typing import Any
 
 import numpy as np
 
+from atomi.core.cell import cell_metadata, infer_formula_units
+
 
 def finite_float(value: Any) -> float | None:
     if value is None:
@@ -64,7 +66,22 @@ def trapz_compat(y: np.ndarray, x: np.ndarray) -> float:
     return float(np.trapz(y, x))
 
 
-def elastic_summary_rows(path: Path, select: str) -> list[dict[str, Any]]:
+def attach_cell_columns(row: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    out = dict(row)
+    for key in (
+        "formula",
+        "natoms",
+        "atoms_per_formula_unit",
+        "n_formula_units",
+        "target_z_formula_units",
+        "cell_role",
+        "normalization_basis",
+    ):
+        out[key] = meta.get(key)
+    return out
+
+
+def elastic_summary_rows(path: Path, select: str, meta: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for row in read_csv(path):
         temp = finite_float(row.get("temperature_K") or row.get("T_K"))
@@ -80,33 +97,40 @@ def elastic_summary_rows(path: Path, select: str) -> list[dict[str, Any]]:
         if temp is None or selected is None:
             continue
         rows.append(
-            {
+            attach_cell_columns(
+                {
                 "T_K": temp,
                 "k_W_mK": selected,
                 "k_min_cahill_W_mK": cahill,
                 "k_min_clarke_W_mK": clarke,
                 "source": f"elastic_min_{select}",
                 "source_file": str(path),
-            }
+                },
+                meta,
+            )
         )
     return rows
 
 
-def conductivity_table_rows(path: Path, label: str | None = None) -> list[dict[str, Any]]:
+def conductivity_table_rows(path: Path, label: str | None = None, meta: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    meta = meta or {}
     for row in read_csv(path):
         temp = finite_float(row.get("T_K") or row.get("temperature_K"))
         conductivity = finite_float(row.get("k_W_mK") or row.get("thermal_conductivity_W_mK"))
         if temp is None or conductivity is None:
             continue
         rows.append(
-            {
+            attach_cell_columns(
+                {
                 "T_K": temp,
                 "k_W_mK": conductivity,
                 "k_std_W_mK": finite_float(row.get("k_std_W_mK")),
                 "source": label or row.get("source") or "table",
                 "source_file": str(path),
-            }
+                },
+                meta,
+            )
         )
     return rows
 
@@ -119,12 +143,13 @@ def green_kubo_rows(
     plateau_start_ps: float | None,
     plateau_fraction: float,
     label: str,
+    meta: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     rows = read_csv(path)
     if not rows:
         return [], {"source_file": str(path), "error": "empty CSV"}
     if any("k_W_mK" in row and row["k_W_mK"] for row in rows):
-        return conductivity_table_rows(path, label=label), {"source_file": str(path), "mode": "pre_integrated"}
+        return conductivity_table_rows(path, label=label, meta=meta), {"source_file": str(path), "mode": "pre_integrated"}
     times = np.asarray(
         [
             value if (value := finite_float(row.get("time_ps"))) is not None else math.nan
@@ -172,14 +197,17 @@ def green_kubo_rows(
                 break
     if temp is None:
         return [], {"source_file": str(path), "error": "temperature is required for green-kubo CSV"}
-    result = {
-        "T_K": temp,
-        "k_W_mK": float(np.mean(values)),
-        "k_std_W_mK": float(np.std(values, ddof=1)) if len(values) > 1 else 0.0,
-        "source": label,
-        "source_file": str(path),
-        **k_components,
-    }
+    result = attach_cell_columns(
+        {
+            "T_K": temp,
+            "k_W_mK": float(np.mean(values)),
+            "k_std_W_mK": float(np.std(values, ddof=1)) if len(values) > 1 else 0.0,
+            "source": label,
+            "source_file": str(path),
+            **k_components,
+        },
+        meta,
+    )
     metadata = {
         "source_file": str(path),
         "mode": "raw_HCACF_integral",
@@ -234,6 +262,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--elastic-dir", type=Path, help="Directory containing elastic_thermophysical_summary.csv.")
     parser.add_argument("--elastic-summary", type=Path, help="Explicit elastic_thermophysical_summary.csv path.")
+    parser.add_argument("--formula", help="Formula, e.g. UO2, recorded in output metadata.")
+    parser.add_argument("--natoms", type=float, help="Atoms in the MD/elastic simulation cell.")
+    parser.add_argument("--atoms-per-formula-unit", type=float, help="Atoms per formula unit.")
+    parser.add_argument("--formula-units", type=float, help="Formula units in the simulation cell.")
+    parser.add_argument("--target-z", type=float, default=4.0, help="Formula units in the target crystallographic cell.")
     parser.add_argument(
         "--elastic-select",
         choices=("cahill", "clarke", "average"),
@@ -261,33 +294,49 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> dict[str, Any]:
     args = build_parser().parse_args(argv)
     outdir = args.outdir.resolve()
+    formula_units = infer_formula_units(
+        formula_units=args.formula_units,
+        natoms=args.natoms,
+        atoms_per_formula_unit=args.atoms_per_formula_unit,
+        formula=args.formula,
+    )
+    meta = cell_metadata(
+        formula=args.formula,
+        natoms=args.natoms,
+        atoms_per_formula_unit=args.atoms_per_formula_unit,
+        formula_units=formula_units,
+        target_z=args.target_z,
+        cell_role="thermal-conductivity-source-cell",
+        normalization_basis="per-formula",
+    )
     rows: list[dict[str, Any]] = []
     sources: list[dict[str, Any]] = []
     summary = args.elastic_summary
     if summary is None and args.elastic_dir is not None:
         summary = args.elastic_dir / "elastic_thermophysical_summary.csv"
     if summary is not None:
-        elastic_rows = elastic_summary_rows(summary.resolve(), args.elastic_select)
+        elastic_rows = elastic_summary_rows(summary.resolve(), args.elastic_select, meta)
         rows.extend(elastic_rows)
         sources.append({"kind": "elastic_lower_bound", "path": str(summary.resolve()), "rows": len(elastic_rows)})
     for idx, path in enumerate(args.k_csv):
         label = args.k_label[idx] if idx < len(args.k_label) else None
-        table_rows = conductivity_table_rows(path.resolve(), label=label)
+        table_rows = conductivity_table_rows(path.resolve(), label=label, meta=meta)
         rows.extend(table_rows)
         sources.append({"kind": "direct_table", "path": str(path.resolve()), "rows": len(table_rows)})
     for idx, path in enumerate(args.green_kubo_csv):
         temp = args.green_kubo_temperature_K[idx] if idx < len(args.green_kubo_temperature_K) else None
         label = args.green_kubo_label[idx] if idx < len(args.green_kubo_label) else f"green_kubo_{idx + 1}"
-        gk_rows, meta = green_kubo_rows(
+        gk_rows, gk_meta = green_kubo_rows(
             path.resolve(),
             temperature_K=temp,
             scale_to_W_mK=args.green_kubo_scale,
             plateau_start_ps=args.plateau_start_ps,
             plateau_fraction=args.plateau_fraction,
             label=label,
+            meta=meta,
         )
         rows.extend(gk_rows)
-        sources.append({"kind": "green_kubo", "path": str(path.resolve()), "rows": len(gk_rows), **meta})
+        sources.append({"kind": "green_kubo", "path": str(path.resolve()), "rows": len(gk_rows), **gk_meta})
     rows = sorted(rows, key=lambda row: (float(row["T_K"]), str(row.get("source") or "")))
     fields = [
         "T_K",
@@ -300,6 +349,13 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "k_z_W_mK",
         "source",
         "source_file",
+        "formula",
+        "natoms",
+        "atoms_per_formula_unit",
+        "n_formula_units",
+        "target_z_formula_units",
+        "cell_role",
+        "normalization_basis",
     ]
     csv_path = outdir / "thermal_conductivity_T.csv"
     write_csv(csv_path, rows, fields)
@@ -307,6 +363,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     metadata = {
         "schema": "atomi.lammps.thermal_conductivity.v1",
         "outputs": {"csv": str(csv_path), "plot": plot},
+        "cell_metadata": meta,
         "n_rows": len(rows),
         "sources": sources,
         "notes": [

@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from atomi.core.archive import archive_output_dir
+from atomi.core.cell import cell_metadata
 from atomi.thermo_db import jaea_anchor
 
 
@@ -1535,6 +1536,11 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         fields = [
             "T_K",
+            "formula",
+            "qha_formula_units",
+            "md_formula_units",
+            "target_z_formula_units",
+            "normalization_basis",
             "Cp_source",
             "blend_weight",
             "Cp",
@@ -1557,6 +1563,11 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
             writer.writerow(
                 {
                     "T_K": row["T_K"],
+                    "formula": args.formula,
+                    "qha_formula_units": args.qha_formula_units,
+                    "md_formula_units": args.md_formula_units,
+                    "target_z_formula_units": args.target_z,
+                    "normalization_basis": args.energy_basis,
                     "Cp_source": row["Cp_source"],
                     "blend_weight": row["blend_weight"],
                     "Cp": row["Cp"],
@@ -1999,6 +2010,13 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
             "shifted at blend_start for plotting."
         ),
         "basis": args.energy_basis,
+        "cell_metadata": cell_metadata(
+            formula=args.formula,
+            formula_units=args.md_formula_units,
+            target_z=args.target_z,
+            cell_role="qha-md-normalized-cell",
+            normalization_basis=args.energy_basis,
+        ),
         "cp_entropy_units": (
             "J/mol-target-cell/K"
             if args.energy_basis == "target-cell"
@@ -2123,11 +2141,19 @@ def write_overlay_csv(path: Path, qha_points, md_points) -> None:
 
 def write_metadata(path: Path, args: argparse.Namespace) -> None:
     metadata = {
+        "formula": args.formula,
         "qha_dir": str(args.qha_dir),
         "md_dir": str(args.md_dir),
         "target_z_formula_units": args.target_z,
         "qha_formula_units": args.qha_formula_units,
         "md_formula_units": args.md_formula_units,
+        "cell_metadata": cell_metadata(
+            formula=args.formula,
+            formula_units=args.md_formula_units,
+            target_z=args.target_z,
+            cell_role="qha-md-normalized-cell",
+            normalization_basis=args.energy_basis,
+        ),
         "temperature_min_requested_K": args.t_min,
         "temperature_max_requested_K": args.t_max,
         "energy_basis": args.energy_basis,
@@ -2189,6 +2215,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not create a tar.gz archive of the output directory.",
     )
     parser.add_argument("--target-z", type=float, default=4.0)
+    parser.add_argument("--formula", default="", help="Formula label used in normalization/CALPHAD metadata, e.g. UO2.")
     parser.add_argument("--qha-formula-units", type=float, required=True)
     parser.add_argument("--md-formula-units", type=float, required=True)
     parser.add_argument("--t-min", type=float, default=None)

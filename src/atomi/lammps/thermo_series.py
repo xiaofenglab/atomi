@@ -149,6 +149,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from atomi.core.archive import archive_output_dir
+from atomi.core.cell import cell_metadata
 from atomi.lammps.box import flatten_box_summary, format_box_summary, summarize_lammps_box_arrays
 from atomi.thermo_db import jaea_anchor
 
@@ -2698,6 +2699,7 @@ def build_combined_thermo(summaries: list[dict],
                           structure_correction: str = "none",
                           structure_correction_apply_to: str = "both",
                           plot_thermo_db_points: bool = False,
+                          formula: str = "UO2",
                           target_z: float = 4.0) -> list[dict]:
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -2730,6 +2732,17 @@ def build_combined_thermo(summaries: list[dict],
         raise ValueError("n_formula_units must be positive")
     if target_z <= 0:
         raise ValueError("--target-z must be positive")
+    natoms = summaries[0].get("natoms")
+    atoms_per_formula_unit = summaries[0].get("atoms_per_formula_unit")
+    box_meta = cell_metadata(
+        formula=formula,
+        natoms=natoms,
+        atoms_per_formula_unit=atoms_per_formula_unit,
+        formula_units=nfu,
+        target_z=target_z,
+        cell_role="md-simulation-cell",
+        normalization_basis="per-formula",
+    )
 
     T = np.array([s["target_T_K"] for s in summaries], dtype=float)
     V = np.array([s["V_mean_A3"] for s in summaries], dtype=float)
@@ -3217,6 +3230,9 @@ def build_combined_thermo(summaries: list[dict],
     for i, s in enumerate(summaries):
         row = dict(s)
         row.update({
+            "formula": box_meta["formula"],
+            "cell_role": box_meta["cell_role"],
+            "normalization_basis": box_meta["normalization_basis"],
             "target_z_formula_units": float(target_z),
             "V_fit_A3": float(V_fit[i]),
             "V_per_formula_A3": float(V_fit[i] / nfu),
@@ -3256,8 +3272,13 @@ def build_combined_thermo(summaries: list[dict],
     for i in range(len(T_grid)):
         grid_rows.append({
             "T_K": float(T_grid[i]),
+            "formula": box_meta["formula"],
+            "natoms": box_meta["natoms"],
+            "atoms_per_formula_unit": box_meta["atoms_per_formula_unit"],
             "n_formula_units": float(nfu),
             "target_z_formula_units": float(target_z),
+            "cell_role": box_meta["cell_role"],
+            "normalization_basis": box_meta["normalization_basis"],
             "V_fit_A3": float(V_grid[i]),
             "V_per_formula_A3": float(V_grid[i] / nfu),
             "V_target_cell_A3": float(V_grid[i] * target_z / nfu),
@@ -3307,6 +3328,7 @@ def build_combined_thermo(summaries: list[dict],
         "fit_degree": deg_fit,
         "n_formula_units": nfu,
         "target_z_formula_units": target_z,
+        "cell_metadata": box_meta,
         "thermo_anchor_T": thermo_anchor_T,
         "thermo_anchor_S_J_mol_K": thermo_anchor_S_J_mol_K,
         "thermo_anchor_Cp_J_mol_K": thermo_anchor_Cp_J_mol_K,
@@ -3722,6 +3744,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     ap.add_argument("--natoms", type=int, default=96)
     ap.add_argument("--atoms-per-formula-unit", type=int, default=3)
+    ap.add_argument("--formula", default="UO2", help="Formula used for formula-unit/cell metadata in outputs.")
     ap.add_argument("--target-z", type=float, default=4.0, help="Formula units in the normalized structural target cell, e.g. 4 for fluorite UO2.")
     ap.add_argument("--compare-label", action="append", default=[], help="Label for a --compare-series directory. Repeat once per series.")
     ap.add_argument("--compare-formula-units", action="append", type=float, default=[], help="Formula units in a compared MD series if old outputs do not record it. Repeat once per series.")
@@ -4232,6 +4255,7 @@ def main(argv: list[str] | None = None) -> None:
             structure_correction=args.structure_correction,
             structure_correction_apply_to=args.structure_correction_apply_to,
             plot_thermo_db_points=args.plot_thermo_db_points,
+            formula=args.formula,
             target_z=args.target_z,
         )
     except ValueError as exc:

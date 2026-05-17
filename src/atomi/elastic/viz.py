@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 import numpy as np
 
+from atomi.core.cell import cell_metadata, infer_formula_units
 from atomi.elastic.derived import (
     complete_elastic_derived,
     complete_thermophysical_derived,
@@ -389,10 +390,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--outdir", type=Path, default=Path("analysis/elastic_viz"))
     parser.add_argument("--source-label", default="", help="Optional label stored in metadata.")
     parser.add_argument("--formula", help="Formula for density/Debye calculations, e.g. Si.")
+    parser.add_argument("--natoms", type=float, help="Atoms in the elastic simulation cell.")
+    parser.add_argument(
+        "--atoms-per-formula-unit",
+        type=float,
+        help="Atoms per formula unit. Defaults to the parsed formula atom count when --formula is given.",
+    )
     parser.add_argument(
         "--formula-units",
         type=float,
-        help="Formula units represented by each elastic tensor cell.",
+        help="Formula units represented by each elastic tensor cell. If omitted, infer from --natoms/--atoms-per-formula-unit.",
+    )
+    parser.add_argument(
+        "--target-z",
+        type=float,
+        default=4.0,
+        help="Formula units in the crystallographic target cell used for normalized reporting.",
     )
     parser.add_argument("--density-kg-m3", type=float, help="Override density in kg/m^3.")
     parser.add_argument("--density-g-cm3", type=float, help="Override density in g/cm^3.")
@@ -415,11 +428,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--molar-mass-g-mol",
         type=float,
         help="Molar mass used with density-only Debye calculations.",
-    )
-    parser.add_argument(
-        "--atoms-per-formula-unit",
-        type=float,
-        help="Atoms per formula unit for Debye calculations.",
     )
     parser.add_argument("--backend", choices=("auto", "elate", "native", "none"), default="auto")
     parser.add_argument(
@@ -458,6 +466,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     atoms_per_formula_unit = args.atoms_per_formula_unit
     if atoms_per_formula_unit is None and args.formula:
         atoms_per_formula_unit = formula_atom_count(args.formula)
+    formula_units = infer_formula_units(
+        formula_units=args.formula_units,
+        natoms=args.natoms,
+        atoms_per_formula_unit=atoms_per_formula_unit,
+        formula=args.formula,
+    )
+    cell_meta = cell_metadata(
+        formula=args.formula,
+        natoms=args.natoms,
+        atoms_per_formula_unit=atoms_per_formula_unit,
+        formula_units=formula_units,
+        target_z=args.target_z,
+        cell_role="elastic-simulation-cell",
+        normalization_basis="per-formula",
+    )
     summary_rows: list[dict[str, Any]] = []
     elate_inputs: list[str] = []
     surface_outputs: list[str] = []
@@ -470,11 +493,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             complete_thermophysical_derived(
                 row,
                 formula=args.formula,
-                formula_units=args.formula_units,
+                formula_units=formula_units,
                 density_kg_m3=density,
                 molar_mass_g_mol=args.molar_mass_g_mol,
                 atoms_per_formula_unit=atoms_per_formula_unit,
             )
+        )
+        row.update(
+            {
+                "formula": cell_meta["formula"],
+                "natoms": cell_meta["natoms"],
+                "atoms_per_formula_unit": cell_meta["atoms_per_formula_unit"],
+                "n_formula_units": cell_meta["n_formula_units"],
+                "target_z_formula_units": cell_meta["target_z_formula_units"],
+                "normalization_basis": cell_meta["normalization_basis"],
+                "cell_role": cell_meta["cell_role"],
+            }
         )
         fracture_energy = args.fracture_energy_J_m2
         if fracture_energy is None and args.surface_energy_J_m2 is not None:
@@ -553,7 +587,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "source_label": args.source_label,
         "n_records": len(records),
         "formula": args.formula or "",
-        "formula_units": args.formula_units,
+        "cell_metadata": cell_meta,
+        "formula_units": formula_units,
         "density_kg_m3_override": density,
         "elate": {
             "note": (
