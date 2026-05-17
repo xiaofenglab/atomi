@@ -8,7 +8,21 @@ from pathlib import Path
 from typing import Any
 
 
-BASE_FIELDS = ["motif_id", "run_dir", "structure", "outcar", "incar"]
+MOTIF_FIELDS = ["motif_id", "run_dir", "structure", "outcar", "incar"]
+REFERENCE_FIELDS = [
+    "reference_id",
+    "formula",
+    "path",
+    "run_dir",
+    "structure",
+    "outcar",
+    "incar",
+    "energy_eV",
+    "n_formula_units",
+    "role",
+    "source",
+    "notes",
+]
 
 
 def safe_id(value: str) -> str:
@@ -44,6 +58,53 @@ def motif_id_for_directory(directory: Path, root: Path, prefix: str | None) -> s
     return safe_id(raw)
 
 
+def reference_id_for_directory(
+    directory: Path,
+    root: Path,
+    reference_id: str | None,
+    prefix: str | None,
+) -> str:
+    generated = motif_id_for_directory(directory, root, prefix)
+    if not reference_id:
+        return generated
+    if directory.resolve() == root.resolve():
+        return safe_id(reference_id)
+    return safe_id(f"{reference_id}_{generated}")
+
+
+def parse_poscar_counts(path: Path | None) -> dict[str, int]:
+    if path is None or not path.exists():
+        return {}
+    try:
+        from atomi.vasp.magmom import read_poscar_species
+
+        species = read_poscar_species(path)
+    except Exception:
+        return {}
+    return {symbol: count for symbol, count in zip(species.symbols, species.counts)}
+
+
+def gcd_counts(counts: dict[str, int]) -> int:
+    import math
+
+    divisor = 0
+    for count in counts.values():
+        divisor = count if divisor == 0 else math.gcd(divisor, count)
+    return max(divisor, 1)
+
+
+def reduced_formula(path: Path | None) -> str:
+    counts = parse_poscar_counts(path)
+    if not counts:
+        return ""
+    divisor = gcd_counts(counts)
+    parts = []
+    for element, count in counts.items():
+        reduced = count // divisor
+        parts.append(element if reduced == 1 else f"{element}{reduced}")
+    return "".join(parts)
+
+
 def candidate_directories(root: Path, pattern: str) -> list[Path]:
     root = root.resolve()
     directories = [root] if root.is_dir() else []
@@ -73,32 +134,58 @@ def scan_root(args: argparse.Namespace, root: Path, index_dir: Path) -> tuple[li
         if outcar is None and not args.allow_missing_outcar:
             skipped.append(f"{directory}: has structure but no OUTCAR")
             continue
-        rows.append(
-            {
-                "motif_id": motif_id_for_directory(directory, root, args.prefix),
-                "run_dir": format_path(directory, index_dir, args.absolute),
-                "structure": format_path(structure, index_dir, args.absolute),
-                "outcar": format_path(outcar, index_dir, args.absolute),
-                "incar": format_path(incar, index_dir, args.absolute),
-            }
-        )
+        base_row = {
+            "motif_id": motif_id_for_directory(directory, root, args.prefix),
+            "run_dir": format_path(directory, index_dir, args.absolute),
+            "structure": format_path(structure, index_dir, args.absolute),
+            "outcar": format_path(outcar, index_dir, args.absolute),
+            "incar": format_path(incar, index_dir, args.absolute),
+        }
+        if args.mode == "reference":
+            reference_path = outcar or structure or directory
+            rows.append(
+                {
+                    "reference_id": reference_id_for_directory(directory, root, args.reference_id, args.prefix),
+                    "formula": args.formula or reduced_formula(structure),
+                    "path": format_path(reference_path, index_dir, args.absolute),
+                    "run_dir": base_row["run_dir"],
+                    "structure": base_row["structure"],
+                    "outcar": base_row["outcar"],
+                    "incar": base_row["incar"],
+                    "energy_eV": args.energy_eV or "",
+                    "n_formula_units": args.n_formula_units or "",
+                    "role": args.role or "",
+                    "source": args.source or "",
+                    "notes": args.notes or "",
+                }
+            )
+        else:
+            rows.append(base_row)
     return rows, skipped
 
 
-def read_existing_rows(path: Path) -> tuple[list[dict[str, str]], list[str]]:
+def base_fields_for_mode(mode: str) -> list[str]:
+    return list(REFERENCE_FIELDS if mode == "reference" else MOTIF_FIELDS)
+
+
+def read_existing_rows(path: Path, mode: str) -> tuple[list[dict[str, str]], list[str]]:
+    base_fields = base_fields_for_mode(mode)
     if not path.exists():
-        return [], list(BASE_FIELDS)
+        return [], base_fields
     with path.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         rows = [dict(row) for row in reader]
-        fields = list(reader.fieldnames or BASE_FIELDS)
-    for field in BASE_FIELDS:
+        fields = list(reader.fieldnames or base_fields)
+    for field in base_fields:
         if field not in fields:
             fields.append(field)
     return rows, fields
 
 
 def row_key(row: dict[str, Any]) -> str:
+    reference_id = str(row.get("reference_id") or "").strip()
+    if reference_id:
+        return f"reference_id:{reference_id}"
     motif_id = str(row.get("motif_id") or "").strip()
     if motif_id:
         return f"motif_id:{motif_id}"
@@ -144,7 +231,7 @@ def write_rows(path: Path, rows: list[dict[str, str]], fields: list[str]) -> Non
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="midx",
-        description="Build or append a path-index CSV for zentropy_motif_db auto-metadata.",
+        description="Build or append path-index CSVs for motif metadata or reference phase tables.",
     )
     parser.add_argument(
         "roots",
@@ -178,9 +265,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--replace-existing",
         action="store_true",
-        help="Replace rows with matching motif_id instead of keeping existing rows.",
+        help="Replace rows with matching motif_id/reference_id instead of keeping existing rows.",
     )
     parser.add_argument("--prefix", help="Optional prefix added to generated motif_id values.")
+    parser.add_argument(
+        "--mode",
+        choices=("motif", "reference"),
+        default="motif",
+        help=(
+            "Default motif mode preserves the original zentropy_motif_db index. "
+            "Reference mode writes a defect-chem reference index."
+        ),
+    )
+    parser.add_argument(
+        "--reference-id",
+        help="Reference id for a single reference folder, or prefix for multiple folders.",
+    )
+    parser.add_argument(
+        "--formula",
+        help="Formula for reference mode. If omitted, midx tries to infer a reduced formula.",
+    )
+    parser.add_argument("--energy-eV", help="Optional total reference energy to write directly into reference mode rows.")
+    parser.add_argument("--n-formula-units", help="Optional number of formula units for reference mode rows.")
+    parser.add_argument("--role", help="Optional reference role, e.g. parent, element, dopant_oxide.")
+    parser.add_argument("--source", help="Optional reference source label, e.g. dft.")
+    parser.add_argument("--notes", help="Optional notes for reference mode rows.")
     parser.add_argument("--dry-run", action="store_true", help="Print the scan summary without writing the CSV.")
     return parser
 
@@ -190,7 +299,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     index = args.index.resolve()
     index_dir = index.parent
-    existing, fields = read_existing_rows(index)
+    existing, fields = read_existing_rows(index, args.mode)
     scanned: list[dict[str, str]] = []
     skipped: list[str] = []
     for root in args.roots:
@@ -203,7 +312,8 @@ def main(argv: list[str] | None = None) -> None:
         write_rows(index, merged, fields)
 
     print(f"Scanned folders     : {len(scanned) + len(skipped)}")
-    print(f"Usable VASP rows    : {len(scanned)}")
+    label = "reference" if args.mode == "reference" else "VASP"
+    print(f"Usable {label} rows : {len(scanned)}")
     print(f"New rows appended   : {counts['new']}")
     print(f"Existing rows kept  : {counts['skipped_existing']}")
     print(f"Rows replaced       : {counts['replaced']}")
@@ -213,8 +323,12 @@ def main(argv: list[str] | None = None) -> None:
         print("Skipped examples:")
         for item in skipped[:5]:
             print(f"  {item}")
-    print("Next auto-metadata step:")
-    print(f"  zentropy_motif_db auto-metadata --input-csv {index}")
+    if args.mode == "reference":
+        print("Next reference-energy step:")
+        print(f"  defect-chem build-references --reference-index {index}")
+    else:
+        print("Next auto-metadata step:")
+        print(f"  zentropy_motif_db auto-metadata --input-csv {index}")
 
 
 if __name__ == "__main__":
