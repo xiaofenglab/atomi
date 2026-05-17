@@ -1,8 +1,8 @@
 # Atomi
 
-Reusable automation tools for atomistic modeling on HPC systems.
+Reusable workflow tools for computational materials science on HPC systems.
 
-Atomi collects scripts for preparing calculations, writing scheduler inputs, tracking jobs, post-processing outputs, and standardizing workflows across VASP, CP2K, LAMMPS, Turbomole, OpenMolcas, and MLIP/MACE workflows.
+Atomi helps organize calculation workflows for electronic structure, atomistic structure, defect chemistry, digital twins of X-ray/neutron experiments, thermodynamic prediction, and multiphysics handoff.
 
 ## Install
 
@@ -81,12 +81,12 @@ Public documentation intentionally avoids detailed project recipes, molecule nam
 
 Atomi currently includes command families for:
 
-- VASP preparation, monitoring, phonopy/QHA helpers, and run summaries.
-- CP2K input generation, AIMD trajectory tools, and visualization helpers.
-- LAMMPS workflow setup, production-array support, and post-processing.
-- MLIP/MACE dataset utilities and model conversion helpers.
-- Zentropy-guided defect motif indexing, staged workflow scaffolding, and optional runtime checks.
-- Total-scattering, XAFS, finite-temperature elasticity, MOOSE, and CALPHAD support.
+- Electronic-structure preparation, monitoring, convergence checks, and run summaries.
+- Molecular and atomistic trajectory setup, live visualization, production-array support, and post-processing.
+- Training-dataset preparation, model-validation diagnostics, and model handoff helpers.
+- Defect-chemistry motif indexing, staged workflow scaffolding, and optional runtime checks.
+- Digital-twin workflows for scattering and spectroscopy comparisons with simulated structures.
+- Thermodynamic, elasticity, materials-property, and multiphysics handoff utilities.
 - HPC environment discovery and local configuration helpers.
 
 Public documentation intentionally stays high-level. Use `atomi --help` and
@@ -94,18 +94,14 @@ Public documentation intentionally stays high-level. Use `atomi --help` and
 and keep project-specific recipes, raw data paths, scheduler partitions, API
 keys, and local executable paths in private notes or `*.local.json` configs.
 
-See [Dependency Strategy](docs/dependency_strategy.md) for optional extras such
-as XAFS/Larch and for stable HPC install guidance.
-
-External MOOSE and CALPHAD environments can stay separate from Atomi. Use
-`moose_status` and `calphad_status` to check configured app executables,
-pycalphad Python environments, and database visibility.
-Use `pdfgetx3_status` for a separately installed PDFGetX3 reduction
-environment.
+See [Dependency Strategy](docs/dependency_strategy.md) for optional extras and
+stable HPC install guidance. Larger external simulation, thermodynamics, or
+data-reduction environments can stay separate from Atomi and be connected
+through local configuration.
 
 ## HPC Environment Check
 
-Before using Atomi on a new cluster, run the environment doctor and review the generated report. The report checks common executables, scheduler commands, plotting tools, atomistic engine names, and Python packages used by the packaged workflows.
+Before using Atomi on a new cluster, run the environment doctor and review the generated report. The report checks common executables, scheduler commands, plotting tools, workflow engines, and Python packages used by the packaged workflows.
 
 Atomi looks for HPC configuration in this order:
 
