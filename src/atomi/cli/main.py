@@ -384,6 +384,14 @@ def build_parser() -> argparse.ArgumentParser:
         )
         zentropy_motif_db.add_argument("zentropy_args", nargs=argparse.REMAINDER)
 
+    motif_path_commands = ("midx", "motifpath", "motifpaths", "motif-paths", "zentropy-motif-paths")
+    for command_name in motif_path_commands:
+        motif_paths = subparsers.add_parser(
+            command_name,
+            help="Build a path-index CSV for zentropy auto-metadata scans.",
+        )
+        motif_paths.add_argument("motif_path_args", nargs=argparse.REMAINDER)
+
     zentropy_status_commands = ("zentropy_status", "zentropy-status")
     for command_name in zentropy_status_commands:
         zentropy_status = subparsers.add_parser(
@@ -800,6 +808,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.zentropy.motif_db import main as zentropy_motif_db_main
 
         zentropy_motif_db_main(raw_args[1:])
+        return
+    motif_path_commands = ("midx", "motifpath", "motifpaths", "motif-paths", "zentropy-motif-paths")
+    if raw_args and raw_args[0] in motif_path_commands:
+        from atomi.zentropy.motif_paths import main as motif_paths_main
+
+        motif_paths_main(raw_args[1:])
         return
     zentropy_status_commands = ("zentropy_status", "zentropy-status")
     if raw_args and raw_args[0] in zentropy_status_commands:
@@ -1228,6 +1242,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.zentropy.motif_db import main as zentropy_motif_db_main
 
         zentropy_motif_db_main(args.zentropy_args)
+        return
+
+    if args.subcommand in motif_path_commands:
+        from atomi.zentropy.motif_paths import main as motif_paths_main
+
+        motif_paths_main(args.motif_path_args)
         return
 
     if args.subcommand in zentropy_status_commands:
