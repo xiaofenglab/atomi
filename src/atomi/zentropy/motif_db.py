@@ -546,6 +546,459 @@ def discover_runs(args: argparse.Namespace) -> list[Path]:
     return unique
 
 
+def resolve_scan_path(raw: str | None, base: Path) -> Path | None:
+    if raw is None or not str(raw).strip():
+        return None
+    path = Path(str(raw).strip()).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (base / path).resolve()
+
+
+def first_existing_path(paths: list[Path | None]) -> Path | None:
+    for path in paths:
+        if path is not None and path.exists():
+            return path
+    return None
+
+
+def scan_structure_for_run(run_dir: Path) -> Path | None:
+    return first_existing_path(
+        [
+            run_dir / "CONTCAR",
+            run_dir / "POSCAR",
+            run_dir / "vasprun.xml",
+            run_dir / "OUTCAR",
+            run_dir / "OUTCAR.gz",
+        ]
+    )
+
+
+def scan_outcar_for_run(run_dir: Path) -> Path | None:
+    return first_existing_path([run_dir / "OUTCAR", run_dir / "OUTCAR.gz"])
+
+
+def scan_incar_for_run(run_dir: Path) -> Path | None:
+    return first_existing_path([run_dir / "INCAR"])
+
+
+def scan_entries_from_csv(path: Path) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    base = path.resolve().parent
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for index, row in enumerate(reader, start=1):
+            run = resolve_scan_path(row.get("run_dir") or row.get("run"), base)
+            structure = first_existing_path(
+                [
+                    resolve_scan_path(row.get("structure"), base),
+                    resolve_scan_path(row.get("contcar"), base),
+                    resolve_scan_path(row.get("poscar"), base),
+                ]
+            )
+            outcar = first_existing_path(
+                [
+                    resolve_scan_path(row.get("outcar"), base),
+                    resolve_scan_path(row.get("OUTCAR"), base),
+                ]
+            )
+            incar = first_existing_path(
+                [
+                    resolve_scan_path(row.get("incar"), base),
+                    resolve_scan_path(row.get("INCAR"), base),
+                ]
+            )
+            if run is not None:
+                structure = structure or scan_structure_for_run(run)
+                outcar = outcar or scan_outcar_for_run(run)
+                incar = incar or scan_incar_for_run(run)
+            elif structure is not None:
+                run = structure.parent
+            else:
+                run = (base / f"motif_row_{index:04d}").resolve()
+            entries.append(
+                {
+                    "run_dir": run,
+                    "structure": structure,
+                    "outcar": outcar,
+                    "incar": incar,
+                    "row": {k: v for k, v in row.items() if v not in (None, "")},
+                }
+            )
+    return entries
+
+
+def discover_scan_entries(args: argparse.Namespace) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    if args.input_csv:
+        entries.extend(scan_entries_from_csv(args.input_csv))
+    if args.run or args.root:
+        for run in discover_runs(args):
+            entries.append(
+                {
+                    "run_dir": run,
+                    "structure": scan_structure_for_run(run),
+                    "outcar": scan_outcar_for_run(run),
+                    "incar": scan_incar_for_run(run),
+                    "row": {},
+                }
+            )
+    if not entries:
+        raise ValueError("No scan entries were provided. Use --run, --root/--glob, or --input-csv.")
+    return entries
+
+
+def safe_motif_slug(value: str) -> str:
+    slug = re.sub(r"[^0-9A-Za-z_.+-]+", "_", value.strip()).strip("_")
+    return slug or "motif"
+
+
+def magmom_values_from_sources(
+    outcar: Path | None,
+    incar: Path | None,
+    natoms: int,
+) -> tuple[list[float], str]:
+    if outcar is not None and outcar.exists():
+        values = parse_final_outcar_magmoms(outcar, natoms)
+        if values is not None:
+            return values, outcar.name
+    if incar is not None and incar.exists():
+        values = existing_magmom_values(incar, natoms)
+        if values is not None:
+            return values, incar.name
+    return [], "missing"
+
+
+def valence_from_spin_label(label: str) -> float | None:
+    base = label.rsplit("_", 1)[0]
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)([+-])", base)
+    if not match:
+        return None
+    value = float(match.group(1))
+    return value if match.group(2) == "+" else -value
+
+
+def infer_defect_metadata(
+    counts: dict[str, int],
+    parent_counts: dict[str, float],
+    host_cation: str | None,
+    guest_cations: list[str],
+    oxygen: str,
+) -> dict[str, Any]:
+    norm = size_normalization(counts, parent_counts, host_cation, guest_cations, oxygen)
+    guest_parts = [f"{element}{counts[element]}" for element in guest_cations if counts.get(element, 0)]
+    oxygen_delta_count = 0
+    if finite(norm.get("expected_oxygen_count")):
+        oxygen_delta_count = int(round(float(norm["expected_oxygen_count"]) - counts.get(oxygen, 0)))
+
+    labels: list[str] = []
+    tags = ["auto_metadata"]
+    if guest_parts:
+        labels.extend(guest_parts)
+        tags.extend(["dopant_substitution", *[part.lower() for part in guest_parts]])
+    if oxygen_delta_count > 0:
+        labels.append(f"O_V{oxygen_delta_count}")
+        tags.append("oxygen_vacancy")
+    elif oxygen_delta_count < 0:
+        labels.append(f"O_i{abs(oxygen_delta_count)}")
+        tags.append("oxygen_interstitial")
+
+    if guest_parts and oxygen_delta_count > 0:
+        family = "dopant_oxygen_vacancy_complex"
+    elif guest_parts:
+        family = "dopant_substitution"
+    elif oxygen_delta_count > 0:
+        family = "oxygen_vacancy"
+    elif oxygen_delta_count < 0:
+        family = "oxygen_interstitial"
+    else:
+        family = "stoichiometric_or_unknown"
+        labels.append("stoichiometric")
+
+    tags.extend(
+        [
+            f"x_guest={norm['guest_cation_fraction']:.6g}",
+            f"oxygen_delta={norm['oxygen_delta_per_formula_unit']:.6g}",
+            f"formula={reduced_formula(counts)}",
+        ]
+    )
+    return {
+        "motif_family": family,
+        "motif_type": "defect_motif",
+        "defect_label": "_".join(labels),
+        "tags": tags,
+        "normalization": norm,
+        "oxygen_defect_count": oxygen_delta_count,
+    }
+
+
+def write_auto_metadata_csvs(
+    metadata_path: Path,
+    site_state_path: Path,
+    report_path: Path,
+    metadata_rows: list[dict[str, Any]],
+    site_state_rows: list[dict[str, Any]],
+    report_rows: list[dict[str, Any]],
+) -> None:
+    metadata_fields = [
+        "run",
+        "motif_id",
+        "motif_family",
+        "motif_type",
+        "defect_label",
+        "tags",
+        "degeneracy",
+        "charge_state",
+        "notes",
+        "source_structure",
+        "source_outcar",
+        "source_incar",
+        "formula",
+        "natoms",
+        "formula_units",
+        "guest_cation_fraction",
+        "oxygen_delta_per_formula_unit",
+    ]
+    site_state_fields = [
+        "run",
+        "motif_id",
+        "atom_index_1based",
+        "element",
+        "valence",
+        "magmom",
+        "spin_label",
+        "role",
+    ]
+    report_fields = [
+        "run",
+        "motif_id",
+        "status",
+        "formula",
+        "natoms",
+        "motif_family",
+        "defect_label",
+        "formula_units",
+        "guest_cation_fraction",
+        "oxygen_delta_per_formula_unit",
+        "magmom_source",
+        "site_states",
+        "message",
+    ]
+    write_rows_with_fields(metadata_path, metadata_rows, metadata_fields)
+    write_rows_with_fields(site_state_path, site_state_rows, site_state_fields)
+    write_rows_with_fields(report_path, report_rows, report_fields)
+
+
+def write_rows_with_fields(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fields})
+
+
+def materialize_scan_run(
+    root: Path | None,
+    motif_id: str,
+    structure: Path,
+    outcar: Path | None,
+    incar: Path | None,
+    case_info_payload: dict[str, Any],
+) -> Path | None:
+    if root is None:
+        return None
+    outdir = root / safe_motif_slug(motif_id)
+    suffix = 2
+    while outdir.exists():
+        outdir = root / f"{safe_motif_slug(motif_id)}_{suffix:03d}"
+        suffix += 1
+    outdir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(structure, outdir / "CONTCAR")
+    if outcar is not None and outcar.exists():
+        shutil.copy2(outcar, outdir / "OUTCAR")
+    if incar is not None and incar.exists():
+        shutil.copy2(incar, outdir / "INCAR")
+    write_json(outdir / "case_info.json", case_info_payload)
+    return outdir.resolve()
+
+
+def auto_metadata_main(argv: list[str] | None = None) -> None:
+    parser = build_auto_metadata_parser()
+    args = parser.parse_args(argv)
+    args.guest_cation = args.guest_cation or []
+    args.valence = parse_key_values(args.valence, float)
+    args.moment_state = parse_moment_state_specs(args.moment_state)
+    parent_counts = parse_formula(args.parent_formula)
+    materialize_root = args.materialize_root.resolve() if args.materialize_root else None
+    if materialize_root is not None:
+        materialize_root.mkdir(parents=True, exist_ok=True)
+
+    metadata_rows: list[dict[str, Any]] = []
+    site_state_rows: list[dict[str, Any]] = []
+    report_rows: list[dict[str, Any]] = []
+    for entry in discover_scan_entries(args):
+        run_dir = Path(entry["run_dir"]).resolve()
+        structure = entry.get("structure")
+        row = entry.get("row", {})
+        if structure is None or not Path(structure).exists():
+            report_rows.append(
+                {
+                    "run": str(run_dir),
+                    "motif_id": row.get("motif_id") or run_dir.name,
+                    "status": "skipped",
+                    "message": "No CONTCAR/POSCAR/structure path found.",
+                }
+            )
+            continue
+        structure = Path(structure).resolve()
+        outcar = Path(entry["outcar"]).resolve() if entry.get("outcar") else None
+        incar = Path(entry["incar"]).resolve() if entry.get("incar") else None
+        try:
+            atoms = read(structure, index=-1)
+        except Exception as exc:
+            report_rows.append(
+                {
+                    "run": str(run_dir),
+                    "motif_id": row.get("motif_id") or run_dir.name,
+                    "status": "skipped",
+                    "message": f"Could not read structure {structure}: {exc}",
+                }
+            )
+            continue
+
+        counts = count_symbols(atoms)
+        inferred = infer_defect_metadata(
+            counts,
+            parent_counts,
+            args.host_cation,
+            args.guest_cation,
+            args.oxygen,
+        )
+        norm = inferred["normalization"]
+        motif_id = row.get("motif_id") or row.get("name") or run_dir.name
+        motif_id = safe_motif_slug(str(motif_id))
+        magmoms, magmom_source = magmom_values_from_sources(outcar, incar, len(atoms))
+        source_run = run_dir
+        case_payload = {
+            "case_name": motif_id,
+            "family": row.get("motif_family") or inferred["motif_family"],
+            "source_run_dir": str(run_dir),
+            "source_structure": str(structure),
+            "source_outcar": str(outcar) if outcar else "",
+            "source_incar": str(incar) if incar else "",
+            "generated_by": "zentropy_motif_db auto-metadata",
+        }
+        materialized = materialize_scan_run(
+            materialize_root,
+            motif_id,
+            structure,
+            outcar,
+            incar,
+            case_payload,
+        )
+        if materialized is not None:
+            source_run = materialized
+
+        metadata_tags = split_tags(row.get("tags"))
+        metadata_tags.extend(inferred["tags"])
+        metadata_row = {
+            "run": str(source_run.resolve()),
+            "motif_id": motif_id,
+            "motif_family": row.get("motif_family") or row.get("family") or inferred["motif_family"],
+            "motif_type": row.get("motif_type") or inferred["motif_type"],
+            "defect_label": row.get("defect_label") or inferred["defect_label"],
+            "tags": ";".join(dict.fromkeys(metadata_tags)),
+            "degeneracy": row.get("degeneracy") or args.degeneracy,
+            "charge_state": row.get("charge_state") or "",
+            "notes": row.get("notes") or (
+                f"Auto-generated metadata; expected O={norm['expected_oxygen_count']:.6g}, "
+                f"actual O={counts.get(args.oxygen, 0)}."
+            ),
+            "source_structure": str(structure),
+            "source_outcar": str(outcar) if outcar else "",
+            "source_incar": str(incar) if incar else "",
+            "formula": reduced_formula(counts),
+            "natoms": len(atoms),
+            "formula_units": norm["formula_units"],
+            "guest_cation_fraction": norm["guest_cation_fraction"],
+            "oxygen_delta_per_formula_unit": norm["oxygen_delta_per_formula_unit"],
+        }
+        metadata_rows.append(metadata_row)
+
+        symbols = atoms.get_chemical_symbols()
+        magnetic_elements = set(args.moment_state)
+        if args.site_element:
+            magnetic_elements.update(args.site_element)
+        for atom_index, (element, magmom) in enumerate(zip(symbols, magmoms), start=1):
+            if element not in magnetic_elements and abs(float(magmom)) < args.magmom_min_abs:
+                continue
+            spin_label = spin_label_for_moment(
+                element,
+                float(magmom),
+                args.moment_state,
+                args.moment_state_tolerance,
+            )
+            if element in args.guest_cation:
+                role = "dopant"
+            elif element == args.host_cation:
+                role = "host"
+            else:
+                role = "magnetic_site"
+            valence = valence_from_spin_label(spin_label)
+            site_state_rows.append(
+                {
+                    "run": str(source_run.resolve()),
+                    "motif_id": motif_id,
+                    "atom_index_1based": atom_index,
+                    "element": element,
+                    "valence": "" if valence is None else f"{valence:g}",
+                    "magmom": f"{float(magmom):.6g}",
+                    "spin_label": spin_label,
+                    "role": role,
+                }
+            )
+
+        report_rows.append(
+            {
+                "run": str(source_run.resolve()),
+                "motif_id": motif_id,
+                "status": "ok",
+                "formula": metadata_row["formula"],
+                "natoms": len(atoms),
+                "motif_family": metadata_row["motif_family"],
+                "defect_label": metadata_row["defect_label"],
+                "formula_units": norm["formula_units"],
+                "guest_cation_fraction": norm["guest_cation_fraction"],
+                "oxygen_delta_per_formula_unit": norm["oxygen_delta_per_formula_unit"],
+                "magmom_source": magmom_source,
+                "site_states": sum(1 for item in site_state_rows if item["motif_id"] == motif_id),
+                "message": "",
+            }
+        )
+
+    write_auto_metadata_csvs(
+        args.metadata_csv,
+        args.site_state_csv,
+        args.report_csv,
+        metadata_rows,
+        site_state_rows,
+        report_rows,
+    )
+    print(f"Scanned motifs      : {len(metadata_rows)}")
+    print(f"Wrote metadata CSV  : {args.metadata_csv.resolve()}")
+    print(f"Wrote site states   : {args.site_state_csv.resolve()}")
+    print(f"Wrote scan report   : {args.report_csv.resolve()}")
+    if materialize_root is not None:
+        print(f"Materialized runs   : {materialize_root.resolve()}")
+    print("Next zentropy step:")
+    print(
+        "  zentropy_motif_db index "
+        f"--metadata-csv {args.metadata_csv.resolve()} "
+        f"--site-state-csv {args.site_state_csv.resolve()}"
+    )
+
+
 def write_record_csv(path: Path, records: list[dict[str, Any]]) -> None:
     fields = [
         "motif_id",
@@ -827,6 +1280,68 @@ def build_index_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def add_scan_source_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--run", action="append", type=Path, default=[], help="VASP run directory. Repeatable.")
+    parser.add_argument("--root", type=Path, help="Root containing motif run directories.")
+    parser.add_argument("--glob", default="*", help="Directory glob under --root.")
+    parser.add_argument(
+        "--input-csv",
+        type=Path,
+        help=(
+            "Optional CSV with run/run_dir and/or structure/poscar/contcar, "
+            "outcar, incar columns. Relative paths are resolved from the CSV."
+        ),
+    )
+
+
+def build_auto_metadata_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="zentropy_motif_db auto-metadata",
+        description=(
+            "Scan existing VASP defect runs and generate motif_metadata.csv plus "
+            "site_states.csv for zentropy_motif_db index."
+        ),
+    )
+    add_scan_source_args(parser)
+    parser.add_argument("--metadata-csv", type=Path, default=Path("motif_metadata.csv"))
+    parser.add_argument("--site-state-csv", type=Path, default=Path("site_states.csv"))
+    parser.add_argument("--report-csv", type=Path, default=Path("motif_auto_metadata_report.csv"))
+    parser.add_argument(
+        "--materialize-root",
+        type=Path,
+        help=(
+            "Optional folder where POSCAR/OUTCAR/INCAR from arbitrary paths are "
+            "copied into index-ready VASP run directories."
+        ),
+    )
+    parser.add_argument("--parent-formula", default="UO2")
+    parser.add_argument("--host-cation", default="U")
+    parser.add_argument("--guest-cation", nargs="*", default=["Gd"])
+    parser.add_argument("--oxygen", default="O")
+    parser.add_argument("--valence", nargs="*", default=["U=4", "Gd=3", "O=-2"])
+    parser.add_argument(
+        "--moment-state",
+        action="append",
+        default=[],
+        help="Map magnetic moment magnitudes to labels, e.g. --moment-state U:2=U4+.",
+    )
+    parser.add_argument("--moment-state-tolerance", type=float, default=0.35)
+    parser.add_argument(
+        "--site-element",
+        action="append",
+        default=[],
+        help="Always write site-state rows for this element. Repeatable.",
+    )
+    parser.add_argument(
+        "--magmom-min-abs",
+        type=float,
+        default=0.2,
+        help="Write site-state rows for non-declared elements above this |magmom|.",
+    )
+    parser.add_argument("--degeneracy", type=float, default=1.0)
+    return parser
+
+
 def add_selection_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--db", type=Path, default=Path("defect_motif_db.json"))
     parser.add_argument("--motif-id", action="append", default=[])
@@ -865,6 +1380,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="action")
     sub.add_parser("index", help="Index refined VASP defect motifs.")
+    sub.add_parser("auto-metadata", help="Scan VASP runs and write metadata CSV inputs.")
     sub.add_parser("generate-spins", help="Generate magit spin-variant VASP folders.")
     sub.add_parser("summarize", help="Print a compact database readout.")
     sub.add_parser("export-mlip", help="Export selected motifs as MLIP/VASP structures.")
@@ -894,6 +1410,8 @@ def main(argv: list[str] | None = None) -> None:
     action, rest = raw[0], raw[1:]
     if action == "index":
         index_main(rest)
+    elif action == "auto-metadata":
+        auto_metadata_main(rest)
     elif action == "generate-spins":
         generate_spins_main(rest)
     elif action == "summarize":

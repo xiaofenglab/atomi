@@ -58,6 +58,53 @@ def write_outcar(path: Path) -> None:
     )
 
 
+def write_vacancy_poscar(path: Path) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                "Gd U O vacancy motif",
+                "1.0",
+                "4.0 0.0 0.0",
+                "0.0 4.0 0.0",
+                "0.0 0.0 4.0",
+                "Gd U O",
+                "1 1 3",
+                "Direct",
+                "0.00 0.00 0.00",
+                "0.50 0.50 0.50",
+                "0.25 0.25 0.25",
+                "0.75 0.75 0.75",
+                "0.25 0.75 0.25",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def write_vacancy_outcar(path: Path) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                " NIONS =      5 ions",
+                " free  energy   TOTEN  =       -95.000000 eV",
+                " volume of cell :       64.000000",
+                " magnetization (x)",
+                " # of ion      s       p       d       tot",
+                " ----------------------------------------",
+                " 1             0.0     0.0     0.0     7.1",
+                " 2             0.0     0.0     0.0     1.2",
+                " 3             0.0     0.0     0.0     0.0",
+                " 4             0.0     0.0     0.0     0.0",
+                " 5             0.0     0.0     0.0     0.0",
+                " tot           0.0     0.0     0.0     8.3",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 def make_run(tmp_path: Path) -> Path:
     run = tmp_path / "gd_uo2_motif"
     run.mkdir()
@@ -179,3 +226,103 @@ def test_motif_db_exports_repeated_mlip_poscar_and_magmom(tmp_path: Path) -> Non
     assert len(magmom.split("=")[1].split()) == 12
     manifest = (out / "mlip_export_manifest.csv").read_text(encoding="utf-8")
     assert "gd_uo2_motif" in manifest
+
+
+def test_motif_db_auto_metadata_detects_oxygen_vacancy_and_valence(tmp_path: Path) -> None:
+    run = tmp_path / "gd_ov_seed"
+    run.mkdir()
+    write_vacancy_poscar(run / "CONTCAR")
+    write_vacancy_outcar(run / "OUTCAR")
+    metadata = tmp_path / "motif_metadata.csv"
+    site_states = tmp_path / "site_states.csv"
+    report = tmp_path / "scan_report.csv"
+
+    motif_db.main(
+        [
+            "auto-metadata",
+            "--run",
+            str(run),
+            "--metadata-csv",
+            str(metadata),
+            "--site-state-csv",
+            str(site_states),
+            "--report-csv",
+            str(report),
+            "--moment-state",
+            "Gd:7=Gd3+",
+            "--moment-state",
+            "U:1=U5+",
+            "--moment-state",
+            "U:2=U4+",
+        ]
+    )
+
+    rows = list(csv.DictReader(metadata.open(encoding="utf-8")))
+    assert rows[0]["motif_family"] == "dopant_oxygen_vacancy_complex"
+    assert rows[0]["defect_label"] == "Gd1_O_V1"
+    assert float(rows[0]["oxygen_delta_per_formula_unit"]) == -0.5
+    site_rows = list(csv.DictReader(site_states.open(encoding="utf-8")))
+    assert [row["spin_label"] for row in site_rows[:2]] == ["Gd3+_up", "U5+_up"]
+    assert [row["valence"] for row in site_rows[:2]] == ["3", "5"]
+
+    db = tmp_path / "defect_motif_db.json"
+    motif_db.main(
+        [
+            "index",
+            "--run",
+            str(run),
+            "--metadata-csv",
+            str(metadata),
+            "--site-state-csv",
+            str(site_states),
+            "--db",
+            str(db),
+            "--csv",
+            str(tmp_path / "index.csv"),
+        ]
+    )
+    record = json.loads(db.read_text(encoding="utf-8"))["records"][0]
+    assert record["defect_label"] == "Gd1_O_V1"
+    assert record["site_states"][1]["spin_label"] == "U5+_up"
+
+
+def test_motif_db_auto_metadata_materializes_split_input_paths(tmp_path: Path) -> None:
+    structures = tmp_path / "structures"
+    outputs = tmp_path / "outputs"
+    structures.mkdir()
+    outputs.mkdir()
+    write_vacancy_poscar(structures / "seed_POSCAR")
+    write_vacancy_outcar(outputs / "seed_OUTCAR")
+    inputs = tmp_path / "inputs.csv"
+    inputs.write_text(
+        "motif_id,structure,outcar\n"
+        "split_seed,structures/seed_POSCAR,outputs/seed_OUTCAR\n",
+        encoding="utf-8",
+    )
+    materialized = tmp_path / "materialized_runs"
+
+    motif_db.main(
+        [
+            "auto-metadata",
+            "--input-csv",
+            str(inputs),
+            "--materialize-root",
+            str(materialized),
+            "--metadata-csv",
+            str(tmp_path / "metadata.csv"),
+            "--site-state-csv",
+            str(tmp_path / "sites.csv"),
+            "--report-csv",
+            str(tmp_path / "report.csv"),
+            "--moment-state",
+            "Gd:7=Gd3+",
+            "--moment-state",
+            "U:1=U5+",
+        ]
+    )
+
+    run = materialized / "split_seed"
+    assert (run / "CONTCAR").exists()
+    assert (run / "OUTCAR").exists()
+    rows = list(csv.DictReader((tmp_path / "metadata.csv").open(encoding="utf-8")))
+    assert rows[0]["run"] == str(run.resolve())
