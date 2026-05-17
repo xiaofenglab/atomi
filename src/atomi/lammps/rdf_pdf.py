@@ -20,6 +20,7 @@ from typing import Optional
 import numpy as np
 
 from atomi.core.archive import archive_output_dir, default_archive_path
+from atomi.core.cell import cell_metadata, infer_formula_units
 from atomi.lammps.box import (
     cell_parameters as box_cell_parameters,
     flatten_box_summary,
@@ -32,6 +33,30 @@ from atomi.lammps.thermo_series import (
     discover_production_records,
     filter_records_by_T,
 )
+
+
+def metadata_value(args: argparse.Namespace, name: str):
+    return getattr(args, name, None)
+
+
+def md_cell_metadata(args: argparse.Namespace, *, natoms: int, cell_role: str) -> dict:
+    requested_natoms = metadata_value(args, "natoms")
+    effective_natoms = float(requested_natoms) if requested_natoms is not None else float(natoms)
+    formula_units = infer_formula_units(
+        formula_units=metadata_value(args, "formula_units"),
+        natoms=effective_natoms,
+        atoms_per_formula_unit=metadata_value(args, "atoms_per_formula_unit"),
+        formula=metadata_value(args, "formula"),
+    )
+    return cell_metadata(
+        formula=metadata_value(args, "formula"),
+        natoms=effective_natoms,
+        atoms_per_formula_unit=metadata_value(args, "atoms_per_formula_unit"),
+        formula_units=formula_units,
+        target_z=metadata_value(args, "target_z"),
+        cell_role=cell_role,
+        normalization_basis="simulation-cell",
+    )
 
 
 def parse_type_map(items: list[str]) -> dict[int, str]:
@@ -1361,6 +1386,11 @@ def run_series(args: argparse.Namespace) -> dict:
             gr_dr=args.gr_dr,
             scattering=args.scattering,
             weights=args.weights,
+            formula=getattr(args, "formula", None),
+            natoms=getattr(args, "natoms", None),
+            atoms_per_formula_unit=getattr(args, "atoms_per_formula_unit", None),
+            formula_units=getattr(args, "formula_units", None),
+            target_z=getattr(args, "target_z", None),
             window_function=args.window_function,
             fitting_exports=args.fitting_exports,
             pdfgui_dr_uncertainty=args.pdfgui_dr_uncertainty,
@@ -1387,6 +1417,7 @@ def run_series(args: argparse.Namespace) -> dict:
             "window_ps_used": summary["source"].get("window_ps_used"),
             "n_frames": summary["n_frames"],
             "avg_volume_A3": summary["avg_volume_A3"],
+            "cell_metadata": summary.get("cell_metadata", {}),
             "structure_stats": summary.get("structure_stats", {}),
             "outdir": str(temp_dir),
             "summary_json": str(temp_dir / f"{prefix}_summary.json"),
@@ -1455,6 +1486,7 @@ def run_series(args: argparse.Namespace) -> dict:
         "dump_format": args.dump_format,
         "type_map": args.type_map,
         "scattering": args.scattering,
+        "cell_metadata": series_items[0].get("cell_metadata", {}) if series_items else {},
         "scattering_note": (
             "Per-temperature summary JSON files include the actual scattering "
             "weights/form-factor metadata used for each averaged MD PDF."
@@ -1498,6 +1530,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dump-format", default="lammps-dump-text")
     parser.add_argument("--type-map", nargs="*", default=[], help="LAMMPS type map, e.g. 1=U 2=O")
+    parser.add_argument("--formula", help="Formula label for shared cell metadata, e.g. UO2.")
+    parser.add_argument("--natoms", type=float, help="Atoms in the source MD/simulation cell.")
+    parser.add_argument("--atoms-per-formula-unit", type=float, help="Atoms per formula unit.")
+    parser.add_argument("--formula-units", type=float, help="Formula units in the source MD/simulation cell.")
+    parser.add_argument("--target-z", type=float, help="Formula units in the normalized target crystallographic cell.")
     parser.add_argument("--dt", type=float, help="MD timestep in ps for --dump")
     parser.add_argument("--dump-every", type=int, help="LAMMPS steps between dump frames for --dump or --md-root")
     parser.add_argument("--window-ps", type=float, default=5.0, help="Last trajectory window for --dump")
@@ -1632,6 +1669,7 @@ def run(args: argparse.Namespace) -> dict:
     if args.write_selected_extxyz:
         selected_outputs = write_selected_frames(args.outdir, args.prefix, frames)
 
+    cell_meta = md_cell_metadata(args, natoms=len(frames[0]), cell_role="md-pdf-source-cell")
     structure_stats = compute_structure_stats(frames)
     species_order = sorted(set(frames[0].get_chemical_symbols()))
     r_edges = np.arange(0.0, args.rmax + args.dr, args.dr)
@@ -1840,6 +1878,7 @@ def run(args: argparse.Namespace) -> dict:
         "selected_outputs": selected_outputs,
         "n_frames": n_frames,
         "avg_volume_A3": avg_volume,
+        "cell_metadata": cell_meta,
         "structure_stats": structure_stats,
         "rho0_atoms_per_A3": rho0,
         "avg_counts": avg_counts,

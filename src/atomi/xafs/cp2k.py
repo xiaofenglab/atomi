@@ -16,6 +16,7 @@ from typing import Optional
 import numpy as np
 from ase import Atoms
 
+from atomi.core.cell import cell_metadata, infer_formula_units
 from atomi.cp2k.extract_frames import STEP_PATTERNS
 from atomi.xafs.larch_md import (
     cluster_records_for_site,
@@ -225,6 +226,26 @@ def write_selected_frames(outdir: Path, frames: list[Cp2kXyzFrame]) -> dict[str,
     }
 
 
+def cp2k_cell_metadata(args: argparse.Namespace, frames: list[Cp2kXyzFrame]) -> dict:
+    requested_natoms = getattr(args, "natoms", None)
+    natoms = float(requested_natoms) if requested_natoms is not None else float(len(frames[0].symbols))
+    formula_units = infer_formula_units(
+        formula_units=getattr(args, "formula_units", None),
+        natoms=natoms,
+        atoms_per_formula_unit=getattr(args, "atoms_per_formula_unit", None),
+        formula=getattr(args, "formula", None),
+    )
+    return cell_metadata(
+        formula=getattr(args, "formula", None),
+        natoms=natoms,
+        atoms_per_formula_unit=getattr(args, "atoms_per_formula_unit", None),
+        formula_units=formula_units,
+        target_z=getattr(args, "target_z", None),
+        cell_role="cp2k-xafs-source-cell",
+        normalization_basis="simulation-cell",
+    )
+
+
 def summarize_selected_frames(
     frames: list[Cp2kXyzFrame],
     atoms_frames: list[Atoms],
@@ -257,6 +278,7 @@ def run_prepare(args: argparse.Namespace) -> dict:
     cell_abc, cell_source = parse_cell(args, input_info)
     atoms_frames = frames_to_atoms(selected_frames, cell_abc, args.pbc)
     selected_outputs = write_selected_frames(args.outdir, selected_frames)
+    cell_meta = cp2k_cell_metadata(args, selected_frames)
 
     symbols = selected_frames[0].symbols
     absorber = resolve_absorber(symbols, args.absorber)
@@ -370,6 +392,7 @@ def run_prepare(args: argparse.Namespace) -> dict:
             "input_metadata": input_info,
         },
         "selected_outputs": selected_outputs,
+        "cell_metadata": cell_meta,
         "frame_summary": frame_summary,
         "cell_source": cell_source,
         "absorber_request": args.absorber,
@@ -397,6 +420,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--xyz", type=Path, required=True, help="Multi-frame CP2K AIMD XYZ, usually *-pos.xyz.")
     parser.add_argument("--inp", type=Path, help="Optional CP2K input for timestep/cell metadata.")
     parser.add_argument("--outdir", type=Path, default=Path("xafs_cp2k_prepare"))
+    parser.add_argument("--formula", help="Formula label for shared cell metadata, e.g. GaCl4.")
+    parser.add_argument("--natoms", type=float, help="Atoms in the CP2K AIMD source cell.")
+    parser.add_argument("--atoms-per-formula-unit", type=float, help="Atoms per formula unit.")
+    parser.add_argument("--formula-units", type=float, help="Formula units in the CP2K AIMD source cell.")
+    parser.add_argument("--target-z", type=float, help="Formula units in a normalized target cell, if applicable.")
     parser.add_argument("--absorber", default="metal", help="Absorber symbol, or 'metal' for first metal in the frame.")
     parser.add_argument("--metal", dest="absorber", help="Alias for --absorber when selecting a metal explicitly.")
     parser.add_argument("--edge", default="L3")

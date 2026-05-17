@@ -82,6 +82,14 @@ def test_xafs_cp2k_prepare_writes_feff_clusters_from_last_ps(tmp_path: Path) -> 
             str(inp),
             "--outdir",
             str(outdir),
+            "--formula",
+            "GaCl2OH2",
+            "--natoms",
+            "6",
+            "--atoms-per-formula-unit",
+            "6",
+            "--formula-units",
+            "1",
             "--last-ps",
             "0.6",
             "--max-absorber-sites",
@@ -102,6 +110,8 @@ def test_xafs_cp2k_prepare_writes_feff_clusters_from_last_ps(tmp_path: Path) -> 
     assert "EDGE L3" in text
     assert "Ga_absorber" in text
     metadata = json.loads((outdir / "xafs_cp2k_prepare_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["cell_metadata"]["formula"] == "GaCl2OH2"
+    assert metadata["cell_metadata"]["n_formula_units"] == 1.0
     assert metadata["frame_summary"]["pbc_used"] is True
     assert metadata["source"]["input_metadata"]["temperature"] == 300.0
 

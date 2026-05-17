@@ -35,6 +35,16 @@ def test_xafs_prepare_writes_metal_absorber_feff_inputs(tmp_path) -> None:
             str(traj),
             "--outdir",
             str(outdir),
+            "--formula",
+            "UO2",
+            "--natoms",
+            "96",
+            "--atoms-per-formula-unit",
+            "3",
+            "--formula-units",
+            "32",
+            "--target-z",
+            "4",
             "--cluster-radius",
             "3.0",
             "--max-frames",
@@ -54,6 +64,8 @@ def test_xafs_prepare_writes_metal_absorber_feff_inputs(tmp_path) -> None:
     assert "ATOMS" in text
     assert "U_absorber" in text
     metadata = json.loads((outdir / "xafs_prepare_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["cell_metadata"]["formula"] == "UO2"
+    assert metadata["cell_metadata"]["n_formula_units"] == 32.0
     assert metadata["roadmap"]["pdf_xafs_joint_analysis"]
 
 

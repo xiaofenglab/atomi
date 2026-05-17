@@ -124,6 +124,11 @@ def test_run_from_existing_traj_can_use_custom_reader(tmp_path, monkeypatch) -> 
         gr_dr=None,
         scattering="custom",
         weights=["U=92", "O=8"],
+        formula="UO2",
+        natoms=96,
+        atoms_per_formula_unit=3,
+        formula_units=32,
+        target_z=4,
         window_function="lorch",
         fitting_exports="auto",
         pdfgui_dr_uncertainty=0.0,
@@ -153,6 +158,9 @@ def test_run_from_existing_traj_can_use_custom_reader(tmp_path, monkeypatch) -> 
     assert (tmp_path / "uo2_adp_species.csv").exists()
     assert summary["outputs"]["adp"]["species_adp_csv"].endswith("uo2_adp_species.csv")
     assert summary["outputs"]["frame_overlays"]["n_overlay_frames"] == 1
+    assert summary["cell_metadata"]["formula"] == "UO2"
+    assert summary["cell_metadata"]["n_formula_units"] == 32.0
+    assert summary["cell_metadata"]["target_z_formula_units"] == 4.0
     assert summary["outputs"]["fitting_exports"]["pdfgui_GofR_direct_4col"].endswith(
         "uo2_pdfgui_GofR_direct_4col.gr"
     )

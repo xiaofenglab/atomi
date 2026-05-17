@@ -21,6 +21,7 @@ from typing import Optional
 import numpy as np
 
 from atomi.core.archive import archive_output_dir, default_archive_path
+from atomi.core.cell import cell_metadata, infer_formula_units
 from atomi.lammps import rdf_pdf
 from atomi.lammps.box import format_box_summary
 from atomi.xafs.status import configured_larch_python, probe_larch_python
@@ -160,6 +161,26 @@ def write_json(path: Path, data: dict) -> None:
         return value
 
     path.write_text(json.dumps(normalize(data), indent=2), encoding="utf-8")
+
+
+def md_cell_metadata(args: argparse.Namespace, frames: list) -> dict:
+    requested_natoms = getattr(args, "natoms", None)
+    natoms = float(requested_natoms) if requested_natoms is not None else float(len(frames[0]))
+    formula_units = infer_formula_units(
+        formula_units=getattr(args, "formula_units", None),
+        natoms=natoms,
+        atoms_per_formula_unit=getattr(args, "atoms_per_formula_unit", None),
+        formula=getattr(args, "formula", None),
+    )
+    return cell_metadata(
+        formula=getattr(args, "formula", None),
+        natoms=natoms,
+        atoms_per_formula_unit=getattr(args, "atoms_per_formula_unit", None),
+        formula_units=formula_units,
+        target_z=getattr(args, "target_z", None),
+        cell_role="md-xafs-source-cell",
+        normalization_basis="simulation-cell",
+    )
 
 
 def atomic_number(symbol: str) -> int:
@@ -496,6 +517,7 @@ def run_prepare(args: argparse.Namespace) -> dict:
     args.outdir.mkdir(parents=True, exist_ok=True)
     frames, source_summary = load_frames_for_prepare(args)
     selected_outputs = rdf_pdf.write_selected_frames(args.outdir, "xafs_selected", frames)
+    cell_meta = md_cell_metadata(args, frames)
     structure_stats = rdf_pdf.compute_structure_stats(frames)
     symbols = frames[0].get_chemical_symbols()
     absorber = resolve_absorber(symbols, args.absorber)
@@ -584,6 +606,7 @@ def run_prepare(args: argparse.Namespace) -> dict:
         "mode": "xafs_lammps_prepare",
         "source": source_summary,
         "selected_outputs": selected_outputs,
+        "cell_metadata": cell_meta,
         "structure_stats": structure_stats,
         "absorber_request": args.absorber,
         "absorber": absorber,
@@ -1056,6 +1079,11 @@ def build_prepare_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dump-format", default="lammps-dump-text")
     parser.add_argument("--type-map", nargs="*", default=[], help="LAMMPS type map, e.g. 1=O 2=U")
+    parser.add_argument("--formula", help="Formula label for shared cell metadata, e.g. UO2.")
+    parser.add_argument("--natoms", type=float, help="Atoms in the source MD/simulation cell.")
+    parser.add_argument("--atoms-per-formula-unit", type=float, help="Atoms per formula unit.")
+    parser.add_argument("--formula-units", type=float, help="Formula units in the source MD/simulation cell.")
+    parser.add_argument("--target-z", type=float, help="Formula units in the normalized target crystallographic cell.")
     parser.add_argument("--dt", type=float, help="MD timestep in ps for dump/config discovery.")
     parser.add_argument("--dump-every", type=int, help="LAMMPS steps between dump frames.")
     parser.add_argument("--window-ps", type=float, default=10.0, help="Last trajectory window for MD dump input.")

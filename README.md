@@ -143,6 +143,8 @@ For UO2, `target-z 4` means the normalized target cell is the conventional
 fluorite cell with four UO2 formula units. CALPHAD exports can read Atomi
 thermo tables and convert common QHA/MD columns to canonical `G_J_mol`,
 `H_J_mol`, `S_J_molK`, and `Cp_J_molK` fields using this basis metadata.
+The same metadata keys are also written by PDF/XAFS preparation commands when
+these options are provided.
 
 The `elastic-viz` extra is intentionally dependency-light so it does not block
 combined HPC installs. If you want Atomi to use ELATE directly, install ELATE
