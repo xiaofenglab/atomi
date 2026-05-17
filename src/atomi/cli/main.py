@@ -416,6 +416,14 @@ def build_parser() -> argparse.ArgumentParser:
         )
         defect_thermo.add_argument("defect_thermo_args", nargs=argparse.REMAINDER)
 
+    sd_dd_commands = ("sd-dd-thermo", "sd_dd_thermo", "defect-sd-dd", "defect-chem")
+    for command_name in sd_dd_commands:
+        sd_dd = subparsers.add_parser(
+            command_name,
+            help="Run dilute single-defect/double-defect thermodynamics cross-checks.",
+        )
+        sd_dd.add_argument("sd_dd_args", nargs=argparse.REMAINDER)
+
     mace_live = subparsers.add_parser(
         "mace-live",
         help="Live terminal plot for MACE training logs.",
@@ -832,6 +840,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.zentropy.defect_thermo import main as defect_thermo_main
 
         defect_thermo_main(raw_args[1:])
+        return
+    sd_dd_commands = ("sd-dd-thermo", "sd_dd_thermo", "defect-sd-dd", "defect-chem")
+    if raw_args and raw_args[0] in sd_dd_commands:
+        from atomi.zentropy.sd_dd_thermo import main as sd_dd_main
+
+        sd_dd_main(raw_args[1:])
         return
     if raw_args and raw_args[0] == "vasp-outcar":
         extv(raw_args[1:])
@@ -1267,6 +1281,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.zentropy.defect_thermo import main as defect_thermo_main
 
         defect_thermo_main(args.defect_thermo_args)
+        return
+
+    if args.subcommand in sd_dd_commands:
+        from atomi.zentropy.sd_dd_thermo import main as sd_dd_main
+
+        sd_dd_main(args.sd_dd_args)
         return
 
     if args.subcommand == "mace-live":
