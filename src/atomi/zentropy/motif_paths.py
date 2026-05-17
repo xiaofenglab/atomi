@@ -20,6 +20,9 @@ REFERENCE_FIELDS = [
     "energy_eV",
     "n_formula_units",
     "role",
+    "phase_model",
+    "reference_basis",
+    "thermo_role",
     "source",
     "notes",
 ]
@@ -155,6 +158,9 @@ def scan_root(args: argparse.Namespace, root: Path, index_dir: Path) -> tuple[li
                     "energy_eV": args.energy_eV or "",
                     "n_formula_units": args.n_formula_units or "",
                     "role": args.role or "",
+                    "phase_model": args.phase_model or "",
+                    "reference_basis": args.reference_basis or "",
+                    "thermo_role": args.thermo_role or "",
                     "source": args.source or "",
                     "notes": args.notes or "",
                 }
@@ -288,6 +294,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--energy-eV", help="Optional total reference energy to write directly into reference mode rows.")
     parser.add_argument("--n-formula-units", help="Optional number of formula units for reference mode rows.")
     parser.add_argument("--role", help="Optional reference role, e.g. parent, element, dopant_oxide.")
+    parser.add_argument(
+        "--phase-model",
+        help="Optional phase/model label, e.g. fluorite, sesquioxide, metal.",
+    )
+    parser.add_argument(
+        "--reference-basis",
+        help="Optional basis label, e.g. stable_phase, same_lattice_anchor, chemical_potential.",
+    )
+    parser.add_argument(
+        "--thermo-role",
+        help="Optional thermodynamic role, e.g. parent, reservoir, pseudo_endmember.",
+    )
     parser.add_argument("--source", help="Optional reference source label, e.g. dft.")
     parser.add_argument("--notes", help="Optional notes for reference mode rows.")
     parser.add_argument("--dry-run", action="store_true", help="Print the scan summary without writing the CSV.")

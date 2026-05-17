@@ -212,13 +212,14 @@ def init_main(argv: list[str] | None = None) -> dict[str, Any]:
         encoding="utf-8",
     )
     (dirs["references"] / "reference_phase_index_template.csv").write_text(
-        "reference_id,formula,path,energy_eV,n_formula_units,role,source,notes\n"
-        "UO2,UO2,/path/to/UO2_relaxed/OUTCAR,,,parent,dft,stoichiometric parent phase\n"
-        "U3O8,U3O8,/path/to/U3O8_relaxed/OUTCAR,,,oxygen_rich_reference,dft,optional reservoir cross-check\n"
-        "U2O5,U2O5,/path/to/U2O5_relaxed/OUTCAR,,,oxygen_rich_reference,dft,optional reservoir cross-check\n"
-        "U_metal,U,/path/to/U_metal_relaxed/OUTCAR,,,element,dft,optional metal reservoir\n"
-        "Gd2O3,Gd2O3,/path/to/Gd2O3_relaxed/OUTCAR,,,dopant_oxide,dft,optional Gd reservoir\n"
-        "Gd05U05O2,Gd0.5U0.5O2,/path/to/GdUO2_relaxed/OUTCAR,,,mixed_endmember,dft,optional solution anchor\n",
+        "reference_id,formula,path,energy_eV,n_formula_units,role,phase_model,reference_basis,thermo_role,source,notes\n"
+        "UO2,UO2,/path/to/UO2_relaxed/OUTCAR,,,parent,fluorite,stable_phase,parent,dft,stoichiometric parent phase\n"
+        "U3O8,U3O8,/path/to/U3O8_relaxed/OUTCAR,,,oxygen_rich_reference,U-O,stable_phase,reservoir,dft,optional reservoir cross-check\n"
+        "U2O5,U2O5,/path/to/U2O5_relaxed/OUTCAR,,,oxygen_rich_reference,U-O,stable_phase,reservoir,dft,optional reservoir cross-check\n"
+        "U_metal,U,/path/to/U_metal_relaxed/OUTCAR,,,element,metal,stable_phase,reservoir,dft,optional metal reservoir\n"
+        "Gd2O3,Gd2O3,/path/to/Gd2O3_relaxed/OUTCAR,,,dopant_oxide,sesquioxide,stable_phase,reservoir,dft,optional Gd reservoir\n"
+        "GdO1.5,GdO1.5,/path/to/Gd_VO_fluorite/OUTCAR,,,dopant_vacancy_anchor,fluorite,same_lattice_anchor,pseudo_endmember,dft,Gd3+ plus oxygen vacancy compensation in fluorite\n"
+        "Gd05U05O2,Gd0.5U0.5O2,/path/to/GdU5_fluorite/OUTCAR,,,mixed_anchor,fluorite,same_lattice_anchor,pseudo_endmember,dft,Gd3+ plus U5+ compensation in fluorite\n",
         encoding="utf-8",
     )
     (dirs["seeds"] / "sd_dd_seed_index_template.csv").write_text(
@@ -493,6 +494,84 @@ def reference_data(path: Path | None) -> tuple[dict[str, float], dict[str, dict[
     return chemical_potentials, references
 
 
+def normalize_reference_text(value: Any) -> str:
+    return re.sub(r"[^0-9a-zA-Z]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def infer_reference_basis(row: dict[str, Any]) -> str:
+    explicit = normalize_reference_text(row.get("reference_basis") or row.get("basis"))
+    if explicit:
+        return explicit
+    text = normalize_reference_text(
+        " ".join(
+            str(row.get(key) or "")
+            for key in ("role", "thermo_role", "reference_id", "notes")
+        )
+    )
+    if any(token in text for token in ("pseudo", "same_lattice", "mixed_anchor", "solution_anchor")):
+        return "same_lattice_anchor"
+    if row.get("element") and finite_float(row.get("mu_eV_per_atom") or row.get("chemical_potential_eV")) is not None:
+        return "chemical_potential"
+    return "stable_phase"
+
+
+def infer_thermo_role(row: dict[str, Any], reference_basis: str) -> str:
+    explicit = normalize_reference_text(row.get("thermo_role"))
+    if explicit:
+        return explicit
+    role = normalize_reference_text(row.get("role"))
+    text = normalize_reference_text(
+        " ".join(str(row.get(key) or "") for key in ("role", "reference_id", "notes"))
+    )
+    if reference_basis == "same_lattice_anchor":
+        return "pseudo_endmember"
+    if "parent" in text:
+        return "parent"
+    if role in {"element", "dopant_oxide", "oxygen_rich_reference", "reservoir"}:
+        return "reservoir"
+    if reference_basis == "chemical_potential":
+        return "chemical_potential"
+    return role or "reference"
+
+
+def reference_phase_model(row: dict[str, Any]) -> str:
+    return str(row.get("phase_model") or row.get("phase") or "").strip()
+
+
+def reference_summary(references: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    rows = []
+    basis_counts: dict[str, int] = {}
+    role_counts: dict[str, int] = {}
+    same_lattice = []
+    stable = []
+    for reference_id, row in references.items():
+        basis = infer_reference_basis(row)
+        thermo_role = infer_thermo_role(row, basis)
+        phase_model = reference_phase_model(row)
+        basis_counts[basis] = basis_counts.get(basis, 0) + 1
+        role_counts[thermo_role] = role_counts.get(thermo_role, 0) + 1
+        item = {
+            "reference_id": reference_id,
+            "formula": row.get("formula") or "",
+            "role": row.get("role") or "",
+            "phase_model": phase_model,
+            "reference_basis": basis,
+            "thermo_role": thermo_role,
+        }
+        rows.append(item)
+        if basis == "same_lattice_anchor" or thermo_role == "pseudo_endmember":
+            same_lattice.append(reference_id)
+        if basis == "stable_phase":
+            stable.append(reference_id)
+    return {
+        "basis_counts": basis_counts,
+        "thermo_role_counts": role_counts,
+        "same_lattice_anchor_ids": same_lattice,
+        "stable_phase_reference_ids": stable,
+        "rows": rows,
+    }
+
+
 def resolve_relative_path(raw: str | None, base: Path) -> Path | None:
     if raw is None or not str(raw).strip():
         return None
@@ -593,6 +672,11 @@ def build_references_main(argv: list[str] | None = None) -> dict[str, Any]:
             warnings.append(message)
         if energy_per_formula is None and formula:
             warnings.append(f"row {row_number} ({reference_id}) has no energy per formula unit")
+        reference_basis = infer_reference_basis(row)
+        thermo_role = infer_thermo_role(row, reference_basis)
+        phase_model = reference_phase_model(row)
+        if reference_basis == "same_lattice_anchor" and not phase_model:
+            warnings.append(f"row {row_number} ({reference_id}) is a same-lattice anchor without phase_model")
         rows.append(
             {
                 "reference_id": reference_id,
@@ -605,6 +689,9 @@ def build_references_main(argv: list[str] | None = None) -> dict[str, Any]:
                 "natoms": finite_float(calc.get("natoms")) or sum(counts.values()) or "",
                 "volume_A3": finite_float(calc.get("volume_A3")),
                 "role": row.get("role") or "",
+                "phase_model": phase_model,
+                "reference_basis": reference_basis,
+                "thermo_role": thermo_role,
                 "source": row.get("source") or energy_source,
                 "notes": row.get("notes") or "",
             }
@@ -620,6 +707,9 @@ def build_references_main(argv: list[str] | None = None) -> dict[str, Any]:
         "natoms",
         "volume_A3",
         "role",
+        "phase_model",
+        "reference_basis",
+        "thermo_role",
         "source",
         "notes",
     ]
@@ -630,10 +720,12 @@ def build_references_main(argv: list[str] | None = None) -> dict[str, Any]:
         "reference_index": str(args.reference_index.resolve()),
         "out": str(out),
         "n_references": len(rows),
+        "reference_summary": reference_summary({str(row["reference_id"]): row for row in rows}),
         "warnings": warnings,
         "notes": [
             "energy_eV is the total DFT energy for the supplied reference calculation.",
             "energy_eV_per_formula is used by defect-chem build-defects when the formula matches the parent phase.",
+            "same_lattice_anchor/pseudo_endmember rows are fluorite-model anchors, not stable phase reservoirs.",
             "Chemical potentials/reservoir choices still need thermodynamic review before publication.",
         ],
     }
@@ -708,11 +800,27 @@ def build_defects_main(argv: list[str] | None = None) -> dict[str, Any]:
     mu_from_file, references = reference_data(args.reference_json or args.reference_csv)
     mu = {**mu_from_file, **parse_key_values(args.chemical_potential)}
     parent_energy = args.parent_reference_energy_eV
-    if parent_energy is None:
-        for ref in references.values():
-            if ref.get("formula") == args.parent_formula:
+    parent_reference_id = ""
+    parent_reference_row: dict[str, Any] = {}
+    for ref_id, ref in references.items():
+        if ref.get("formula") == args.parent_formula:
+            parent_reference_id = ref_id
+            parent_reference_row = ref
+            if parent_energy is None:
                 parent_energy = finite_float(ref.get("energy_eV_per_formula") or ref.get("energy_eV"))
-                break
+            break
+    ref_summary = reference_summary(references)
+    same_lattice_anchor_ids = ",".join(ref_summary["same_lattice_anchor_ids"])
+    parent_reference_basis = infer_reference_basis(parent_reference_row) if parent_reference_row else ""
+    parent_reference_phase = reference_phase_model(parent_reference_row) if parent_reference_row else ""
+    reference_context = "; ".join(
+        item
+        for item in (
+            f"parent={parent_reference_id}" if parent_reference_id else "",
+            f"same_lattice_anchors={same_lattice_anchor_ids}" if same_lattice_anchor_ids else "",
+        )
+        if item
+    )
     rows: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
     for record in db.get("records", []):
@@ -744,6 +852,11 @@ def build_defects_main(argv: list[str] | None = None) -> dict[str, Any]:
             "spin_order_host": meta.get("spin_order_host", ""),
             "spin_order_all": meta.get("spin_order_all", ""),
             "source": record.get("run_dir", ""),
+            "parent_reference_id": parent_reference_id,
+            "parent_reference_basis": parent_reference_basis,
+            "parent_reference_phase_model": parent_reference_phase,
+            "same_lattice_anchor_ids": same_lattice_anchor_ids,
+            "reference_context": reference_context,
             "notes": "Built from defect_motif_db.json; verify reference chemical potentials before publication.",
         }
         rows.append(row)
@@ -762,6 +875,11 @@ def build_defects_main(argv: list[str] | None = None) -> dict[str, Any]:
         "spin_order_host",
         "spin_order_all",
         "source",
+        "parent_reference_id",
+        "parent_reference_basis",
+        "parent_reference_phase_model",
+        "same_lattice_anchor_ids",
+        "reference_context",
         "notes",
     ]
     write_csv(args.out.resolve(), rows, fields)
@@ -771,6 +889,10 @@ def build_defects_main(argv: list[str] | None = None) -> dict[str, Any]:
         "reference_file": str((args.reference_json or args.reference_csv).resolve()) if (args.reference_json or args.reference_csv) else "",
         "parent_formula": args.parent_formula,
         "parent_reference_energy_eV": parent_energy,
+        "parent_reference_id": parent_reference_id,
+        "parent_reference_basis": parent_reference_basis,
+        "parent_reference_phase_model": parent_reference_phase,
+        "reference_summary": ref_summary,
         "chemical_potentials_eV": mu,
         "n_rows": len(rows),
         "skipped": skipped,
@@ -1257,6 +1379,9 @@ def evaluate_rows(
                     "sublattice": row.get("sublattice"),
                     "site_species": row.get("site_species"),
                     "source": row.get("source"),
+                    "parent_reference_id": row.get("parent_reference_id", ""),
+                    "same_lattice_anchor_ids": row.get("same_lattice_anchor_ids", ""),
+                    "reference_context": row.get("reference_context", ""),
                 }
             )
             cef_rows.append(
@@ -1269,6 +1394,7 @@ def evaluate_rows(
                     "site_species": row.get("site_species") or row["defect_id"],
                     "site_fraction_seed": pop["site_fraction_of_capacity"],
                     "G_kJ_mol_defect": effective_g * EV_PER_DEFECT_TO_KJ_MOL,
+                    "reference_context": row.get("reference_context", ""),
                     "cef_role": "seed_site_fraction_or_endmember_energy_for_future_CEF_assessment",
                 }
             )
@@ -1363,6 +1489,9 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
             "sublattice",
             "site_species",
             "source",
+            "parent_reference_id",
+            "same_lattice_anchor_ids",
+            "reference_context",
         ],
     )
     write_csv(
@@ -1391,6 +1520,7 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
             "site_species",
             "site_fraction_seed",
             "G_kJ_mol_defect",
+            "reference_context",
             "cef_role",
         ],
     )
@@ -1406,6 +1536,7 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
         "temperatures_K": temperatures,
         "chemical_potentials_eV": chemical_potentials,
         "electron_chemical_potential_eV": args.electron_chemical_potential,
+        "reference_contexts": sorted({row.get("reference_context") for row in rows if row.get("reference_context")}),
         "outputs": {
             "populations": str(detail_path),
             "summary": str(summary_path),

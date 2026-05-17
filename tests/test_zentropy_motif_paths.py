@@ -94,6 +94,12 @@ def test_motif_paths_reference_mode_builds_defect_chem_reference_index(tmp_path:
             "parent_UO2",
             "--role",
             "parent",
+            "--phase-model",
+            "fluorite",
+            "--reference-basis",
+            "stable_phase",
+            "--thermo-role",
+            "parent",
             "--source",
             "dft",
         ]
@@ -105,6 +111,9 @@ def test_motif_paths_reference_mode_builds_defect_chem_reference_index(tmp_path:
     assert reference_rows[0]["path"] == "references/UO2/OUTCAR"
     assert reference_rows[0]["run_dir"] == "references/UO2"
     assert reference_rows[0]["role"] == "parent"
+    assert reference_rows[0]["phase_model"] == "fluorite"
+    assert reference_rows[0]["reference_basis"] == "stable_phase"
+    assert reference_rows[0]["thermo_role"] == "parent"
     assert reference_rows[0]["source"] == "dft"
 
 
@@ -139,6 +148,12 @@ def test_motif_paths_reference_mode_replaces_by_reference_id(tmp_path: Path) -> 
             "Gd2O3",
             "--role",
             "dopant_oxide",
+            "--phase-model",
+            "sesquioxide",
+            "--reference-basis",
+            "stable_phase",
+            "--thermo-role",
+            "reservoir",
             "--replace-existing",
         ]
     )
@@ -147,3 +162,40 @@ def test_motif_paths_reference_mode_replaces_by_reference_id(tmp_path: Path) -> 
     assert len(reference_rows) == 1
     assert reference_rows[0]["reference_id"] == "Gd2O3"
     assert reference_rows[0]["role"] == "dopant_oxide"
+    assert reference_rows[0]["phase_model"] == "sesquioxide"
+    assert reference_rows[0]["reference_basis"] == "stable_phase"
+    assert reference_rows[0]["thermo_role"] == "reservoir"
+
+
+def test_motif_paths_reference_mode_can_label_pseudo_endmember(tmp_path: Path) -> None:
+    reference = tmp_path / "references" / "Gd05U05O2"
+    write_vasp_run(reference)
+    index = tmp_path / "reference_phase_index.csv"
+
+    motif_paths.main(
+        [
+            str(reference),
+            "--mode",
+            "reference",
+            "--index",
+            str(index),
+            "--reference-id",
+            "Gd05U05O2",
+            "--formula",
+            "Gd0.5U0.5O2",
+            "--role",
+            "mixed_anchor",
+            "--phase-model",
+            "fluorite",
+            "--reference-basis",
+            "same_lattice_anchor",
+            "--thermo-role",
+            "pseudo_endmember",
+        ]
+    )
+
+    reference_rows = read_rows(index)
+    assert reference_rows[0]["reference_id"] == "Gd05U05O2"
+    assert reference_rows[0]["phase_model"] == "fluorite"
+    assert reference_rows[0]["reference_basis"] == "same_lattice_anchor"
+    assert reference_rows[0]["thermo_role"] == "pseudo_endmember"
