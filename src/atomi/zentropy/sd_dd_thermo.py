@@ -7,14 +7,21 @@ import csv
 import json
 import math
 import re
+import shutil
+import sys
 from pathlib import Path
 from typing import Any
+
+import numpy as np
+
+from atomi.zentropy.motif_db import parse_formula
 
 
 KB_EV_K = 8.617333262145e-5
 EV_PER_DEFECT_TO_KJ_MOL = 96.48533212331002
 J_PER_MOL_PER_EV = EV_PER_DEFECT_TO_KJ_MOL * 1000.0
 SCHEMA = "atomi.zentropy.sd_dd_thermo.v1"
+WORKFLOW_SCHEMA = "atomi.zentropy.sd_dd_workflow.v1"
 
 
 def finite_float(value: Any) -> float | None:
@@ -65,6 +72,10 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def read_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def parse_key_values(items: list[str] | None) -> dict[str, float]:
@@ -163,6 +174,136 @@ def normalize_defect_rows(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
     return clean_rows
 
 
+def workflow_directories(root: Path) -> dict[str, Path]:
+    return {
+        "references": root / "00_references",
+        "seeds": root / "01_seed_structures",
+        "dft": root / "02_sd_dd_dft",
+        "metadata": root / "03_motif_metadata",
+        "defects": root / "04_defect_tables",
+        "thermo": root / "05_sd_dd_thermo",
+        "solution": root / "06_solution_model",
+        "calphad": root / "07_calphad_seed",
+    }
+
+
+def init_main(argv: list[str] | None = None) -> dict[str, Any]:
+    parser = argparse.ArgumentParser(
+        prog="defect-chem init",
+        description="Create an SD/DD defect thermodynamics workflow skeleton.",
+    )
+    parser.add_argument("--outdir", type=Path, default=Path("sd_dd_workflow"))
+    parser.add_argument("--system", default="(Gd,U)O2")
+    parser.add_argument("--parent-formula", default="UO2")
+    parser.add_argument("--dopant", default="Gd")
+    parser.add_argument("--host", default="U")
+    parser.add_argument("--oxygen", default="O")
+    args = parser.parse_args(argv)
+    root = args.outdir.resolve()
+    dirs = workflow_directories(root)
+    for directory in dirs.values():
+        directory.mkdir(parents=True, exist_ok=True)
+    (dirs["references"] / "reference_energies_template.csv").write_text(
+        "element,mu_eV_per_atom,reference_id,energy_eV,formula,source,notes\n"
+        "U,,,,,,element or reservoir chemical potential in eV/atom\n"
+        "O,,,,,,oxygen chemical potential in eV/atom\n"
+        "Gd,,,,,,dopant reservoir chemical potential in eV/atom\n"
+        ",,parent_UO2,,UO2,,energy per parent formula unit or primitive reference\n",
+        encoding="utf-8",
+    )
+    (dirs["seeds"] / "sd_dd_seed_index_template.csv").write_text(
+        "case_id,model,seed_poscar,template,defect_a,defect_b,charge,delta_O,degeneracy,capacity_per_formula,notes\n"
+        "Gd_U_seed,SD,seed_POSCARs/Gd_U/POSCAR,VASP_TEMPLATE,,,,,2,1.0,Gd substitution seed\n"
+        "V_O_seed,SD,seed_POSCARs/V_O/POSCAR,VASP_TEMPLATE,,,,,-1,1,2.0,O vacancy seed\n"
+        "GdU_VO_pair,DD,seed_POSCARs/GdU_VO_pair/POSCAR,VASP_TEMPLATE,Gd_U_seed,V_O_seed,,,-1,1.0,Gd-vacancy pair seed\n",
+        encoding="utf-8",
+    )
+    (dirs["defects"] / "defect_pairs_template.csv").write_text(
+        "pair_id,defect_a,defect_b,binding_energy_eV,capacity_per_formula,notes\n"
+        f"{args.dopant}_{args.host}_VO_pair,{args.dopant}_{args.host},V_O,,1.0,negative binding stabilizes the pair\n",
+        encoding="utf-8",
+    )
+    (dirs["solution"] / "solution_points_template.csv").write_text(
+        "x,G_mix_eV_per_formula,T_K,source,notes\n"
+        "0.0,0.0,,,\n"
+        "0.5,,,,mixed or ordered endmember motif\n"
+        "1.0,0.0,,,\n",
+        encoding="utf-8",
+    )
+    commands = [
+        f"midx 02_sd_dd_dft --index {dirs['metadata'] / 'motif_paths.csv'}",
+        (
+            "zentropy_motif_db auto-metadata "
+            f"--input-csv {dirs['metadata'] / 'motif_paths.csv'} "
+            f"--materialize-root {dirs['metadata'] / 'materialized_seeds'} "
+            f"--metadata-csv {dirs['metadata'] / 'motif_metadata.csv'} "
+            f"--site-state-csv {dirs['metadata'] / 'site_states.csv'}"
+        ),
+        (
+            "zentropy_motif_db index "
+            f"--root {dirs['metadata'] / 'materialized_seeds'} "
+            f"--metadata-csv {dirs['metadata'] / 'motif_metadata.csv'} "
+            f"--site-state-csv {dirs['metadata'] / 'site_states.csv'} "
+            f"--db {dirs['metadata'] / 'defect_motif_db.json'}"
+        ),
+        (
+            "defect-chem build-defects "
+            f"--motif-db-json {dirs['metadata'] / 'defect_motif_db.json'} "
+            f"--reference-csv {dirs['references'] / 'reference_energies_template.csv'} "
+            f"--out {dirs['defects'] / 'defects.csv'}"
+        ),
+        (
+            "defect-chem run "
+            f"--defect-csv {dirs['defects'] / 'defects.csv'} "
+            f"--pair-csv {dirs['defects'] / 'defect_pairs_template.csv'} "
+            f"--outdir {dirs['thermo']}"
+        ),
+    ]
+    readme = [
+        f"# SD/DD Defect Thermodynamics Workflow: {args.system}",
+        "",
+        "This skeleton keeps SD/DD point-defect chemistry separate from the zentropy-ML path.",
+        "Use it to prepare DFT runs, turn completed motif energies into defect species,",
+        "fit simple CALPHAD-style solution seeds, and run dilute SD/DD cross-checks.",
+        "",
+        "## Stage Order",
+        "",
+        "1. Put seed POSCARs and a VASP_TEMPLATE into `01_seed_structures`.",
+        "2. Use `defect-chem prepare-runs` to create array-DFT-ready folders in `02_sd_dd_dft`.",
+        "3. Use `midx`, `auto-metadata`, and `zentropy_motif_db index` after VASP finishes.",
+        "4. Use `defect-chem build-defects` to build `defects.csv` from DFT energies.",
+        "5. Use `defect-chem run` for SD/DD thermodynamics.",
+        "6. Use `defect-chem fit-solution` to seed regular/Redlich-Kister CALPHAD parameters.",
+        "",
+        "## Useful Commands",
+        "",
+        *[f"- `{command}`" for command in commands],
+        "",
+    ]
+    (root / "README_SD_DD_WORKFLOW.md").write_text("\n".join(readme), encoding="utf-8")
+    metadata = {
+        "schema": WORKFLOW_SCHEMA,
+        "system": args.system,
+        "parent_formula": args.parent_formula,
+        "host": args.host,
+        "dopant": args.dopant,
+        "oxygen": args.oxygen,
+        "directories": {key: str(path) for key, path in dirs.items()},
+        "suggested_commands": commands,
+        "model_path": [
+            "SD/DD DFT motifs",
+            "defects.csv formation energies",
+            "dilute defect thermodynamics",
+            "solution-model seed parameters",
+            "CALPHAD/pycalphad assessment",
+        ],
+    }
+    write_json(root / "sd_dd_workflow.json", metadata)
+    print(f"Wrote SD/DD workflow skeleton: {root}")
+    print(f"Readme: {root / 'README_SD_DD_WORKFLOW.md'}")
+    return metadata
+
+
 def build_pair_rows(single_rows: list[dict[str, Any]], pair_rows: list[dict[str, str]]) -> list[dict[str, Any]]:
     by_id = {str(row["defect_id"]): row for row in single_rows}
     out: list[dict[str, Any]] = []
@@ -215,6 +356,339 @@ def build_pair_rows(single_rows: list[dict[str, Any]], pair_rows: list[dict[str,
         )
         out.append(row)
     return out
+
+
+def copy_vasp_template(template: Path, destination: Path, poscar: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(poscar, destination / "POSCAR")
+    for name in ("INCAR", "KPOINTS", "POTCAR"):
+        source = template / name
+        if source.exists():
+            shutil.copy2(source, destination / name)
+
+
+def prepare_runs_main(argv: list[str] | None = None) -> dict[str, Any]:
+    parser = argparse.ArgumentParser(
+        prog="defect-chem prepare-runs",
+        description="Create SD/DD VASP run folders from seed POSCARs and a VASP template.",
+    )
+    parser.add_argument("--seed-csv", type=Path, required=True)
+    parser.add_argument("--outdir", type=Path, default=Path("02_sd_dd_dft"))
+    parser.add_argument("--default-template", type=Path, default=Path("VASP_TEMPLATE"))
+    parser.add_argument("--runlist", type=Path)
+    parser.add_argument("--index", type=Path)
+    parser.add_argument("--replace", action="store_true")
+    args = parser.parse_args(argv)
+    base = args.seed_csv.resolve().parent
+    outdir = args.outdir.resolve()
+    runlist = args.runlist.resolve() if args.runlist else outdir / "runlist.txt"
+    index = args.index.resolve() if args.index else outdir / "sd_dd_seed_index.csv"
+    manifest_rows: list[dict[str, Any]] = []
+    run_dirs: list[Path] = []
+    for row_number, row in enumerate(read_csv(args.seed_csv.resolve()), start=1):
+        case_id = row.get("case_id") or row.get("defect_id") or row.get("motif_id") or f"case_{row_number:04d}"
+        case_id = safe_name(case_id)
+        seed_raw = row.get("seed_poscar") or row.get("poscar") or row.get("structure")
+        if not seed_raw:
+            raise ValueError(f"Seed row {row_number} is missing seed_poscar/poscar/structure.")
+        seed_poscar = Path(seed_raw)
+        if not seed_poscar.is_absolute():
+            seed_poscar = base / seed_poscar
+        template = Path(row.get("template") or args.default_template)
+        if not template.is_absolute():
+            template = base / template
+        if not seed_poscar.exists():
+            raise FileNotFoundError(f"Seed POSCAR not found for {case_id}: {seed_poscar}")
+        if not template.exists():
+            raise FileNotFoundError(f"VASP template not found for {case_id}: {template}")
+        run_dir = outdir / case_id
+        if run_dir.exists() and args.replace:
+            shutil.rmtree(run_dir)
+        if run_dir.exists() and not args.replace:
+            raise FileExistsError(f"Run folder already exists: {run_dir}. Use --replace to overwrite.")
+        copy_vasp_template(template, run_dir, seed_poscar)
+        case_info = {
+            "case_name": case_id,
+            "model": row.get("model") or defect_kind(row),
+            "defect_a": row.get("defect_a") or "",
+            "defect_b": row.get("defect_b") or "",
+            "seed_poscar": str(seed_poscar.resolve()),
+            "template": str(template.resolve()),
+            "source_row": {key: value for key, value in row.items() if value not in (None, "")},
+        }
+        write_json(run_dir / "case_info.json", case_info)
+        run_dirs.append(run_dir)
+        manifest = dict(row)
+        manifest.update(
+            {
+                "case_id": case_id,
+                "run_dir": str(run_dir.resolve()),
+                "seed_poscar": str(seed_poscar.resolve()),
+                "template": str(template.resolve()),
+            }
+        )
+        manifest_rows.append(manifest)
+    write_csv(index, manifest_rows, sorted({key for row in manifest_rows for key in row}))
+    runlist.parent.mkdir(parents=True, exist_ok=True)
+    runlist.write_text("\n".join(str(path.resolve()) for path in run_dirs) + ("\n" if run_dirs else ""), encoding="utf-8")
+    metadata = {
+        "schema": "atomi.zentropy.sd_dd_prepare_runs.v1",
+        "seed_csv": str(args.seed_csv.resolve()),
+        "outdir": str(outdir),
+        "runlist": str(runlist),
+        "index": str(index),
+        "n_runs": len(run_dirs),
+        "next_step": f"submit array DFT with {runlist}",
+    }
+    write_json(outdir / "sd_dd_prepare_metadata.json", metadata)
+    print(f"Prepared SD/DD VASP runs : {len(run_dirs)}")
+    print(f"Runlist                  : {runlist}")
+    print(f"Seed index               : {index}")
+    return metadata
+
+
+def reference_data(path: Path | None) -> tuple[dict[str, float], dict[str, dict[str, str]]]:
+    chemical_potentials: dict[str, float] = {}
+    references: dict[str, dict[str, str]] = {}
+    if path is None:
+        return chemical_potentials, references
+    if path.suffix.lower() == ".json":
+        data = read_json(path)
+        for key, value in (data.get("chemical_potentials_eV") or data.get("chemical_potentials") or {}).items():
+            chemical_potentials[str(key)] = float(value)
+        references = {str(key): value for key, value in (data.get("references") or {}).items()}
+        return chemical_potentials, references
+    for row in read_csv(path):
+        element = row.get("element") or row.get("species")
+        mu = finite_float(row.get("mu_eV_per_atom") or row.get("chemical_potential_eV"))
+        if element and mu is not None:
+            chemical_potentials[element] = mu
+        reference_id = row.get("reference_id") or row.get("id")
+        if reference_id:
+            references[reference_id] = row
+    return chemical_potentials, references
+
+
+def record_model(record: dict[str, Any]) -> str:
+    text = " ".join(
+        str(record.get(key) or "")
+        for key in ("motif_id", "motif_family", "motif_type", "defect_label")
+    ).lower()
+    if "pair" in text or "double" in text or "complex" in text:
+        return "DD"
+    meta = record.get("motif_metadata", {})
+    text = " ".join(str(meta.get(key) or "") for key in ("motif_family", "motif_type", "defect_label")).lower()
+    return "DD" if "pair" in text or "double" in text or "complex" in text else "SD"
+
+
+def formation_energy_from_record(
+    record: dict[str, Any],
+    parent_counts: dict[str, float],
+    parent_energy_eV: float | None,
+    chemical_potentials: dict[str, float],
+) -> tuple[float | None, str]:
+    energy = finite_float(record.get("energy_eV"))
+    if energy is None:
+        return None, "missing_energy"
+    counts = {str(key): float(value) for key, value in record.get("counts", {}).items()}
+    norm = record.get("size_normalization", {})
+    formula_units = finite_float(norm.get("formula_units"))
+    if parent_energy_eV is not None and formula_units is not None:
+        value = energy - formula_units * parent_energy_eV
+        for element, parent_count in parent_counts.items():
+            delta = counts.get(element, 0.0) - formula_units * float(parent_count)
+            if abs(delta) > 1.0e-12 and element in chemical_potentials:
+                value -= delta * chemical_potentials[element]
+        for element, count in counts.items():
+            if element not in parent_counts and element in chemical_potentials:
+                value -= count * chemical_potentials[element]
+        return value, "parent_reference_plus_delta_mu"
+    if chemical_potentials:
+        value = energy
+        for element, count in counts.items():
+            if element in chemical_potentials:
+                value -= count * chemical_potentials[element]
+        return value, "absolute_mu_sum"
+    return None, "need_parent_reference_or_chemical_potentials"
+
+
+def build_defects_main(argv: list[str] | None = None) -> dict[str, Any]:
+    parser = argparse.ArgumentParser(
+        prog="defect-chem build-defects",
+        description="Build defects.csv from a zentropy motif DB and reference chemical potentials.",
+    )
+    parser.add_argument("--motif-db-json", type=Path, required=True)
+    parser.add_argument("--reference-csv", type=Path)
+    parser.add_argument("--reference-json", type=Path)
+    parser.add_argument("--out", type=Path, default=Path("defects.csv"))
+    parser.add_argument("--parent-formula", default="UO2")
+    parser.add_argument("--parent-reference-energy-eV", type=float)
+    parser.add_argument("--chemical-potential", action="append", default=[])
+    parser.add_argument("--default-capacity-per-formula", type=float)
+    args = parser.parse_args(argv)
+    db = read_json(args.motif_db_json.resolve())
+    parent_counts = parse_formula(args.parent_formula)
+    mu_from_file, references = reference_data(args.reference_json or args.reference_csv)
+    mu = {**mu_from_file, **parse_key_values(args.chemical_potential)}
+    parent_energy = args.parent_reference_energy_eV
+    if parent_energy is None:
+        for ref in references.values():
+            if ref.get("formula") == args.parent_formula:
+                parent_energy = finite_float(ref.get("energy_eV") or ref.get("energy_eV_per_formula"))
+                break
+    rows: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    for record in db.get("records", []):
+        eform, method = formation_energy_from_record(record, parent_counts, parent_energy, mu)
+        if eform is None:
+            skipped.append({"motif_id": record.get("motif_id", ""), "reason": method})
+            continue
+        norm = record.get("size_normalization", {})
+        formula_units = finite_float(norm.get("formula_units")) or 1.0
+        capacity = args.default_capacity_per_formula
+        if capacity is None:
+            capacity = 1.0 / formula_units if formula_units else 1.0
+        meta = record.get("motif_metadata", {})
+        charge = finite_float(record.get("charge_state"))
+        if charge is None:
+            charge = finite_float(record.get("charge", {}).get("nominal_charge_total")) or 0.0
+        row = {
+            "defect_id": record.get("motif_id"),
+            "model": record_model(record),
+            "formation_energy_eV": eform,
+            "formation_energy_method": method,
+            "degeneracy": record.get("degeneracy", 1.0),
+            "capacity_per_formula": capacity,
+            "charge": charge,
+            "delta_O": norm.get("oxygen_delta_per_formula_unit", ""),
+            "sublattice": meta.get("sublattice") or "",
+            "site_species": record.get("defect_label") or meta.get("defect_label") or record.get("motif_id"),
+            "motif_family": record.get("motif_family", ""),
+            "spin_order_host": meta.get("spin_order_host", ""),
+            "spin_order_all": meta.get("spin_order_all", ""),
+            "source": record.get("run_dir", ""),
+            "notes": "Built from defect_motif_db.json; verify reference chemical potentials before publication.",
+        }
+        rows.append(row)
+    fields = [
+        "defect_id",
+        "model",
+        "formation_energy_eV",
+        "formation_energy_method",
+        "degeneracy",
+        "capacity_per_formula",
+        "charge",
+        "delta_O",
+        "sublattice",
+        "site_species",
+        "motif_family",
+        "spin_order_host",
+        "spin_order_all",
+        "source",
+        "notes",
+    ]
+    write_csv(args.out.resolve(), rows, fields)
+    metadata = {
+        "schema": "atomi.zentropy.sd_dd_defects_builder.v1",
+        "motif_db_json": str(args.motif_db_json.resolve()),
+        "reference_file": str((args.reference_json or args.reference_csv).resolve()) if (args.reference_json or args.reference_csv) else "",
+        "parent_formula": args.parent_formula,
+        "parent_reference_energy_eV": parent_energy,
+        "chemical_potentials_eV": mu,
+        "n_rows": len(rows),
+        "skipped": skipped,
+        "out": str(args.out.resolve()),
+    }
+    write_json(args.out.resolve().with_suffix(".metadata.json"), metadata)
+    print(f"Wrote defects.csv rows : {len(rows)}")
+    print(f"Output                : {args.out.resolve()}")
+    if skipped:
+        print(f"Skipped records       : {len(skipped)}")
+    return metadata
+
+
+def fit_solution_main(argv: list[str] | None = None) -> dict[str, Any]:
+    parser = argparse.ArgumentParser(
+        prog="defect-chem fit-solution",
+        description="Fit simple CALPHAD seed parameters from a binary solution energy curve.",
+    )
+    parser.add_argument("--solution-csv", type=Path, required=True)
+    parser.add_argument("--outdir", type=Path, default=Path("analysis/sd_dd_solution_model"))
+    parser.add_argument("--model", choices=("regular", "redlich-kister"), default="regular")
+    parser.add_argument("--material", default="material")
+    parser.add_argument("--phase", default="DEFECT_FLUORITE")
+    parser.add_argument("--component-a", default="UO2")
+    parser.add_argument("--component-b", default="GdO1.5")
+    args = parser.parse_args(argv)
+    raw_rows = read_csv(args.solution_csv.resolve())
+    points = []
+    for row in raw_rows:
+        x = finite_float(row.get("x") or row.get("x_B") or row.get("mole_fraction"))
+        gmix = finite_float(row.get("G_mix_eV_per_formula") or row.get("G_excess_eV_per_formula"))
+        if x is None or gmix is None or x <= 0 or x >= 1:
+            continue
+        points.append((x, gmix))
+    if not points:
+        raise ValueError("No usable solution points found. Need x and G_mix_eV_per_formula for 0 < x < 1.")
+    x_arr = np.asarray([item[0] for item in points], dtype=float)
+    y_arr = np.asarray([item[1] for item in points], dtype=float)
+    if args.model == "regular":
+        basis = (x_arr * (1.0 - x_arr))[:, None]
+        labels = ["L0_eV_per_formula"]
+    else:
+        basis = np.column_stack(
+            [
+                x_arr * (1.0 - x_arr),
+                x_arr * (1.0 - x_arr) * (2.0 * x_arr - 1.0),
+            ]
+        )
+        labels = ["L0_eV_per_formula", "L1_eV_per_formula"]
+    coeffs, *_ = np.linalg.lstsq(basis, y_arr, rcond=None)
+    predicted = basis @ coeffs
+    outdir = args.outdir.resolve()
+    param_rows = [
+        {
+            "model": args.model,
+            "parameter": label,
+            "value_eV_per_formula": value,
+            "value_kJ_mol_formula": value * EV_PER_DEFECT_TO_KJ_MOL,
+            "phase": args.phase,
+            "component_a": args.component_a,
+            "component_b": args.component_b,
+        }
+        for label, value in zip(labels, coeffs)
+    ]
+    fit_rows = [
+        {
+            "x": x,
+            "G_mix_eV_per_formula": y,
+            "G_fit_eV_per_formula": fit,
+            "residual_eV_per_formula": y - fit,
+        }
+        for x, y, fit in zip(x_arr, y_arr, predicted)
+    ]
+    write_csv(outdir / "solution_model_parameters.csv", param_rows, list(param_rows[0]))
+    write_csv(outdir / "solution_model_fit.csv", fit_rows, list(fit_rows[0]))
+    metadata = {
+        "schema": "atomi.zentropy.sd_dd_solution_fit.v1",
+        "model": args.model,
+        "material": args.material,
+        "phase": args.phase,
+        "component_a": args.component_a,
+        "component_b": args.component_b,
+        "n_points": len(points),
+        "notes": [
+            "Regular/Redlich-Kister coefficients are CALPHAD seed parameters, not a full assessment.",
+            "For a true CEF model, map these parameters onto the selected sublattice endmembers and refit with pycalphad/TDB constraints.",
+        ],
+        "outputs": {
+            "parameters": str(outdir / "solution_model_parameters.csv"),
+            "fit": str(outdir / "solution_model_fit.csv"),
+        },
+    }
+    write_json(outdir / "solution_model_metadata.json", metadata)
+    print(f"Wrote solution parameters: {outdir / 'solution_model_parameters.csv'}")
+    return metadata
 
 
 def effective_formation_energy_eV(
@@ -371,7 +845,7 @@ Use this as a fast thermodynamic sanity check and a seed table for later CEF/CAL
     path.write_text(text, encoding="utf-8")
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_run_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sd-dd-thermo",
         description="Single-defect/double-defect dilute thermodynamics cross-check for zentropy and CEF workflows.",
@@ -397,8 +871,8 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> dict[str, Any]:
-    args = build_parser().parse_args(argv)
+def run_main(argv: list[str] | None = None) -> dict[str, Any]:
+    args = build_run_parser().parse_args(argv)
     temperatures = temperature_grid(args)
     chemical_potentials = parse_key_values(args.chemical_potential)
     rows = normalize_defect_rows(read_csv(args.defect_csv.resolve()))
@@ -509,6 +983,40 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         print(f"Wrote SD/DD summary     : {summary_path}")
         print(f"Wrote CEF seed table    : {cef_path}")
     return metadata
+
+
+def build_dispatch_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="defect-chem",
+        description="SD/DD defect chemistry workflow helpers and thermodynamics cross-checks.",
+    )
+    sub = parser.add_subparsers(dest="action")
+    sub.add_parser("init", help="Create a workflow skeleton.")
+    sub.add_parser("prepare-runs", help="Create VASP folders from seed POSCARs.")
+    sub.add_parser("build-defects", help="Build defects.csv from a motif DB.")
+    sub.add_parser("fit-solution", help="Fit regular/Redlich-Kister CALPHAD seed parameters.")
+    sub.add_parser("run", help="Run SD/DD dilute thermodynamics.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> dict[str, Any]:
+    raw = sys.argv[1:] if argv is None else list(argv)
+    actions = {
+        "init": init_main,
+        "prepare-runs": prepare_runs_main,
+        "prepare": prepare_runs_main,
+        "build-defects": build_defects_main,
+        "build": build_defects_main,
+        "fit-solution": fit_solution_main,
+        "fit": fit_solution_main,
+        "run": run_main,
+    }
+    if raw and raw[0] in actions:
+        return actions[raw[0]](raw[1:])
+    if raw and raw[0] in ("-h", "--help"):
+        build_dispatch_parser().parse_args(raw)
+        return {}
+    return run_main(raw)
 
 
 if __name__ == "__main__":
