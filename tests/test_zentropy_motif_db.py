@@ -210,6 +210,13 @@ def test_motif_db_imports_magit_spin_index_as_site_states(tmp_path: Path) -> Non
     assert record["site_states"][1]["spin_label"] == "U4+_down"
 
 
+def test_motif_spin_order_classification() -> None:
+    assert motif_db.classify_spin_order([2.0, 2.1], 0.2)["label"] == "FM"
+    assert motif_db.classify_spin_order([2.0, -2.1], 0.2)["label"] == "AFM"
+    assert motif_db.classify_spin_order([2.0, -2.1, 1.0], 0.2)["label"] == "AFM-like"
+    assert motif_db.classify_spin_order([0.01, -0.02], 0.2)["label"] == "nonmagnetic"
+
+
 def test_motif_db_exports_repeated_mlip_poscar_and_magmom(tmp_path: Path) -> None:
     run = make_run(tmp_path)
     db = tmp_path / "defect_motif_db.json"
@@ -261,9 +268,14 @@ def test_motif_db_auto_metadata_detects_oxygen_vacancy_and_valence(tmp_path: Pat
     assert rows[0]["motif_family"] == "dopant_oxygen_vacancy_complex"
     assert rows[0]["defect_label"] == "Gd1_O_V1"
     assert float(rows[0]["oxygen_delta_per_formula_unit"]) == -0.5
+    assert rows[0]["spin_order_host"] == "single_spin"
+    assert rows[0]["spin_order_all"] == "FM"
+    assert "spin_all_fm" in rows[0]["tags"]
     site_rows = list(csv.DictReader(site_states.open(encoding="utf-8")))
     assert [row["spin_label"] for row in site_rows[:2]] == ["Gd3+_up", "U5+_up"]
     assert [row["valence"] for row in site_rows[:2]] == ["3", "5"]
+    report_rows = list(csv.DictReader(report.open(encoding="utf-8")))
+    assert report_rows[0]["spin_order_host"] == "single_spin"
 
     db = tmp_path / "defect_motif_db.json"
     motif_db.main(
@@ -283,6 +295,7 @@ def test_motif_db_auto_metadata_detects_oxygen_vacancy_and_valence(tmp_path: Pat
     )
     record = json.loads(db.read_text(encoding="utf-8"))["records"][0]
     assert record["defect_label"] == "Gd1_O_V1"
+    assert record["motif_metadata"]["spin_order_all"] == "FM"
     assert record["site_states"][1]["spin_label"] == "U5+_up"
 
 

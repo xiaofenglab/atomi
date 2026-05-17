@@ -143,6 +143,49 @@ def spin_label_for_moment(
     return f"{element}|m={magnitude:.3f}|{sign}"
 
 
+def classify_spin_order(values: list[float], threshold: float) -> dict[str, Any]:
+    """Classify a set of collinear moments as a lightweight diagnostic."""
+    active = [float(value) for value in values if abs(float(value)) >= threshold]
+    zero_count = len(values) - len(active)
+    up_count = sum(1 for value in active if value > 0)
+    down_count = sum(1 for value in active if value < 0)
+    net_moment = sum(active)
+    abs_moment_sum = sum(abs(value) for value in active)
+    if not active:
+        label = "nonmagnetic"
+    elif len(active) == 1:
+        label = "single_spin"
+    elif up_count == len(active) or down_count == len(active):
+        label = "FM"
+    elif up_count == down_count and abs_moment_sum and abs(net_moment) / abs_moment_sum <= 0.25:
+        label = "AFM"
+    else:
+        label = "AFM-like"
+    return {
+        "label": label,
+        "active": len(active),
+        "up": up_count,
+        "down": down_count,
+        "zero": zero_count,
+        "net_moment": net_moment,
+        "abs_moment_sum": abs_moment_sum,
+    }
+
+
+def format_spin_order(info: dict[str, Any]) -> str:
+    label = str(info.get("label", "unknown"))
+    return (
+        f"{label}(active={int(info.get('active', 0))},"
+        f"up={int(info.get('up', 0))},down={int(info.get('down', 0))},"
+        f"zero={int(info.get('zero', 0))},net={float(info.get('net_moment', 0.0)):.6g})"
+    )
+
+
+def spin_order_tag(label: str) -> str:
+    clean = re.sub(r"[^0-9a-z]+", "_", label.lower()).strip("_")
+    return clean or "unknown"
+
+
 def spin_index_aliases(run_dir: str, motif_id: str) -> set[str]:
     aliases = {run_dir, motif_id}
     if run_dir:
@@ -518,6 +561,7 @@ def build_record(
         "size_normalization": normalization,
         "charge": charge_metadata(counts, formula_units, args.valence),
         "magmom": magmom,
+        "motif_metadata": meta,
         "site_states": site_states_for_run(site_state_rows, run_dir, motif_id),
         "case_info": info,
         "zentropy_role": (
@@ -758,6 +802,11 @@ def write_auto_metadata_csvs(
         "formula_units",
         "guest_cation_fraction",
         "oxygen_delta_per_formula_unit",
+        "magmom_source",
+        "spin_order_host",
+        "spin_order_host_detail",
+        "spin_order_all",
+        "spin_order_all_detail",
     ]
     site_state_fields = [
         "run",
@@ -781,6 +830,10 @@ def write_auto_metadata_csvs(
         "guest_cation_fraction",
         "oxygen_delta_per_formula_unit",
         "magmom_source",
+        "spin_order_host",
+        "spin_order_host_detail",
+        "spin_order_all",
+        "spin_order_all_detail",
         "site_states",
         "message",
     ]
@@ -923,13 +976,14 @@ def auto_metadata_main(argv: list[str] | None = None) -> None:
             "formula_units": norm["formula_units"],
             "guest_cation_fraction": norm["guest_cation_fraction"],
             "oxygen_delta_per_formula_unit": norm["oxygen_delta_per_formula_unit"],
+            "magmom_source": magmom_source,
         }
-        metadata_rows.append(metadata_row)
 
         symbols = atoms.get_chemical_symbols()
         magnetic_elements = set(args.moment_state)
         if args.site_element:
             magnetic_elements.update(args.site_element)
+        motif_site_rows: list[dict[str, Any]] = []
         for atom_index, (element, magmom) in enumerate(zip(symbols, magmoms), start=1):
             if element not in magnetic_elements and abs(float(magmom)) < args.magmom_min_abs:
                 continue
@@ -946,18 +1000,44 @@ def auto_metadata_main(argv: list[str] | None = None) -> None:
             else:
                 role = "magnetic_site"
             valence = valence_from_spin_label(spin_label)
-            site_state_rows.append(
-                {
-                    "run": str(source_run.resolve()),
-                    "motif_id": motif_id,
-                    "atom_index_1based": atom_index,
-                    "element": element,
-                    "valence": "" if valence is None else f"{valence:g}",
-                    "magmom": f"{float(magmom):.6g}",
-                    "spin_label": spin_label,
-                    "role": role,
-                }
-            )
+            site_row = {
+                "run": str(source_run.resolve()),
+                "motif_id": motif_id,
+                "atom_index_1based": atom_index,
+                "element": element,
+                "valence": "" if valence is None else f"{valence:g}",
+                "magmom": f"{float(magmom):.6g}",
+                "spin_label": spin_label,
+                "role": role,
+            }
+            site_state_rows.append(site_row)
+            motif_site_rows.append(site_row)
+
+        all_moments = [float(row["magmom"]) for row in motif_site_rows]
+        host_moments = [
+            float(row["magmom"])
+            for row in motif_site_rows
+            if args.host_cation and row["element"] == args.host_cation
+        ]
+        all_spin_order = classify_spin_order(all_moments, args.magmom_min_abs)
+        host_spin_order = classify_spin_order(host_moments, args.magmom_min_abs)
+        metadata_row["spin_order_host"] = host_spin_order["label"]
+        metadata_row["spin_order_host_detail"] = format_spin_order(host_spin_order)
+        metadata_row["spin_order_all"] = all_spin_order["label"]
+        metadata_row["spin_order_all_detail"] = format_spin_order(all_spin_order)
+        metadata_tags.extend(
+            [
+                f"spin_host_{spin_order_tag(str(host_spin_order['label']))}",
+                f"spin_all_{spin_order_tag(str(all_spin_order['label']))}",
+            ]
+        )
+        metadata_row["tags"] = ";".join(dict.fromkeys(metadata_tags))
+        metadata_row["notes"] = (
+            f"{metadata_row['notes']} "
+            f"spin_order_host={metadata_row['spin_order_host_detail']}; "
+            f"spin_order_all={metadata_row['spin_order_all_detail']}."
+        )
+        metadata_rows.append(metadata_row)
 
         report_rows.append(
             {
@@ -972,7 +1052,11 @@ def auto_metadata_main(argv: list[str] | None = None) -> None:
                 "guest_cation_fraction": norm["guest_cation_fraction"],
                 "oxygen_delta_per_formula_unit": norm["oxygen_delta_per_formula_unit"],
                 "magmom_source": magmom_source,
-                "site_states": sum(1 for item in site_state_rows if item["motif_id"] == motif_id),
+                "spin_order_host": metadata_row["spin_order_host"],
+                "spin_order_host_detail": metadata_row["spin_order_host_detail"],
+                "spin_order_all": metadata_row["spin_order_all"],
+                "spin_order_all_detail": metadata_row["spin_order_all_detail"],
+                "site_states": len(motif_site_rows),
                 "message": "",
             }
         )
@@ -1014,6 +1098,8 @@ def write_record_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "formula_units",
         "guest_cation_fraction",
         "oxygen_delta_per_formula_unit",
+        "spin_order_host",
+        "spin_order_all",
         "energy_eV",
         "energy_per_formula_unit_eV",
         "volume_A3",
@@ -1043,6 +1129,8 @@ def write_record_csv(path: Path, records: list[dict[str, Any]]) -> None:
                 "formula_units": norm["formula_units"],
                 "guest_cation_fraction": norm["guest_cation_fraction"],
                 "oxygen_delta_per_formula_unit": norm["oxygen_delta_per_formula_unit"],
+                "spin_order_host": rec.get("motif_metadata", {}).get("spin_order_host", ""),
+                "spin_order_all": rec.get("motif_metadata", {}).get("spin_order_all", ""),
                 "energy_eV": rec["energy_eV"],
                 "energy_per_formula_unit_eV": rec["energy_per_formula_unit_eV"],
                 "volume_A3": rec["volume_A3"],
