@@ -109,11 +109,19 @@ Young's modulus and linear-compressibility HTML surfaces:
 elastic_viz --elastic-dir analysis/elastic_lammps/fit --formula Si --formula-units 64 --plot-3d
 ```
 
-The base command works without ELATE by using native tensor formulas. Install
-the optional visualization extra when you want Atomi to use ELATE directly:
+The base command works without ELATE by using native tensor formulas. Check the
+active backend with:
 
 ```bash
-python -m pip install "atomi[elastic-viz] @ git+https://github.com/xiaofenglab/atomi.git@main"
+elate_status
+```
+
+The `elastic-viz` extra is intentionally dependency-light so it does not block
+combined HPC installs. If you want Atomi to use ELATE directly, install ELATE
+from its GitHub repository in the same environment:
+
+```bash
+python -m pip install "ELATE @ git+https://github.com/coudertlab/elate.git@master"
 ```
 
 The derived-property table includes VRH moduli, Pugh ratio, Cauchy pressure,

@@ -181,6 +181,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         elastic_viz.add_argument("elastic_viz_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("elate_status", "elastic_viz_status"):
+        elastic_status = subparsers.add_parser(
+            command_name,
+            help="Check optional ELATE/native elastic visualization availability.",
+        )
+        elastic_status.add_argument("elastic_status_args", nargs=argparse.REMAINDER)
+
     for command_name in ("vasp_elastic", "vasp-elastic"):
         vasp_elastic = subparsers.add_parser(
             command_name,
@@ -608,6 +615,11 @@ def main(argv: list[str] | None = None) -> None:
 
         elastic_viz_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("elate_status", "elastic_viz_status"):
+        from atomi.elastic.status import main as elastic_status_main
+
+        elastic_status_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] in ("vasp_elastic", "vasp-elastic"):
         from atomi.vasp.elastic import main as vasp_elastic_main
 
@@ -971,6 +983,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.elastic.viz import main as elastic_viz_main
 
         elastic_viz_main(args.elastic_viz_args)
+        return
+
+    if args.subcommand in ("elate_status", "elastic_viz_status"):
+        from atomi.elastic.status import main as elastic_status_main
+
+        elastic_status_main(args.elastic_status_args)
         return
 
     if args.subcommand in ("vasp_elastic", "vasp-elastic"):
