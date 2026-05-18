@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import json
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from atomi.vasp.checks import collect_run_energies, iter_runlist
+from atomi.vasp.checks import array_indexed_output_candidates, collect_run_energies, iter_runlist
 from atomi.vasp.magmom import (
     PoscarSpecies,
     existing_magmom_values,
@@ -64,6 +66,7 @@ class RunSpinReport:
     energy_eV: float | None = None
     energy_kind: str = ""
     energy_source: Path | None = None
+    mag_source: Path | None = None
     mag_status: str = "NO_OUTCAR"
     atoms: list[AtomReport] = field(default_factory=list)
     total_moment: float | None = None
@@ -79,7 +82,9 @@ class RunSpinReport:
 
 
 def infer_nions_from_outcar(outcar: Path) -> int | None:
-    text = outcar.read_text(encoding="utf-8", errors="replace")
+    opener = gzip.open if outcar.suffix == ".gz" else open
+    with opener(outcar, "rt", encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
     matches = NIONS_RE.findall(text)
     return int(matches[-1]) if matches else None
 
@@ -124,7 +129,9 @@ def _parse_mag_rows(lines: list[str], start: int) -> list[MagnetizationRow]:
 def extract_last_magnetization_block(outcar: Path, natoms: int | None = None) -> MagnetizationBlock:
     if not outcar.is_file():
         raise FileNotFoundError(f"OUTCAR not found: {outcar}")
-    lines = outcar.read_text(encoding="utf-8", errors="replace").splitlines()
+    opener = gzip.open if outcar.suffix == ".gz" else open
+    with opener(outcar, "rt", encoding="utf-8", errors="replace") as handle:
+        lines = handle.read().splitlines()
     expected = natoms if natoms is not None else infer_nions_from_outcar(outcar)
     candidates: list[MagnetizationBlock] = []
     for index, line in enumerate(lines):
@@ -314,6 +321,7 @@ def load_spin_index(path: Path | None) -> dict[str, dict[str, str]]:
             resolved = Path(run_dir)
             if not resolved.is_absolute():
                 resolved = base / resolved
+            row["_resolved_run_dir"] = str(resolved.resolve())
             rows[str(resolved.resolve())] = row
             rows[resolved.name] = row
     return rows
@@ -330,6 +338,40 @@ def default_species_file(run_dir: Path) -> Path | None:
 def default_outcar(run_dir: Path) -> Path | None:
     path = run_dir / "OUTCAR"
     return path if path.is_file() else None
+
+
+def magnetization_candidate_files(index: int, run_dir: Path, log_dir: Path | None) -> list[Path]:
+    candidates: list[Path] = []
+    for name in ("OUTCAR", "OUTCAR.gz"):
+        path = run_dir / name
+        if path.is_file():
+            candidates.append(path)
+    search_log_dir = run_dir.parent if log_dir is None else log_dir
+    candidates.extend(array_indexed_output_candidates(index, search_log_dir))
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(path)
+    return sorted(unique, key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
+
+
+def extract_first_available_magnetization(
+    candidates: list[Path],
+    expected: int | None,
+) -> tuple[Path | None, MagnetizationBlock | None, str]:
+    warnings = []
+    for path in candidates:
+        try:
+            return path, extract_last_magnetization_block(path, natoms=expected), ""
+        except Exception as exc:
+            warnings.append(f"{path}: {exc}")
+    if not candidates:
+        return None, None, "OUTCAR missing; run may have been deleted or not started."
+    return None, None, "No usable magnetization block found in candidate files. " + " | ".join(warnings[:3])
 
 
 def build_atom_reports(
@@ -415,17 +457,19 @@ def build_run_reports(
             report.spin_index_name = spin_row.get("name", "")
             report.dopant_mode = spin_row.get("dopant_mode", "")
             report.host_mode = spin_row.get("host_mode", "")
+            indexed_run_dir = Path(spin_row.get("_resolved_run_dir", ""))
+            if indexed_run_dir.is_dir() and indexed_run_dir != run_dir:
+                run_dir = indexed_run_dir
+                report.resolved_run = indexed_run_dir
         if not run_dir.is_dir():
-            report.mag_status = "NODIR"
-            report.warning = f"Run directory missing: {run_dir}"
-            reports.append(report)
-            continue
-        outcar = default_outcar(run_dir)
-        if outcar is None:
-            report.mag_status = "NO_OUTCAR"
-            report.warning = "OUTCAR missing; run may have been deleted or not started."
-            reports.append(report)
-            continue
+            candidates = magnetization_candidate_files(energy.index, run_dir, log_dir)
+            if not candidates:
+                report.mag_status = "NODIR"
+                report.warning = f"Run directory missing: {run_dir}"
+                reports.append(report)
+                continue
+        else:
+            candidates = magnetization_candidate_files(energy.index, run_dir, log_dir)
         species_file = species_override or default_species_file(run_dir)
         expected = natoms
         if expected is None and species_file is not None:
@@ -433,13 +477,13 @@ def build_run_reports(
                 expected = read_poscar_species(species_file).total_atoms
             except Exception:
                 expected = None
-        try:
-            block = extract_last_magnetization_block(outcar, natoms=expected)
-        except Exception as exc:
+        mag_source, block, mag_warning = extract_first_available_magnetization(candidates, expected=expected)
+        if block is None or mag_source is None:
             report.mag_status = "NO_MAGNETIZATION"
-            report.warning = str(exc)
+            report.warning = mag_warning
             reports.append(report)
             continue
+        report.mag_source = mag_source
         labels, species, species_warning = read_species_labels(species_file, len(block.rows))
         if species_warning:
             report.warning = species_warning
@@ -475,6 +519,7 @@ def write_run_summary(reports: list[RunSpinReport], path: Path) -> None:
         "energy_eV",
         "energy_kind",
         "energy_source",
+        "mag_source",
         "mag_status",
         "total_moment",
         "max_abs_moment",
@@ -501,6 +546,7 @@ def write_run_summary(reports: list[RunSpinReport], path: Path) -> None:
                     "energy_eV": "" if report.energy_eV is None else f"{report.energy_eV:.10f}",
                     "energy_kind": report.energy_kind,
                     "energy_source": "" if report.energy_source is None else str(report.energy_source),
+                    "mag_source": "" if report.mag_source is None else str(report.mag_source),
                     "mag_status": report.mag_status,
                     "total_moment": "" if report.total_moment is None else f"{report.total_moment:.8f}",
                     "max_abs_moment": "" if report.max_abs_moment is None else f"{report.max_abs_moment:.8f}",
@@ -753,6 +799,8 @@ def run_batch(args: argparse.Namespace) -> None:
     ok = sum(1 for report in reports if report.energy_eV is not None and report.atoms)
     print(f"Runlist rows       : {len(reports)}")
     print(f"Energy+moments rows: {ok}")
+    print(f"Energy status      : {dict(Counter(report.status for report in reports))}")
+    print(f"Moment status      : {dict(Counter(report.mag_status for report in reports))}")
     print(f"Summary CSV        : {paths['summary']}")
     print(f"Atom CSV           : {paths['atoms']}")
     print(f"Markdown report    : {paths['report']}")
@@ -763,6 +811,8 @@ def run_batch(args: argparse.Namespace) -> None:
         print(f"Plots              : {paths['plots']}")
     else:
         print("Plots              : not written (matplotlib unavailable or no usable rows)")
+    if ok == 0 and reports:
+        print("Hint               : check runlist root, --log-dir, and whether stopped array artifacts contain OUTCAR.")
 
 
 def main(argv: list[str] | None = None) -> None:

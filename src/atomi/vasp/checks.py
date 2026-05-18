@@ -11,6 +11,14 @@ from pathlib import Path
 DONE_MARKER = "General timing and accounting informations for this job"
 CLEAN_PATTERNS = ("OUTCAR*", "CONTCAR", "vasprun.xml", "OSZICAR")
 OUTPUT_PATTERNS = ("vasprun.xml", "OUTCAR*", "OSZICAR", "CONTCAR")
+ARRAY_ARTIFACT_PATTERNS = (
+    "vasp.out*",
+    "OUTCAR",
+    "OUTCAR.gz",
+    "OSZICAR",
+    "vasprun.xml",
+    "vasprun.xml.gz",
+)
 DEFAULT_CHECKVASP_STOPPED_AFTER_MINUTES = 5.0
 DEFAULT_CHECKENG_STOPPED_AFTER_MINUTES = 15.0
 DEFAULT_CHECKENG_DAV_AVERAGE_WINDOW = 10
@@ -443,22 +451,20 @@ def _latest_vasp_output(
     for pattern in ("vasp.out*", "OUTCAR", "OUTCAR.gz", "OSZICAR", "vasprun.xml"):
         candidates.extend(path for path in runpath.glob(pattern) if path.is_file())
     if index is not None and log_dir is not None:
-        candidates.extend(
-            sorted(path for path in log_dir.glob(f"vasp.out*.{index}") if path.is_file())
-        )
+        candidates.extend(array_indexed_output_candidates(index, log_dir))
     if not candidates:
         return None
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
 def _find_vasp_log_for_index(index: int, log_dir: Path) -> Path | None:
-    matches = sorted(log_dir.glob(f"vasp.out*.{index}"))
+    matches = array_indexed_output_candidates(index, log_dir)
     return matches[0] if matches else None
 
 
 def _energy_candidate_files(index: int, runpath: Path, log_dir: Path) -> list[Path]:
     candidates: list[Path] = []
-    candidates.extend(sorted(log_dir.glob(f"vasp.out*.{index}")))
+    candidates.extend(array_indexed_output_candidates(index, log_dir))
     if runpath.is_dir():
         for pattern in ("vasp.out*", "OUTCAR", "OUTCAR.gz", "OSZICAR"):
             candidates.extend(sorted(path for path in runpath.glob(pattern) if path.is_file()))
@@ -471,6 +477,36 @@ def _energy_candidate_files(index: int, runpath: Path, log_dir: Path) -> list[Pa
         seen.add(resolved)
         unique.append(path)
     return sorted(unique, key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
+
+
+def array_indexed_output_candidates(index: int, log_dir: Path) -> list[Path]:
+    """Return root-level or scheduler-folder VASP artifacts for one array index."""
+    if not log_dir.is_dir():
+        return []
+    candidates: list[Path] = []
+    for path in log_dir.iterdir():
+        if not _name_has_array_index(path.name, index):
+            continue
+        if path.is_file():
+            candidates.append(path)
+            continue
+        if not path.is_dir():
+            continue
+        for pattern in ARRAY_ARTIFACT_PATTERNS:
+            candidates.extend(child for child in path.glob(pattern) if child.is_file())
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(path)
+    return sorted(unique, key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
+
+
+def _name_has_array_index(name: str, index: int) -> bool:
+    return re.search(rf"(?:^|[._-])0*{index}(?:[._-]|$)", name) is not None
 
 
 def _last_dav_energy_change(path: Path) -> float | None:

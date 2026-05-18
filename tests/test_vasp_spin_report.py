@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import gzip
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,15 @@ def write_outcar(path: Path, complete_last: bool = True) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def write_outcar_gz(path: Path, complete_last: bool = True) -> None:
+    tmp = path.with_suffix("")
+    write_outcar(tmp, complete_last=complete_last)
+    text = tmp.read_text(encoding="utf-8")
+    tmp.unlink()
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        handle.write(text)
+
+
 def test_extract_last_complete_magnetization_block(tmp_path: Path) -> None:
     outcar = tmp_path / "OUTCAR"
     write_outcar(outcar, complete_last=False)
@@ -105,6 +115,28 @@ def test_single_outcar_writes_magmom_files(tmp_path: Path, capsys) -> None:
     assert "1      Gd   +7.100" in expanded
     vasp_line = (tmp_path / "single" / "spin_MAGMOM_vasp.txt").read_text(encoding="utf-8")
     assert "MAGMOM = +7.100 +7.000 +1.000 -2.100 +0.020 -0.020" in vasp_line
+
+
+def test_single_outcar_gz_writes_magmom_files(tmp_path: Path) -> None:
+    outcar = tmp_path / "OUTCAR.gz"
+    poscar = tmp_path / "POSCAR"
+    write_outcar_gz(outcar)
+    write_poscar(poscar)
+    prefix = tmp_path / "single" / "spin_gz"
+
+    main(
+        [
+            "--outcar",
+            str(outcar),
+            "--species",
+            str(poscar),
+            "--output-prefix",
+            str(prefix),
+        ]
+    )
+
+    expanded = (tmp_path / "single" / "spin_gz_MAGMOM_expanded.txt").read_text(encoding="utf-8")
+    assert "1      Gd   +7.100" in expanded
 
 
 def test_batch_spin_energy_report(tmp_path: Path) -> None:
@@ -158,6 +190,82 @@ def test_batch_spin_energy_report(tmp_path: Path) -> None:
     assert atom_rows[0]["element"] == "Gd"
     assert atom_rows[0]["changed"] == "no"
     assert (tmp_path / "reports" / "magmom_lines" / "001_spin_001_MAGMOM.txt").exists()
+
+
+def test_batch_uses_array_artifact_directory_for_stopped_spin_run(tmp_path: Path) -> None:
+    runlist = tmp_path / "runlist.txt"
+    run_dir = tmp_path / "SPIN_CANDIDATES" / "spin_001"
+    run_dir.mkdir(parents=True)
+    write_poscar(run_dir / "POSCAR")
+    write_incar(run_dir / "INCAR")
+    runlist.write_text("spin_001\n", encoding="utf-8")
+    spin_index = tmp_path / "SPIN_CANDIDATES" / "spin_index.csv"
+    spin_index.write_text(
+        "run_dir,name,dopant_mode,host_mode,moments_by_atom\n"
+        f"{run_dir},spin_001,all,afm,[]\n",
+        encoding="utf-8",
+    )
+    artifact_dir = tmp_path / "bwforcluster-phonopy_array_96.sbatch.21488960.1.260518_030213"
+    artifact_dir.mkdir()
+    write_outcar(artifact_dir / "OUTCAR")
+    prefix = tmp_path / "SPIN_CANDIDATES" / "spin_energy"
+
+    atomi_main(
+        [
+            "vasp-spin-report",
+            "--runlist",
+            str(runlist),
+            "--spin-index",
+            str(spin_index),
+            "--log-dir",
+            str(tmp_path),
+            "--output-prefix",
+            str(prefix),
+            "--no-plot",
+        ]
+    )
+
+    rows = list(csv.DictReader((tmp_path / "SPIN_CANDIDATES" / "spin_energy_run_summary.csv").open()))
+    assert rows[0]["mag_status"] == "OK"
+    assert rows[0]["energy_eV"] == "-11.2500000000"
+    assert rows[0]["mag_source"].endswith("OUTCAR")
+    atom_rows = list(csv.DictReader((tmp_path / "SPIN_CANDIDATES" / "spin_energy_atom_moments.csv").open()))
+    assert atom_rows[0]["element"] == "Gd"
+
+
+def test_batch_uses_outcar_gz_for_moments_and_vasp_stdout_for_latest_energy(tmp_path: Path) -> None:
+    runlist = tmp_path / "runlist.txt"
+    run_dir = tmp_path / "spin_001"
+    run_dir.mkdir()
+    write_poscar(run_dir / "POSCAR")
+    write_incar(run_dir / "INCAR")
+    write_outcar_gz(run_dir / "OUTCAR.gz")
+    (tmp_path / "vasp.out_std.21488960.1").write_text(
+        "DAV: 1 -12.500000 0.0 0.0\n"
+        " free  energy   TOTEN  =       -12.750000 eV\n",
+        encoding="utf-8",
+    )
+    runlist.write_text("spin_001\n", encoding="utf-8")
+    prefix = tmp_path / "reports" / "spin_energy"
+
+    atomi_main(
+        [
+            "vasp-spin-report",
+            "--runlist",
+            str(runlist),
+            "--log-dir",
+            str(tmp_path),
+            "--output-prefix",
+            str(prefix),
+            "--no-plot",
+        ]
+    )
+
+    rows = list(csv.DictReader((tmp_path / "reports" / "spin_energy_run_summary.csv").open()))
+    assert rows[0]["mag_status"] == "OK"
+    assert rows[0]["mag_source"].endswith("OUTCAR.gz")
+    assert rows[0]["energy_source"].endswith("vasp.out_std.21488960.1")
+    assert rows[0]["energy_eV"] == "-12.7500000000"
 
 
 def test_missing_magnetization_error_is_clear(tmp_path: Path) -> None:
