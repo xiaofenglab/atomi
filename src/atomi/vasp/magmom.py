@@ -896,6 +896,11 @@ def build_enum_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
+    if argv and argv[0] in ("report", "spin-report", "analyze"):
+        from atomi.vasp.spin_report import main as spin_report_main
+
+        spin_report_main(argv[1:])
+        return
     if argv and argv[0] in ("enum", "enumerate", "spins"):
         parser = build_enum_parser()
         args = parser.parse_args(argv[1:])
