@@ -57,6 +57,9 @@ class AtomReport:
     delta: float | None
     changed: bool
     mag_class: str
+    physics_ok: bool | None = None
+    physics_target: float | None = None
+    physics_delta: float | None = None
 
 
 @dataclass
@@ -83,6 +86,9 @@ class RunSpinReport:
     spin_index_name: str = ""
     dopant_mode: str = ""
     host_mode: str = ""
+    physics_guard_status: str = "NOT_APPLIED"
+    physics_guard_bad_count: int = 0
+    physics_guard_bad_by_element: dict[str, int] = field(default_factory=dict)
 
 
 def infer_nions_from_outcar(outcar: Path) -> int | None:
@@ -314,6 +320,73 @@ def classify_moment(value: float, thresholds: tuple[float, float, float] = (0.5,
     if abs_value > high:
         return "large_gt5"
     return "other"
+
+
+def parse_moment_guards(values: list[str], default_tol: float) -> dict[str, tuple[list[float], float]]:
+    guards: dict[str, tuple[list[float], float]] = {}
+    for raw in values:
+        if "=" not in raw:
+            raise ValueError(f"Invalid --moment-guard {raw!r}; use Element=v1,v2 or Element=v1,v2@tol.")
+        element, spec = raw.split("=", 1)
+        element = element.strip()
+        if not element:
+            raise ValueError(f"Invalid --moment-guard {raw!r}; element is empty.")
+        tolerance = default_tol
+        if "@" in spec:
+            spec, tol_text = spec.rsplit("@", 1)
+            try:
+                tolerance = float(tol_text)
+            except ValueError as exc:
+                raise ValueError(f"Invalid tolerance in --moment-guard {raw!r}.") from exc
+        targets = []
+        for item in re.split(r"[,;/]+", spec):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                targets.append(float(item))
+            except ValueError as exc:
+                raise ValueError(f"Invalid moment value {item!r} in --moment-guard {raw!r}.") from exc
+        if not targets:
+            raise ValueError(f"Invalid --moment-guard {raw!r}; no target moments were given.")
+        guards[element] = (targets, tolerance)
+    return guards
+
+
+def guard_rule_text(guards: dict[str, tuple[list[float], float]]) -> str:
+    pieces = []
+    for element in sorted(guards):
+        targets, tolerance = guards[element]
+        values = ",".join(format_float(value, decimals=3) for value in targets)
+        pieces.append(f"{element}=[{values}] tol={tolerance:g}")
+    return "; ".join(pieces)
+
+
+def apply_moment_guards(atoms: list[AtomReport], guards: dict[str, tuple[list[float], float]]) -> tuple[str, int, dict[str, int]]:
+    if not guards:
+        return "NOT_APPLIED", 0, {}
+    bad_by_element: dict[str, int] = {}
+    checked = 0
+    for atom in atoms:
+        rule = guards.get(atom.element)
+        if rule is None:
+            atom.physics_ok = None
+            atom.physics_target = None
+            atom.physics_delta = None
+            continue
+        checked += 1
+        targets, tolerance = rule
+        target = min(targets, key=lambda value: abs(atom.final - value))
+        delta = atom.final - target
+        atom.physics_target = target
+        atom.physics_delta = delta
+        atom.physics_ok = abs(delta) <= tolerance
+        if not atom.physics_ok:
+            bad_by_element[atom.element] = bad_by_element.get(atom.element, 0) + 1
+    if checked == 0:
+        return "NO_MATCHED_ELEMENTS", 0, {}
+    bad_count = sum(bad_by_element.values())
+    return ("OK" if bad_count == 0 else "FAIL"), bad_count, bad_by_element
 
 
 def summarize_counts(moments: list[float]) -> dict[str, int]:
@@ -575,6 +648,7 @@ def build_run_reports(
     natoms: int | None,
     change_threshold: float,
     order_threshold: float,
+    moment_guards: dict[str, tuple[list[float], float]] | None = None,
 ) -> list[RunSpinReport]:
     energy_records = collect_run_energies(
         runlist=runlist,
@@ -656,6 +730,11 @@ def build_run_reports(
         report.changed_by_element = changed_counts_by_element(atoms)
         report.initial_element_order = initial_order_from_atoms(atoms, threshold=order_threshold)
         report.element_order, report.element_sum = element_order_from_atoms(atoms, threshold=order_threshold)
+        if moment_guards:
+            status, bad_count, bad_by_element = apply_moment_guards(atoms, moment_guards)
+            report.physics_guard_status = status
+            report.physics_guard_bad_count = bad_count
+            report.physics_guard_bad_by_element = bad_by_element
         if block.warning:
             report.warning = (report.warning + " " if report.warning else "") + block.warning
         reports.append(report)
@@ -683,6 +762,9 @@ def write_run_summary(reports: list[RunSpinReport], path: Path) -> None:
         "initial_element_order",
         "element_order",
         "element_sum",
+        "physics_guard_status",
+        "physics_guard_bad_count",
+        "physics_guard_bad_by_element",
         "spin_index_name",
         "dopant_mode",
         "host_mode",
@@ -712,6 +794,9 @@ def write_run_summary(reports: list[RunSpinReport], path: Path) -> None:
                     "initial_element_order": json.dumps(report.initial_element_order, sort_keys=True),
                     "element_order": json.dumps(report.element_order, sort_keys=True),
                     "element_sum": json.dumps(report.element_sum, sort_keys=True),
+                    "physics_guard_status": report.physics_guard_status,
+                    "physics_guard_bad_count": report.physics_guard_bad_count,
+                    "physics_guard_bad_by_element": json.dumps(report.physics_guard_bad_by_element, sort_keys=True),
                     "spin_index_name": report.spin_index_name,
                     "dopant_mode": report.dopant_mode,
                     "host_mode": report.host_mode,
@@ -732,6 +817,9 @@ def write_atom_table(reports: list[RunSpinReport], path: Path) -> None:
         "delta",
         "changed",
         "mag_class",
+        "physics_ok",
+        "physics_target",
+        "physics_delta",
         "energy_eV",
         "mag_status",
     ]
@@ -751,10 +839,19 @@ def write_atom_table(reports: list[RunSpinReport], path: Path) -> None:
                         "delta": "" if atom.delta is None else f"{atom.delta:.8f}",
                         "changed": "yes" if atom.changed else "no",
                         "mag_class": atom.mag_class,
+                        "physics_ok": "" if atom.physics_ok is None else ("yes" if atom.physics_ok else "no"),
+                        "physics_target": "" if atom.physics_target is None else f"{atom.physics_target:.8f}",
+                        "physics_delta": "" if atom.physics_delta is None else f"{atom.physics_delta:.8f}",
                         "energy_eV": "" if report.energy_eV is None else f"{report.energy_eV:.10f}",
                         "mag_status": report.mag_status,
                     }
                 )
+
+
+def write_physics_filtered_tables(reports: list[RunSpinReport], paths: dict[str, Path]) -> None:
+    passed = [report for report in reports if report.physics_guard_status == "OK"]
+    write_run_summary(passed, paths["filtered_summary"])
+    write_atom_table(passed, paths["filtered_atoms"])
 
 
 def write_magmom_lines(reports: list[RunSpinReport], output_dir: Path, decimals: int, compress_tol: float) -> None:
@@ -787,6 +884,20 @@ def write_markdown_report(reports: list[RunSpinReport], path: Path) -> None:
         f"Runs with energy and magnetization: {len(ok_with_energy)}",
         "",
     ]
+    guarded = [report for report in ok_with_energy if report.physics_guard_status not in {"", "NOT_APPLIED"}]
+    if guarded:
+        passed = [report for report in guarded if report.physics_guard_status == "OK"]
+        failed = [report for report in guarded if report.physics_guard_status == "FAIL"]
+        lines.extend(
+            [
+                "## Physics Guard Summary",
+                "",
+                f"- Guarded runs with energy and moments: {len(guarded)}",
+                f"- Physics-accepted runs: {len(passed)}",
+                f"- Physics-rejected runs: {len(failed)}",
+                "",
+            ]
+        )
     if ok_with_energy:
         minimum = min(report.energy_eV for report in ok_with_energy if report.energy_eV is not None)
         best = min(ok_with_energy, key=lambda report: report.energy_eV or float("inf"))
@@ -802,8 +913,8 @@ def write_markdown_report(reports: list[RunSpinReport], path: Path) -> None:
                 "",
                 "## Energy Table",
                 "",
-                "| index | run | dE_eV | total_moment | max_abs | changed | element_order | status |",
-                "| --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
+                "| index | run | dE_eV | total_moment | max_abs | changed | physics_guard | element_order | status |",
+                "| --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |",
             ]
         )
         for report in ok_with_energy:
@@ -811,7 +922,8 @@ def write_markdown_report(reports: list[RunSpinReport], path: Path) -> None:
             lines.append(
                 f"| {report.index} | `{report.run}` | {delta:.8f} | "
                 f"{report.total_moment:.6f} | {report.max_abs_moment:.6f} | "
-                f"{report.changed_count} | `{json.dumps(report.element_order, sort_keys=True)}` | "
+                f"{report.changed_count} | {report.physics_guard_status} | "
+                f"`{json.dumps(report.element_order, sort_keys=True)}` | "
                 f"{report.status}/{report.mag_status} |"
             )
         lines.append("")
@@ -843,12 +955,36 @@ def write_plots(
     minimum = min(report.energy_eV for report in usable if report.energy_eV is not None)
     labels = [report.spin_index_name or report.resolved_run.name for report in usable]
     rel_e = [(report.energy_eV or 0.0) - minimum for report in usable]
+    guard_applied = any(report.physics_guard_status not in {"", "NOT_APPLIED"} for report in usable)
     output_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
 
     def scatter(x_values: list[float], xlabel: str, name: str) -> None:
         fig, ax = plt.subplots(figsize=(6.0, 4.5))
-        ax.scatter(x_values, rel_e, s=36)
+        if guard_applied:
+            accepted = [idx for idx, report in enumerate(usable) if report.physics_guard_status == "OK"]
+            rejected = [idx for idx, report in enumerate(usable) if report.physics_guard_status != "OK"]
+            if rejected:
+                ax.scatter(
+                    [x_values[idx] for idx in rejected],
+                    [rel_e[idx] for idx in rejected],
+                    s=28,
+                    c="0.72",
+                    alpha=0.55,
+                    label="physics rejected",
+                )
+            if accepted:
+                ax.scatter(
+                    [x_values[idx] for idx in accepted],
+                    [rel_e[idx] for idx in accepted],
+                    s=42,
+                    c="#111111",
+                    alpha=0.95,
+                    label="physics accepted",
+                )
+            ax.legend(frameon=False, fontsize=8)
+        else:
+            ax.scatter(x_values, rel_e, s=36)
         ax.set_xlabel(xlabel)
         ax.set_ylabel("relative energy (eV)")
         ax.grid(True, alpha=0.3)
@@ -876,6 +1012,8 @@ def output_paths(prefix: Path) -> dict[str, Path]:
     return {
         "summary": prefix.with_name(prefix.name + "_run_summary.csv"),
         "atoms": prefix.with_name(prefix.name + "_atom_moments.csv"),
+        "filtered_summary": prefix.with_name(prefix.name + "_physics_filtered_run_summary.csv"),
+        "filtered_atoms": prefix.with_name(prefix.name + "_physics_filtered_atom_moments.csv"),
         "report": prefix.with_name(prefix.name + "_report.md"),
         "plots": prefix.with_name(prefix.name + "_plots"),
     }
@@ -905,6 +1043,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dav-average-window", type=int, default=10)
     parser.add_argument("--change-threshold", type=float, default=0.25)
     parser.add_argument("--order-threshold", type=float, default=0.2)
+    parser.add_argument(
+        "--moment-guard",
+        action="append",
+        default=[],
+        help="Physics guard for final moments, repeatable: Element=v1,v2 or Element=v1,v2@tol.",
+    )
+    parser.add_argument("--moment-guard-tol", type=float, default=0.6, help="Default tolerance for --moment-guard.")
     parser.add_argument("--compress-tol", type=float, default=0.05)
     parser.add_argument("--decimals", type=int, default=3)
     parser.add_argument("--no-plot", action="store_true")
@@ -932,6 +1077,7 @@ def run_single(args: argparse.Namespace) -> None:
 
 def run_batch(args: argparse.Namespace) -> None:
     runlist = args.runlist or Path("runlist.txt")
+    moment_guards = parse_moment_guards(args.moment_guard, args.moment_guard_tol)
     reports = build_run_reports(
         runlist=runlist,
         spin_index=args.spin_index,
@@ -943,10 +1089,13 @@ def run_batch(args: argparse.Namespace) -> None:
         natoms=args.natoms,
         change_threshold=args.change_threshold,
         order_threshold=args.order_threshold,
+        moment_guards=moment_guards,
     )
     paths = output_paths(args.output_prefix)
     write_run_summary(reports, paths["summary"])
     write_atom_table(reports, paths["atoms"])
+    if moment_guards:
+        write_physics_filtered_tables(reports, paths)
     write_markdown_report(reports, paths["report"])
     write_magmom_lines(reports, args.output_prefix.parent, args.decimals, args.compress_tol)
     plot_paths: list[Path] = []
@@ -959,6 +1108,12 @@ def run_batch(args: argparse.Namespace) -> None:
     print(f"Moment status      : {dict(Counter(report.mag_status for report in reports))}")
     print(f"Summary CSV        : {paths['summary']}")
     print(f"Atom CSV           : {paths['atoms']}")
+    if moment_guards:
+        print(f"Physics guard      : {guard_rule_text(moment_guards)}")
+        print(f"Physics accepted   : {sum(1 for report in reports if report.physics_guard_status == 'OK')}")
+        print(f"Physics rejected   : {sum(1 for report in reports if report.physics_guard_status == 'FAIL')}")
+        print(f"Filtered summary   : {paths['filtered_summary']}")
+        print(f"Filtered atom CSV  : {paths['filtered_atoms']}")
     print(f"Markdown report    : {paths['report']}")
     print(f"MAGMOM lines       : {args.output_prefix.parent / 'magmom_lines'}")
     if args.no_plot:

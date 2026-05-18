@@ -70,6 +70,14 @@ def write_outcar(path: Path, complete_last: bool = True) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def write_outcar_with_final(path: Path, final: list[float], energy: float = -11.25) -> None:
+    text = " NIONS =      6 ions\n" + mag_block([7.0, -7.0, 2.0, -2.0, 0.0, 0.0])
+    text += f" free  energy   TOTEN  =       {energy:.6f} eV\n"
+    text += mag_block(final)
+    text += f" free  energy   TOTEN  =       {energy - 0.5:.6f} eV\n"
+    path.write_text(text, encoding="utf-8")
+
+
 def write_outcar_gz(path: Path, complete_last: bool = True) -> None:
     tmp = path.with_suffix("")
     write_outcar(tmp, complete_last=complete_last)
@@ -244,6 +252,50 @@ def test_batch_spin_energy_report(tmp_path: Path) -> None:
     assert atom_rows[0]["element"] == "Gd"
     assert atom_rows[0]["changed"] == "no"
     assert (tmp_path / "reports" / "magmom_lines" / "001_spin_001_MAGMOM.txt").exists()
+
+
+def test_batch_spin_physics_guard_writes_filtered_tables(tmp_path: Path) -> None:
+    runlist = tmp_path / "runlist.txt"
+    run_ok = tmp_path / "spin_001"
+    run_bad = tmp_path / "spin_002"
+    run_ok.mkdir()
+    run_bad.mkdir()
+    for run in (run_ok, run_bad):
+        write_poscar(run / "POSCAR")
+        write_incar(run / "INCAR")
+    write_outcar_with_final(run_ok / "OUTCAR", [7.1, -7.0, 1.0, -2.1, 0.02, -0.02], energy=-12.0)
+    write_outcar_with_final(run_bad / "OUTCAR", [5.8, -7.0, 1.0, -2.1, 0.02, -0.02], energy=-13.0)
+    runlist.write_text("spin_001\nspin_002\n", encoding="utf-8")
+    prefix = tmp_path / "reports" / "spin_energy"
+
+    atomi_main(
+        [
+            "vasp-spin-report",
+            "--runlist",
+            str(runlist),
+            "--output-prefix",
+            str(prefix),
+            "--moment-guard",
+            "Gd=7,-7@0.5",
+            "--moment-guard",
+            "U=2,-2,1,-1@0.5",
+            "--moment-guard",
+            "O=0@0.2",
+            "--no-plot",
+        ]
+    )
+
+    rows = list(csv.DictReader((tmp_path / "reports" / "spin_energy_run_summary.csv").open()))
+    assert rows[0]["physics_guard_status"] == "OK"
+    assert rows[1]["physics_guard_status"] == "FAIL"
+    assert rows[1]["physics_guard_bad_by_element"] == '{"Gd": 1}'
+    filtered = list(csv.DictReader((tmp_path / "reports" / "spin_energy_physics_filtered_run_summary.csv").open()))
+    assert len(filtered) == 1
+    assert filtered[0]["run"] == "spin_001"
+    atom_rows = list(csv.DictReader((tmp_path / "reports" / "spin_energy_atom_moments.csv").open()))
+    bad_gd = [row for row in atom_rows if row["run"] == "spin_002" and row["atom"] == "1"][0]
+    assert bad_gd["physics_ok"] == "no"
+    assert bad_gd["physics_target"] == "7.00000000"
 
 
 def test_batch_uses_array_artifact_directory_for_stopped_spin_run(tmp_path: Path) -> None:
