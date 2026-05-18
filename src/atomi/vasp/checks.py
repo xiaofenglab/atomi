@@ -493,7 +493,7 @@ def array_indexed_output_candidates(index: int, log_dir: Path) -> list[Path]:
         if not path.is_dir():
             continue
         for pattern in ARRAY_ARTIFACT_PATTERNS:
-            candidates.extend(child for child in path.glob(pattern) if child.is_file())
+            candidates.extend(child for child in path.rglob(pattern) if child.is_file())
     seen: set[Path] = set()
     unique: list[Path] = []
     for path in candidates:

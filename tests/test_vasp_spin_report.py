@@ -79,6 +79,46 @@ def write_outcar_gz(path: Path, complete_last: bool = True) -> None:
         handle.write(text)
 
 
+def onsite_block(atom: int, angular_l: int, moment: float) -> str:
+    dim = 2 * angular_l + 1
+    spin1 = max(moment, 0.0)
+    spin2 = max(-moment, 0.0)
+
+    def matrix(first_diagonal: float) -> list[str]:
+        rows = []
+        for row_index in range(dim):
+            values = ["0.0000"] * dim
+            if row_index == 0:
+                values[0] = f"{first_diagonal:.4f}"
+            rows.append(" " + " ".join(values))
+        return rows
+
+    lines = [
+        f"atom = {atom:4d}  type =  2  l = {angular_l}",
+        "",
+        " onsite density matrix",
+        "",
+        "spin component  1",
+        "",
+        *matrix(spin1),
+        "",
+        "spin component  2",
+        "",
+        *matrix(spin2),
+        "",
+        " occupancies and eigenvectors",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def write_onsite_outcar(path: Path) -> None:
+    text = " NIONS =      6 ions\n"
+    text += onsite_block(atom=1, angular_l=3, moment=7.0)
+    text += onsite_block(atom=3, angular_l=3, moment=-2.0)
+    text += " free  energy   TOTEN  =       -13.500000 eV\n"
+    path.write_text(text, encoding="utf-8")
+
+
 def test_extract_last_complete_magnetization_block(tmp_path: Path) -> None:
     outcar = tmp_path / "OUTCAR"
     write_outcar(outcar, complete_last=False)
@@ -88,6 +128,20 @@ def test_extract_last_complete_magnetization_block(tmp_path: Path) -> None:
     assert len(block.rows) == 6
     assert block.rows[0].tot == pytest.approx(7.1)
     assert block.warning is None
+
+
+def test_extract_onsite_density_matrix_fallback(tmp_path: Path) -> None:
+    outcar = tmp_path / "OUTCAR"
+    write_onsite_outcar(outcar)
+
+    block = extract_last_magnetization_block(outcar)
+
+    assert block.source_kind == "onsite_density_matrix"
+    assert len(block.rows) == 6
+    assert block.rows[0].tot == pytest.approx(7.0)
+    assert block.rows[1].tot == pytest.approx(0.0)
+    assert block.rows[2].tot == pytest.approx(-2.0)
+    assert "onsite density matrix" in (block.warning or "")
 
 
 def test_single_outcar_writes_magmom_files(tmp_path: Path, capsys) -> None:
@@ -231,6 +285,48 @@ def test_batch_uses_array_artifact_directory_for_stopped_spin_run(tmp_path: Path
     assert rows[0]["mag_source"].endswith("OUTCAR")
     atom_rows = list(csv.DictReader((tmp_path / "SPIN_CANDIDATES" / "spin_energy_atom_moments.csv").open()))
     assert atom_rows[0]["element"] == "Gd"
+
+
+def test_batch_uses_nested_array_artifact_onsite_matrix_fallback(tmp_path: Path) -> None:
+    runlist = tmp_path / "runlist.txt"
+    run_dir = tmp_path / "SPIN_CANDIDATES" / "spin_001"
+    run_dir.mkdir(parents=True)
+    write_poscar(run_dir / "POSCAR")
+    write_incar(run_dir / "INCAR")
+    runlist.write_text("spin_001\n", encoding="utf-8")
+    spin_index = tmp_path / "SPIN_CANDIDATES" / "spin_index.csv"
+    spin_index.write_text(
+        "run_dir,name,dopant_mode,host_mode,moments_by_atom\n"
+        f"{run_dir},spin_001,all,afm,[]\n",
+        encoding="utf-8",
+    )
+    artifact_run = tmp_path / "bwforcluster-phonopy_array_96.sbatch.21488960.1.260518_030213" / "run"
+    artifact_run.mkdir(parents=True)
+    write_onsite_outcar(artifact_run / "OUTCAR")
+    prefix = tmp_path / "SPIN_CANDIDATES" / "spin_energy"
+
+    atomi_main(
+        [
+            "vasp-spin-report",
+            "--runlist",
+            str(runlist),
+            "--spin-index",
+            str(spin_index),
+            "--log-dir",
+            str(tmp_path),
+            "--output-prefix",
+            str(prefix),
+            "--no-plot",
+        ]
+    )
+
+    rows = list(csv.DictReader((tmp_path / "SPIN_CANDIDATES" / "spin_energy_run_summary.csv").open()))
+    assert rows[0]["mag_status"] == "ONSITE_MATRIX"
+    assert rows[0]["energy_eV"] == "-13.5000000000"
+    assert rows[0]["mag_source"].endswith("run/OUTCAR")
+    atom_rows = list(csv.DictReader((tmp_path / "SPIN_CANDIDATES" / "spin_energy_atom_moments.csv").open()))
+    assert atom_rows[0]["final_moment"] == "7.00000000"
+    assert atom_rows[2]["final_moment"] == "-2.00000000"
 
 
 def test_batch_uses_outcar_gz_for_moments_and_vasp_stdout_for_latest_energy(tmp_path: Path) -> None:

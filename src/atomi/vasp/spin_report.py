@@ -22,6 +22,7 @@ from atomi.vasp.magmom import (
 
 MAG_HEADER_RE = re.compile(r"magnetization\s*\(x\)", re.IGNORECASE)
 NIONS_RE = re.compile(r"\bNIONS\s*=\s*(\d+)")
+ONSITE_ATOM_RE = re.compile(r"\batom\s*=\s*(\d+)\s+type\s*=\s*(\d+)\s+l\s*=\s*(\d+)", re.IGNORECASE)
 
 
 @dataclass
@@ -40,6 +41,7 @@ class MagnetizationBlock:
     line_number: int
     expected_atoms: int | None = None
     warning: str | None = None
+    source_kind: str = "magnetization_x"
 
     @property
     def moments(self) -> list[float]:
@@ -126,12 +128,16 @@ def _parse_mag_rows(lines: list[str], start: int) -> list[MagnetizationRow]:
     return rows
 
 
+def _read_text_lines(path: Path) -> list[str]:
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
+        return handle.read().splitlines()
+
+
 def extract_last_magnetization_block(outcar: Path, natoms: int | None = None) -> MagnetizationBlock:
     if not outcar.is_file():
         raise FileNotFoundError(f"OUTCAR not found: {outcar}")
-    opener = gzip.open if outcar.suffix == ".gz" else open
-    with opener(outcar, "rt", encoding="utf-8", errors="replace") as handle:
-        lines = handle.read().splitlines()
+    lines = _read_text_lines(outcar)
     expected = natoms if natoms is not None else infer_nions_from_outcar(outcar)
     candidates: list[MagnetizationBlock] = []
     for index, line in enumerate(lines):
@@ -141,6 +147,9 @@ def extract_last_magnetization_block(outcar: Path, natoms: int | None = None) ->
         if rows:
             candidates.append(MagnetizationBlock(rows=rows, line_number=index + 1, expected_atoms=expected))
     if not candidates:
+        onsite = extract_last_onsite_density_matrix_block(outcar, natoms=expected, lines=lines)
+        if onsite is not None:
+            return onsite
         raise ValueError(
             f"No 'magnetization (x)' table found in {outcar}. "
             "LORBIT may not have been enabled, or VASP stopped before writing moments."
@@ -149,6 +158,9 @@ def extract_last_magnetization_block(outcar: Path, natoms: int | None = None) ->
         for block in reversed(candidates):
             if len(block.rows) == expected:
                 return block
+        onsite = extract_last_onsite_density_matrix_block(outcar, natoms=expected, lines=lines)
+        if onsite is not None:
+            return onsite
         block = candidates[-1]
         block.warning = (
             f"Extracted {len(block.rows)} moment rows, but expected {expected} atoms. "
@@ -156,6 +168,121 @@ def extract_last_magnetization_block(outcar: Path, natoms: int | None = None) ->
         )
         return block
     return candidates[-1]
+
+
+def extract_last_onsite_density_matrix_block(
+    outcar: Path,
+    natoms: int | None = None,
+    lines: list[str] | None = None,
+) -> MagnetizationBlock | None:
+    lines = _read_text_lines(outcar) if lines is None else lines
+    expected = natoms if natoms is not None else infer_nions_from_outcar(outcar)
+    groups: list[tuple[int, dict[int, MagnetizationRow]]] = []
+    current: dict[int, MagnetizationRow] = {}
+    group_start = 0
+    last_ion = 0
+    for index, line in enumerate(lines):
+        match = ONSITE_ATOM_RE.search(line)
+        if not match:
+            continue
+        ion = int(match.group(1))
+        angular_l = int(match.group(3))
+        if current and (ion in current or ion < last_ion):
+            groups.append((group_start, current))
+            current = {}
+        if not current:
+            group_start = index + 1
+        moment = _parse_onsite_atom_moment(lines, index, angular_l)
+        if moment is None:
+            continue
+        current[ion] = _onsite_row(ion, angular_l, moment)
+        last_ion = ion
+    if current:
+        groups.append((group_start, current))
+    if not groups:
+        return None
+    line_number, rows_by_ion = groups[-1]
+    if expected is None:
+        rows = [rows_by_ion[ion] for ion in sorted(rows_by_ion)]
+        expected = len(rows)
+        missing = 0
+    else:
+        rows = [rows_by_ion.get(ion, MagnetizationRow(ion=ion)) for ion in range(1, expected + 1)]
+        missing = expected - len(rows_by_ion)
+    warning = (
+        "No complete 'magnetization (x)' table was found; using onsite density matrix "
+        "trace(spin component 1) - trace(spin component 2) fallback."
+    )
+    if missing > 0:
+        warning += f" {missing} atoms without onsite matrices were filled with 0.0."
+    return MagnetizationBlock(
+        rows=rows,
+        line_number=line_number,
+        expected_atoms=expected,
+        warning=warning,
+        source_kind="onsite_density_matrix",
+    )
+
+
+def _parse_onsite_atom_moment(lines: list[str], atom_line_index: int, angular_l: int) -> float | None:
+    dim = 2 * angular_l + 1
+    first_index = _find_spin_component(lines, atom_line_index + 1, component=1)
+    if first_index is None:
+        return None
+    first, _next = _parse_square_matrix(lines, first_index + 1, dim)
+    second_index = _find_spin_component(lines, first_index + 1, component=2)
+    if second_index is None:
+        return None
+    second, _next = _parse_square_matrix(lines, second_index + 1, dim)
+    if len(first) != dim or len(second) != dim:
+        return None
+    return _matrix_trace(first) - _matrix_trace(second)
+
+
+def _find_spin_component(lines: list[str], start: int, component: int) -> int | None:
+    needle = f"spin component  {component}"
+    for index in range(start, min(len(lines), start + 80)):
+        stripped = lines[index].strip().lower()
+        if ONSITE_ATOM_RE.search(lines[index]):
+            return None
+        if stripped == needle or stripped == f"spin component {component}":
+            return index
+    return None
+
+
+def _parse_square_matrix(lines: list[str], start: int, dim: int) -> tuple[list[list[float]], int]:
+    matrix: list[list[float]] = []
+    index = start
+    while index < len(lines) and len(matrix) < dim:
+        stripped = lines[index].strip()
+        index += 1
+        if not stripped:
+            continue
+        values = [_parse_float(part) for part in stripped.split()]
+        numeric = [value for value in values if value is not None]
+        if len(numeric) < dim:
+            if matrix:
+                break
+            continue
+        matrix.append(numeric[:dim])
+    return matrix, index
+
+
+def _matrix_trace(matrix: list[list[float]]) -> float:
+    return sum(row[index] for index, row in enumerate(matrix) if index < len(row))
+
+
+def _onsite_row(ion: int, angular_l: int, moment: float) -> MagnetizationRow:
+    row = MagnetizationRow(ion=ion, tot=moment)
+    if angular_l == 0:
+        row.s = moment
+    elif angular_l == 1:
+        row.p = moment
+    elif angular_l == 2:
+        row.d = moment
+    elif angular_l == 3:
+        row.f = moment
+    return row
 
 
 def read_species_labels(species_file: Path | None, natoms: int | None) -> tuple[list[str], PoscarSpecies | None, str]:
@@ -498,7 +625,10 @@ def build_run_reports(
             initial = existing_magmom_values(incar, species.total_atoms)
         atoms = build_atom_reports(block.moments, labels, initial, change_threshold)
         report.atoms = atoms
-        report.mag_status = "OK" if block.warning is None else "WARN"
+        if block.source_kind == "onsite_density_matrix":
+            report.mag_status = "ONSITE_MATRIX"
+        else:
+            report.mag_status = "OK" if block.warning is None else "WARN"
         report.total_moment = sum(block.moments)
         report.max_abs_moment = max((abs(value) for value in block.moments), default=0.0)
         report.summary_counts = summarize_counts(block.moments)
