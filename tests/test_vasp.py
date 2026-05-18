@@ -7,6 +7,7 @@ import pytest
 from atomi.codes.vasp import missing_inputs, summarize_outcar
 from atomi.vasp.checks import (
     check_runs,
+    clean_stopped_energy_outputs,
     collect_run_energies,
     vasp_energies,
 )
@@ -239,6 +240,76 @@ def test_vasp_energies_prints_tsv(tmp_path: Path, capsys) -> None:
     assert "index\trun\tenergy_eV\tkind\tstatus\tsource" in output
     assert "1\t" in output
     assert "-5.0000000000" in output
+
+
+def test_checkeng_clean_stopped_artifacts_dry_run(tmp_path: Path, capsys) -> None:
+    runlist = tmp_path / "runlist.txt"
+    run_dir = tmp_path / "spin_001"
+    run_dir.mkdir()
+    runlist.write_text("spin_001\n", encoding="utf-8")
+    artifact_run = tmp_path / "bwforcluster-vasp_array.sbatch.12345.1.260518_030213" / "run"
+    artifact_run.mkdir(parents=True)
+    outcar = artifact_run / "OUTCAR"
+    outcar.write_text(" free  energy   TOTEN  =       -5.000000 eV\n", encoding="utf-8")
+    keep = artifact_run / "POSCAR"
+    keep.write_text("keep\n", encoding="utf-8")
+    old_time = time.time() - 20 * 60
+    os.utime(outcar, (old_time, old_time))
+
+    vasp_energies(
+        [
+            str(runlist),
+            "--log-dir",
+            str(tmp_path),
+            "--stopped-after-min",
+            "15",
+            "--clean-stopped",
+            "--clean-pattern",
+            "OUTCAR",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert "STOPPED-CLEAN run 1" in output
+    assert "would remove:" in output
+    assert outcar.exists()
+    assert keep.exists()
+
+
+def test_clean_stopped_energy_outputs_execute_only_stopped_artifacts(tmp_path: Path) -> None:
+    runlist = tmp_path / "runlist.txt"
+    run_a = tmp_path / "spin_001"
+    run_b = tmp_path / "spin_002"
+    run_a.mkdir()
+    run_b.mkdir()
+    runlist.write_text("spin_001\nspin_002\n", encoding="utf-8")
+    stopped_run = tmp_path / "bwforcluster-vasp_array.sbatch.12345.1.260518_030213" / "run"
+    active_run = tmp_path / "bwforcluster-vasp_array.sbatch.12346.2.260518_030213" / "run"
+    stopped_run.mkdir(parents=True)
+    active_run.mkdir(parents=True)
+    stopped_outcar = stopped_run / "OUTCAR"
+    active_outcar = active_run / "OUTCAR"
+    stopped_outcar.write_text(" free  energy   TOTEN  =       -5.000000 eV\n", encoding="utf-8")
+    active_outcar.write_text(" free  energy   TOTEN  =       -4.000000 eV\n", encoding="utf-8")
+    stopped_keep = stopped_run / "INCAR"
+    stopped_keep.write_text("keep\n", encoding="utf-8")
+    old_time = time.time() - 20 * 60
+    os.utime(stopped_outcar, (old_time, old_time))
+
+    records = collect_run_energies(runlist, log_dir=tmp_path, stopped_after_minutes=15)
+    counts = clean_stopped_energy_outputs(
+        runlist=runlist,
+        records=records,
+        log_dir=tmp_path,
+        patterns=["OUTCAR"],
+        execute=True,
+    )
+
+    assert counts.stopped_runs == 1
+    assert counts.removed_files == 1
+    assert not stopped_outcar.exists()
+    assert stopped_keep.exists()
+    assert active_outcar.exists()
 
 
 def test_read_lammps_thermo_rows(tmp_path: Path) -> None:

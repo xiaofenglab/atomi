@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import gzip
 import re
 import time
@@ -18,6 +19,21 @@ ARRAY_ARTIFACT_PATTERNS = (
     "OSZICAR",
     "vasprun.xml",
     "vasprun.xml.gz",
+)
+DEFAULT_CHECKENG_CLEAN_PATTERNS = (
+    "vasp.out*",
+    "OUTCAR*",
+    "OSZICAR",
+    "vasprun.xml*",
+    "WAVECAR",
+    "CHG",
+    "CHGCAR",
+    "EIGENVAL",
+    "PROCAR",
+    "DOSCAR",
+    "XDATCAR",
+    "REPORT",
+    "PCDAT",
 )
 DEFAULT_CHECKVASP_STOPPED_AFTER_MINUTES = 5.0
 DEFAULT_CHECKENG_STOPPED_AFTER_MINUTES = 15.0
@@ -61,6 +77,14 @@ class EnergyRecord:
     energy_kind: str = ""
     source: Path | None = None
     status: str = "NOLOG"
+
+
+@dataclass
+class StoppedCleanCounts:
+    stopped_runs: int = 0
+    matched_files: int = 0
+    removed_files: int = 0
+    dry_run: bool = True
 
 
 def iter_runlist(runlist: Path) -> list[Path]:
@@ -261,6 +285,52 @@ def print_energy_table(records: list[EnergyRecord], delimiter: str = "  ") -> No
         print(delimiter.join(row[col].ljust(widths[col]) for col in range(len(row))))
 
 
+def clean_stopped_energy_outputs(
+    runlist: Path,
+    records: list[EnergyRecord],
+    log_dir: Path | None = None,
+    patterns: list[str] | None = None,
+    scope: str = "artifacts",
+    execute: bool = False,
+) -> StoppedCleanCounts:
+    search_log_dir = runlist.parent if log_dir is None else log_dir
+    clean_patterns = patterns or list(DEFAULT_CHECKENG_CLEAN_PATTERNS)
+    counts = StoppedCleanCounts(dry_run=not execute)
+    for record in records:
+        if record.status != "STOPPED":
+            continue
+        counts.stopped_runs += 1
+        runpath = record.run if record.run.is_absolute() else runlist.parent / record.run
+        roots: list[Path] = []
+        if scope in {"artifacts", "both"}:
+            roots.extend(array_indexed_artifact_roots(record.index, search_log_dir, exclude=runpath))
+        if scope in {"run", "both"}:
+            roots.append(runpath)
+        files = _clean_candidate_files(roots, clean_patterns)
+        counts.matched_files += len(files)
+        print(f"STOPPED-CLEAN run {record.index}   {record.run}   files={len(files)}")
+        for path in files:
+            action = "remove" if execute else "would remove"
+            print(f"  {action}: {path}")
+            if execute:
+                try:
+                    path.unlink(missing_ok=True)
+                    counts.removed_files += 1
+                except OSError as exc:
+                    print(f"  failed: {path} ({exc})")
+    return counts
+
+
+def print_stopped_clean_summary(counts: StoppedCleanCounts) -> None:
+    print()
+    print("Stopped cleanup summary")
+    print(f"mode        : {'dry-run' if counts.dry_run else 'delete'}")
+    print(f"stopped runs: {counts.stopped_runs}")
+    print(f"matched     : {counts.matched_files}")
+    if not counts.dry_run:
+        print(f"removed     : {counts.removed_files}")
+
+
 def print_scf_summary(
     counts: ScfCounts,
     threshold: float,
@@ -394,6 +464,31 @@ def vasp_energies(argv: list[str] | None = None) -> None:
         default="  ",
         help="Column delimiter. Use 'tab' for TSV output.",
     )
+    parser.add_argument(
+        "--clean-stopped",
+        action="store_true",
+        help="After reporting energies, clean files belonging to STOPPED rows. Dry-run unless --clean-execute is set.",
+    )
+    parser.add_argument(
+        "--clean-execute",
+        action="store_true",
+        help="Actually delete files selected by --clean-stopped. Without this flag, cleanup is a dry-run.",
+    )
+    parser.add_argument(
+        "--clean-scope",
+        choices=("artifacts", "run", "both"),
+        default="artifacts",
+        help="Where to clean stopped outputs: scheduler artifacts, run folders, or both. Default: artifacts.",
+    )
+    parser.add_argument(
+        "--clean-pattern",
+        action="append",
+        default=None,
+        help=(
+            "File glob to clean for stopped rows. Repeat for several patterns. "
+            "Default removes VASP output artifacts but keeps input files."
+        ),
+    )
     args = parser.parse_args(argv)
 
     records = collect_run_energies(
@@ -404,6 +499,16 @@ def vasp_energies(argv: list[str] | None = None) -> None:
         dav_average_window=args.dav_average_window,
     )
     print_energy_table(records, delimiter=args.delimiter)
+    if args.clean_stopped:
+        counts = clean_stopped_energy_outputs(
+            runlist=args.runlist,
+            records=records,
+            log_dir=args.log_dir,
+            patterns=args.clean_pattern,
+            scope=args.clean_scope,
+            execute=args.clean_execute,
+        )
+        print_stopped_clean_summary(counts)
 
 
 def _parse_checkscf_positionals(
@@ -503,6 +608,46 @@ def array_indexed_output_candidates(index: int, log_dir: Path) -> list[Path]:
         seen.add(resolved)
         unique.append(path)
     return sorted(unique, key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
+
+
+def array_indexed_artifact_roots(index: int, log_dir: Path, exclude: Path | None = None) -> list[Path]:
+    if not log_dir.is_dir():
+        return []
+    excluded = exclude.resolve() if exclude is not None else None
+    roots = []
+    for path in log_dir.iterdir():
+        if not _name_has_array_index(path.name, index):
+            continue
+        if excluded is not None and path.resolve() == excluded:
+            continue
+        roots.append(path)
+    return sorted(roots, key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
+
+
+def _clean_candidate_files(roots: list[Path], patterns: list[str]) -> list[Path]:
+    candidates: list[Path] = []
+    for root in roots:
+        if root.is_file():
+            if _matches_any(root, patterns):
+                candidates.append(root)
+            continue
+        if not root.is_dir():
+            continue
+        for pattern in patterns:
+            candidates.extend(path for path in root.rglob(pattern) if path.is_file() or path.is_symlink())
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(path)
+    return sorted(unique)
+
+
+def _matches_any(path: Path, patterns: list[str]) -> bool:
+    return any(fnmatch.fnmatch(path.name, pattern) for pattern in patterns)
 
 
 def _name_has_array_index(name: str, index: int) -> bool:
