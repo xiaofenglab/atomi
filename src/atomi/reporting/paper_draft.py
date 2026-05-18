@@ -14,6 +14,21 @@ from typing import Iterable
 
 MODULE_ALIASES = {
     "DFT": {"DFT", "VASP", "ELECTRONIC", "ELECTRONIC_STRUCTURE", "ELECTRONIC-STRUCTURE"},
+    "VASP_PREP": {
+        "VASP_PREP",
+        "DFT_PREP",
+        "STRUCTURE_PREP",
+        "DEFECT_CLOUD",
+        "DEFECT-CLOUD",
+        "VASP_DEFECT_CLOUD",
+        "VASP-DEFECT-CLOUD",
+        "DEFECT_CANDIDATES",
+        "DEFECT-CANDIDATES",
+        "VASP_CANDIDATES",
+        "VASP-CANDIDATES",
+        "SEED_DFT",
+        "SEED-DFT",
+    },
     "AIMD": {"AIMD", "CP2K", "AB_INITIO_MD", "AB-INITIO-MD"},
     "MD": {"MD", "LAMMPS", "MOLECULAR_DYNAMICS", "MOLECULAR-DYNAMICS"},
     "MLIP": {"MLIP", "MACE", "ML", "MACHINE_LEARNING_POTENTIAL", "MACHINE-LEARNING-POTENTIAL"},
@@ -318,6 +333,54 @@ def parse_csv_summary(path: Path) -> dict[str, object]:
     return info
 
 
+def parse_runlist(path: Path) -> dict[str, object]:
+    rows = [line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+    return {"rows": len(rows), "first_entries": rows[:5]}
+
+
+def parse_defect_cloud_summary(path: Path) -> dict[str, object]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    families_by_motif = payload.get("families_by_motif", {})
+    family_totals: dict[str, int] = {}
+    if isinstance(families_by_motif, dict):
+        for motif_counts in families_by_motif.values():
+            if isinstance(motif_counts, dict):
+                for family, count in motif_counts.items():
+                    try:
+                        family_totals[str(family)] = family_totals.get(str(family), 0) + int(count)
+                    except (TypeError, ValueError):
+                        continue
+    defaults = payload.get("defaults", {})
+    return {
+        "schema": payload.get("schema", ""),
+        "n_seed_motifs": payload.get("n_seed_motifs"),
+        "n_candidate_runs": payload.get("n_candidate_runs"),
+        "per_motif_requested": payload.get("per_motif_requested"),
+        "seed": payload.get("seed"),
+        "family_totals": family_totals,
+        "defaults": defaults if isinstance(defaults, dict) else {},
+    }
+
+
+def parse_defect_cloud_index(path: Path) -> dict[str, object]:
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+    motif_ids = sorted({row.get("motif_id", "") for row in rows if row.get("motif_id")})
+    family_counts: dict[str, int] = {}
+    for row in rows:
+        family = row.get("family", "")
+        if family:
+            family_counts[family] = family_counts.get(family, 0) + 1
+    return {
+        "rows": len(rows),
+        "columns": reader.fieldnames or [],
+        "motif_count": len(motif_ids),
+        "motif_ids": motif_ids[:20],
+        "family_counts": family_counts,
+    }
+
+
 def parse_tdb(path: Path) -> dict[str, object]:
     text = _read_text(path)
     elements = re.findall(r"^\s*ELEMENT\s+(\S+)", text, flags=re.MULTILINE | re.IGNORECASE)
@@ -338,6 +401,27 @@ def scan_run(path: Path, requested_modules: list[str], max_files: int = 5000) ->
     files = _find_files(root, max_files=max_files)
     if len(files) >= max_files:
         evidence.warnings.append(f"File scan stopped at --max-files={max_files}.")
+
+    defect_cloud_summaries = _by_name(files, "defect_cloud_summary.json")
+    defect_cloud_indexes = _by_name(files, "defect_cloud_index.csv")
+    if defect_cloud_summaries or defect_cloud_indexes:
+        evidence.add_module("VASP_PREP")
+        runlists = _by_name(files, "runlist.txt")
+        for item in defect_cloud_summaries[:5]:
+            evidence.add_file("defect_cloud_summary", item)
+        for item in defect_cloud_indexes[:5]:
+            evidence.add_file("defect_cloud_index", item)
+        for item in runlists[:5]:
+            evidence.add_file("runlist", item)
+        if defect_cloud_summaries:
+            try:
+                evidence.facts["defect_cloud_summary"] = parse_defect_cloud_summary(defect_cloud_summaries[0])
+            except (json.JSONDecodeError, OSError) as exc:
+                evidence.warnings.append(f"Could not parse defect-cloud summary: {exc}")
+        if defect_cloud_indexes:
+            evidence.facts["defect_cloud_index"] = parse_defect_cloud_index(defect_cloud_indexes[0])
+        if runlists:
+            evidence.facts["vasp_runlist"] = parse_runlist(runlists[0])
 
     poscars = _by_name(files, "POSCAR", "CONTCAR")
     incars = _by_name(files, "INCAR")
@@ -481,6 +565,51 @@ def methods_paragraphs(evidences: list[RunEvidence], modules: list[str]) -> list
     paragraphs: list[str] = []
     modules_to_write = modules or sorted({module for ev in evidences for module in ev.detected_modules})
 
+    if "VASP_PREP" in modules_to_write:
+        summary = _first_fact(evidences, "defect_cloud_summary", {})
+        index = _first_fact(evidences, "defect_cloud_index", {})
+        runlist = _first_fact(evidences, "vasp_runlist", {})
+        details = []
+        if isinstance(summary, dict) and summary:
+            if summary.get("n_seed_motifs") is not None:
+                details.append(f"{summary['n_seed_motifs']} seed motifs")
+            if summary.get("n_candidate_runs") is not None:
+                details.append(f"{summary['n_candidate_runs']} candidate VASP folders")
+            if summary.get("per_motif_requested") is not None:
+                details.append(f"{summary['per_motif_requested']} requested variants per motif")
+            if summary.get("seed") is not None:
+                details.append(f"random seed {summary['seed']}")
+            defaults = summary.get("defaults", {})
+            if isinstance(defaults, dict) and defaults:
+                prep_settings = []
+                for key in ("random_amp_A", "structured_amp_A", "bias_species", "bias_amp_A", "mixed_amp_A", "iso_strains"):
+                    if key in defaults:
+                        prep_settings.append(f"{key}={_format_value(defaults[key])}")
+                if prep_settings:
+                    details.append("generation settings " + "; ".join(prep_settings))
+            family_totals = summary.get("family_totals", {})
+            if isinstance(family_totals, dict) and family_totals:
+                details.append("variant families " + _format_value(family_totals))
+        elif isinstance(index, dict) and index:
+            details.append(f"{index.get('rows', 'unknown')} candidate rows")
+            if index.get("motif_count") is not None:
+                details.append(f"{index['motif_count']} motifs")
+            family_counts = index.get("family_counts", {})
+            if isinstance(family_counts, dict) and family_counts:
+                details.append("variant families " + _format_value(family_counts))
+        if isinstance(runlist, dict) and runlist:
+            details.append(f"array-run index runlist.txt with {runlist.get('rows', 'unknown')} entries")
+        paragraphs.append(
+            "Defect-seed and candidate electronic-structure folders were generated by "
+            "starting from relaxed motif structures, preserving atom ordering, copying "
+            "the calculation template files, and writing one calculation directory per "
+            "candidate structure. "
+            + (_sentence_join(details) + ". " if details else "")
+            + "For manuscript use, describe the motif source, charge or spin labels, "
+            "which perturbation families were retained, and how the indexed folders "
+            "were submitted and screened."
+        )
+
     if "DFT" in modules_to_write:
         tags = _first_fact(evidences, "dft_incar_tags", {})
         structure = _first_fact(evidences, "dft_structure", {})
@@ -606,6 +735,23 @@ def result_lines(evidences: list[RunEvidence]) -> list[str]:
     for evidence in evidences:
         modules = ", ".join(evidence.detected_modules) or "no module detected"
         lines.append(f"- `{evidence.path}`: detected {modules}.")
+        prep = evidence.facts.get("defect_cloud_summary") or evidence.facts.get("defect_cloud_index")
+        if isinstance(prep, dict) and prep:
+            bits = []
+            if "n_seed_motifs" in prep:
+                bits.append(f"{prep['n_seed_motifs']} seed motifs")
+            elif "motif_count" in prep:
+                bits.append(f"{prep['motif_count']} seed motifs")
+            if "n_candidate_runs" in prep:
+                bits.append(f"{prep['n_candidate_runs']} candidate folders")
+            elif "rows" in prep:
+                bits.append(f"{prep['rows']} candidate rows")
+            if prep.get("family_totals"):
+                bits.append("families " + _format_value(prep["family_totals"]))
+            elif prep.get("family_counts"):
+                bits.append("families " + _format_value(prep["family_counts"]))
+            if bits:
+                lines.append("  - VASP preparation summary: " + "; ".join(bits) + ".")
         dft = evidence.facts.get("dft_outcar")
         if isinstance(dft, dict):
             bits = []
@@ -742,7 +888,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         action="append",
         default=[],
-        help="Workflow keywords used in this entry, e.g. DFT MLIP AIMD MD CALPHAD MOOSE.",
+        help="Workflow keywords used in this entry, e.g. DFT VASP_PREP MLIP AIMD MD CALPHAD MOOSE.",
     )
     parser.add_argument(
         "--run",

@@ -73,6 +73,61 @@ def write_calphad_run(root: Path) -> None:
     )
 
 
+def write_defect_cloud_run(root: Path) -> None:
+    root.mkdir()
+    (root / "defect_cloud_summary.json").write_text(
+        json.dumps(
+            {
+                "schema": "atomi.vasp.defect_cloud.summary.v1",
+                "n_seed_motifs": 2,
+                "n_candidate_runs": 16,
+                "per_motif_requested": 8,
+                "seed": 20260518,
+                "families_by_motif": {
+                    "GdUO2_seed_01": {
+                        "base": 1,
+                        "random_displacement": 3,
+                        "isotropic_strain": 2,
+                        "species_biased_displacement": 1,
+                        "mixed_displacement": 1,
+                    },
+                    "GdUO2_seed_02": {
+                        "base": 1,
+                        "random_displacement": 3,
+                        "isotropic_strain": 2,
+                        "species_biased_displacement": 1,
+                        "mixed_displacement": 1,
+                    },
+                },
+                "defaults": {
+                    "random_amp_A": 0.02,
+                    "structured_amp_A": 0.01,
+                    "bias_species": "O",
+                    "bias_amp_A": 0.05,
+                    "mixed_amp_A": 0.04,
+                    "iso_strains": [-0.01, 0.01],
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "defect_cloud_index.csv").write_text(
+        "\n".join(
+            [
+                "motif_id,family,run_dir",
+                "GdUO2_seed_01,base,GdUO2_seed_01/base",
+                "GdUO2_seed_01,random_displacement,GdUO2_seed_01/random_001",
+                "GdUO2_seed_02,species_biased_displacement,GdUO2_seed_02/bias_O_001",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "runlist.txt").write_text("GdUO2_seed_01/base\nGdUO2_seed_01/random_001\n", encoding="utf-8")
+
+
 def test_paper_draft_scans_and_appends(tmp_path: Path) -> None:
     vasp = tmp_path / "vasp"
     lammps = tmp_path / "md"
@@ -119,6 +174,46 @@ def test_paper_draft_scans_and_appends(tmp_path: Path) -> None:
     assert "dft_outcar" in parsed[0]["facts"]
 
 
+def test_paper_draft_describes_vasp_defect_candidate_generation(tmp_path: Path) -> None:
+    prep = tmp_path / "defect_prep"
+    write_defect_cloud_run(prep)
+    document = tmp_path / "draft.md"
+    evidence = tmp_path / "evidence.json"
+
+    paper_draft.main(
+        [
+            "--used",
+            "defect-cloud",
+            "DFT",
+            "--run",
+            str(prep),
+            "--document",
+            str(document),
+            "--evidence-json",
+            str(evidence),
+            "--mode",
+            "overwrite",
+            "--no-style-note",
+            "--title",
+            "Defect candidate preparation",
+            "--material",
+            "(Gd,U)O2-x",
+        ]
+    )
+
+    text = document.read_text(encoding="utf-8")
+    assert "Requested modules: VASP_PREP, DFT" in text
+    assert "Defect-seed and candidate electronic-structure folders" in text
+    assert "2 seed motifs" in text
+    assert "16 candidate VASP folders" in text
+    assert "bias_species=O" in text
+    assert "array-run index runlist.txt with 2 entries" in text
+
+    parsed = json.loads(evidence.read_text(encoding="utf-8"))
+    assert parsed[0]["detected_modules"] == ["VASP_PREP"]
+    assert parsed[0]["facts"]["defect_cloud_summary"]["family_totals"]["base"] == 2
+
+
 def test_paper_draft_top_level_cli(tmp_path: Path) -> None:
     vasp = tmp_path / "vasp"
     write_vasp_run(vasp)
@@ -147,3 +242,7 @@ def test_paper_draft_top_level_cli(tmp_path: Path) -> None:
 
 def test_normalize_modules_keeps_unknown_keyword() -> None:
     assert paper_draft.normalize_modules(["dft, mlip", "custom"]) == ["DFT", "MLIP", "CUSTOM"]
+
+
+def test_normalize_modules_accepts_defect_cloud_alias() -> None:
+    assert paper_draft.normalize_modules(["defect-cloud"]) == ["VASP_PREP"]
