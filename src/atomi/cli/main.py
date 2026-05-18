@@ -415,6 +415,54 @@ def build_parser() -> argparse.ArgumentParser:
         )
         zentropy_workflow.add_argument("zentropy_workflow_args", nargs=argparse.REMAINDER)
 
+    zentropy_free_energy_commands = ("zentropy_free_energy", "zentropy-free-energy")
+    for command_name in zentropy_free_energy_commands:
+        zentropy_free_energy = subparsers.add_parser(
+            command_name,
+            help="Assemble motif-resolved free-energy tables for zentropy solves.",
+        )
+        zentropy_free_energy.add_argument("zentropy_free_energy_args", nargs=argparse.REMAINDER)
+
+    zentropy_solve_commands = ("zentropy_solve", "zentropy-solve")
+    for command_name in zentropy_solve_commands:
+        zentropy_solve = subparsers.add_parser(
+            command_name,
+            help="Solve discrete motif probabilities from G_i(T) and degeneracy.",
+        )
+        zentropy_solve.add_argument("zentropy_solve_args", nargs=argparse.REMAINDER)
+
+    zentropy_export_commands = ("zentropy_export", "zentropy-export")
+    for command_name in zentropy_export_commands:
+        zentropy_export = subparsers.add_parser(
+            command_name,
+            help="Export zentropy thermo and population tables for downstream models.",
+        )
+        zentropy_export.add_argument("zentropy_export_args", nargs=argparse.REMAINDER)
+
+    zentropy_active_learning_commands = ("zentropy_active_learning", "zentropy-active-learning")
+    for command_name in zentropy_active_learning_commands:
+        zentropy_active_learning = subparsers.add_parser(
+            command_name,
+            help="Rank zentropy motifs for follow-up DFT or MLIP sampling.",
+        )
+        zentropy_active_learning.add_argument("zentropy_active_learning_args", nargs=argparse.REMAINDER)
+
+    solid_solution_scan_commands = ("mlip_solid_solution_scan", "mlip-solid-solution-scan")
+    for command_name in solid_solution_scan_commands:
+        solid_solution_scan = subparsers.add_parser(
+            command_name,
+            help="Plan compact MLIP solid-solution scans over composition and defect families.",
+        )
+        solid_solution_scan.add_argument("solid_solution_scan_args", nargs=argparse.REMAINDER)
+
+    motif_cluster_commands = ("motif_cluster", "motif-cluster", "zentropy_motif_cluster", "zentropy-motif-cluster")
+    for command_name in motif_cluster_commands:
+        motif_cluster = subparsers.add_parser(
+            command_name,
+            help="Cluster defect motifs and select low-energy representatives.",
+        )
+        motif_cluster.add_argument("motif_cluster_args", nargs=argparse.REMAINDER)
+
     defect_thermo_commands = ("defect_thermo_export", "defect-thermo-export")
     for command_name in defect_thermo_commands:
         defect_thermo = subparsers.add_parser(
@@ -859,6 +907,42 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.zentropy.workflow import main as zentropy_workflow_main
 
         zentropy_workflow_main(raw_args[1:])
+        return
+    zentropy_free_energy_commands = ("zentropy_free_energy", "zentropy-free-energy")
+    if raw_args and raw_args[0] in zentropy_free_energy_commands:
+        from atomi.zentropy.free_energy import main as zentropy_free_energy_main
+
+        zentropy_free_energy_main(raw_args[1:])
+        return
+    zentropy_solve_commands = ("zentropy_solve", "zentropy-solve")
+    if raw_args and raw_args[0] in zentropy_solve_commands:
+        from atomi.zentropy.solve import main as zentropy_solve_main
+
+        zentropy_solve_main(raw_args[1:])
+        return
+    zentropy_export_commands = ("zentropy_export", "zentropy-export")
+    if raw_args and raw_args[0] in zentropy_export_commands:
+        from atomi.zentropy.export import main as zentropy_export_main
+
+        zentropy_export_main(raw_args[1:])
+        return
+    zentropy_active_learning_commands = ("zentropy_active_learning", "zentropy-active-learning")
+    if raw_args and raw_args[0] in zentropy_active_learning_commands:
+        from atomi.zentropy.active_learning import main as zentropy_active_learning_main
+
+        zentropy_active_learning_main(raw_args[1:])
+        return
+    solid_solution_scan_commands = ("mlip_solid_solution_scan", "mlip-solid-solution-scan")
+    if raw_args and raw_args[0] in solid_solution_scan_commands:
+        from atomi.zentropy.solid_solution_scan import main as solid_solution_scan_main
+
+        solid_solution_scan_main(raw_args[1:])
+        return
+    motif_cluster_commands = ("motif_cluster", "motif-cluster", "zentropy_motif_cluster", "zentropy-motif-cluster")
+    if raw_args and raw_args[0] in motif_cluster_commands:
+        from atomi.zentropy.motif_cluster import main as motif_cluster_main
+
+        motif_cluster_main(raw_args[1:])
         return
     defect_thermo_commands = ("defect_thermo_export", "defect-thermo-export")
     if raw_args and raw_args[0] in defect_thermo_commands:
@@ -1315,6 +1399,42 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.zentropy.workflow import main as zentropy_workflow_main
 
         zentropy_workflow_main(args.zentropy_workflow_args)
+        return
+
+    if args.subcommand in zentropy_free_energy_commands:
+        from atomi.zentropy.free_energy import main as zentropy_free_energy_main
+
+        zentropy_free_energy_main(args.zentropy_free_energy_args)
+        return
+
+    if args.subcommand in zentropy_solve_commands:
+        from atomi.zentropy.solve import main as zentropy_solve_main
+
+        zentropy_solve_main(args.zentropy_solve_args)
+        return
+
+    if args.subcommand in zentropy_export_commands:
+        from atomi.zentropy.export import main as zentropy_export_main
+
+        zentropy_export_main(args.zentropy_export_args)
+        return
+
+    if args.subcommand in zentropy_active_learning_commands:
+        from atomi.zentropy.active_learning import main as zentropy_active_learning_main
+
+        zentropy_active_learning_main(args.zentropy_active_learning_args)
+        return
+
+    if args.subcommand in solid_solution_scan_commands:
+        from atomi.zentropy.solid_solution_scan import main as solid_solution_scan_main
+
+        solid_solution_scan_main(args.solid_solution_scan_args)
+        return
+
+    if args.subcommand in motif_cluster_commands:
+        from atomi.zentropy.motif_cluster import main as motif_cluster_main
+
+        motif_cluster_main(args.motif_cluster_args)
         return
 
     defect_thermo_commands = ("defect_thermo_export", "defect-thermo-export")

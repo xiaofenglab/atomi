@@ -21,6 +21,7 @@ STAGES: list[dict[str, Any]] = [
             "source provenance."
         ),
         "primary_command": "zentropy_motif_db index",
+        "supporting_commands": ["motif-cluster", "mlip-solid-solution-scan"],
         "typical_outputs": ["defect_motif_db.json", "defect_motif_db.csv", "mlip_inputs/"],
         "status": "implemented",
     },
@@ -32,9 +33,9 @@ STAGES: list[dict[str, Any]] = [
             "and uncertainty metadata to each motif using static DFT, QHA, MD, "
             "or MLIP-derived data."
         ),
-        "primary_command": "planned: zentropy_free_energy",
+        "primary_command": "zentropy-free-energy",
         "typical_outputs": ["microstate_free_energy.csv", "microstate_free_energy.json"],
-        "status": "framework",
+        "status": "implemented-basic",
     },
     {
         "id": "stage3_zentropy_solve",
@@ -44,9 +45,9 @@ STAGES: list[dict[str, Any]] = [
             "probabilities and macroscopic thermodynamic functions under "
             "user-selected composition, T, P, and oxygen-potential constraints."
         ),
-        "primary_command": "planned: zentropy_solve",
+        "primary_command": "zentropy-solve",
         "typical_outputs": ["ensemble_probabilities.csv", "zentropy_thermo_functions.csv"],
-        "status": "framework",
+        "status": "implemented-basic",
     },
     {
         "id": "stage4_calphad_export",
@@ -56,9 +57,9 @@ STAGES: list[dict[str, Any]] = [
             "and property surfaces to CALPHAD/MOOSE-friendly tables for downstream "
             "fuel-performance and phase-stability workflows."
         ),
-        "primary_command": "planned: zentropy_export",
+        "primary_command": "zentropy-export",
         "typical_outputs": ["calphad_pseudodata.csv", "moose_material_table.csv"],
-        "status": "framework",
+        "status": "implemented-basic",
     },
     {
         "id": "stage5_active_learning",
@@ -68,9 +69,9 @@ STAGES: list[dict[str, Any]] = [
             "additional DFT/MLIP sampling when ensemble probabilities or "
             "experimental benchmarks show gaps."
         ),
-        "primary_command": "planned: zentropy_active_learning",
+        "primary_command": "zentropy-active-learning",
         "typical_outputs": ["active_learning_candidates.csv", "mlip_training_manifest.json"],
-        "status": "framework",
+        "status": "implemented-basic",
     },
 ]
 
@@ -117,6 +118,10 @@ def default_stage_config(stage: dict[str, Any], args: argparse.Namespace) -> dic
         base["notes"] = [
             "Use zentropy_motif_db generate-spins to create magit/MAGMOM spin variants "
             "from a VASP template, then index them with --spin-index.",
+            "Use motif-cluster to collapse many relaxed motifs into representative "
+            "families before expensive finite-temperature sampling.",
+            "Use mlip-solid-solution-scan to plan low/mid/high composition and "
+            "charge-compensation grids for MLIPv7 screening.",
             "Use metadata_csv/site_state_csv to carry defect labels, site valence, "
             "MAGMOM, charge state, degeneracy, and motif-family tags.",
             "DFT motifs from different supercell sizes should be compared through "
