@@ -209,7 +209,7 @@ def test_paper_draft_scans_and_appends(tmp_path: Path) -> None:
     assert "Methods seed" in text
     assert "Electronic-structure calculations" in text
     assert "ENCUT=520" in text
-    assert "software vasp.6.4.3" in text
+    assert "VASP executable reported vasp.6.4.3" in text
     assert "PAW_PBE U" in text
     assert "final DFT energy -25.125" in text
     assert "MD thermo summary" in text
@@ -260,6 +260,49 @@ def test_paper_draft_describes_vasp_defect_candidate_generation(tmp_path: Path) 
     assert parsed[0]["facts"]["defect_cloud_summary"]["family_totals"]["base"] == 2
 
 
+def test_paper_draft_uses_private_hpc_config_for_methods(tmp_path: Path) -> None:
+    vasp = tmp_path / "vasp"
+    write_vasp_run(vasp)
+    config = tmp_path / "atomi_hpc_config.kit.local.json"
+    config.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "site": "KIT / bwHPC",
+                "profiles": {
+                    "vasp_cpu": {
+                        "modules": ["devel/python/3.11.4", "chem/vasp/6.2.1"],
+                        "executable_candidates": ["vasp_std"],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    document = tmp_path / "draft.md"
+
+    paper_draft.main(
+        [
+            "--used",
+            "DFT",
+            "--run",
+            str(vasp),
+            "--hpc-config",
+            str(config),
+            "--document",
+            str(document),
+            "--mode",
+            "overwrite",
+        ]
+    )
+
+    text = document.read_text(encoding="utf-8")
+    assert "Site-specific runtime information" in text
+    assert "KIT / bwHPC" in text
+    assert "chem/vasp/6.2.1" in text
+    assert "vasp_std" in text
+
+
 def test_paper_draft_describes_vasp_spin_report(tmp_path: Path) -> None:
     spin = tmp_path / "spin"
     write_spin_report_run(spin)
@@ -288,15 +331,15 @@ def test_paper_draft_describes_vasp_spin_report(tmp_path: Path) -> None:
 
     text = document.read_text(encoding="utf-8")
     assert "Requested modules: VASP_SPIN" in text
-    assert "Spin-configuration screening was summarized" in text
-    assert "The spin inputs were generated as an indexed set of MAGMOM patterns" in text
+    assert "Spin-configuration screening was performed" in text
+    assert "The spin-generation index records" in text
     assert "2 indexed spin configurations" in text
     assert "initial element moment values Gd=-7, 7; U=-2, 2" in text
     assert "physics-guard counts OK=1; FAIL=1" in text
-    assert "Spin-screening summary" in text
-    assert "Spin-generation index: 2 generated spin inputs" in text
+    assert "spin-screening table" in text
+    assert "spin-generation index contained 2 generated spin inputs" in text
     assert "lowest parsed run `spin_001`" in text
-    assert "Spin atom table: 2 atom-level moment changes" in text
+    assert "atom-resolved moment table showed 2 atom-level moment changes" in text
 
     parsed = json.loads(evidence.read_text(encoding="utf-8"))
     assert parsed[0]["detected_modules"] == ["DFT", "VASP_SPIN"]

@@ -9,7 +9,9 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
+
+from atomi.core.doctor import find_config_path, load_hpc_config
 
 
 MODULE_ALIASES = {
@@ -779,9 +781,178 @@ def _sentence_join(parts: Iterable[str]) -> str:
     return "; ".join(part for part in parts if part)
 
 
-def methods_paragraphs(evidences: list[RunEvidence], modules: list[str]) -> list[str]:
+def parse_magmom_summary(value: str) -> dict[str, object]:
+    tokens = [token for token in re.split(r"\s+", value.strip()) if token]
+    expanded: list[float] = []
+    for token in tokens:
+        if "*" in token:
+            left, right = token.split("*", 1)
+            try:
+                count = int(float(left))
+                moment = float(right)
+            except ValueError:
+                continue
+            expanded.extend([moment] * max(count, 0))
+            continue
+        try:
+            expanded.append(float(token))
+        except ValueError:
+            continue
+    counts: dict[str, int] = {}
+    for moment in expanded:
+        label = f"{moment:g}"
+        counts[label] = counts.get(label, 0) + 1
+    return {
+        "n_moments": len(expanded),
+        "values": counts,
+    }
+
+
+def compact_incar_methods(tags: dict[str, str]) -> str:
+    if not tags:
+        return ""
+    sentences: list[str] = []
+    if tags.get("ENCUT"):
+        sentences.append(f"The plane-wave cutoff was {tags['ENCUT']} eV (ENCUT={tags['ENCUT']})")
+    if tags.get("EDIFF") or tags.get("EDIFFG"):
+        convergence = []
+        if tags.get("EDIFF"):
+            convergence.append(f"electronic threshold {tags['EDIFF']} eV")
+        if tags.get("EDIFFG"):
+            convergence.append(f"ionic threshold {tags['EDIFFG']} eV A^-1")
+        sentences.append("Convergence criteria used " + " and ".join(convergence))
+    if tags.get("GGA"):
+        sentences.append(f"The exchange-correlation tag was GGA={tags['GGA']}")
+    if tags.get("LDAU"):
+        u_bits = [f"LDAU={tags['LDAU']}"]
+        for key in ("LDAUU", "LDAUJ", "LDAUL"):
+            if tags.get(key):
+                u_bits.append(f"{key}={tags[key]}")
+        sentences.append("On-site Hubbard corrections were controlled by " + ", ".join(u_bits))
+    if tags.get("ISMEAR") or tags.get("SIGMA"):
+        smear = []
+        if tags.get("ISMEAR"):
+            smear.append(f"ISMEAR={tags['ISMEAR']}")
+        if tags.get("SIGMA"):
+            smear.append(f"SIGMA={tags['SIGMA']} eV")
+        sentences.append("Electronic occupations used " + " and ".join(smear))
+    if tags.get("ISPIN"):
+        sentences.append(f"Spin polarization was enabled with ISPIN={tags['ISPIN']}")
+    if tags.get("MAGMOM"):
+        magmom = parse_magmom_summary(tags["MAGMOM"])
+        if magmom["n_moments"]:
+            sentences.append(
+                f"Initial site moments were specified for {magmom['n_moments']} sites "
+                f"with values {_format_value(magmom['values'])}"
+            )
+    return ". ".join(sentences) + ("." if sentences else "")
+
+
+def compact_hpc_value(value: Any, *, show_private: bool) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ", ".join(compact_hpc_value(item, show_private=show_private) for item in value if item not in (None, ""))
+    if isinstance(value, dict):
+        return "; ".join(
+            f"{key}={compact_hpc_value(val, show_private=show_private)}"
+            for key, val in value.items()
+            if val not in (None, "", [], {})
+        )
+    text = str(value)
+    if show_private or "/" not in text:
+        return text
+    return Path(text).name or text
+
+
+def hpc_profile_summary(
+    config: dict[str, Any],
+    profile_name: str,
+    *,
+    label: str,
+    show_private: bool,
+) -> str:
+    profile = (config.get("profiles") or {}).get(profile_name)
+    if not isinstance(profile, dict):
+        return ""
+    bits: list[str] = []
+    modules = profile.get("modules") or profile.get("module_commands")
+    if modules:
+        if isinstance(modules, list):
+            bits.append("modules " + ", ".join(str(item) for item in modules if item))
+        else:
+            bits.append("modules " + str(modules))
+    versions = profile.get("resolved_versions")
+    if versions:
+        bits.append("versions " + compact_hpc_value(versions, show_private=show_private))
+    for key in ("executable", "lammps_executable", "python", "module", "env_path"):
+        if profile.get(key):
+            bits.append(f"{key} {compact_hpc_value(profile[key], show_private=show_private)}")
+            break
+    candidates = profile.get("executable_candidates")
+    if candidates:
+        bits.append("executables " + compact_hpc_value(candidates, show_private=show_private))
+    if not bits:
+        return ""
+    return f"{label}: " + "; ".join(bits)
+
+
+def build_hpc_context(path: Path | None, *, show_private: bool) -> dict[str, Any]:
+    config_path = find_config_path(path)
+    if config_path is None:
+        return {"found": False}
+    config = load_hpc_config(config_path)
+    return {
+        "found": True,
+        "path": str(config_path.resolve()) if show_private else config_path.name,
+        "site": config.get("site") or "",
+        "profiles": {
+            "vasp": hpc_profile_summary(config, "vasp_cpu", label="VASP", show_private=show_private),
+            "lammps": hpc_profile_summary(config, "lammps_md_engine", label="MD engine", show_private=show_private),
+            "cp2k": hpc_profile_summary(config, "cp2k", label="AIMD", show_private=show_private),
+            "phonopy": hpc_profile_summary(config, "phonopy", label="QHA", show_private=show_private),
+        },
+    }
+
+
+def hpc_methods_paragraph(modules: list[str], hpc_context: dict[str, Any] | None) -> str:
+    if not hpc_context or not hpc_context.get("found"):
+        return ""
+    modules_to_write = set(modules)
+    if not modules_to_write:
+        modules_to_write = {"DFT", "VASP_SPIN", "AIMD", "MD", "QHA"}
+    profile_keys = []
+    if {"DFT", "VASP_SPIN", "VASP_PREP"} & modules_to_write:
+        profile_keys.append("vasp")
+    if "MD" in modules_to_write:
+        profile_keys.append("lammps")
+    if "AIMD" in modules_to_write:
+        profile_keys.append("cp2k")
+    if "QHA" in modules_to_write:
+        profile_keys.append("phonopy")
+    details = [hpc_context["profiles"].get(key, "") for key in profile_keys]
+    details = [detail for detail in details if detail]
+    if not details:
+        return ""
+    site = hpc_context.get("site") or "the configured HPC environment"
+    return (
+        f"Site-specific runtime information was taken from the local Atomi HPC configuration for {site}. "
+        + " ".join(details)
+        + "."
+    )
+
+
+def methods_paragraphs(
+    evidences: list[RunEvidence],
+    modules: list[str],
+    hpc_context: dict[str, Any] | None = None,
+) -> list[str]:
     paragraphs: list[str] = []
     modules_to_write = modules or sorted({module for ev in evidences for module in ev.detected_modules})
+
+    hpc_paragraph = hpc_methods_paragraph(modules_to_write, hpc_context)
+    if hpc_paragraph:
+        paragraphs.append(hpc_paragraph)
 
     if "VASP_PREP" in modules_to_write:
         summary = _first_fact(evidences, "defect_cloud_summary", {})
@@ -836,25 +1007,32 @@ def methods_paragraphs(evidences: list[RunEvidence], modules: list[str]) -> list
         outcar = _first_fact(evidences, "dft_outcar", {})
         details = []
         if isinstance(outcar, dict) and outcar.get("vasp_version"):
-            details.append(f"software {outcar['vasp_version']}")
+            details.append(f"the VASP executable reported {outcar['vasp_version']}")
         if structure:
             if structure.get("comment"):
-                details.append(f"structure label {structure['comment']}")
-            details.append(f"representative composition {structure.get('formula', 'not parsed')}")
-            details.append(f"{structure.get('natoms', 'unknown')} atoms")
-        if tags:
-            details.append("INCAR tags " + _format_value(tags))
+                details.append(f"the representative POSCAR label was {structure['comment']}")
+            composition = structure.get("formula", "not parsed")
+            natoms = structure.get("natoms", "unknown")
+            details.append(f"the representative supercell contained {composition} ({natoms} atoms)")
         if kpoints:
-            details.append("k-point setting " + _format_value(kpoints))
+            k_bits = []
+            if kpoints.get("mode"):
+                k_bits.append(str(kpoints["mode"]))
+            if kpoints.get("mesh"):
+                k_bits.append(str(kpoints["mesh"]))
+            if k_bits:
+                details.append("Brillouin-zone sampling used " + " ".join(k_bits))
         if isinstance(potcar, dict) and potcar.get("titles"):
-            details.append("PAW/POTCAR entries " + _format_value(potcar["titles"]))
+            details.append("PAW datasets were " + _format_value(potcar["titles"]))
+        incar_text = compact_incar_methods(tags) if isinstance(tags, dict) else ""
         paragraphs.append(
-            "Electronic-structure calculations were documented from the completed run "
-            "directories by collecting structure, input, k-point, and output files. "
+            "Electronic-structure calculations were carried out with VASP using PAW "
+            "projector datasets and spin-polarized input settings. "
             + (_sentence_join(details) + ". " if details else "")
-            + "Before manuscript submission, verify the exchange-correlation functional, "
-            "potential set, software version, convergence thresholds, smearing, and spin "
-            "treatment against the final input files."
+            + (incar_text + " " if incar_text else "")
+            + "These fields are reported explicitly because reproducibility of "
+            "correlated, magnetic oxides depends on the potential set, cutoff, "
+            "k-point mesh, convergence criteria, smearing, and magnetic initialization."
         )
 
     if "VASP_SPIN" in modules_to_write:
@@ -896,23 +1074,24 @@ def methods_paragraphs(evidences: list[RunEvidence], modules: list[str]) -> list
             if isinstance(bad, dict) and bad:
                 details.append("physics-guard atom flags " + _format_value(bad))
         paragraphs.append(
-            "Spin-configuration screening was summarized from Atomi spin-energy "
-            "reports that correlate parsed VASP energies with final or last available "
-            "site magnetic moments. The workflow compares final moments with the "
-            "initial MAGMOM pattern, records element-resolved spin labels, and can "
-            "apply user-defined physics guards to distinguish plausible moment states "
-            "from configurations that relaxed to unintended valence or spin states. "
+            "Spin-configuration screening was performed by enumerating initial "
+            "MAGMOM patterns for the magnetic sublattice and running each pattern as a "
+            "separate VASP calculation. Final, or for interrupted jobs the last complete, "
+            "site-resolved magnetic moments were extracted from OUTCAR-like outputs and "
+            "compared with the initial MAGMOM pattern. Element-resolved moment labels and "
+            "physics guards were used to separate configurations that retained the intended "
+            "nominal moment states from configurations that relaxed to unintended valence "
+            "or spin states. "
             + (
-                "The spin inputs were generated as an indexed set of MAGMOM patterns "
+                "The spin-generation index records "
                 + _sentence_join(generation_details)
                 + ". "
                 if generation_details
                 else ""
             )
             + (_sentence_join(details) + ". " if details else "")
-            + "For manuscript use, report the starting spin enumeration rule, moment "
-            "tolerances, handling of stopped jobs, and whether rejected spin states "
-            "were excluded from energy comparisons."
+            + "Energy comparisons should therefore be interpreted using both the parsed "
+            "total energies and the final moment-state classification."
         )
 
     if "AIMD" in modules_to_write:
@@ -1016,7 +1195,8 @@ def result_lines(evidences: list[RunEvidence]) -> list[str]:
     lines: list[str] = []
     for evidence in evidences:
         modules = ", ".join(evidence.detected_modules) or "no module detected"
-        lines.append(f"- `{evidence.path}`: detected {modules}.")
+        run_label = evidence.path.name or str(evidence.path)
+        lines.append(f"For `{run_label}`, Atomi detected {modules}.")
         prep = evidence.facts.get("defect_cloud_summary") or evidence.facts.get("defect_cloud_index")
         if isinstance(prep, dict) and prep:
             bits = []
@@ -1033,7 +1213,7 @@ def result_lines(evidences: list[RunEvidence]) -> list[str]:
             elif prep.get("family_counts"):
                 bits.append("families " + _format_value(prep["family_counts"]))
             if bits:
-                lines.append("  - VASP preparation summary: " + "; ".join(bits) + ".")
+                lines.append("The VASP preparation stage generated " + "; ".join(bits) + ".")
         dft = evidence.facts.get("dft_outcar")
         if isinstance(dft, dict):
             bits = []
@@ -1046,7 +1226,7 @@ def result_lines(evidences: list[RunEvidence]) -> list[str]:
             if "nions" in dft:
                 bits.append(f"{dft['nions']} ions")
             if bits:
-                lines.append("  - " + "; ".join(bits) + ".")
+                lines.append("The representative electronic-structure output reported " + "; ".join(bits) + ".")
         spin_index = evidence.facts.get("vasp_spin_index")
         if isinstance(spin_index, dict) and spin_index:
             bits = []
@@ -1062,7 +1242,7 @@ def result_lines(evidences: list[RunEvidence]) -> list[str]:
             if isinstance(host_counts, dict) and host_counts:
                 bits.append("host modes " + _format_value(host_counts))
             if bits:
-                lines.append("  - Spin-generation index: " + "; ".join(bits) + ".")
+                lines.append("The spin-generation index contained " + "; ".join(bits) + ".")
         spin = evidence.facts.get("vasp_spin_summary")
         if isinstance(spin, dict) and spin:
             bits = [
@@ -1083,7 +1263,7 @@ def result_lines(evidences: list[RunEvidence]) -> list[str]:
                     best_bits.append(f"total moment={float(best['total_moment']):.6g}")
                 if best_bits:
                     bits.append("; ".join(best_bits))
-            lines.append("  - Spin-screening summary: " + "; ".join(bits) + ".")
+            lines.append("The spin-screening table contained " + "; ".join(bits) + ".")
         spin_atoms = evidence.facts.get("vasp_spin_atoms")
         if isinstance(spin_atoms, dict) and spin_atoms:
             atom_bits = []
@@ -1093,19 +1273,19 @@ def result_lines(evidences: list[RunEvidence]) -> list[str]:
             if isinstance(bad, dict) and bad:
                 atom_bits.append("physics-guard atom flags " + _format_value(bad))
             if atom_bits:
-                lines.append("  - Spin atom table: " + "; ".join(atom_bits) + ".")
+                lines.append("The atom-resolved moment table showed " + "; ".join(atom_bits) + ".")
         cp2k = evidence.facts.get("cp2k_log")
         if isinstance(cp2k, dict) and cp2k:
-            lines.append("  - CP2K-style log summary: " + _format_value(cp2k) + ".")
+            lines.append("The AIMD log summary was " + _format_value(cp2k) + ".")
         lammps = evidence.facts.get("lammps_log")
         if isinstance(lammps, dict) and lammps:
-            lines.append("  - MD thermo summary: " + _format_value(lammps) + ".")
+            lines.append("The MD thermo summary was " + _format_value(lammps) + ".")
         thermo = evidence.facts.get("thermo_csv")
         if isinstance(thermo, dict) and thermo:
-            lines.append("  - Thermodynamic table summary: " + _format_value(thermo) + ".")
+            lines.append("The thermodynamic table summary was " + _format_value(thermo) + ".")
         if evidence.warnings:
             for warning in evidence.warnings:
-                lines.append(f"  - Check: {warning}")
+                lines.append(f"Check before manuscript use: {warning}")
     return lines
 
 
@@ -1139,6 +1319,8 @@ def compose_markdown(
     study_label: str,
     notes: list[str],
     include_style_note: bool,
+    hpc_context: dict[str, Any] | None = None,
+    include_inventory: bool = True,
 ) -> str:
     timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     heading = title or "Atomi Draft Entry"
@@ -1156,7 +1338,7 @@ def compose_markdown(
         parts.extend(f"- {note}" for note in notes)
         parts.append("")
     if include_style_note:
-        parts.extend(["### Drafting Style Notes", ""])
+        parts.extend(["### Editorial Notes", ""])
         parts.append(
             "This draft follows common computational-materials writing practice: "
             "Methods prioritize reproducibility, software/input settings, convergence, "
@@ -1167,18 +1349,19 @@ def compose_markdown(
         for ref in STYLE_REFERENCES:
             parts.append(f"- {ref['label']}: {ref['url']} ({ref['note']})")
         parts.append("")
-    parts.extend(["### Run Inventory", ""])
-    parts.extend(evidence_table(evidences))
-    parts.append("")
-    parts.extend(["### Methods Draft", ""])
-    for paragraph in methods_paragraphs(evidences, modules):
+    parts.extend(["### Methods", ""])
+    for paragraph in methods_paragraphs(evidences, modules, hpc_context=hpc_context):
         parts.append(paragraph)
         parts.append("")
-    parts.extend(["### Brief Results Draft", ""])
+    parts.extend(["### Results", ""])
     result = result_lines(evidences)
-    parts.extend(result if result else ["- No parseable run evidence was found."])
+    parts.extend(result if result else ["No parseable run evidence was found."])
     parts.append("")
-    parts.extend(["### Items To Verify Before Manuscript Use", ""])
+    if include_inventory:
+        parts.extend(["### Evidence Inventory", ""])
+        parts.extend(evidence_table(evidences))
+        parts.append("")
+    parts.extend(["### Verification Checklist", ""])
     parts.extend(
         [
             "- Software names, versions, compilation options, and citation requirements.",
@@ -1250,7 +1433,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="How to write --document. Fragment writes only --fragment-out and evidence JSON.",
     )
     parser.add_argument("--max-files", type=int, default=5000, help="Maximum files to scan per run folder.")
-    parser.add_argument("--no-style-note", action="store_true", help="Omit style notes and links.")
+    parser.add_argument("--hpc-config", type=Path, help="Optional private Atomi HPC config JSON. Defaults to ATOMI_HPC_CONFIG when set.")
+    parser.add_argument(
+        "--show-private-hpc",
+        action="store_true",
+        help="Include private executable/env paths from the HPC config in the local draft.",
+    )
+    parser.add_argument("--style-note", action="store_true", help="Include editorial style notes and reference links.")
+    parser.add_argument("--no-style-note", action="store_true", help="Deprecated alias retained for older scripts.")
+    parser.add_argument("--no-inventory", action="store_true", help="Omit the evidence inventory table from the generated draft.")
     parser.add_argument("--dry-run", action="store_true", help="Print the draft without writing files.")
     return parser
 
@@ -1262,6 +1453,7 @@ def main(argv: list[str] | None = None) -> None:
     modules = normalize_modules(module_tokens)
     runs = args.run or [Path(".")]
     evidences = [scan_run(path, modules, max_files=args.max_files) for path in runs]
+    hpc_context = build_hpc_context(args.hpc_config, show_private=args.show_private_hpc)
     draft = compose_markdown(
         evidences=evidences,
         modules=modules,
@@ -1269,7 +1461,9 @@ def main(argv: list[str] | None = None) -> None:
         material=args.material,
         study_label=args.study_label,
         notes=args.note,
-        include_style_note=not args.no_style_note,
+        include_style_note=args.style_note and not args.no_style_note,
+        hpc_context=hpc_context,
+        include_inventory=not args.no_inventory,
     )
     if args.dry_run:
         print(draft)
