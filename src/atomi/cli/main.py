@@ -513,6 +513,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vasp_defect_candidates.add_argument("defect_args", nargs=argparse.REMAINDER)
 
+    vasp_defect_cloud = subparsers.add_parser(
+        "vasp-defect-cloud",
+        help="Prepare compact local perturbation clouds from relaxed defect motifs.",
+    )
+    vasp_defect_cloud.add_argument("defect_cloud_args", nargs=argparse.REMAINDER)
+
     vasp_md_snapshot_candidates = subparsers.add_parser(
         "vasp-md-snapshot-candidates",
         help="Harvest successful md-engine LAMMPS frames into VASP-ready folders.",
@@ -923,6 +929,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.defects import main as vasp_defect_candidates_main
 
         vasp_defect_candidates_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "vasp-defect-cloud":
+        from atomi.vasp.defect_cloud import main as vasp_defect_cloud_main
+
+        vasp_defect_cloud_main(raw_args[1:])
         return
     if raw_args and raw_args[0] == "vasp-md-snapshot-candidates":
         from atomi.vasp.md_snapshots import main as vasp_md_snapshot_candidates_main
@@ -1385,6 +1396,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.stress_force import main as vasp_stress_force_candidates_main
 
         vasp_stress_force_candidates_main(args.stress_force_args)
+        return
+
+    if args.subcommand == "vasp-defect-cloud":
+        from atomi.vasp.defect_cloud import main as vasp_defect_cloud_main
+
+        vasp_defect_cloud_main(args.defect_cloud_args)
         return
 
     if args.subcommand == "mace-build-dataset":
