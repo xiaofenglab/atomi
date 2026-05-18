@@ -220,6 +220,39 @@ def test_paper_draft_scans_and_appends(tmp_path: Path) -> None:
     assert "dft_outcar" in parsed[0]["facts"]
 
 
+def test_paper_draft_style_note_includes_format_rules(tmp_path: Path) -> None:
+    vasp = tmp_path / "vasp"
+    md = tmp_path / "md"
+    write_vasp_run(vasp)
+    write_lammps_run(md)
+    document = tmp_path / "draft.md"
+
+    paper_draft.main(
+        [
+            "--used",
+            "DFT",
+            "MD",
+            "MLIP",
+            "--run",
+            str(vasp),
+            "--run",
+            str(md),
+            "--document",
+            str(document),
+            "--mode",
+            "overwrite",
+            "--style-note",
+        ]
+    )
+
+    text = document.read_text(encoding="utf-8")
+    assert "### Manuscript Format Rules" in text
+    assert "Use a layered Methods flow" in text
+    assert "DFT: State the physical target" in text
+    assert "MD: Report potential/model source" in text
+    assert "MLIP: Report training-data provenance" in text
+
+
 def test_paper_draft_describes_vasp_defect_candidate_generation(tmp_path: Path) -> None:
     prep = tmp_path / "defect_prep"
     write_defect_cloud_run(prep)

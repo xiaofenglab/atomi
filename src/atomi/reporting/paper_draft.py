@@ -76,6 +76,52 @@ STYLE_REFERENCES = [
     },
 ]
 
+METHOD_FORMAT_RULES = {
+    "DFT": [
+        "State the physical target, reference structure, charge/spin state, supercell size, and whether the calculation is a relaxation, static energy, or response calculation.",
+        "Report code/version, exchange-correlation functional, Hubbard U or other corrections, PAW/pseudopotential set, cutoff, k-point sampling, smearing, convergence thresholds, relaxation criteria, and magnetic initialization.",
+        "For results, begin with validated ground-state quantities such as energy differences, volume, local moments, and convergence or stability checks before interpreting trends.",
+    ],
+    "VASP_PREP": [
+        "Describe seed-motif provenance, template files, atom ordering, perturbation families, random seed, runlist construction, and screening criteria for failed or duplicate candidates.",
+        "Separate chemically distinct motif classes, defect-compensation models, concentration/cell-size choices, and spin or valence labels so later thermodynamics can reuse the metadata.",
+    ],
+    "VASP_SPIN": [
+        "Report how initial MAGMOM patterns were enumerated, which atoms were allowed to flip, and which nominal moment windows define physically retained states.",
+        "Compare initial and final/last moments by element and use energy rankings only together with the final spin/valence classification.",
+    ],
+    "AIMD": [
+        "Report ensemble, temperature/pressure schedule, timestep, thermostat/barostat, restraint or collective-variable definitions, equilibration window, production length, and frame-selection rule.",
+        "For results, summarize trajectory stability, reaction-coordinate or bond statistics, and representative-frame selection before mechanistic interpretation.",
+    ],
+    "MD": [
+        "Report potential/model source, supercell size, timestep, ensemble sequence, temperature grid, equilibration criteria, production length, uncertainty/blocking method, and normalization basis.",
+        "When extracting elastic or thermal properties, state the deformation or fluctuation formula, averaging window, finite-size checks, and comparison reference.",
+    ],
+    "MLIP": [
+        "Report training-data provenance, train/validation/test split, motif or temperature coverage, model architecture/descriptor, loss weights, active-learning or outlier rules, and validation metrics.",
+        "Show that the ML model is used within the domain spanned by the reference data, with explicit checks on energies, forces, stresses, stability, and relevant properties.",
+    ],
+    "QHA": [
+        "Report phonon/displacement settings, volume grid, free-energy fit, splice or anchor choices, temperature grid, uncertainty treatment, and normalization to atom/formula-unit/cell.",
+    ],
+    "CALPHAD": [
+        "Report reference states, endmember or pseudo-endmember definitions, source priority between database/literature/DFT/MD values, fitted interaction form, and composition/temperature validity range.",
+    ],
+    "MOOSE": [
+        "Report the exact material properties transferred, interpolation basis, units, temperature range, missing-property source, and how the exported tables map into the multiphysics input.",
+    ],
+    "SCATTERING": [
+        "Report trajectory/source frames, absorber or pair definitions, instrument corrections, Q/r/k ranges, comparison metric, and uncertainty or frame averaging.",
+    ],
+}
+
+COMMON_FORMAT_RULES = [
+    "Use a layered Methods flow: electronic-structure reference, finite-temperature sampling, ML/data model if used, property extraction equations, uncertainty/convergence checks, and reproducibility artifacts.",
+    "Use a layered Results flow: first validate the reference state, then show temperature/composition/property trends, then compare with experiment or prior calculation, and finally state limitations.",
+    "Do not let the draft invent missing settings. Leave missing convergence, citation, unit, and reference-state information as verification items.",
+]
+
 
 @dataclass
 class RunEvidence:
@@ -781,6 +827,21 @@ def _sentence_join(parts: Iterable[str]) -> str:
     return "; ".join(part for part in parts if part)
 
 
+def format_rule_lines(modules: list[str]) -> list[str]:
+    modules_to_write = modules or ["DFT", "MD", "MLIP"]
+    lines = [f"- {rule}" for rule in COMMON_FORMAT_RULES]
+    seen: set[str] = set()
+    for module in modules_to_write:
+        if module in seen:
+            continue
+        seen.add(module)
+        rules = METHOD_FORMAT_RULES.get(module, [])
+        if not rules:
+            continue
+        lines.append(f"- {module}: " + " ".join(rules))
+    return lines
+
+
 def parse_magmom_summary(value: str) -> dict[str, object]:
     tokens = [token for token in re.split(r"\s+", value.strip()) if token]
     expanded: list[float] = []
@@ -1349,6 +1410,9 @@ def compose_markdown(
         for ref in STYLE_REFERENCES:
             parts.append(f"- {ref['label']}: {ref['url']} ({ref['note']})")
         parts.append("")
+        parts.extend(["### Manuscript Format Rules", ""])
+        parts.extend(format_rule_lines(modules))
+        parts.append("")
     parts.extend(["### Methods", ""])
     for paragraph in methods_paragraphs(evidences, modules, hpc_context=hpc_context):
         parts.append(paragraph)
@@ -1369,6 +1433,7 @@ def compose_markdown(
             "- Ensemble definitions, timestep, thermostat/barostat, production length, and sampling windows.",
             "- Dataset split, weighting, model version, validation metrics, and outlier rules.",
             "- Unit conversions, normalization basis, thermodynamic reference states, and uncertainty method.",
+            "- Ground-state validation, finite-temperature trends, model/domain validity, literature comparison, and residual limitations.",
             "- Data availability, code availability, and whether any private/local paths must be removed.",
         ]
     )
