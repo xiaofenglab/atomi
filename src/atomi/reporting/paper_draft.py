@@ -29,6 +29,19 @@ MODULE_ALIASES = {
         "SEED_DFT",
         "SEED-DFT",
     },
+    "VASP_SPIN": {
+        "VASP_SPIN",
+        "VASP-SPIN",
+        "SPIN",
+        "SPIN_REPORT",
+        "SPIN-REPORT",
+        "VASP_SPIN_REPORT",
+        "VASP-SPIN-REPORT",
+        "SPIN_SCREENING",
+        "SPIN-SCREENING",
+        "MAGMOM_SCREENING",
+        "MAGMOM-SCREENING",
+    },
     "AIMD": {"AIMD", "CP2K", "AB_INITIO_MD", "AB-INITIO-MD"},
     "MD": {"MD", "LAMMPS", "MOLECULAR_DYNAMICS", "MOLECULAR-DYNAMICS"},
     "MLIP": {"MLIP", "MACE", "ML", "MACHINE_LEARNING_POTENTIAL", "MACHINE-LEARNING-POTENTIAL"},
@@ -381,6 +394,106 @@ def parse_defect_cloud_index(path: Path) -> dict[str, object]:
     }
 
 
+def parse_json_counts(value: str) -> dict[str, int]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key, raw in parsed.items():
+        try:
+            out[str(key)] = int(raw)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _count_values(rows: list[dict[str, str]], column: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = row.get(column, "") or "blank"
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _float_or_none(value: str | None) -> float | None:
+    if value is None or not str(value).strip():
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def parse_spin_summary(path: Path) -> dict[str, object]:
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+    energies: list[tuple[float, dict[str, str]]] = []
+    changed_by_element: dict[str, int] = {}
+    for row in rows:
+        energy = _float_or_none(row.get("energy_eV"))
+        if energy is not None:
+            energies.append((energy, row))
+        for element, count in parse_json_counts(row.get("changed_by_element", "")).items():
+            changed_by_element[element] = changed_by_element.get(element, 0) + count
+    best: dict[str, object] = {}
+    if energies:
+        energy, row = min(energies, key=lambda item: item[0])
+        best = {
+            "index": row.get("index", ""),
+            "run": row.get("run", ""),
+            "energy_eV": energy,
+            "relative_energy_eV": 0.0,
+            "total_moment": _float_or_none(row.get("total_moment")),
+            "max_abs_moment": _float_or_none(row.get("max_abs_moment")),
+            "host_mode": row.get("host_mode", ""),
+            "dopant_mode": row.get("dopant_mode", ""),
+            "physics_guard_status": row.get("physics_guard_status", ""),
+        }
+    return {
+        "rows": len(rows),
+        "columns": reader.fieldnames or [],
+        "status_counts": _count_values(rows, "status"),
+        "mag_status_counts": _count_values(rows, "mag_status"),
+        "physics_guard_counts": _count_values(rows, "physics_guard_status"),
+        "host_mode_counts": _count_values(rows, "host_mode"),
+        "dopant_mode_counts": _count_values(rows, "dopant_mode"),
+        "energy_rows": len(energies),
+        "energy_min_eV": min((item[0] for item in energies), default=None),
+        "energy_max_eV": max((item[0] for item in energies), default=None),
+        "best": best,
+        "changed_by_element": changed_by_element,
+    }
+
+
+def parse_spin_atoms(path: Path) -> dict[str, object]:
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+    changed = [row for row in rows if str(row.get("changed", "")).lower() in {"1", "true", "yes"}]
+    physics_bad = [row for row in rows if str(row.get("physics_ok", "")).lower() in {"0", "false", "no"}]
+    changed_by_element: dict[str, int] = {}
+    bad_by_element: dict[str, int] = {}
+    for row in changed:
+        element = row.get("element", "") or "X"
+        changed_by_element[element] = changed_by_element.get(element, 0) + 1
+    for row in physics_bad:
+        element = row.get("element", "") or "X"
+        bad_by_element[element] = bad_by_element.get(element, 0) + 1
+    return {
+        "rows": len(rows),
+        "changed_rows": len(changed),
+        "physics_bad_rows": len(physics_bad),
+        "changed_by_element": changed_by_element,
+        "physics_bad_by_element": bad_by_element,
+    }
+
+
 def parse_tdb(path: Path) -> dict[str, object]:
     text = _read_text(path)
     elements = re.findall(r"^\s*ELEMENT\s+(\S+)", text, flags=re.MULTILINE | re.IGNORECASE)
@@ -422,6 +535,49 @@ def scan_run(path: Path, requested_modules: list[str], max_files: int = 5000) ->
             evidence.facts["defect_cloud_index"] = parse_defect_cloud_index(defect_cloud_indexes[0])
         if runlists:
             evidence.facts["vasp_runlist"] = parse_runlist(runlists[0])
+
+    spin_summaries = [
+        item
+        for item in _by_suffix(files, ".csv")
+        if item.name.endswith("_run_summary.csv")
+        and "spin" in item.name.lower()
+        and "physics_filtered" not in item.name.lower()
+    ]
+    spin_atom_tables = [
+        item
+        for item in _by_suffix(files, ".csv")
+        if item.name.endswith("_atom_moments.csv")
+        and "spin" in item.name.lower()
+        and "physics_filtered" not in item.name.lower()
+    ]
+    spin_filtered = [
+        item
+        for item in _by_suffix(files, ".csv")
+        if "spin" in item.name.lower() and "physics_filtered" in item.name.lower()
+    ]
+    spin_markdown = [
+        item
+        for item in _by_suffix(files, ".md")
+        if "spin" in item.name.lower() and ("report" in item.name.lower() or "energy" in item.name.lower())
+    ]
+    magmom_dirs = [item for item in files if item.name == "MAGMOM_expanded.txt" or item.name == "MAGMOM_vasp.txt"]
+    if spin_summaries or spin_atom_tables or spin_filtered or spin_markdown:
+        evidence.add_module("DFT")
+        evidence.add_module("VASP_SPIN")
+        for item in spin_summaries[:5]:
+            evidence.add_file("spin_run_summary", item)
+        for item in spin_atom_tables[:5]:
+            evidence.add_file("spin_atom_moments", item)
+        for item in spin_filtered[:5]:
+            evidence.add_file("spin_physics_filtered", item)
+        for item in spin_markdown[:5]:
+            evidence.add_file("spin_markdown_report", item)
+        for item in magmom_dirs[:5]:
+            evidence.add_file("magmom_restart_line", item)
+        if spin_summaries:
+            evidence.facts["vasp_spin_summary"] = parse_spin_summary(spin_summaries[0])
+        if spin_atom_tables:
+            evidence.facts["vasp_spin_atoms"] = parse_spin_atoms(spin_atom_tables[0])
 
     poscars = _by_name(files, "POSCAR", "CONTCAR")
     incars = _by_name(files, "INCAR")
@@ -633,6 +789,43 @@ def methods_paragraphs(evidences: list[RunEvidence], modules: list[str]) -> list
             "treatment against the final input files."
         )
 
+    if "VASP_SPIN" in modules_to_write:
+        spin = _first_fact(evidences, "vasp_spin_summary", {})
+        atoms = _first_fact(evidences, "vasp_spin_atoms", {})
+        details = []
+        if isinstance(spin, dict) and spin:
+            if spin.get("rows") is not None:
+                details.append(f"{spin['rows']} indexed spin configurations")
+            if spin.get("energy_rows") is not None:
+                details.append(f"{spin['energy_rows']} configurations with parsed energies")
+            physics_counts = spin.get("physics_guard_counts", {})
+            if isinstance(physics_counts, dict) and physics_counts:
+                details.append("physics-guard counts " + _format_value(physics_counts))
+            host_counts = spin.get("host_mode_counts", {})
+            if isinstance(host_counts, dict) and host_counts:
+                details.append("host spin labels " + _format_value(host_counts))
+            dopant_counts = spin.get("dopant_mode_counts", {})
+            if isinstance(dopant_counts, dict) and dopant_counts:
+                details.append("dopant spin labels " + _format_value(dopant_counts))
+        if isinstance(atoms, dict) and atoms:
+            if atoms.get("changed_rows") is not None:
+                details.append(f"{atoms['changed_rows']} atom-level initial/final moment changes")
+            bad = atoms.get("physics_bad_by_element", {})
+            if isinstance(bad, dict) and bad:
+                details.append("physics-guard atom flags " + _format_value(bad))
+        paragraphs.append(
+            "Spin-configuration screening was summarized from Atomi spin-energy "
+            "reports that correlate parsed VASP energies with final or last available "
+            "site magnetic moments. The workflow compares final moments with the "
+            "initial MAGMOM pattern, records element-resolved spin labels, and can "
+            "apply user-defined physics guards to distinguish plausible moment states "
+            "from configurations that relaxed to unintended valence or spin states. "
+            + (_sentence_join(details) + ". " if details else "")
+            + "For manuscript use, report the starting spin enumeration rule, moment "
+            "tolerances, handling of stopped jobs, and whether rejected spin states "
+            "were excluded from energy comparisons."
+        )
+
     if "AIMD" in modules_to_write:
         cp2k_info = _first_fact(evidences, "cp2k_input", {})
         frames = _first_fact(evidences, "xyz_frames", None)
@@ -763,6 +956,37 @@ def result_lines(evidences: list[RunEvidence]) -> list[str]:
                 bits.append(f"{dft['nions']} ions")
             if bits:
                 lines.append("  - " + "; ".join(bits) + ".")
+        spin = evidence.facts.get("vasp_spin_summary")
+        if isinstance(spin, dict) and spin:
+            bits = [
+                f"{spin.get('rows', 'unknown')} spin configurations",
+                f"{spin.get('energy_rows', 'unknown')} with parsed energies",
+            ]
+            physics_counts = spin.get("physics_guard_counts", {})
+            if isinstance(physics_counts, dict) and physics_counts:
+                bits.append("physics guard " + _format_value(physics_counts))
+            best = spin.get("best", {})
+            if isinstance(best, dict) and best:
+                best_bits = []
+                if best.get("run"):
+                    best_bits.append(f"lowest parsed run `{best['run']}`")
+                if best.get("energy_eV") is not None:
+                    best_bits.append(f"E={float(best['energy_eV']):.8g} eV")
+                if best.get("total_moment") is not None:
+                    best_bits.append(f"total moment={float(best['total_moment']):.6g}")
+                if best_bits:
+                    bits.append("; ".join(best_bits))
+            lines.append("  - Spin-screening summary: " + "; ".join(bits) + ".")
+        spin_atoms = evidence.facts.get("vasp_spin_atoms")
+        if isinstance(spin_atoms, dict) and spin_atoms:
+            atom_bits = []
+            if spin_atoms.get("changed_rows") is not None:
+                atom_bits.append(f"{spin_atoms['changed_rows']} atom-level moment changes")
+            bad = spin_atoms.get("physics_bad_by_element", {})
+            if isinstance(bad, dict) and bad:
+                atom_bits.append("physics-guard atom flags " + _format_value(bad))
+            if atom_bits:
+                lines.append("  - Spin atom table: " + "; ".join(atom_bits) + ".")
         cp2k = evidence.facts.get("cp2k_log")
         if isinstance(cp2k, dict) and cp2k:
             lines.append("  - CP2K-style log summary: " + _format_value(cp2k) + ".")
@@ -888,7 +1112,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         action="append",
         default=[],
-        help="Workflow keywords used in this entry, e.g. DFT VASP_PREP MLIP AIMD MD CALPHAD MOOSE.",
+        help="Workflow keywords used in this entry, e.g. DFT VASP_PREP VASP_SPIN MLIP AIMD MD CALPHAD MOOSE.",
     )
     parser.add_argument(
         "--run",

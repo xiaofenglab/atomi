@@ -128,6 +128,34 @@ def write_defect_cloud_run(root: Path) -> None:
     (root / "runlist.txt").write_text("GdUO2_seed_01/base\nGdUO2_seed_01/random_001\n", encoding="utf-8")
 
 
+def write_spin_report_run(root: Path) -> None:
+    root.mkdir()
+    (root / "spin_energy_run_summary.csv").write_text(
+        "\n".join(
+            [
+                "index,run,status,energy_eV,energy_kind,energy_source,mag_source,mag_status,total_moment,max_abs_moment,changed_count,changed_by_element,abs_gt5,abs_0p5_1p5,abs_1p5_2p5,initial_element_order,element_order,element_sum,physics_guard_status,physics_guard_bad_count,physics_guard_bad_by_element,spin_index_name,dopant_mode,host_mode,warning",
+                '1,spin_001,OK,-100.0,TOTEN,vasp.out.1,OUTCAR,OK,0.2,7.1,1,"{""U"": 1}",2,0,10,"{""Gd"": ""FM""}","{""Gd"": ""FM"", ""U"": ""AFM-like""}","{""Gd"": 14.0, ""U"": -0.2}",OK,0,"{}",spin_001,FM,AFM-like,',
+                '2,spin_002,OK,-99.5,TOTEN,vasp.out.2,OUTCAR,OK,8.1,6.0,3,"{""Gd"": 1, ""U"": 2}",1,2,8,"{""Gd"": ""AFM""}","{""Gd"": ""AFM"", ""U"": ""FM""}","{""Gd"": 0.0, ""U"": 8.1}",FAIL,2,"{""U"": 2}",spin_002,AFM,FM,',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "spin_energy_atom_moments.csv").write_text(
+        "\n".join(
+            [
+                "run_index,run,atom,element,initial_moment,final_moment,delta,changed,mag_class,physics_ok,physics_target,physics_delta,energy_eV,mag_status",
+                "1,spin_001,1,Gd,7.0,7.1,0.1,false,Gd-like,true,7,0.1,-100.0,OK",
+                "1,spin_001,2,U,2.0,-2.1,-4.1,true,U4-like,true,-2,0.1,-100.0,OK",
+                "2,spin_002,2,U,2.0,0.2,-1.8,true,other,false,2,1.8,-99.5,OK",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "spin_energy_report.md").write_text("# VASP Spin-Energy Report\n", encoding="utf-8")
+
+
 def test_paper_draft_scans_and_appends(tmp_path: Path) -> None:
     vasp = tmp_path / "vasp"
     lammps = tmp_path / "md"
@@ -214,6 +242,47 @@ def test_paper_draft_describes_vasp_defect_candidate_generation(tmp_path: Path) 
     assert parsed[0]["facts"]["defect_cloud_summary"]["family_totals"]["base"] == 2
 
 
+def test_paper_draft_describes_vasp_spin_report(tmp_path: Path) -> None:
+    spin = tmp_path / "spin"
+    write_spin_report_run(spin)
+    document = tmp_path / "spin_draft.md"
+    evidence = tmp_path / "spin_evidence.json"
+
+    paper_draft.main(
+        [
+            "--used",
+            "spin-report",
+            "--run",
+            str(spin),
+            "--document",
+            str(document),
+            "--evidence-json",
+            str(evidence),
+            "--mode",
+            "overwrite",
+            "--no-style-note",
+            "--title",
+            "Spin screening",
+            "--material",
+            "(Gd,U)O2-x",
+        ]
+    )
+
+    text = document.read_text(encoding="utf-8")
+    assert "Requested modules: VASP_SPIN" in text
+    assert "Spin-configuration screening was summarized" in text
+    assert "2 indexed spin configurations" in text
+    assert "physics-guard counts OK=1; FAIL=1" in text
+    assert "Spin-screening summary" in text
+    assert "lowest parsed run `spin_001`" in text
+    assert "Spin atom table: 2 atom-level moment changes" in text
+
+    parsed = json.loads(evidence.read_text(encoding="utf-8"))
+    assert parsed[0]["detected_modules"] == ["DFT", "VASP_SPIN"]
+    assert parsed[0]["facts"]["vasp_spin_summary"]["best"]["run"] == "spin_001"
+    assert parsed[0]["facts"]["vasp_spin_atoms"]["physics_bad_by_element"]["U"] == 1
+
+
 def test_paper_draft_top_level_cli(tmp_path: Path) -> None:
     vasp = tmp_path / "vasp"
     write_vasp_run(vasp)
@@ -246,3 +315,7 @@ def test_normalize_modules_keeps_unknown_keyword() -> None:
 
 def test_normalize_modules_accepts_defect_cloud_alias() -> None:
     assert paper_draft.normalize_modules(["defect-cloud"]) == ["VASP_PREP"]
+
+
+def test_normalize_modules_accepts_spin_report_alias() -> None:
+    assert paper_draft.normalize_modules(["spin-report"]) == ["VASP_SPIN"]
