@@ -476,7 +476,7 @@ def magnetization_candidate_files(index: int, run_dir: Path, log_dir: Path | Non
         if path.is_file():
             candidates.append(path)
     search_log_dir = run_dir.parent if log_dir is None else log_dir
-    candidates.extend(array_indexed_output_candidates(index, search_log_dir))
+    candidates.extend(array_indexed_output_candidates(index, search_log_dir, deep=True))
     seen: set[Path] = set()
     unique: list[Path] = []
     for path in candidates:
@@ -582,6 +582,7 @@ def build_run_reports(
         energy_kind=energy_kind,
         stopped_after_minutes=stopped_after_minutes,
         dav_average_window=dav_average_window,
+        deep_artifacts=True,
     )
     spin_rows = load_spin_index(spin_index)
     run_entries = iter_runlist(runlist)

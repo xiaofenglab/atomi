@@ -250,6 +250,26 @@ def test_collect_run_energies_prefers_array_stdout_over_completed_outcar(tmp_pat
     assert records[0].source == stdout
 
 
+def test_collect_run_energies_keeps_default_checkeng_path_shallow(tmp_path: Path) -> None:
+    runlist = tmp_path / "runlist.txt"
+    run_a = tmp_path / "spin_001"
+    run_a.mkdir()
+    runlist.write_text("spin_001\n", encoding="utf-8")
+    artifact_run = tmp_path / "bwforcluster-vasp_array.sbatch.12345.1.260518_030213" / "run"
+    artifact_run.mkdir(parents=True)
+    nested_outcar = artifact_run / "OUTCAR"
+    nested_outcar.write_text(" free  energy   TOTEN  =       -7.000000 eV\n", encoding="utf-8")
+
+    shallow = collect_run_energies(runlist, log_dir=tmp_path)
+    deep = collect_run_energies(runlist, log_dir=tmp_path, deep_artifacts=True)
+
+    assert shallow[0].status == "NOLOG"
+    assert shallow[0].source is None
+    assert deep[0].status == "OK"
+    assert deep[0].source == nested_outcar
+    assert deep[0].energy_eV == -7.0
+
+
 def test_vasp_energies_prints_tsv(tmp_path: Path, capsys) -> None:
     runlist = tmp_path / "runlist.txt"
     run_a = tmp_path / "run_A"
@@ -322,7 +342,12 @@ def test_clean_stopped_energy_outputs_execute_only_stopped_artifacts(tmp_path: P
     old_time = time.time() - 20 * 60
     os.utime(stopped_outcar, (old_time, old_time))
 
-    records = collect_run_energies(runlist, log_dir=tmp_path, stopped_after_minutes=15)
+    records = collect_run_energies(
+        runlist,
+        log_dir=tmp_path,
+        stopped_after_minutes=15,
+        deep_artifacts=True,
+    )
     counts = clean_stopped_energy_outputs(
         runlist=runlist,
         records=records,

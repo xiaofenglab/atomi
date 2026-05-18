@@ -217,6 +217,7 @@ def collect_run_energies(
     energy_kind: str = "toten",
     stopped_after_minutes: float = DEFAULT_CHECKENG_STOPPED_AFTER_MINUTES,
     dav_average_window: int = DEFAULT_CHECKENG_DAV_AVERAGE_WINDOW,
+    deep_artifacts: bool = False,
 ) -> list[EnergyRecord]:
     if not runlist.is_file():
         raise FileNotFoundError(f"cannot find {runlist}")
@@ -229,7 +230,7 @@ def collect_run_energies(
     search_log_dir = runlist.parent if log_dir is None else log_dir
     for index, runpath in enumerate(iter_runlist(runlist), start=1):
         resolved_runpath = runpath if runpath.is_absolute() else (runlist.parent / runpath)
-        candidates = _energy_candidate_files(index, resolved_runpath, search_log_dir)
+        candidates = _energy_candidate_files(index, resolved_runpath, search_log_dir, deep_artifacts=deep_artifacts)
         record = EnergyRecord(index=index, run=runpath, energy_eV=None)
         if not resolved_runpath.is_dir():
             record.status = "NODIR"
@@ -497,6 +498,7 @@ def vasp_energies(argv: list[str] | None = None) -> None:
         energy_kind=args.energy,
         stopped_after_minutes=args.stopped_after_min,
         dav_average_window=args.dav_average_window,
+        deep_artifacts=args.clean_stopped,
     )
     print_energy_table(records, delimiter=args.delimiter)
     if args.clean_stopped:
@@ -567,9 +569,17 @@ def _find_vasp_log_for_index(index: int, log_dir: Path) -> Path | None:
     return matches[0] if matches else None
 
 
-def _energy_candidate_files(index: int, runpath: Path, log_dir: Path) -> list[Path]:
+def _energy_candidate_files(
+    index: int,
+    runpath: Path,
+    log_dir: Path,
+    deep_artifacts: bool = False,
+) -> list[Path]:
     candidates: list[tuple[int, Path]] = []
-    candidates.extend((_array_energy_rank(path), path) for path in array_indexed_output_candidates(index, log_dir))
+    candidates.extend(
+        (_array_energy_rank(path), path)
+        for path in array_indexed_output_candidates(index, log_dir, deep=deep_artifacts)
+    )
     if runpath.is_dir():
         for pattern in ("vasp.out*", "OUTCAR", "OUTCAR.gz", "OSZICAR"):
             candidates.extend(
@@ -613,11 +623,16 @@ def _run_folder_energy_rank(path: Path) -> int:
     return 5 + _array_energy_rank(path)
 
 
-def array_indexed_output_candidates(index: int, log_dir: Path) -> list[Path]:
+def array_indexed_output_candidates(index: int, log_dir: Path, deep: bool = False) -> list[Path]:
     """Return root-level or scheduler-folder VASP artifacts for one array index."""
     if not log_dir.is_dir():
         return []
     candidates: list[Path] = []
+    for pattern in (f"vasp.out*.{index}", f"vasp.out*.{index}.*"):
+        candidates.extend(path for path in log_dir.glob(pattern) if path.is_file())
+    if not deep:
+        return _unique_paths_by_mtime(candidates)
+
     for path in log_dir.iterdir():
         if not _name_has_array_index(path.name, index):
             continue
@@ -628,6 +643,10 @@ def array_indexed_output_candidates(index: int, log_dir: Path) -> list[Path]:
             continue
         for pattern in ARRAY_ARTIFACT_PATTERNS:
             candidates.extend(child for child in path.rglob(pattern) if child.is_file())
+    return _unique_paths_by_mtime(candidates)
+
+
+def _unique_paths_by_mtime(candidates: list[Path]) -> list[Path]:
     seen: set[Path] = set()
     unique: list[Path] = []
     for path in candidates:
