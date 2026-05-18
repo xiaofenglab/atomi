@@ -371,6 +371,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         calphad_export.add_argument("calphad_export_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("paper-draft", "report-draft", "atomi-paper-draft"):
+        paper_draft = subparsers.add_parser(
+            command_name,
+            help="Append Methods and brief Results draft text from completed run folders.",
+        )
+        paper_draft.add_argument("paper_draft_args", nargs=argparse.REMAINDER)
+
     zentropy_commands = (
         "zentropy_motif_db",
         "zentropy-motif-db",
@@ -805,6 +812,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.calphad.export import main as calphad_export_main
 
         calphad_export_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in ("paper-draft", "report-draft", "atomi-paper-draft"):
+        from atomi.reporting.paper_draft import main as paper_draft_main
+
+        paper_draft_main(raw_args[1:])
         return
     zentropy_commands = (
         "zentropy_motif_db",
@@ -1250,6 +1262,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.calphad.export import main as calphad_export_main
 
         calphad_export_main(args.calphad_export_args)
+        return
+
+    if args.subcommand in ("paper-draft", "report-draft", "atomi-paper-draft"):
+        from atomi.reporting.paper_draft import main as paper_draft_main
+
+        paper_draft_main(args.paper_draft_args)
         return
 
     if args.subcommand in zentropy_commands:
