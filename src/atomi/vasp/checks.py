@@ -563,25 +563,54 @@ def _latest_vasp_output(
 
 
 def _find_vasp_log_for_index(index: int, log_dir: Path) -> Path | None:
-    matches = array_indexed_output_candidates(index, log_dir)
+    matches = sorted(array_indexed_output_candidates(index, log_dir), key=_energy_candidate_sort_key)
     return matches[0] if matches else None
 
 
 def _energy_candidate_files(index: int, runpath: Path, log_dir: Path) -> list[Path]:
-    candidates: list[Path] = []
-    candidates.extend(array_indexed_output_candidates(index, log_dir))
+    candidates: list[tuple[int, Path]] = []
+    candidates.extend((_array_energy_rank(path), path) for path in array_indexed_output_candidates(index, log_dir))
     if runpath.is_dir():
         for pattern in ("vasp.out*", "OUTCAR", "OUTCAR.gz", "OSZICAR"):
-            candidates.extend(sorted(path for path in runpath.glob(pattern) if path.is_file()))
-    seen: set[Path] = set()
-    unique: list[Path] = []
-    for path in candidates:
+            candidates.extend(
+                (_run_folder_energy_rank(path), path)
+                for path in sorted(runpath.glob(pattern))
+                if path.is_file()
+            )
+    seen: dict[Path, tuple[int, Path]] = {}
+    for rank, path in candidates:
         resolved = path.resolve()
-        if resolved in seen:
+        existing = seen.get(resolved)
+        if existing is not None and existing[0] <= rank:
             continue
-        seen.add(resolved)
-        unique.append(path)
-    return sorted(unique, key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
+        seen[resolved] = (rank, path)
+    return [
+        path
+        for rank, path in sorted(
+            seen.values(),
+            key=lambda item: (item[0], -(item[1].stat().st_mtime if item[1].exists() else 0.0)),
+        )
+    ]
+
+
+def _energy_candidate_sort_key(path: Path) -> tuple[int, float]:
+    return (_array_energy_rank(path), -(path.stat().st_mtime if path.exists() else 0.0))
+
+
+def _array_energy_rank(path: Path) -> int:
+    if path.name.startswith("vasp.out"):
+        return 0
+    if path.name == "OSZICAR":
+        return 1
+    if path.name.startswith("OUTCAR"):
+        return 2
+    if path.name.startswith("vasprun.xml"):
+        return 3
+    return 4
+
+
+def _run_folder_energy_rank(path: Path) -> int:
+    return 5 + _array_energy_rank(path)
 
 
 def array_indexed_output_candidates(index: int, log_dir: Path) -> list[Path]:

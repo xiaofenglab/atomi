@@ -224,6 +224,32 @@ def test_collect_run_energies_falls_back_to_run_folder(tmp_path: Path) -> None:
     assert records[0].source == run_a / "OUTCAR"
 
 
+def test_collect_run_energies_prefers_array_stdout_over_completed_outcar(tmp_path: Path) -> None:
+    runlist = tmp_path / "runlist.txt"
+    run_a = tmp_path / "spin_001"
+    run_a.mkdir()
+    runlist.write_text("spin_001\n", encoding="utf-8")
+    outcar = run_a / "OUTCAR"
+    outcar.write_text(
+        " free  energy   TOTEN  =       2200.000000 eV\n",
+        encoding="utf-8",
+    )
+    stdout = tmp_path / "vasp.out_std.21444132.1"
+    stdout.write_text(
+        " free  energy   TOTEN  =       -11.500000 eV\n",
+        encoding="utf-8",
+    )
+    now = time.time()
+    os.utime(stdout, (now - 60.0, now - 60.0))
+    os.utime(outcar, (now, now))
+
+    records = collect_run_energies(runlist, log_dir=tmp_path)
+
+    assert records[0].status == "OK"
+    assert records[0].energy_eV == -11.5
+    assert records[0].source == stdout
+
+
 def test_vasp_energies_prints_tsv(tmp_path: Path, capsys) -> None:
     runlist = tmp_path / "runlist.txt"
     run_a = tmp_path / "run_A"

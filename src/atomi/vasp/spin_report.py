@@ -74,6 +74,8 @@ class RunSpinReport:
     total_moment: float | None = None
     max_abs_moment: float | None = None
     changed_count: int = 0
+    changed_by_element: dict[str, int] = field(default_factory=dict)
+    initial_element_order: dict[str, str] = field(default_factory=dict)
     element_order: dict[str, str] = field(default_factory=dict)
     element_sum: dict[str, float] = field(default_factory=dict)
     summary_counts: dict[str, int] = field(default_factory=dict)
@@ -545,6 +547,23 @@ def element_order_from_atoms(atoms: list[AtomReport], threshold: float) -> tuple
     )
 
 
+def initial_order_from_atoms(atoms: list[AtomReport], threshold: float) -> dict[str, str]:
+    values: dict[str, list[float]] = {}
+    for atom in atoms:
+        if atom.initial is None:
+            continue
+        values.setdefault(atom.element, []).append(atom.initial)
+    return {element: magnetic_order(moments, threshold=threshold) for element, moments in values.items()}
+
+
+def changed_counts_by_element(atoms: list[AtomReport]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for atom in atoms:
+        if atom.changed:
+            counts[atom.element] = counts.get(atom.element, 0) + 1
+    return counts
+
+
 def build_run_reports(
     runlist: Path,
     spin_index: Path | None,
@@ -633,6 +652,8 @@ def build_run_reports(
         report.max_abs_moment = max((abs(value) for value in block.moments), default=0.0)
         report.summary_counts = summarize_counts(block.moments)
         report.changed_count = sum(1 for atom in atoms if atom.changed)
+        report.changed_by_element = changed_counts_by_element(atoms)
+        report.initial_element_order = initial_order_from_atoms(atoms, threshold=order_threshold)
         report.element_order, report.element_sum = element_order_from_atoms(atoms, threshold=order_threshold)
         if block.warning:
             report.warning = (report.warning + " " if report.warning else "") + block.warning
@@ -654,9 +675,11 @@ def write_run_summary(reports: list[RunSpinReport], path: Path) -> None:
         "total_moment",
         "max_abs_moment",
         "changed_count",
+        "changed_by_element",
         "abs_gt5",
         "abs_0p5_1p5",
         "abs_1p5_2p5",
+        "initial_element_order",
         "element_order",
         "element_sum",
         "spin_index_name",
@@ -681,9 +704,11 @@ def write_run_summary(reports: list[RunSpinReport], path: Path) -> None:
                     "total_moment": "" if report.total_moment is None else f"{report.total_moment:.8f}",
                     "max_abs_moment": "" if report.max_abs_moment is None else f"{report.max_abs_moment:.8f}",
                     "changed_count": report.changed_count,
+                    "changed_by_element": json.dumps(report.changed_by_element, sort_keys=True),
                     "abs_gt5": report.summary_counts.get("abs_gt5", ""),
                     "abs_0p5_1p5": report.summary_counts.get("abs_0p5_1p5", ""),
                     "abs_1p5_2p5": report.summary_counts.get("abs_1p5_2p5", ""),
+                    "initial_element_order": json.dumps(report.initial_element_order, sort_keys=True),
                     "element_order": json.dumps(report.element_order, sort_keys=True),
                     "element_sum": json.dumps(report.element_sum, sort_keys=True),
                     "spin_index_name": report.spin_index_name,
