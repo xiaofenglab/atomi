@@ -223,9 +223,22 @@ def parse_kpoints(path: Path) -> dict[str, str]:
     return info
 
 
+def parse_potcar(path: Path) -> dict[str, object]:
+    text = _read_text(path)
+    titles = re.findall(r"^\s*TITEL\s*=\s*(.+?)\s*$", text, flags=re.MULTILINE)
+    if not titles:
+        titles = re.findall(r"^\s*PAW\S*\s+(.+?)\s*$", text, flags=re.MULTILINE)
+    return {"titles": titles[:20], "title_count": len(titles)}
+
+
 def parse_outcar(path: Path) -> dict[str, object]:
     text = _read_text(path)
     info: dict[str, object] = {}
+    version_match = re.search(r"^\s*(vasp\.\S+.*)$", text, flags=re.MULTILINE | re.IGNORECASE)
+    if version_match:
+        version_line = version_match.group(1).strip()
+        info["vasp_version_line"] = version_line
+        info["vasp_version"] = version_line.split()[0]
     energies = re.findall(r"free\s+energy\s+TOTEN\s+=\s*([-+0-9.Ee]+)", text)
     if energies:
         info["final_energy_eV"] = float(energies[-1])
@@ -494,6 +507,40 @@ def parse_spin_atoms(path: Path) -> dict[str, object]:
     }
 
 
+def parse_spin_index(path: Path) -> dict[str, object]:
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+    element_values: dict[str, set[float]] = {}
+    for row in rows:
+        raw = row.get("moments_by_atom", "")
+        if not raw:
+            continue
+        try:
+            moments = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(moments, list):
+            continue
+        for item in moments:
+            if not isinstance(item, dict):
+                continue
+            element = str(item.get("element") or "X")
+            value = _float_or_none(str(item.get("magmom", "")))
+            if value is not None:
+                element_values.setdefault(element, set()).add(round(value, 6))
+    return {
+        "rows": len(rows),
+        "columns": reader.fieldnames or [],
+        "dopant_mode_counts": _count_values(rows, "dopant_mode"),
+        "host_mode_counts": _count_values(rows, "host_mode"),
+        "element_moment_values": {
+            element: sorted(values)
+            for element, values in sorted(element_values.items())
+        },
+    }
+
+
 def parse_tdb(path: Path) -> dict[str, object]:
     text = _read_text(path)
     elements = re.findall(r"^\s*ELEMENT\s+(\S+)", text, flags=re.MULTILINE | re.IGNORECASE)
@@ -560,8 +607,14 @@ def scan_run(path: Path, requested_modules: list[str], max_files: int = 5000) ->
         for item in _by_suffix(files, ".md")
         if "spin" in item.name.lower() and ("report" in item.name.lower() or "energy" in item.name.lower())
     ]
+    spin_indexes = [
+        item
+        for item in _by_suffix(files, ".csv")
+        if item.name.lower() == "spin_index.csv"
+        or (item.name.lower().endswith("_spin_index.csv") and "spin" in item.name.lower())
+    ]
     magmom_dirs = [item for item in files if item.name == "MAGMOM_expanded.txt" or item.name == "MAGMOM_vasp.txt"]
-    if spin_summaries or spin_atom_tables or spin_filtered or spin_markdown:
+    if spin_summaries or spin_atom_tables or spin_filtered or spin_markdown or spin_indexes:
         evidence.add_module("DFT")
         evidence.add_module("VASP_SPIN")
         for item in spin_summaries[:5]:
@@ -572,16 +625,21 @@ def scan_run(path: Path, requested_modules: list[str], max_files: int = 5000) ->
             evidence.add_file("spin_physics_filtered", item)
         for item in spin_markdown[:5]:
             evidence.add_file("spin_markdown_report", item)
+        for item in spin_indexes[:5]:
+            evidence.add_file("spin_index", item)
         for item in magmom_dirs[:5]:
             evidence.add_file("magmom_restart_line", item)
         if spin_summaries:
             evidence.facts["vasp_spin_summary"] = parse_spin_summary(spin_summaries[0])
         if spin_atom_tables:
             evidence.facts["vasp_spin_atoms"] = parse_spin_atoms(spin_atom_tables[0])
+        if spin_indexes:
+            evidence.facts["vasp_spin_index"] = parse_spin_index(spin_indexes[0])
 
     poscars = _by_name(files, "POSCAR", "CONTCAR")
     incars = _by_name(files, "INCAR")
     kpoints = _by_name(files, "KPOINTS")
+    potcars = _by_name(files, "POTCAR")
     outcars = _by_name(files, "OUTCAR")
     if poscars or incars or outcars:
         evidence.add_module("DFT")
@@ -591,6 +649,8 @@ def scan_run(path: Path, requested_modules: list[str], max_files: int = 5000) ->
             evidence.add_file("incar", item)
         for item in kpoints[:5]:
             evidence.add_file("kpoints", item)
+        for item in potcars[:5]:
+            evidence.add_file("potcar", item)
         for item in outcars[:5]:
             evidence.add_file("outcar", item)
         if poscars:
@@ -601,6 +661,8 @@ def scan_run(path: Path, requested_modules: list[str], max_files: int = 5000) ->
             evidence.facts["dft_incar_tags"] = {key: tags[key] for key in keep if key in tags}
         if kpoints:
             evidence.facts["dft_kpoints"] = parse_kpoints(kpoints[0])
+        if potcars:
+            evidence.facts["dft_potcar"] = parse_potcar(potcars[0])
         if outcars:
             evidence.facts["dft_outcar"] = parse_outcar(outcars[0])
 
@@ -770,7 +832,11 @@ def methods_paragraphs(evidences: list[RunEvidence], modules: list[str]) -> list
         tags = _first_fact(evidences, "dft_incar_tags", {})
         structure = _first_fact(evidences, "dft_structure", {})
         kpoints = _first_fact(evidences, "dft_kpoints", {})
+        potcar = _first_fact(evidences, "dft_potcar", {})
+        outcar = _first_fact(evidences, "dft_outcar", {})
         details = []
+        if isinstance(outcar, dict) and outcar.get("vasp_version"):
+            details.append(f"software {outcar['vasp_version']}")
         if structure:
             if structure.get("comment"):
                 details.append(f"structure label {structure['comment']}")
@@ -780,6 +846,8 @@ def methods_paragraphs(evidences: list[RunEvidence], modules: list[str]) -> list
             details.append("INCAR tags " + _format_value(tags))
         if kpoints:
             details.append("k-point setting " + _format_value(kpoints))
+        if isinstance(potcar, dict) and potcar.get("titles"):
+            details.append("PAW/POTCAR entries " + _format_value(potcar["titles"]))
         paragraphs.append(
             "Electronic-structure calculations were documented from the completed run "
             "directories by collecting structure, input, k-point, and output files. "
@@ -792,7 +860,21 @@ def methods_paragraphs(evidences: list[RunEvidence], modules: list[str]) -> list
     if "VASP_SPIN" in modules_to_write:
         spin = _first_fact(evidences, "vasp_spin_summary", {})
         atoms = _first_fact(evidences, "vasp_spin_atoms", {})
+        spin_index = _first_fact(evidences, "vasp_spin_index", {})
         details = []
+        generation_details = []
+        if isinstance(spin_index, dict) and spin_index:
+            if spin_index.get("rows") is not None:
+                generation_details.append(f"{spin_index['rows']} generated spin inputs")
+            dopant_counts = spin_index.get("dopant_mode_counts", {})
+            if isinstance(dopant_counts, dict) and dopant_counts:
+                generation_details.append("dopant enumeration " + _format_value(dopant_counts))
+            host_counts = spin_index.get("host_mode_counts", {})
+            if isinstance(host_counts, dict) and host_counts:
+                generation_details.append("host enumeration " + _format_value(host_counts))
+            moment_values = spin_index.get("element_moment_values", {})
+            if isinstance(moment_values, dict) and moment_values:
+                generation_details.append("initial element moment values " + _format_value(moment_values))
         if isinstance(spin, dict) and spin:
             if spin.get("rows") is not None:
                 details.append(f"{spin['rows']} indexed spin configurations")
@@ -820,6 +902,13 @@ def methods_paragraphs(evidences: list[RunEvidence], modules: list[str]) -> list
             "initial MAGMOM pattern, records element-resolved spin labels, and can "
             "apply user-defined physics guards to distinguish plausible moment states "
             "from configurations that relaxed to unintended valence or spin states. "
+            + (
+                "The spin inputs were generated as an indexed set of MAGMOM patterns "
+                + _sentence_join(generation_details)
+                + ". "
+                if generation_details
+                else ""
+            )
             + (_sentence_join(details) + ". " if details else "")
             + "For manuscript use, report the starting spin enumeration rule, moment "
             "tolerances, handling of stopped jobs, and whether rejected spin states "
@@ -948,6 +1037,8 @@ def result_lines(evidences: list[RunEvidence]) -> list[str]:
         dft = evidence.facts.get("dft_outcar")
         if isinstance(dft, dict):
             bits = []
+            if "vasp_version" in dft:
+                bits.append(f"VASP version {dft['vasp_version']}")
             if "final_energy_eV" in dft:
                 bits.append(f"final DFT energy {dft['final_energy_eV']:.8g} eV")
             if "final_volume_A3" in dft:
@@ -956,6 +1047,22 @@ def result_lines(evidences: list[RunEvidence]) -> list[str]:
                 bits.append(f"{dft['nions']} ions")
             if bits:
                 lines.append("  - " + "; ".join(bits) + ".")
+        spin_index = evidence.facts.get("vasp_spin_index")
+        if isinstance(spin_index, dict) and spin_index:
+            bits = []
+            if spin_index.get("rows") is not None:
+                bits.append(f"{spin_index['rows']} generated spin inputs")
+            moment_values = spin_index.get("element_moment_values", {})
+            if isinstance(moment_values, dict) and moment_values:
+                bits.append("initial moments " + _format_value(moment_values))
+            dopant_counts = spin_index.get("dopant_mode_counts", {})
+            if isinstance(dopant_counts, dict) and dopant_counts:
+                bits.append("dopant modes " + _format_value(dopant_counts))
+            host_counts = spin_index.get("host_mode_counts", {})
+            if isinstance(host_counts, dict) and host_counts:
+                bits.append("host modes " + _format_value(host_counts))
+            if bits:
+                lines.append("  - Spin-generation index: " + "; ".join(bits) + ".")
         spin = evidence.facts.get("vasp_spin_summary")
         if isinstance(spin, dict) and spin:
             bits = [

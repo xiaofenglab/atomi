@@ -33,9 +33,14 @@ def write_vasp_run(root: Path) -> None:
         encoding="utf-8",
     )
     (root / "KPOINTS").write_text("mesh\n0\nGamma\n3 3 3\n0 0 0\n", encoding="utf-8")
+    (root / "POTCAR").write_text(
+        "TITEL  = PAW_PBE U 06Sep2000\nTITEL  = PAW_PBE O 08Apr2002\n",
+        encoding="utf-8",
+    )
     (root / "OUTCAR").write_text(
         "\n".join(
             [
+                " vasp.6.4.3 01Jan24 (build test) standard",
                 " NIONS =      3 ions",
                 " volume of cell :      41.234",
                 " free  energy   TOTEN  =      -25.125 eV",
@@ -154,6 +159,17 @@ def write_spin_report_run(root: Path) -> None:
         encoding="utf-8",
     )
     (root / "spin_energy_report.md").write_text("# VASP Spin-Energy Report\n", encoding="utf-8")
+    (root / "spin_index.csv").write_text(
+        "\n".join(
+            [
+                "run_dir,name,dopant_mode,host_mode,moments_by_atom",
+                'spin_001,spin_001,FM,AFM-like,"[{""atom"": 1, ""element"": ""Gd"", ""magmom"": 7.0}, {""atom"": 2, ""element"": ""U"", ""magmom"": -2.0}]"',
+                'spin_002,spin_002,AFM,FM,"[{""atom"": 1, ""element"": ""Gd"", ""magmom"": -7.0}, {""atom"": 2, ""element"": ""U"", ""magmom"": 2.0}]"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def test_paper_draft_scans_and_appends(tmp_path: Path) -> None:
@@ -193,6 +209,8 @@ def test_paper_draft_scans_and_appends(tmp_path: Path) -> None:
     assert "Methods seed" in text
     assert "Electronic-structure calculations" in text
     assert "ENCUT=520" in text
+    assert "software vasp.6.4.3" in text
+    assert "PAW_PBE U" in text
     assert "final DFT energy -25.125" in text
     assert "MD thermo summary" in text
     assert "phase_count=1" in text
@@ -271,15 +289,19 @@ def test_paper_draft_describes_vasp_spin_report(tmp_path: Path) -> None:
     text = document.read_text(encoding="utf-8")
     assert "Requested modules: VASP_SPIN" in text
     assert "Spin-configuration screening was summarized" in text
+    assert "The spin inputs were generated as an indexed set of MAGMOM patterns" in text
     assert "2 indexed spin configurations" in text
+    assert "initial element moment values Gd=-7, 7; U=-2, 2" in text
     assert "physics-guard counts OK=1; FAIL=1" in text
     assert "Spin-screening summary" in text
+    assert "Spin-generation index: 2 generated spin inputs" in text
     assert "lowest parsed run `spin_001`" in text
     assert "Spin atom table: 2 atom-level moment changes" in text
 
     parsed = json.loads(evidence.read_text(encoding="utf-8"))
     assert parsed[0]["detected_modules"] == ["DFT", "VASP_SPIN"]
     assert parsed[0]["facts"]["vasp_spin_summary"]["best"]["run"] == "spin_001"
+    assert parsed[0]["facts"]["vasp_spin_index"]["element_moment_values"]["Gd"] == [-7.0, 7.0]
     assert parsed[0]["facts"]["vasp_spin_atoms"]["physics_bad_by_element"]["U"] == 1
 
 
