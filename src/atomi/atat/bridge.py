@@ -66,6 +66,28 @@ SPECIES_FIELDS = [
     "notes",
 ]
 
+CE_TRAINING_FIELDS = [
+    "training_id",
+    "source_csv",
+    "source_row",
+    "run",
+    "resolved_run",
+    "output_run_dir",
+    "structure_path",
+    "energy_eV",
+    "energy_eV_per_fu",
+    "relative_energy_eV_per_fu",
+    "physics_status",
+    "mag_status",
+    "decision",
+    "element_order",
+    "changed_by_element",
+    "atat_candidate_id",
+    "motif_family",
+    "use_for",
+    "notes",
+]
+
 
 @dataclass
 class PseudoSpecies:
@@ -109,6 +131,23 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None
         writer.writeheader()
         for row in rows:
             writer.writerow({field: row.get(field, "") for field in fields})
+
+
+def read_csv(path: Path) -> list[dict[str, str]]:
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def finite_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 def tool_status(tool: str) -> dict[str, str | bool]:
@@ -321,6 +360,7 @@ def init_main(argv: list[str] | None = None) -> None:
             "atat_status": inspect_atat_environment(),
             "handoff_commands": {
                 "index_atat_candidates": "atat-bridge index --root 01_motif_search --out atat_candidate_index.csv",
+                "build_ce_training_set": "atat-bridge ce-handoff --summary-csv stage1_screen/stage1_branch_summary.csv --outdir 02_sd_dd_cluster_expansion/ce_handoff",
                 "fail_fast_screen": "vasp-branch-live --runlist runlist.txt --log-dir . --outdir stage1_screen --moment-guard ...",
                 "spin_report": "vasp-spin-report --runlist runlist.txt --log-dir . --output-prefix spin_energy --moment-guard ...",
                 "sd_dd": "defect-chem build-defects ... ; defect-chem run ...",
@@ -391,6 +431,246 @@ def index_main(argv: list[str] | None = None) -> None:
     print(f"Candidate index         : {args.out.resolve()}")
 
 
+def first_present(row: dict[str, str], keys: list[str]) -> str:
+    for key in keys:
+        value = row.get(key)
+        if value not in {None, ""}:
+            return str(value)
+    return ""
+
+
+def row_physics_status(row: dict[str, str]) -> str:
+    return first_present(row, ["physics_guard_status", "guard", "spin_status"]) or "NOT_APPLIED"
+
+
+def row_decision(row: dict[str, str]) -> str:
+    return first_present(row, ["action", "decision", "status"]) or "unknown"
+
+
+def row_is_accepted(row: dict[str, str], include_warning: bool, include_unchecked: bool) -> bool:
+    physics = row_physics_status(row)
+    if physics in {"FAIL", "NO_MATCHED_ELEMENTS"}:
+        return False
+    if physics in {"NOT_APPLIED", ""} and not include_unchecked:
+        return False
+    decision = row_decision(row).lower()
+    if decision in {"stop", "bad", "error", "missing", "nodir"}:
+        return False
+    if decision in {"warning", "warn"}:
+        return include_warning
+    return True
+
+
+def infer_structure_path(row: dict[str, str]) -> str:
+    for key in ("structure_path", "poscar", "POSCAR"):
+        if row.get(key):
+            return row[key]
+    for key in ("output_run_dir", "resolved_run", "run_dir", "run"):
+        value = row.get(key)
+        if value:
+            return str(Path(value) / "POSCAR")
+    return ""
+
+
+def candidate_lookup(path: Path | None) -> dict[str, dict[str, str]]:
+    if path is None or not path.is_file():
+        return {}
+    lookup: dict[str, dict[str, str]] = {}
+    for row in read_csv(path):
+        candidate_id = row.get("candidate_id") or ""
+        for key in ("path", "run", "run_dir", "structure_path"):
+            value = row.get(key)
+            if value:
+                lookup[str(Path(value).resolve())] = row
+        if candidate_id:
+            lookup[candidate_id] = row
+    return lookup
+
+
+def match_candidate(row: dict[str, str], lookup: dict[str, dict[str, str]]) -> dict[str, str] | None:
+    for key in ("atat_candidate_id", "candidate_id"):
+        value = row.get(key)
+        if value and value in lookup:
+            return lookup[value]
+    for key in ("structure_path", "output_run_dir", "resolved_run", "run_dir", "run"):
+        value = row.get(key)
+        if not value:
+            continue
+        path = Path(value)
+        keys = [str(path.resolve())]
+        if path.is_dir():
+            keys.append(str((path / "POSCAR").resolve()))
+        for item in keys:
+            if item in lookup:
+                return lookup[item]
+    return None
+
+
+def ce_training_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
+    lookup = candidate_lookup(args.candidate_index)
+    rows: list[dict[str, Any]] = []
+    for source in args.summary_csv:
+        for source_row, row in enumerate(read_csv(source), start=1):
+            if not row_is_accepted(row, args.include_warning, args.include_unchecked):
+                continue
+            energy = finite_float(first_present(row, ["energy_eV", "energy", "E_eV"]))
+            if energy is None:
+                continue
+            energy_per_fu = energy / args.formula_units
+            candidate = match_candidate(row, lookup)
+            structure_path = infer_structure_path(row)
+            rows.append(
+                {
+                    "training_id": f"ce_{len(rows) + 1:05d}",
+                    "source_csv": str(source),
+                    "source_row": source_row,
+                    "run": first_present(row, ["run", "run_dir", "branch_id", "resolved_run"]),
+                    "resolved_run": first_present(row, ["resolved_run", "run_dir", "run"]),
+                    "output_run_dir": row.get("output_run_dir", ""),
+                    "structure_path": structure_path,
+                    "energy_eV": f"{energy:.12g}",
+                    "energy_eV_per_fu": f"{energy_per_fu:.12g}",
+                    "relative_energy_eV_per_fu": "",
+                    "physics_status": row_physics_status(row),
+                    "mag_status": row.get("mag_status", ""),
+                    "decision": row_decision(row),
+                    "element_order": row.get("element_order", ""),
+                    "changed_by_element": row.get("changed_by_element", ""),
+                    "atat_candidate_id": "" if candidate is None else candidate.get("candidate_id", ""),
+                    "motif_family": first_present(row, ["motif_family", "frame_id", "family"]),
+                    "use_for": args.use_for,
+                    "notes": "accepted by Atomi physics/decision filters; convert structure_path to ATAT str.out for CE fitting",
+                }
+            )
+    if rows:
+        minimum = min(float(row["energy_eV_per_fu"]) for row in rows)
+        for row in rows:
+            row["relative_energy_eV_per_fu"] = f"{float(row['energy_eV_per_fu']) - minimum:.12g}"
+    return rows
+
+
+def write_ce_command_notes(path: Path, args: argparse.Namespace) -> None:
+    text = f"""# ATAT CE / MC handoff generated by Atomi
+
+# Inputs prepared by Atomi:
+#   {args.outdir / 'ce_training_set.csv'}
+#   {args.outdir / 'atat_ce_manifest.json'}
+#
+# Recommended flow:
+# 1. Convert accepted structure_path entries to ATAT str.out-like structures.
+# 2. Use ATAT maps/mmaps/corrdump to fit a cluster expansion from the accepted
+#    DFT energies.
+# 3. Use ATAT emc2 or your preferred Monte Carlo runner to estimate
+#    composition/T-dependent motif populations.
+# 4. Normalize MC/population outputs into:
+#      {args.outdir / 'atat_mc_population_handoff_template.csv'}
+#    and pass them to zentropy-free-energy / zentropy-solve as motif-family
+#    priors or pseudo-data.
+#
+# These command sketches intentionally avoid fixed flags because ATAT lat.in,
+# composition variables, and pseudo-species encoding are system-specific.
+# Keep pseudo-species labels synchronized with pseudo_species_map.csv and
+# validate them with vasp-branch-live / vasp-spin-report moment guards.
+"""
+    path.write_text(text, encoding="utf-8")
+
+
+def ce_handoff_main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="atat-bridge ce-handoff",
+        description="Build an ATAT cluster-expansion training handoff from accepted Atomi DFT rows.",
+    )
+    parser.add_argument(
+        "--summary-csv",
+        type=Path,
+        action="append",
+        required=True,
+        help="Atomi stage1_branch_summary.csv or spin_energy_run_summary.csv; repeatable.",
+    )
+    parser.add_argument("--candidate-index", type=Path, help="Optional atat_candidate_index.csv to link structures.")
+    parser.add_argument("--outdir", type=Path, default=Path("atat_ce_handoff"))
+    parser.add_argument("--formula-units", type=float, default=1.0, help="Formula units represented by each energy.")
+    parser.add_argument("--include-warning", action="store_true", help="Keep Atomi warning rows in the CE candidate set.")
+    parser.add_argument(
+        "--include-unchecked",
+        action="store_true",
+        help="Keep rows where no physics moment guard was applied.",
+    )
+    parser.add_argument("--use-for", default="ce_fit,sd_dd,zentropy", help="Free-form downstream role label.")
+    args = parser.parse_args(argv)
+    if args.formula_units <= 0:
+        raise ValueError("--formula-units must be positive.")
+    rows = ce_training_rows(args)
+    args.outdir.mkdir(parents=True, exist_ok=True)
+    training_csv = args.outdir / "ce_training_set.csv"
+    write_csv(training_csv, rows, CE_TRAINING_FIELDS)
+    interaction_template = args.outdir / "sd_dd_interaction_template.csv"
+    write_csv(
+        interaction_template,
+        [
+            {
+                "interaction_id": "atat_ce_pair_or_cluster_001",
+                "source": "ATAT_CE",
+                "species_or_cluster": "",
+                "effective_interaction_eV": "",
+                "temperature_K": "",
+                "composition": "",
+                "notes": "Fill from fitted CE/ECI or coarse-grained pair binding values.",
+            }
+        ],
+        ["interaction_id", "source", "species_or_cluster", "effective_interaction_eV", "temperature_K", "composition", "notes"],
+    )
+    population_template = args.outdir / "atat_mc_population_handoff_template.csv"
+    write_csv(
+        population_template,
+        [
+            {
+                "T_K": "",
+                "composition": "",
+                "oxygen_delta": "",
+                "motif_family": "",
+                "motif_id": "",
+                "probability": "",
+                "G_eV_per_fu": "",
+                "source": "ATAT_MC",
+                "notes": "Use as zentropy motif prior or pseudo-data after MC normalization.",
+            }
+        ],
+        ["T_K", "composition", "oxygen_delta", "motif_family", "motif_id", "probability", "G_eV_per_fu", "source", "notes"],
+    )
+    command_notes = args.outdir / "atat_ce_commands.md"
+    write_ce_command_notes(command_notes, args)
+    manifest = {
+        "schema": "atomi.atat.ce_handoff.v1",
+        "summary_csv": [str(path) for path in args.summary_csv],
+        "candidate_index": "" if args.candidate_index is None else str(args.candidate_index),
+        "formula_units": args.formula_units,
+        "n_training_rows": len(rows),
+        "filters": {
+            "include_warning": args.include_warning,
+            "include_unchecked": args.include_unchecked,
+            "rejected_physics_status": ["FAIL", "NO_MATCHED_ELEMENTS"],
+            "rejected_decisions": ["stop", "bad", "error", "missing", "nodir"],
+        },
+        "outputs": {
+            "ce_training_set": str(training_csv),
+            "sd_dd_interaction_template": str(interaction_template),
+            "atat_mc_population_handoff_template": str(population_template),
+            "atat_ce_commands": str(command_notes),
+        },
+        "downstream": {
+            "sd_dd": "Use interaction template or coarse-grained CE interactions in defect-chem build-defects / solution-model fitting.",
+            "zentropy": "Use MC population handoff as motif-family priors or pseudo-data beside microstate G_i(T).",
+            "fail_fast": "Return new ATAT-selected structures to vasp-branch-live before expensive DFT.",
+        },
+    }
+    write_json(args.outdir / "atat_ce_manifest.json", manifest)
+    print(f"CE training rows       : {len(rows)}")
+    print(f"CE training set        : {training_csv.resolve()}")
+    print(f"CE manifest            : {(args.outdir / 'atat_ce_manifest.json').resolve()}")
+    print(f"MC population template : {population_template.resolve()}")
+
+
 def status_main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="atat-doctor", description="Report ATAT tool availability for Atomi bridges.")
     parser.add_argument("--json", action="store_true")
@@ -411,6 +691,8 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("args", nargs=argparse.REMAINDER)
     index_parser = subparsers.add_parser("index", help="Index ATAT candidate structure files.")
     index_parser.add_argument("args", nargs=argparse.REMAINDER)
+    ce_parser = subparsers.add_parser("ce-handoff", help="Build a CE/MC handoff from accepted Atomi DFT rows.")
+    ce_parser.add_argument("args", nargs=argparse.REMAINDER)
     return parser
 
 
@@ -426,6 +708,8 @@ def main(argv: list[str] | None = None) -> None:
         init_main(rest)
     elif command == "index":
         index_main(rest)
+    elif command in {"ce-handoff", "ce", "ce-plan"}:
+        ce_handoff_main(rest)
     else:
         parser = build_parser()
         parser.parse_args(argv)
