@@ -381,6 +381,41 @@ def test_batch_uses_nested_array_artifact_onsite_matrix_fallback(tmp_path: Path)
     assert atom_rows[2]["final_moment"] == "-2.00000000"
 
 
+def test_batch_uses_nested_artifact_poscar_and_incar_when_run_folder_missing(tmp_path: Path) -> None:
+    runlist = tmp_path / "runlist.txt"
+    runlist.write_text("spin_001\n", encoding="utf-8")
+    artifact_run = tmp_path / "bwforcluster-phonopy_array_96.sbatch.21488960.1.260518_030213" / "scratch" / "run"
+    artifact_run.mkdir(parents=True)
+    write_poscar(artifact_run / "POSCAR")
+    write_incar(artifact_run / "INCAR")
+    write_outcar(artifact_run / "OUTCAR")
+    prefix = tmp_path / "reports" / "spin_energy"
+
+    atomi_main(
+        [
+            "vasp-spin-report",
+            "--runlist",
+            str(runlist),
+            "--log-dir",
+            str(tmp_path),
+            "--output-prefix",
+            str(prefix),
+            "--no-plot",
+        ]
+    )
+
+    rows = list(csv.DictReader((tmp_path / "reports" / "spin_energy_run_summary.csv").open()))
+    assert rows[0]["mag_status"] == "OK"
+    assert rows[0]["run"] == "spin_001"
+    assert rows[0]["resolved_run"].endswith("spin_001")
+    assert rows[0]["output_run_dir"].endswith("scratch/run")
+    assert rows[0]["mag_source"].endswith("scratch/run/OUTCAR")
+    assert rows[0]["changed_count"] == "2"
+    atom_rows = list(csv.DictReader((tmp_path / "reports" / "spin_energy_atom_moments.csv").open()))
+    assert atom_rows[0]["element"] == "Gd"
+    assert atom_rows[0]["initial_moment"] == "7.00000000"
+
+
 def test_batch_uses_outcar_gz_for_moments_and_vasp_stdout_for_latest_energy(tmp_path: Path) -> None:
     runlist = tmp_path / "runlist.txt"
     run_dir = tmp_path / "spin_001"

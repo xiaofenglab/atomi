@@ -67,6 +67,7 @@ class RunSpinReport:
     index: int
     run: Path
     resolved_run: Path
+    output_run_dir: Path | None
     status: str
     energy_eV: float | None = None
     energy_kind: str = ""
@@ -537,6 +538,47 @@ def default_species_file(run_dir: Path) -> Path | None:
     return None
 
 
+def default_incar(run_dir: Path) -> Path | None:
+    path = run_dir / "INCAR"
+    return path if path.is_file() else None
+
+
+def _context_dirs(intended_run_dir: Path, output_file: Path | None = None) -> list[Path]:
+    candidates = [intended_run_dir]
+    if output_file is not None:
+        cursor = output_file.parent
+        for _ in range(4):
+            candidates.append(cursor)
+            if cursor.parent == cursor:
+                break
+            cursor = cursor.parent
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(path)
+    return unique
+
+
+def first_species_file(intended_run_dir: Path, output_file: Path | None = None) -> Path | None:
+    for directory in _context_dirs(intended_run_dir, output_file):
+        species_file = default_species_file(directory)
+        if species_file is not None:
+            return species_file
+    return None
+
+
+def first_incar_file(intended_run_dir: Path, output_file: Path | None = None) -> Path | None:
+    for directory in _context_dirs(intended_run_dir, output_file):
+        incar = default_incar(directory)
+        if incar is not None:
+            return incar
+    return None
+
+
 def default_outcar(run_dir: Path) -> Path | None:
     path = run_dir / "OUTCAR"
     return path if path.is_file() else None
@@ -668,6 +710,7 @@ def build_run_reports(
             index=energy.index,
             run=entry,
             resolved_run=run_dir,
+            output_run_dir=None,
             status=energy.status,
             energy_eV=energy.energy_eV,
             energy_kind=energy.energy_kind,
@@ -705,6 +748,26 @@ def build_run_reports(
             reports.append(report)
             continue
         report.mag_source = mag_source
+        report.output_run_dir = mag_source.parent
+        species_file = species_override or first_species_file(run_dir, mag_source)
+        expected = natoms
+        if expected is None and species_file is not None:
+            try:
+                expected = read_poscar_species(species_file).total_atoms
+            except Exception:
+                expected = None
+        if expected is not None and block.expected_atoms is not None and len(block.rows) != expected:
+            try:
+                mag_source, block, mag_warning = extract_first_available_magnetization(candidates, expected=expected)
+            except Exception:
+                pass
+            if block is None or mag_source is None:
+                report.mag_status = "NO_MAGNETIZATION"
+                report.warning = mag_warning
+                reports.append(report)
+                continue
+            report.mag_source = mag_source
+            report.output_run_dir = mag_source.parent
         labels, species, species_warning = read_species_labels(species_file, len(block.rows))
         if species_warning:
             report.warning = species_warning
@@ -714,8 +777,8 @@ def build_run_reports(
                 + f"Species count {len(labels)} does not match moment rows {len(block.rows)}."
             )
         initial = None
-        incar = run_dir / "INCAR"
-        if incar.is_file() and species is not None:
+        incar = first_incar_file(run_dir, mag_source)
+        if incar is not None and species is not None:
             initial = existing_magmom_values(incar, species.total_atoms)
         atoms = build_atom_reports(block.moments, labels, initial, change_threshold)
         report.atoms = atoms
@@ -750,6 +813,8 @@ def write_run_summary(reports: list[RunSpinReport], path: Path) -> None:
         "energy_eV",
         "energy_kind",
         "energy_source",
+        "resolved_run",
+        "output_run_dir",
         "mag_source",
         "mag_status",
         "total_moment",
@@ -782,6 +847,8 @@ def write_run_summary(reports: list[RunSpinReport], path: Path) -> None:
                     "energy_eV": "" if report.energy_eV is None else f"{report.energy_eV:.10f}",
                     "energy_kind": report.energy_kind,
                     "energy_source": "" if report.energy_source is None else str(report.energy_source),
+                    "resolved_run": str(report.resolved_run),
+                    "output_run_dir": "" if report.output_run_dir is None else str(report.output_run_dir),
                     "mag_source": "" if report.mag_source is None else str(report.mag_source),
                     "mag_status": report.mag_status,
                     "total_moment": "" if report.total_moment is None else f"{report.total_moment:.8f}",
