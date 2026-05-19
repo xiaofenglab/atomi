@@ -479,7 +479,14 @@ def build_parser() -> argparse.ArgumentParser:
         )
         sd_dd.add_argument("sd_dd_args", nargs=argparse.REMAINDER)
 
-    atat_commands = ("atat-bridge", "atat_bridge", "atat-doctor", "atat-status")
+    atat_commands = (
+        "atat-bridge",
+        "atat_bridge",
+        "atat-doctor",
+        "atat-status",
+        "materials-opt",
+        "quick-materials-opt",
+    )
     for command_name in atat_commands:
         atat_bridge = subparsers.add_parser(
             command_name,
@@ -905,6 +912,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.atat.bridge import doctor_main as atat_doctor_main
 
         atat_doctor_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in ("materials-opt", "quick-materials-opt"):
+        from atomi.atat.bridge import quick_opt_main
+
+        quick_opt_main(raw_args[1:])
         return
     if raw_args and raw_args[0] in ("paper-draft", "report-draft", "atomi-paper-draft"):
         from atomi.reporting.paper_draft import main as paper_draft_main
@@ -1423,6 +1435,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.atat.bridge import doctor_main as atat_doctor_main
 
         atat_doctor_main(args.atat_args)
+        return
+
+    if args.subcommand in ("materials-opt", "quick-materials-opt"):
+        from atomi.atat.bridge import quick_opt_main
+
+        quick_opt_main(args.atat_args)
         return
 
     if args.subcommand in ("paper-draft", "report-draft", "atomi-paper-draft"):

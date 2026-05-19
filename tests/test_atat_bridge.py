@@ -190,3 +190,73 @@ def test_atat_ce_handoff_cli_accepts_unchecked_rows(tmp_path: Path, capsys) -> N
     training = rows(out / "ce_training_set.csv")
     assert len(training) == 1
     assert training[0]["mag_status"] == "OK"
+
+
+def test_quick_materials_opt_writes_uc2_command_scaffold(tmp_path: Path, capsys) -> None:
+    template = tmp_path / "VASP_TEMPLATE"
+    template.mkdir()
+    poscar = tmp_path / "POSCAR_uc2_2x1x1"
+    poscar.write_text(
+        "UC2 demo\n"
+        "1.0\n"
+        "1 0 0\n"
+        "0 1 0\n"
+        "0 0 1\n"
+        "U C\n"
+        "2 4\n"
+        "Direct\n"
+        "0 0 0\n"
+        "0.5 0.5 0.5\n"
+        "0.25 0.25 0.25\n"
+        "0.75 0.75 0.75\n"
+        "0.25 0.75 0.25\n"
+        "0.75 0.25 0.75\n",
+        encoding="utf-8",
+    )
+    for name, text in {
+        "INCAR": "MAGMOM = 2 -2 4*0\n",
+        "KPOINTS": "Gamma\n",
+        "POTCAR": "fake\n",
+    }.items():
+        (template / name).write_text(text, encoding="utf-8")
+    out = tmp_path / "uc2_quick"
+
+    atomi_main(
+        [
+            "materials-opt",
+            "--system",
+            "UC2",
+            "--formula",
+            "UC2",
+            "--supercell",
+            "2x1x1",
+            "--poscar",
+            str(poscar),
+            "--template",
+            str(template),
+            "--outdir",
+            str(out),
+            "--magnetic-element",
+            "U",
+            "--nonmagnetic-element",
+            "C",
+            "--moment",
+            "U=2",
+            "--max-configs",
+            "8",
+        ]
+    )
+
+    assert "Quick optimization workspace" in capsys.readouterr().out
+    assert (out / "00_vasp_template" / "POSCAR").read_text(encoding="utf-8").startswith("UC2 demo")
+    assert (out / "pseudo_species_map.csv").exists()
+    species = rows(out / "pseudo_species_map.csv")
+    assert {"U2p", "U2m", "C"}.issubset({row["pseudo_species"] for row in species})
+    plan = json.loads((out / "quick_opt_plan.json").read_text(encoding="utf-8"))
+    assert plan["schema"] == bridge.QUICK_OPT_SCHEMA
+    assert plan["moment_guards"] == ["U=2,-2@0.7", "C=0@0.25"]
+    command_text = (out / "QUICK_OPT_COMMANDS.md").read_text(encoding="utf-8")
+    assert "magit enum" in command_text
+    assert "vasp-branch-live" in command_text
+    assert "vasp-spin-report" in command_text
+    assert "atat-bridge ce-handoff" in command_text

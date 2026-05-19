@@ -15,6 +15,7 @@ from typing import Any
 
 SCHEMA = "atomi.atat.bridge.v1"
 STATUS_SCHEMA = "atomi.atat.status.v1"
+QUICK_OPT_SCHEMA = "atomi.atat.quick_opt.v1"
 
 ATAT_TOOLS: dict[str, list[str]] = {
     "cluster_expansion": ["maps", "mmaps", "corrdump", "genstr", "emc2"],
@@ -88,6 +89,8 @@ CE_TRAINING_FIELDS = [
     "notes",
 ]
 
+QUICK_COMMAND_FIELDS = ["step", "purpose", "command"]
+
 
 @dataclass
 class PseudoSpecies:
@@ -148,6 +151,127 @@ def finite_float(value: Any) -> float | None:
         return float(text)
     except ValueError:
         return None
+
+
+def split_items(items: list[str] | None) -> list[str]:
+    values: list[str] = []
+    for raw in items or []:
+        for part in str(raw).split(","):
+            text = part.strip()
+            if text:
+                values.append(text)
+    return values
+
+
+def shell_join(parts: list[str]) -> str:
+    return " \\\n  ".join(parts)
+
+
+def parse_moment_specs(items: list[str] | None) -> dict[str, list[float]]:
+    moments: dict[str, list[float]] = {}
+    for raw in items or []:
+        if "=" not in raw:
+            raise ValueError(f"Invalid --moment {raw!r}; use Element=value[,value].")
+        element, values = raw.split("=", 1)
+        element = element.strip()
+        if not element:
+            raise ValueError(f"Invalid --moment {raw!r}; missing element.")
+        parsed: list[float] = []
+        for value in values.split(","):
+            text = value.strip()
+            if not text:
+                continue
+            try:
+                parsed.append(abs(float(text)))
+            except ValueError as exc:
+                raise ValueError(f"Invalid magnetic moment value {text!r} in {raw!r}.") from exc
+        if not parsed:
+            raise ValueError(f"Invalid --moment {raw!r}; no values were provided.")
+        existing = moments.setdefault(element, [])
+        for value in parsed:
+            if value not in existing:
+                existing.append(value)
+    return moments
+
+
+def format_number(value: float) -> str:
+    if abs(value - round(value)) < 1.0e-10:
+        return str(int(round(value)))
+    return f"{value:g}"
+
+
+def build_guard_specs(
+    magnetic_elements: list[str],
+    nonmagnetic_elements: list[str],
+    moment_specs: dict[str, list[float]],
+    guard_tol: float,
+    nonmagnetic_tol: float,
+    explicit_guards: list[str] | None,
+) -> list[str]:
+    if explicit_guards:
+        return split_items(explicit_guards)
+    guards: list[str] = []
+    for element in magnetic_elements:
+        magnitudes = moment_specs.get(element) or [1.0]
+        targets: list[str] = []
+        for magnitude in magnitudes:
+            targets.append(format_number(magnitude))
+            targets.append(format_number(-magnitude))
+        guards.append(f"{element}={','.join(targets)}@{format_number(guard_tol)}")
+    for element in nonmagnetic_elements:
+        guards.append(f"{element}=0@{format_number(nonmagnetic_tol)}")
+    return guards
+
+
+def quick_pseudo_species_rows(args: argparse.Namespace) -> list[dict[str, str]]:
+    magnetic_elements = split_items(args.magnetic_element)
+    nonmagnetic_elements = split_items(args.nonmagnetic_element)
+    moment_specs = parse_moment_specs(args.moment)
+    rows: list[dict[str, str]] = []
+    for element in magnetic_elements:
+        for magnitude in moment_specs.get(element) or [1.0]:
+            mag = format_number(magnitude)
+            rows.append(
+                PseudoSpecies(
+                    f"{safe_name(element)}{safe_name(mag)}p",
+                    element,
+                    "spin_state",
+                    f"+{mag}",
+                    "",
+                    "magnetic_sublattice",
+                    f"{element}={mag},{format_number(-magnitude)}@{format_number(args.moment_guard_tol)}",
+                    element,
+                    "Quick optimization pseudo-species for spin-up branch.",
+                ).row()
+            )
+            rows.append(
+                PseudoSpecies(
+                    f"{safe_name(element)}{safe_name(mag)}m",
+                    element,
+                    "spin_state",
+                    f"{format_number(-magnitude)}",
+                    "",
+                    "magnetic_sublattice",
+                    f"{element}={mag},{format_number(-magnitude)}@{format_number(args.moment_guard_tol)}",
+                    element,
+                    "Quick optimization pseudo-species for spin-down branch.",
+                ).row()
+            )
+    for element in nonmagnetic_elements:
+        rows.append(
+            PseudoSpecies(
+                safe_name(element),
+                element,
+                "nonmagnetic_species",
+                "0",
+                "",
+                "nonmagnetic_sublattice",
+                f"{element}=0@{format_number(args.nonmagnetic_tolerance)}",
+                element,
+                "Nonmagnetic guard used during fail-fast screening.",
+            ).row()
+        )
+    return rows
 
 
 def tool_status(tool: str) -> dict[str, str | bool]:
@@ -671,6 +795,279 @@ def ce_handoff_main(argv: list[str] | None = None) -> None:
     print(f"MC population template : {population_template.resolve()}")
 
 
+def prepare_quick_template(args: argparse.Namespace, root: Path) -> tuple[Path, list[str]]:
+    template = args.template.expanduser().resolve()
+    if not template.is_dir():
+        raise FileNotFoundError(f"VASP template directory not found: {template}")
+    source_poscar = args.poscar.expanduser().resolve() if args.poscar else template / "POSCAR"
+    if not source_poscar.is_file():
+        raise FileNotFoundError(
+            "POSCAR not found. Pass --poscar, or provide POSCAR inside --template."
+        )
+
+    target = root / "00_vasp_template"
+    target.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_poscar, target / "POSCAR")
+    missing: list[str] = []
+    for name in ("INCAR", "KPOINTS", "POTCAR"):
+        src = template / name
+        if src.is_file():
+            shutil.copy2(src, target / name)
+        else:
+            missing.append(name)
+    return target, missing
+
+
+def quick_command_rows(args: argparse.Namespace, guards: list[str]) -> list[dict[str, str]]:
+    dopants = split_items(args.dopant)
+    hosts = split_items(args.host)
+    magnetic_elements = split_items(args.magnetic_element)
+    spin_parts = [
+        "magit enum",
+        "--template 00_vasp_template",
+        "--output-root 02_spin_candidates",
+        "--runlist runlist.txt",
+        "--index spin_index.csv",
+    ]
+    if dopants or hosts:
+        for element in dopants:
+            spin_parts.append(f"--dopant {element}")
+        for element in hosts:
+            spin_parts.append(f"--host {element}")
+    else:
+        for element in magnetic_elements:
+            spin_parts.append(f"--element {element}")
+    for raw in args.moment or []:
+        spin_parts.append(f"--moment {raw}")
+    spin_parts.extend(
+        [
+            f"--dopant-mode {args.spin_mode}",
+            f"--max-configs {args.max_configs}",
+        ]
+    )
+    if args.truncate:
+        spin_parts.append("--truncate")
+
+    guard_parts = [f"--moment-guard {guard}" for guard in guards]
+    live_parts = [
+        "vasp-branch-live",
+        "--runlist runlist.txt",
+        "--log-dir .",
+        "--outdir 03_fail_fast",
+        f"--single-frame-id {safe_name(args.system)}_{safe_name(args.supercell)}",
+        f"--keep-per-frame {args.keep_per_frame}",
+        f"--stopped-after-min {format_number(args.stopped_after_min)}",
+        f"--refresh {format_number(args.refresh)}",
+    ] + guard_parts
+    screen_parts = [
+        "vasp-branch-screen",
+        "--runlist runlist.txt",
+        "--log-dir .",
+        "--outdir 03_fail_fast",
+        f"--single-frame-id {safe_name(args.system)}_{safe_name(args.supercell)}",
+        f"--keep-per-frame {args.keep_per_frame}",
+        f"--stopped-after-min {format_number(args.stopped_after_min)}",
+    ] + guard_parts
+    report_parts = [
+        "vasp-spin-report",
+        "--runlist runlist.txt",
+        "--spin-index spin_index.csv",
+        "--log-dir .",
+        "--output-prefix 04_final_report/spin_energy",
+        f"--stopped-after-min {format_number(args.stopped_after_min)}",
+    ] + guard_parts
+    ce_parts = [
+        "atat-bridge ce-handoff",
+        "--summary-csv 03_fail_fast/stage1_branch_summary.csv",
+        "--outdir 05_atat_ce_handoff",
+        "--include-warning",
+    ]
+    return [
+        {
+            "step": "00_atat_status",
+            "purpose": "Check whether external ATAT tools are visible on this machine.",
+            "command": "atat-doctor",
+        },
+        {
+            "step": "01_optional_atat_index",
+            "purpose": "After external ATAT enumeration/SQS files are placed in 01_atat_candidates, index them for Atomi.",
+            "command": "atat-bridge index --root 01_atat_candidates --out atat_candidate_index.csv",
+        },
+        {
+            "step": "02_spin_candidates",
+            "purpose": "Generate compact spin/local-moment branches from the VASP template.",
+            "command": shell_join(spin_parts),
+        },
+        {
+            "step": "03_array_dft",
+            "purpose": "Submit your VASP array workflow against runlist.txt; Atomi leaves scheduler submission to your local script.",
+            "command": "# sbatch your_vasp_array_script.sbatch runlist.txt",
+        },
+        {
+            "step": "04_live_fail_fast",
+            "purpose": "Scan running/stopped branches, show energy and spin health, and write survivor tables.",
+            "command": shell_join(live_parts),
+        },
+        {
+            "step": "05_one_shot_screen",
+            "purpose": "Run the same branch ranking once after jobs stop or finish.",
+            "command": shell_join(screen_parts),
+        },
+        {
+            "step": "06_spin_energy_report",
+            "purpose": "Generate final energy vs magnetic-moment tables and plots.",
+            "command": shell_join(report_parts),
+        },
+        {
+            "step": "07_atat_ce_handoff",
+            "purpose": "Prepare accepted low-energy rows for ATAT cluster expansion or MC population work.",
+            "command": shell_join(ce_parts),
+        },
+    ]
+
+
+def write_quick_commands(path: Path, rows: list[dict[str, str]], args: argparse.Namespace) -> None:
+    lines = [
+        f"# Quick Materials Optimization: {args.system}",
+        "",
+        f"Formula: {args.formula}",
+        f"Starting cell: {args.supercell}",
+        "",
+        "Run these commands from this workspace directory.",
+        "The spin-only path is ready immediately after this scaffold is created.",
+        "The ATAT path becomes active after you add ATAT lat.in/rndstr.in or structure outputs to 01_atat_candidates.",
+        "",
+    ]
+    for row in rows:
+        lines.extend([f"## {row['step']}", row["purpose"], "", "```bash", row["command"], "```", ""])
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_quick_shell(path: Path, rows: list[dict[str, str]]) -> None:
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "",
+        "# Generated command sketch. Review before running on an HPC login node.",
+        "",
+    ]
+    for row in rows:
+        lines.extend([f"# {row['step']}: {row['purpose']}", row["command"], ""])
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def quick_opt_main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="materials-opt",
+        description="Create a compact ATAT/Atomi quick optimization scaffold for spin and lattice candidates.",
+    )
+    parser.add_argument("--outdir", type=Path, default=Path("materials_opt_quick"))
+    parser.add_argument("--system", default="UC2")
+    parser.add_argument("--formula", default="UC2")
+    parser.add_argument("--supercell", default="2x1x1")
+    parser.add_argument("--poscar", type=Path, help="Starting POSCAR. If omitted, use POSCAR from --template.")
+    parser.add_argument("--template", type=Path, default=Path("VASP_TEMPLATE"))
+    parser.add_argument("--magnetic-element", action="append", default=[], help="Magnetic element to branch, repeatable.")
+    parser.add_argument("--nonmagnetic-element", action="append", default=[], help="Nonmagnetic element guard, repeatable.")
+    parser.add_argument("--dopant", action="append", default=[], help="Optional dopant-style magnetic element for magit enum.")
+    parser.add_argument("--host", action="append", default=[], help="Optional host magnetic element for magit enum.")
+    parser.add_argument("--moment", action="append", default=[], help="Moment magnitude, e.g. U=2 or U=2,1.")
+    parser.add_argument("--moment-guard", action="append", default=[], help="Explicit moment guard, e.g. U=2,-2@0.7.")
+    parser.add_argument("--moment-guard-tol", type=float, default=0.7)
+    parser.add_argument("--nonmagnetic-tolerance", type=float, default=0.25)
+    parser.add_argument("--spin-mode", choices=("all", "fm", "afm", "both"), default="all")
+    parser.add_argument("--max-configs", type=int, default=16)
+    parser.add_argument("--no-truncate", dest="truncate", action="store_false", default=True)
+    parser.add_argument("--keep-per-frame", type=int, default=2)
+    parser.add_argument("--stopped-after-min", type=float, default=15.0)
+    parser.add_argument("--refresh", type=float, default=10.0)
+    args = parser.parse_args(argv)
+
+    moment_specs = parse_moment_specs(args.moment)
+    magnetic_elements = split_items(args.magnetic_element)
+    for element in split_items(args.dopant) + split_items(args.host):
+        if element not in magnetic_elements:
+            magnetic_elements.append(element)
+    if not magnetic_elements:
+        magnetic_elements = list(moment_specs)
+    if not magnetic_elements:
+        raise ValueError("Provide --magnetic-element or --moment Element=value for spin branching.")
+    args.magnetic_element = magnetic_elements
+    nonmagnetic_elements = split_items(args.nonmagnetic_element)
+
+    root = args.outdir.expanduser().resolve()
+    for name in (
+        "01_atat_candidates",
+        "02_spin_candidates",
+        "03_fail_fast",
+        "04_final_report",
+        "05_atat_ce_handoff",
+    ):
+        (root / name).mkdir(parents=True, exist_ok=True)
+    template_path, missing_template_files = prepare_quick_template(args, root)
+    guards = build_guard_specs(
+        magnetic_elements,
+        nonmagnetic_elements,
+        moment_specs,
+        args.moment_guard_tol,
+        args.nonmagnetic_tolerance,
+        args.moment_guard,
+    )
+    species_rows = quick_pseudo_species_rows(args)
+    command_rows = quick_command_rows(args, guards)
+
+    write_csv(root / "pseudo_species_map.csv", species_rows, SPECIES_FIELDS)
+    write_csv(root / "quick_opt_commands.csv", command_rows, QUICK_COMMAND_FIELDS)
+    write_quick_commands(root / "QUICK_OPT_COMMANDS.md", command_rows, args)
+    write_quick_shell(root / "quick_opt_commands.sh", command_rows)
+    write_json(
+        root / "quick_opt_plan.json",
+        {
+            "schema": QUICK_OPT_SCHEMA,
+            "system": args.system,
+            "formula": args.formula,
+            "supercell": args.supercell,
+            "magnetic_elements": magnetic_elements,
+            "nonmagnetic_elements": nonmagnetic_elements,
+            "moment_specs": {key: [format_number(value) for value in values] for key, values in moment_specs.items()},
+            "moment_guards": guards,
+            "max_configs": args.max_configs,
+            "spin_mode": args.spin_mode,
+            "template": str(template_path),
+            "missing_template_files": missing_template_files,
+            "outputs": {
+                "commands": str(root / "QUICK_OPT_COMMANDS.md"),
+                "shell_commands": str(root / "quick_opt_commands.sh"),
+                "runlist_after_spin_enum": str(root / "runlist.txt"),
+                "spin_index_after_spin_enum": str(root / "spin_index.csv"),
+                "fail_fast_summary": str(root / "03_fail_fast" / "stage1_branch_summary.csv"),
+                "stage2_survivors": str(root / "03_fail_fast" / "stage2_survivors_runlist.txt"),
+                "spin_report": str(root / "04_final_report" / "spin_energy_run_summary.csv"),
+            },
+            "atat_status": inspect_atat_environment(),
+            "notes": [
+                "For a stoichiometric UC2 2x1x1 demo, the spin-only path can start with magit enum.",
+                "Use ATAT in 01_atat_candidates when occupational, vacancy, or SQS lattice candidates are needed.",
+                "Lowest-energy selection should use physics-accepted rows from 03_fail_fast or 04_final_report.",
+            ],
+        },
+    )
+    (root / "01_atat_candidates" / "README.md").write_text(
+        "Optional ATAT area. Put lat.in/rndstr.in and ATAT structure outputs here, then run:\n"
+        "  atat-bridge index --root 01_atat_candidates --out atat_candidate_index.csv\n",
+        encoding="utf-8",
+    )
+
+    print(f"Quick optimization workspace : {root}")
+    print(f"VASP template copy           : {template_path}")
+    print(f"Pseudo-species map           : {root / 'pseudo_species_map.csv'}")
+    print(f"Command guide                : {root / 'QUICK_OPT_COMMANDS.md'}")
+    print(f"Plan                         : {root / 'quick_opt_plan.json'}")
+    if missing_template_files:
+        print(f"Template warning             : missing {', '.join(missing_template_files)}")
+    print("Next                         : cd into the workspace and run the magit enum command from QUICK_OPT_COMMANDS.md.")
+
+
 def status_main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="atat-doctor", description="Report ATAT tool availability for Atomi bridges.")
     parser.add_argument("--json", action="store_true")
@@ -693,6 +1090,8 @@ def build_parser() -> argparse.ArgumentParser:
     index_parser.add_argument("args", nargs=argparse.REMAINDER)
     ce_parser = subparsers.add_parser("ce-handoff", help="Build a CE/MC handoff from accepted Atomi DFT rows.")
     ce_parser.add_argument("args", nargs=argparse.REMAINDER)
+    quick_parser = subparsers.add_parser("quick-opt", help="Create a quick materials optimization scaffold.")
+    quick_parser.add_argument("args", nargs=argparse.REMAINDER)
     return parser
 
 
@@ -710,6 +1109,8 @@ def main(argv: list[str] | None = None) -> None:
         index_main(rest)
     elif command in {"ce-handoff", "ce", "ce-plan"}:
         ce_handoff_main(rest)
+    elif command in {"quick-opt", "quick", "materials-opt"}:
+        quick_opt_main(rest)
     else:
         parser = build_parser()
         parser.parse_args(argv)
