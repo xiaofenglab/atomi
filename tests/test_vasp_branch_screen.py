@@ -165,9 +165,15 @@ def test_branch_screen_accepts_runlist_and_streams_live_scan(tmp_path: Path, cap
     output = capsys.readouterr().out
     assert "Atomi VASP Branch Scan Monitor" in output
     assert "path" in output
+    assert "guard" in output
+    assert "chg" in output
+    assert "order" in output
     assert "1/2" in output
     assert "2/2" in output
     assert "u_site_a" in output
+    assert "U:1" in output
+    assert "Gd:" in output
+    assert "U:" in output
     assert "Pass 1 complete" in output
 
     rows = read_csv(outdir / "stage1_branch_summary.csv")
@@ -192,7 +198,11 @@ def test_branch_screen_accepts_runlist_and_streams_live_scan(tmp_path: Path, cap
     table = branch_screen.format_live_table(reports, args, iteration=1)
     assert "Atomi VASP Branch Live Monitor" in table
     assert "path" in table
+    assert "guard" in table
+    assert "chg" in table
+    assert "order" in table
     assert "u_site_a" in table
+    assert "U:1" in table
     assert "GOOD" in table
     assert "BAD" in table or "WARN" in table
 

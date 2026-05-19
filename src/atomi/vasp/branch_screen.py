@@ -910,6 +910,26 @@ def _spin_status(report: BranchReport) -> str:
     return spin_status
 
 
+def _compact_count_map(values: dict[str, int], empty: str = "-") -> str:
+    parts = [f"{key}:{values[key]}" for key in sorted(values) if values[key]]
+    return ",".join(parts) if parts else empty
+
+
+def _compact_order_shift(report: BranchReport) -> str:
+    elements = sorted(set(report.initial_element_order) | set(report.element_order))
+    parts: list[str] = []
+    for element in elements:
+        initial = report.initial_element_order.get(element)
+        final = report.element_order.get(element)
+        if final is None:
+            continue
+        if initial is not None and initial != final:
+            parts.append(f"{element}:{initial}>{final}")
+        else:
+            parts.append(f"{element}:{final}")
+    return ",".join(parts) if parts else "-"
+
+
 def _run_pointer(path: Path, parent_is_shared: bool) -> str:
     name = path.name or str(path)
     parent = path.parent.name
@@ -944,8 +964,8 @@ def format_live_table(reports: list[BranchReport], args: argparse.Namespace, ite
         f"Branches={len(reports)}   GOOD={counts.get('continue', 0)}   WARN={counts.get('warning', 0)}   BAD={counts.get('stop', 0)}",
         f"Outputs: {args.outdir / 'stage1_branch_summary.csv'} ; {args.outdir / 'stage2_survivors_runlist.txt'}",
         "",
-        "run  path                    frame        branch        step      energy     relE      dE      conv      scf       spin      trk   rec   note",
-        "---  ----------------------  -----------  ------------  -----  ----------  -------  --------  --------  --------  --------  ----  ----  ----------------",
+        "run  path                    frame        branch        step      energy     relE      dE      conv      scf       guard     chg       order             trk   rec   note",
+        "---  ----------------------  -----------  ------------  -----  ----------  -------  --------  --------  --------  --------  --------  ----------------  ----  ----  ----------------",
     ]
     sorted_reports = sorted(
         reports,
@@ -967,6 +987,8 @@ def format_live_table(reports: list[BranchReport], args: argparse.Namespace, ite
             f"{_short(report.convergence_status, 8)}  "
             f"{_short(report.scf_status, 8)}  "
             f"{_short(spin_status, 8)}  "
+            f"{_short(_compact_count_map(report.changed_by_element), 8)}  "
+            f"{_short(_compact_order_shift(report), 16)}  "
             f"{_short(report.tracked_site_status, 4)}  "
             f"{_short(_action_label(report.action), 4)}  "
             f"{_short(compact_reason(report), 16)}"
@@ -975,7 +997,8 @@ def format_live_table(reports: list[BranchReport], args: argparse.Namespace, ite
         [
             "",
             "Legend: rec GOOD/WARN/BAD is the same recommendation used by the CSV/JSON branch screen.",
-            "Spin shows moment-guard status when guards are set; otherwise it shows magnetization extraction status.",
+            "guard shows physics moment-guard status when guards are set; otherwise it shows magnetization extraction status.",
+            "chg counts atoms whose final local moment changed from initial MAGMOM by element; order compares initial and final element-level FM/AFM labels.",
             "Ctrl-C exits cleanly.",
         ]
     )
@@ -989,8 +1012,8 @@ def format_scan_header(args: argparse.Namespace, iteration: int, total: int) -> 
         f"Atomi VASP Branch Scan Monitor | pass {iteration} | {now} | branches={total}",
         f"Outputs after pass: {args.outdir / 'stage1_branch_summary.csv'} ; {args.outdir / 'stage2_survivors_runlist.txt'}",
         "Rows are streamed as soon as each branch is parsed; per-frame ranks are final after the pass completes.",
-        "run        path                    frame        branch        step      energy     relE      dE      conv      scf       spin      trk   rec   note",
-        "---------  ----------------------  -----------  ------------  -----  ----------  -------  --------  --------  --------  --------  ----  ----  ----------------",
+        "run        path                    frame        branch        step      energy     relE      dE      conv      scf       guard     chg       order             trk   rec   note",
+        "---------  ----------------------  -----------  ------------  -----  ----------  -------  --------  --------  --------  --------  --------  ----------------  ----  ----  ----------------",
     ]
     return "\n".join(lines)
 
@@ -1009,6 +1032,8 @@ def format_scan_row(report: BranchReport, index: int, total: int, run_label: str
         f"{_short(report.convergence_status, 8)}  "
         f"{_short(report.scf_status, 8)}  "
         f"{_short(_spin_status(report), 8)}  "
+        f"{_short(_compact_count_map(report.changed_by_element), 8)}  "
+        f"{_short(_compact_order_shift(report), 16)}  "
         f"{_short(report.tracked_site_status, 4)}  "
         f"{_short(_action_label(report.action), 4)}  "
         f"{_short(compact_reason(report), 16)}"
