@@ -74,6 +74,7 @@ class BranchReport:
     convergence_status: str = "NO_OUTPUT"
     newest_output: Path | None = None
     newest_output_age_min: float | None = None
+    current_step: int | None = None
     last_de: float | None = None
     scf_status: str = "UNKNOWN"
     scf_steps: int = 0
@@ -153,6 +154,25 @@ def load_branch_index(path: Path) -> list[BranchInput]:
                     metadata={key: value for key, value in row.items() if value is not None},
                 )
             )
+    return rows
+
+
+def load_branch_runlist(path: Path, single_frame_id: str | None = None) -> list[BranchInput]:
+    rows: list[BranchInput] = []
+    base = path.parent.resolve()
+    for line_number, raw in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        run_dir = _resolve_run_dir(line, base)
+        rows.append(
+            BranchInput(
+                frame_id=single_frame_id or run_dir.parent.name,
+                branch_id=run_dir.name or f"branch_{line_number:04d}",
+                run_dir=run_dir,
+                metadata={"runlist": str(path), "runlist_index": str(line_number)},
+            )
+        )
     return rows
 
 
@@ -311,6 +331,25 @@ def parse_oszicar_scf(path: Path) -> tuple[list[float], list[float]]:
     except OSError:
         return [], []
     return dEs, energies
+
+
+def parse_oszicar_current_step(path: Path) -> int | None:
+    if not path.is_file():
+        return None
+    current_step = None
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                parts = line.split()
+                if not parts:
+                    continue
+                if not parts[0].isdigit():
+                    continue
+                if "F=" in parts or "E0=" in parts or "T=" in parts:
+                    current_step = int(parts[0])
+    except OSError:
+        return None
+    return current_step
 
 
 def sign_change_ratio(values: list[float]) -> float | None:
@@ -491,6 +530,7 @@ def evaluate_branch(branch: BranchInput, args: argparse.Namespace) -> BranchRepo
     report.reasons.extend(convergence_reasons)
 
     dEs, _energies = parse_oszicar_scf(branch.run_dir / "OSZICAR")
+    report.current_step = parse_oszicar_current_step(branch.run_dir / "OSZICAR")
     scf_status, last_de, recent_median, ratio, scf_reasons = classify_scf(
         dEs,
         warning_de=args.scf_warning_de,
@@ -601,6 +641,7 @@ def report_to_dict(report: BranchReport) -> dict[str, Any]:
         "convergence_status": report.convergence_status,
         "newest_output": "" if report.newest_output is None else str(report.newest_output),
         "newest_output_age_min": report.newest_output_age_min,
+        "current_step": report.current_step,
         "last_de": report.last_de,
         "scf_status": report.scf_status,
         "scf_steps": report.scf_steps,
@@ -639,6 +680,7 @@ def write_csv(reports: list[BranchReport], path: Path) -> None:
         "energy_kind",
         "energy_source",
         "convergence_status",
+        "current_step",
         "last_de",
         "scf_status",
         "mag_status",
@@ -710,10 +752,114 @@ def print_summary(reports: list[BranchReport], outdir: Path) -> None:
     print(f"Stage-2 runlist     : {outdir / 'stage2_survivors_runlist.txt'}")
 
 
+def _short(text: str, width: int) -> str:
+    if len(text) <= width:
+        return text.ljust(width)
+    if width <= 1:
+        return text[:width]
+    return (text[: width - 1] + "~").ljust(width)
+
+
+def _fmt_float(value: float | None, width: int, precision: int = 3) -> str:
+    if value is None:
+        return "-".rjust(width)
+    return f"{value:.{precision}f}".rjust(width)
+
+
+def _fmt_scientific(value: float | None, width: int) -> str:
+    if value is None:
+        return "-".rjust(width)
+    return f"{value:.1e}".rjust(width)
+
+
+def _action_label(action: str) -> str:
+    return {"continue": "GOOD", "warning": "WARN", "stop": "BAD"}.get(action, action.upper())
+
+
+def compact_reason(report: BranchReport) -> str:
+    parts: list[str] = []
+    if report.relative_energy_eV is not None and report.relative_energy_eV > 0:
+        parts.append(f"dE={report.relative_energy_eV:.2f}")
+    if report.scf_status not in {"OK", "UNKNOWN"}:
+        parts.append(report.scf_status)
+    if report.physics_guard_status == "FAIL":
+        parts.append("spin-guard")
+    if report.tracked_site_status == "LOST":
+        parts.append("track-lost")
+    if report.mag_status in {"NO_OUTCAR", "NO_MAGNETIZATION"}:
+        parts.append(report.mag_status)
+    if report.convergence_status in {"STOPPED", "ERROR", "NO_OUTPUT"}:
+        parts.append(report.convergence_status)
+    if report.reasons and not parts:
+        parts.append(report.reasons[0])
+    return ";".join(parts) if parts else "ok"
+
+
+def format_live_table(reports: list[BranchReport], args: argparse.Namespace, iteration: int) -> str:
+    counts: dict[str, int] = {}
+    for report in reports:
+        counts[report.action] = counts.get(report.action, 0) + 1
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    lines = [
+        "Atomi VASP Branch Live Monitor",
+        f"Updated: {now}   refresh={args.refresh:g}s   iteration={iteration}",
+        f"Branches={len(reports)}   GOOD={counts.get('continue', 0)}   WARN={counts.get('warning', 0)}   BAD={counts.get('stop', 0)}",
+        f"Outputs: {args.outdir / 'stage1_branch_summary.csv'} ; {args.outdir / 'stage2_survivors_runlist.txt'}",
+        "",
+        "run  frame        branch        step      energy     relE      dE      conv      scf       spin      trk   rec   note",
+        "---  -----------  ------------  -----  ----------  -------  --------  --------  --------  --------  ----  ----  ----------------",
+    ]
+    sorted_reports = sorted(
+        reports,
+        key=lambda item: (item.frame_id, item.rank_in_frame or 999999, item.branch_id),
+    )
+    for index, report in enumerate(sorted_reports, start=1):
+        step = "-" if report.current_step is None else str(report.current_step)
+        spin_status = report.physics_guard_status
+        if spin_status == "NOT_APPLIED":
+            spin_status = report.mag_status
+        lines.append(
+            f"{str(index).rjust(3)}  "
+            f"{_short(report.frame_id, 11)}  "
+            f"{_short(report.branch_id, 12)}  "
+            f"{step.rjust(5)}  "
+            f"{_fmt_float(report.energy_eV, 10, 4)}  "
+            f"{_fmt_float(report.relative_energy_eV, 7, 3)}  "
+            f"{_fmt_scientific(report.last_de, 8)}  "
+            f"{_short(report.convergence_status, 8)}  "
+            f"{_short(report.scf_status, 8)}  "
+            f"{_short(spin_status, 8)}  "
+            f"{_short(report.tracked_site_status, 4)}  "
+            f"{_short(_action_label(report.action), 4)}  "
+            f"{_short(compact_reason(report), 16)}"
+        )
+    lines.extend(
+        [
+            "",
+            "Legend: rec GOOD/WARN/BAD is the same recommendation used by the CSV/JSON branch screen.",
+            "Spin shows moment-guard status when guards are set; otherwise it shows magnetization extraction status.",
+            "Ctrl-C exits cleanly.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def write_outputs(reports: list[BranchReport], args: argparse.Namespace) -> None:
+    args.outdir.mkdir(parents=True, exist_ok=True)
+    write_csv(reports, args.outdir / "stage1_branch_summary.csv")
+    write_json(reports, args.outdir / "stage1_branch_summary.json", args)
+    write_survivors(reports, args.outdir / "stage2_survivors_runlist.txt")
+
+
 def screen_once(args: argparse.Namespace) -> list[BranchReport]:
-    branches = load_branch_index(args.index) if args.index else discover_branches(args.root, args.max_depth, args.single_frame_id)
+    if args.index:
+        branches = load_branch_index(args.index)
+    elif args.runlist:
+        branches = load_branch_runlist(args.runlist, single_frame_id=args.single_frame_id)
+    else:
+        branches = discover_branches(args.root, args.max_depth, args.single_frame_id)
     if not branches:
-        raise FileNotFoundError("No VASP branch directories found. Use --index or adjust --max-depth.")
+        raise FileNotFoundError("No VASP branch directories found. Use --index, --runlist, or adjust --max-depth.")
     reports = [evaluate_branch(branch, args) for branch in branches]
     rank_and_classify(
         reports,
@@ -731,6 +877,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("root", nargs="?", type=Path, default=Path("."), help="Root containing frame/branch VASP folders.")
     parser.add_argument("--index", type=Path, help="CSV with run_dir/path plus optional frame_id and branch_id columns.")
+    parser.add_argument("--runlist", type=Path, help="Plain runlist.txt containing one branch directory per line.")
     parser.add_argument("--outdir", type=Path, default=Path("."), help="Output directory for stage-1 summaries.")
     parser.add_argument("--max-depth", type=int, default=2, help="Discovery depth below root when --index is not given.")
     parser.add_argument("--single-frame-id", help="Frame id for one-level branch folders under root.")
@@ -754,6 +901,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--localized-min-abs", type=float, default=0.5, help="Tracked site is lost below this |moment|.")
     parser.add_argument("--order-threshold", type=float, default=0.2, help="Moment threshold for FM/AFM/AFM-like labels.")
     parser.add_argument("--natoms", type=int, help="Expected atom count when POSCAR/CONTCAR is missing.")
+    parser.add_argument("--live", action="store_true", help="Refresh a terminal dashboard instead of printing one summary.")
+    parser.add_argument("--refresh", type=float, default=10.0, help="Refresh seconds for --live. Default: 10.")
+    parser.add_argument("--live-count", type=int, default=0, help="Number of live refreshes; 0 means until Ctrl-C.")
     parser.add_argument("--watch-interval", type=float, default=0.0, help="Repeat screening every N seconds. Default one-shot.")
     parser.add_argument("--watch-count", type=int, default=1, help="Number of watch iterations; use 0 for until Ctrl-C.")
     return parser
@@ -764,20 +914,43 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     args._moment_guards = parse_moment_guards(args.moment_guard, args.moment_guard_tol)
     args._track_atoms = parse_track_atoms(args.track_atom)
+    if args.live:
+        run_live(args)
+        return
     iteration = 0
     while True:
         iteration += 1
         reports = screen_once(args)
-        args.outdir.mkdir(parents=True, exist_ok=True)
-        write_csv(reports, args.outdir / "stage1_branch_summary.csv")
-        write_json(reports, args.outdir / "stage1_branch_summary.json", args)
-        write_survivors(reports, args.outdir / "stage2_survivors_runlist.txt")
+        write_outputs(reports, args)
         print_summary(reports, args.outdir)
         if args.watch_interval <= 0:
             break
         if args.watch_count > 0 and iteration >= args.watch_count:
             break
         time.sleep(args.watch_interval)
+
+
+def run_live(args: argparse.Namespace) -> None:
+    iteration = 0
+    try:
+        while True:
+            iteration += 1
+            reports = screen_once(args)
+            write_outputs(reports, args)
+            print("\033[2J\033[H", end="")
+            print(format_live_table(reports, args, iteration))
+            if args.live_count > 0 and iteration >= args.live_count:
+                break
+            time.sleep(max(args.refresh, 0.1))
+    except KeyboardInterrupt:
+        print("\nStopped live VASP branch monitor.")
+
+
+def monitor_main(argv: list[str] | None = None) -> None:
+    args = list(argv or [])
+    if "--live" not in args:
+        args.insert(0, "--live")
+    main(args)
 
 
 if __name__ == "__main__":  # pragma: no cover

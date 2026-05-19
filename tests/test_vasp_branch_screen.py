@@ -136,3 +136,54 @@ def test_branch_screen_uses_index_and_spin_guard_stop(tmp_path: Path) -> None:
     assert rows[0]["tracked_site_status"] == "LOST"
     assert "moment guard failed" in rows[0]["reasons"]
     assert (outdir / "stage2_survivors_runlist.txt").read_text(encoding="utf-8") == ""
+
+
+def test_branch_screen_accepts_runlist_and_formats_live_table(tmp_path: Path) -> None:
+    run_a = tmp_path / "frame_003" / "u_site_a"
+    run_b = tmp_path / "frame_003" / "u_site_b"
+    write_branch(run_a, energy=-8.0, moments=[7.0, 2.0, 0.0])
+    write_branch(run_b, energy=-7.0, moments=[7.0, 0.1, 0.0])
+    runlist = tmp_path / "runlist.txt"
+    runlist.write_text(f"{run_a}\n{run_b}\n", encoding="utf-8")
+    outdir = tmp_path / "out"
+
+    branch_screen.main(
+        [
+            "--runlist",
+            str(runlist),
+            "--outdir",
+            str(outdir),
+            "--moment-guard",
+            "U=2@0.5",
+            "--live",
+            "--live-count",
+            "1",
+            "--refresh",
+            "0.1",
+        ]
+    )
+
+    rows = read_csv(outdir / "stage1_branch_summary.csv")
+    assert [row["frame_id"] for row in rows] == ["frame_003", "frame_003"]
+    assert rows[0]["current_step"] == "1"
+    assert (outdir / "stage2_survivors_runlist.txt").read_text(encoding="utf-8").strip().endswith("u_site_a")
+
+    args = branch_screen.build_parser().parse_args(
+        [
+            "--runlist",
+            str(runlist),
+            "--outdir",
+            str(outdir),
+            "--moment-guard",
+            "U=2@0.5",
+        ]
+    )
+    args._moment_guards = branch_screen.parse_moment_guards(args.moment_guard, args.moment_guard_tol)
+    args._track_atoms = branch_screen.parse_track_atoms(args.track_atom)
+    reports = branch_screen.screen_once(args)
+    args.refresh = 10
+    table = branch_screen.format_live_table(reports, args, iteration=1)
+    assert "Atomi VASP Branch Live Monitor" in table
+    assert "u_site_a" in table
+    assert "GOOD" in table
+    assert "BAD" in table or "WARN" in table
