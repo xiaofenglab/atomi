@@ -201,7 +201,7 @@ def test_single_outcar_gz_writes_magmom_files(tmp_path: Path) -> None:
     assert "1      Gd   +7.100" in expanded
 
 
-def test_batch_spin_energy_report(tmp_path: Path) -> None:
+def test_batch_spin_energy_report(tmp_path: Path, capsys) -> None:
     runlist = tmp_path / "runlist.txt"
     run_a = tmp_path / "spin_001"
     run_b = tmp_path / "spin_002"
@@ -235,6 +235,13 @@ def test_batch_spin_energy_report(tmp_path: Path) -> None:
         ]
     )
 
+    output = capsys.readouterr().out
+    assert "Atomi VASP Spin Report" in output
+    assert "guard" in output
+    assert "chg" in output
+    assert "order" in output
+    assert "Gd:AFM>FM" in output
+    assert "U:AFM" in output
     summary_path = tmp_path / "reports" / "spin_energy_run_summary.csv"
     atom_path = tmp_path / "reports" / "spin_energy_atom_moments.csv"
     report_path = tmp_path / "reports" / "spin_energy_report.md"

@@ -1074,6 +1074,94 @@ def write_plots(
     return paths
 
 
+def _short(text: str, width: int) -> str:
+    if len(text) <= width:
+        return text.ljust(width)
+    if width <= 1:
+        return text[:width]
+    return (text[: width - 1] + "~").ljust(width)
+
+
+def _fmt_float(value: float | None, width: int, precision: int = 3) -> str:
+    if value is None:
+        return "-".rjust(width)
+    return f"{value:.{precision}f}".rjust(width)
+
+
+def _compact_count_map(values: dict[str, int], empty: str = "-") -> str:
+    parts = [f"{key}:{values[key]}" for key in sorted(values) if values[key]]
+    return ",".join(parts) if parts else empty
+
+
+def _ordered_spin_elements(report: RunSpinReport) -> list[str]:
+    elements = list(dict.fromkeys([*report.initial_element_order, *report.element_order]))
+
+    def is_magnetic(element: str) -> bool:
+        labels = [report.initial_element_order.get(element), report.element_order.get(element)]
+        return any(label not in {None, "nonmagnetic"} for label in labels)
+
+    magnetic = [element for element in elements if is_magnetic(element)]
+    nonmagnetic = [element for element in elements if element not in magnetic]
+    return magnetic + nonmagnetic
+
+
+def compact_order_shift(report: RunSpinReport) -> str:
+    parts: list[str] = []
+    for element in _ordered_spin_elements(report):
+        initial = report.initial_element_order.get(element)
+        final = report.element_order.get(element)
+        if final is None:
+            continue
+        if initial is not None and initial != final:
+            parts.append(f"{element}:{initial}>{final}")
+        else:
+            parts.append(f"{element}:{final}")
+    return ",".join(parts) if parts else "-"
+
+
+def compact_spin_note(report: RunSpinReport) -> str:
+    if report.physics_guard_bad_by_element:
+        return f"bad={_compact_count_map(report.physics_guard_bad_by_element)}"
+    if report.warning:
+        return report.warning
+    if report.status not in {"OK", "STOPPED"}:
+        return report.status
+    return "ok"
+
+
+def print_batch_table(reports: list[RunSpinReport]) -> None:
+    usable_energies = [report.energy_eV for report in reports if report.energy_eV is not None]
+    best_energy = min(usable_energies) if usable_energies else None
+    print()
+    print("Atomi VASP Spin Report")
+    print(
+        "run  path                    status    energy      relE     total_m   mag       guard     chg       order             note"
+    )
+    print(
+        "---  ----------------------  --------  ----------  -------  --------  --------  --------  --------  ----------------  ----------------"
+    )
+    for report in reports:
+        relative = None
+        if report.energy_eV is not None and best_energy is not None:
+            relative = report.energy_eV - best_energy
+        guard = report.physics_guard_status
+        if guard in {"", "NOT_APPLIED"}:
+            guard = report.mag_status
+        print(
+            f"{str(report.index).rjust(3)}  "
+            f"{_short(Path(report.run).name or str(report.run), 22)}  "
+            f"{_short(report.status, 8)}  "
+            f"{_fmt_float(report.energy_eV, 10, 4)}  "
+            f"{_fmt_float(relative, 7, 3)}  "
+            f"{_fmt_float(report.total_moment, 8, 3)}  "
+            f"{_short(report.mag_status, 8)}  "
+            f"{_short(guard, 8)}  "
+            f"{_short(_compact_count_map(report.changed_by_element), 8)}  "
+            f"{_short(compact_order_shift(report), 16)}  "
+            f"{_short(compact_spin_note(report), 16)}"
+        )
+
+
 def output_paths(prefix: Path) -> dict[str, Path]:
     prefix.parent.mkdir(parents=True, exist_ok=True)
     return {
@@ -1169,6 +1257,8 @@ def run_batch(args: argparse.Namespace) -> None:
     if not args.no_plot:
         plot_paths = write_plots(reports, paths["plots"], args.output_prefix.name, args.max_plot_labels)
     ok = sum(1 for report in reports if report.energy_eV is not None and report.atoms)
+    print_batch_table(reports)
+    print()
     print(f"Runlist rows       : {len(reports)}")
     print(f"Energy+moments rows: {ok}")
     print(f"Energy status      : {dict(Counter(report.status for report in reports))}")
