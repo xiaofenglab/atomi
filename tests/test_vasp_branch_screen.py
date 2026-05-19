@@ -197,6 +197,42 @@ def test_branch_screen_accepts_runlist_and_streams_live_scan(tmp_path: Path, cap
     assert "BAD" in table or "WARN" in table
 
 
+def test_live_monitor_defaults_to_runlist_not_directory_discovery(tmp_path: Path, monkeypatch, capsys) -> None:
+    run_a = tmp_path / "frame_004" / "u_site_a"
+    extra = tmp_path / "unlisted_but_vasp_like"
+    write_branch(run_a, energy=-8.0, moments=[7.0, 2.0, 0.0])
+    write_branch(extra, energy=-99.0, moments=[7.0, 2.0, 0.0])
+    (tmp_path / "runlist.txt").write_text("frame_004/u_site_a\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    branch_screen.monitor_main(["--outdir", "out", "--live-count", "1", "--refresh", "0.1"])
+
+    output = capsys.readouterr().out
+    assert "1/1" in output
+    assert "u_site_a" in output
+    assert "unlisted" not in output
+    rows = read_csv(tmp_path / "out" / "stage1_branch_summary.csv")
+    assert len(rows) == 1
+    assert rows[0]["run_dir"].endswith("frame_004/u_site_a")
+
+
+def test_live_monitor_requires_runlist_unless_discover_is_explicit(tmp_path: Path, monkeypatch) -> None:
+    write_branch(tmp_path / "unlisted_but_vasp_like", energy=-99.0, moments=[7.0, 2.0, 0.0])
+    monkeypatch.chdir(tmp_path)
+
+    try:
+        branch_screen.monitor_main(["--outdir", "out", "--live-count", "1"])
+    except FileNotFoundError as exc:
+        assert "runlist.txt" in str(exc)
+    else:
+        raise AssertionError("vasp-branch-live should require runlist.txt unless --discover is passed")
+
+    branch_screen.monitor_main(["--discover", "--outdir", "out", "--live-count", "1", "--refresh", "0.1"])
+    rows = read_csv(tmp_path / "out" / "stage1_branch_summary.csv")
+    assert len(rows) == 1
+    assert rows[0]["run_dir"].endswith("unlisted_but_vasp_like")
+
+
 def test_run_pointer_uses_parent_only_when_needed(tmp_path: Path) -> None:
     shared = [
         branch_screen.BranchInput("f1", "a", tmp_path / "frame_001" / "spin_a"),

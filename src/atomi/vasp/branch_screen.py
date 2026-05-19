@@ -1022,6 +1022,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runlist", type=Path, help="Plain runlist.txt containing one branch directory per line.")
     parser.add_argument("--outdir", type=Path, default=Path("."), help="Output directory for stage-1 summaries.")
     parser.add_argument("--max-depth", type=int, default=2, help="Discovery depth below root when --index is not given.")
+    parser.add_argument(
+        "--discover",
+        action="store_true",
+        help="Allow live mode to discover VASP branches under root when no --runlist/--index is supplied.",
+    )
     parser.add_argument("--single-frame-id", help="Frame id for one-level branch folders under root.")
     parser.add_argument("--keep-per-frame", type=int, default=1, help="Number of best branches to pass to stage 2 per frame.")
     parser.add_argument("--energy-window-warning", type=float, default=0.5, help="Warn when branch energy is this many eV above frame best.")
@@ -1063,6 +1068,15 @@ def main(argv: list[str] | None = None) -> None:
     args._moment_guards = parse_moment_guards(args.moment_guard, args.moment_guard_tol)
     args._track_atoms = parse_track_atoms(args.track_atom)
     if args.live:
+        if args.index is None and args.runlist is None and not args.discover:
+            default_runlist = args.root / "runlist.txt"
+            if not default_runlist.is_file():
+                raise FileNotFoundError(
+                    "vasp-branch-live reads runlist.txt by default and did not find one. "
+                    "Pass --runlist PATH, run from the runlist directory, or pass --discover "
+                    "to scan nearby VASP-like folders."
+                )
+            args.runlist = default_runlist
         run_live(args)
         return
     iteration = 0
