@@ -138,7 +138,7 @@ def test_branch_screen_uses_index_and_spin_guard_stop(tmp_path: Path) -> None:
     assert (outdir / "stage2_survivors_runlist.txt").read_text(encoding="utf-8") == ""
 
 
-def test_branch_screen_accepts_runlist_and_formats_live_table(tmp_path: Path) -> None:
+def test_branch_screen_accepts_runlist_and_streams_live_scan(tmp_path: Path, capsys) -> None:
     run_a = tmp_path / "frame_003" / "u_site_a"
     run_b = tmp_path / "frame_003" / "u_site_b"
     write_branch(run_a, energy=-8.0, moments=[7.0, 2.0, 0.0])
@@ -162,6 +162,11 @@ def test_branch_screen_accepts_runlist_and_formats_live_table(tmp_path: Path) ->
             "0.1",
         ]
     )
+    output = capsys.readouterr().out
+    assert "Atomi VASP Branch Scan Monitor" in output
+    assert "1/2" in output
+    assert "2/2" in output
+    assert "Pass 1 complete" in output
 
     rows = read_csv(outdir / "stage1_branch_summary.csv")
     assert [row["frame_id"] for row in rows] == ["frame_003", "frame_003"]

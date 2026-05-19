@@ -5,9 +5,12 @@ from __future__ import annotations
 import argparse
 import csv
 import gzip
+import itertools
 import json
 import re
 import statistics
+import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -592,7 +595,27 @@ def _max_action(current: str, proposed: str) -> str:
     return proposed if order.get(proposed, 0) > order.get(current, 0) else current
 
 
+def _append_unique(items: list[str], text: str) -> None:
+    if text not in items:
+        items.append(text)
+
+
 def rank_and_classify(reports: list[BranchReport], keep_per_frame: int, warn_window: float, stop_window: float) -> None:
+    ranking_prefixes = (
+        "higher than frame best by ",
+        "above warning window by ",
+        "rank ",
+    )
+    for report in reports:
+        report.reasons = [
+            reason
+            for reason in report.reasons
+            if not (
+                reason.startswith(ranking_prefixes[0])
+                or reason.startswith(ranking_prefixes[1])
+                or (reason.startswith(ranking_prefixes[2]) and "exceeds keep-per-frame=" in reason)
+            )
+        ]
     by_frame: dict[str, list[BranchReport]] = {}
     for report in reports:
         by_frame.setdefault(report.frame_id, []).append(report)
@@ -610,13 +633,13 @@ def rank_and_classify(reports: list[BranchReport], keep_per_frame: int, warn_win
             report.relative_energy_eV = (report.energy_eV or best_energy) - best_energy
             if report.relative_energy_eV > stop_window:
                 report.action = "stop"
-                report.reasons.append(f"higher than frame best by {report.relative_energy_eV:.3g} eV")
+                _append_unique(report.reasons, f"higher than frame best by {report.relative_energy_eV:.3g} eV")
             elif report.relative_energy_eV > warn_window:
                 report.action = _max_action(report.action, "warning")
-                report.reasons.append(f"above warning window by {report.relative_energy_eV:.3g} eV")
+                _append_unique(report.reasons, f"above warning window by {report.relative_energy_eV:.3g} eV")
             if rank > keep_per_frame:
                 report.action = "stop"
-                report.reasons.append(f"rank {rank} exceeds keep-per-frame={keep_per_frame}")
+                _append_unique(report.reasons, f"rank {rank} exceeds keep-per-frame={keep_per_frame}")
         for report in frame_reports:
             report.survivor = (
                 report.energy_eV is not None
@@ -795,6 +818,13 @@ def compact_reason(report: BranchReport) -> str:
     return ";".join(parts) if parts else "ok"
 
 
+def _spin_status(report: BranchReport) -> str:
+    spin_status = report.physics_guard_status
+    if spin_status == "NOT_APPLIED":
+        spin_status = report.mag_status
+    return spin_status
+
+
 def format_live_table(reports: list[BranchReport], args: argparse.Namespace, iteration: int) -> str:
     counts: dict[str, int] = {}
     for report in reports:
@@ -815,9 +845,7 @@ def format_live_table(reports: list[BranchReport], args: argparse.Namespace, ite
     )
     for index, report in enumerate(sorted_reports, start=1):
         step = "-" if report.current_step is None else str(report.current_step)
-        spin_status = report.physics_guard_status
-        if spin_status == "NOT_APPLIED":
-            spin_status = report.mag_status
+        spin_status = _spin_status(report)
         lines.append(
             f"{str(index).rjust(3)}  "
             f"{_short(report.frame_id, 11)}  "
@@ -844,6 +872,89 @@ def format_live_table(reports: list[BranchReport], args: argparse.Namespace, ite
     return "\n".join(lines)
 
 
+def format_scan_header(args: argparse.Namespace, iteration: int, total: int) -> str:
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    lines = [
+        "=" * 118,
+        f"Atomi VASP Branch Scan Monitor | pass {iteration} | {now} | branches={total}",
+        f"Outputs after pass: {args.outdir / 'stage1_branch_summary.csv'} ; {args.outdir / 'stage2_survivors_runlist.txt'}",
+        "Rows are streamed as soon as each branch is parsed; per-frame ranks are final after the pass completes.",
+        "run        frame        branch        step      energy     relE      dE      conv      scf       spin      trk   rec   note",
+        "---------  -----------  ------------  -----  ----------  -------  --------  --------  --------  --------  ----  ----  ----------------",
+    ]
+    return "\n".join(lines)
+
+
+def format_scan_row(report: BranchReport, index: int, total: int) -> str:
+    step = "-" if report.current_step is None else str(report.current_step)
+    return (
+        f"{str(index).rjust(3)}/{str(total).ljust(3)}  "
+        f"{_short(report.frame_id, 11)}  "
+        f"{_short(report.branch_id, 12)}  "
+        f"{step.rjust(5)}  "
+        f"{_fmt_float(report.energy_eV, 10, 4)}  "
+        f"{_fmt_float(report.relative_energy_eV, 7, 3)}  "
+        f"{_fmt_scientific(report.last_de, 8)}  "
+        f"{_short(report.convergence_status, 8)}  "
+        f"{_short(report.scf_status, 8)}  "
+        f"{_short(_spin_status(report), 8)}  "
+        f"{_short(report.tracked_site_status, 4)}  "
+        f"{_short(_action_label(report.action), 4)}  "
+        f"{_short(compact_reason(report), 16)}"
+    )
+
+
+def format_scan_footer(reports: list[BranchReport], args: argparse.Namespace, iteration: int) -> str:
+    counts: dict[str, int] = {}
+    for report in reports:
+        counts[report.action] = counts.get(report.action, 0) + 1
+    lines = [
+        "-" * 118,
+        (
+            f"Pass {iteration} complete: branches={len(reports)} "
+            f"GOOD={counts.get('continue', 0)} WARN={counts.get('warning', 0)} BAD={counts.get('stop', 0)}"
+        ),
+        f"Wrote: {args.outdir / 'stage1_branch_summary.csv'}",
+        f"Wrote: {args.outdir / 'stage2_survivors_runlist.txt'}",
+    ]
+    if args.live_count == 0 or iteration < args.live_count:
+        lines.append(f"Next scan starts in {args.refresh:g} s. Ctrl-C exits cleanly.")
+    return "\n".join(lines)
+
+
+class ScanSpinner:
+    def __init__(self, label: str, enabled: bool | None = None) -> None:
+        self.label = label
+        self.enabled = sys.stdout.isatty() if enabled is None else enabled
+        self._done = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "ScanSpinner":
+        if not self.enabled:
+            return self
+
+        def run() -> None:
+            for mark in itertools.cycle("|/-\\"):
+                if self._done.is_set():
+                    break
+                sys.stdout.write(f"\r{mark} {self.label}")
+                sys.stdout.flush()
+                self._done.wait(0.15)
+            sys.stdout.write("\r" + " " * (len(self.label) + 4) + "\r")
+            sys.stdout.flush()
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if not self.enabled:
+            return
+        self._done.set()
+        if self._thread is not None:
+            self._thread.join()
+
+
 def write_outputs(reports: list[BranchReport], args: argparse.Namespace) -> None:
     args.outdir.mkdir(parents=True, exist_ok=True)
     write_csv(reports, args.outdir / "stage1_branch_summary.csv")
@@ -851,7 +962,7 @@ def write_outputs(reports: list[BranchReport], args: argparse.Namespace) -> None
     write_survivors(reports, args.outdir / "stage2_survivors_runlist.txt")
 
 
-def screen_once(args: argparse.Namespace) -> list[BranchReport]:
+def load_branches_from_args(args: argparse.Namespace) -> list[BranchInput]:
     if args.index:
         branches = load_branch_index(args.index)
     elif args.runlist:
@@ -860,6 +971,11 @@ def screen_once(args: argparse.Namespace) -> list[BranchReport]:
         branches = discover_branches(args.root, args.max_depth, args.single_frame_id)
     if not branches:
         raise FileNotFoundError("No VASP branch directories found. Use --index, --runlist, or adjust --max-depth.")
+    return branches
+
+
+def screen_once(args: argparse.Namespace) -> list[BranchReport]:
+    branches = load_branches_from_args(args)
     reports = [evaluate_branch(branch, args) for branch in branches]
     rank_and_classify(
         reports,
@@ -901,9 +1017,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--localized-min-abs", type=float, default=0.5, help="Tracked site is lost below this |moment|.")
     parser.add_argument("--order-threshold", type=float, default=0.2, help="Moment threshold for FM/AFM/AFM-like labels.")
     parser.add_argument("--natoms", type=int, help="Expected atom count when POSCAR/CONTCAR is missing.")
-    parser.add_argument("--live", action="store_true", help="Refresh a terminal dashboard instead of printing one summary.")
-    parser.add_argument("--refresh", type=float, default=10.0, help="Refresh seconds for --live. Default: 10.")
-    parser.add_argument("--live-count", type=int, default=0, help="Number of live refreshes; 0 means until Ctrl-C.")
+    parser.add_argument("--live", action="store_true", help="Run a repeating terminal monitor instead of printing one summary.")
+    parser.add_argument(
+        "--live-mode",
+        choices=("scan", "dashboard"),
+        default="scan",
+        help="Live display style. scan streams rows as they are evaluated; dashboard repaints one full table. Default: scan.",
+    )
+    parser.add_argument("--refresh", type=float, default=10.0, help="Seconds between live scan passes. Default: 10.")
+    parser.add_argument("--live-count", type=int, default=0, help="Number of live scan passes; 0 means until Ctrl-C.")
     parser.add_argument("--watch-interval", type=float, default=0.0, help="Repeat screening every N seconds. Default one-shot.")
     parser.add_argument("--watch-count", type=int, default=1, help="Number of watch iterations; use 0 for until Ctrl-C.")
     return parser
@@ -931,6 +1053,13 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def run_live(args: argparse.Namespace) -> None:
+    if args.live_mode == "dashboard":
+        run_live_dashboard(args)
+    else:
+        run_live_scan(args)
+
+
+def run_live_dashboard(args: argparse.Namespace) -> None:
     iteration = 0
     try:
         while True:
@@ -944,6 +1073,42 @@ def run_live(args: argparse.Namespace) -> None:
             time.sleep(max(args.refresh, 0.1))
     except KeyboardInterrupt:
         print("\nStopped live VASP branch monitor.")
+
+
+def run_live_scan(args: argparse.Namespace) -> None:
+    iteration = 0
+    try:
+        while True:
+            iteration += 1
+            branches = load_branches_from_args(args)
+            reports: list[BranchReport] = []
+            total = len(branches)
+            print(format_scan_header(args, iteration, total), flush=True)
+            for index, branch in enumerate(branches, start=1):
+                label = f"scanning run {index}/{total} {branch.frame_id}/{branch.branch_id}"
+                with ScanSpinner(label):
+                    report = evaluate_branch(branch, args)
+                reports.append(report)
+                rank_and_classify(
+                    reports,
+                    keep_per_frame=args.keep_per_frame,
+                    warn_window=args.energy_window_warning,
+                    stop_window=args.energy_window_stop,
+                )
+                print(format_scan_row(report, index, total), flush=True)
+            rank_and_classify(
+                reports,
+                keep_per_frame=args.keep_per_frame,
+                warn_window=args.energy_window_warning,
+                stop_window=args.energy_window_stop,
+            )
+            write_outputs(reports, args)
+            print(format_scan_footer(reports, args, iteration), flush=True)
+            if args.live_count > 0 and iteration >= args.live_count:
+                break
+            time.sleep(max(args.refresh, 0.1))
+    except KeyboardInterrupt:
+        print("\nStopped live VASP branch scan monitor.")
 
 
 def monitor_main(argv: list[str] | None = None) -> None:
