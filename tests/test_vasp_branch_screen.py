@@ -69,6 +69,14 @@ def read_csv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def test_compact_order_shift_lists_magnetic_elements_first() -> None:
+    report = branch_screen.BranchReport(frame_id="frame", branch_id="branch", run_dir=Path("branch"))
+    report.initial_element_order = {"O": "nonmagnetic", "Gd": "FM", "U": "AFM-like"}
+    report.element_order = {"O": "nonmagnetic", "Gd": "FM", "U": "AFM-like"}
+
+    assert branch_screen._compact_order_shift(report) == "Gd:FM,U:AFM-like,O:nonmagnetic"
+
+
 def test_branch_screen_ranks_branches_per_frame(tmp_path: Path) -> None:
     root = tmp_path / "screen"
     write_branch(root / "frame_001" / "spin_low", energy=-10.0, moments=[7.1, 2.0, 0.0])

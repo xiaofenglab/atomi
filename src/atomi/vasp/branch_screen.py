@@ -915,10 +915,21 @@ def _compact_count_map(values: dict[str, int], empty: str = "-") -> str:
     return ",".join(parts) if parts else empty
 
 
+def _ordered_spin_elements(report: BranchReport) -> list[str]:
+    elements = list(dict.fromkeys([*report.initial_element_order, *report.element_order]))
+
+    def is_magnetic(element: str) -> bool:
+        labels = [report.initial_element_order.get(element), report.element_order.get(element)]
+        return any(label not in {None, "nonmagnetic"} for label in labels)
+
+    magnetic = [element for element in elements if is_magnetic(element)]
+    nonmagnetic = [element for element in elements if element not in magnetic]
+    return magnetic + nonmagnetic
+
+
 def _compact_order_shift(report: BranchReport) -> str:
-    elements = sorted(set(report.initial_element_order) | set(report.element_order))
     parts: list[str] = []
-    for element in elements:
+    for element in _ordered_spin_elements(report):
         initial = report.initial_element_order.get(element)
         final = report.element_order.get(element)
         if final is None:
