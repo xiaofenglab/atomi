@@ -91,6 +91,33 @@ CE_TRAINING_FIELDS = [
 
 QUICK_COMMAND_FIELDS = ["step", "purpose", "command"]
 SPIN_GUARD_FIELDS = ["element", "allowed_moments", "tolerance", "role", "notes"]
+RELAX_INDEX_FIELDS = [
+    "run_index",
+    "stage",
+    "seed",
+    "spin_pattern",
+    "volume_scale",
+    "linear_scale",
+    "volume_A3",
+    "volume_per_atom_A3",
+    "run_dir",
+]
+RELAX_SUMMARY_FIELDS = RELAX_INDEX_FIELDS + [
+    "energy_eV",
+    "relative_energy_eV",
+    "energy_kind",
+    "status",
+    "physics_guard_status",
+    "physics_guard_bad_count",
+    "mag_status",
+    "total_moment",
+    "max_abs_moment",
+    "element_order",
+    "changed_by_element",
+    "energy_source",
+    "mag_source",
+    "warning",
+]
 
 
 @dataclass
@@ -299,6 +326,134 @@ def quick_spin_guard_rows(args: argparse.Namespace, guards: list[str]) -> list[d
             }
         )
     return rows
+
+
+def cell_volume(cell: list[list[float]]) -> float:
+    a, b, c = cell
+    return abs(
+        a[0] * (b[1] * c[2] - b[2] * c[1])
+        - a[1] * (b[0] * c[2] - b[2] * c[0])
+        + a[2] * (b[0] * c[1] - b[1] * c[0])
+    )
+
+
+def scaled_cell(cell: list[list[float]], volume_scale: float, scale_kind: str) -> tuple[list[list[float]], float]:
+    if volume_scale <= 0:
+        raise ValueError("--volume-scale values must be positive.")
+    linear = volume_scale if scale_kind == "linear" else volume_scale ** (1.0 / 3.0)
+    return [[value * linear for value in vector] for vector in cell], linear
+
+
+def write_poscar_text(
+    comment: str,
+    symbols: list[str],
+    counts: list[int],
+    cell: list[list[float]],
+    scaled_positions: list[list[float]],
+) -> str:
+    lines = [comment, "1.0"]
+    lines.extend("  " + "  ".join(f"{value: .16f}" for value in vector) for vector in cell)
+    lines.append("  " + "  ".join(symbols))
+    lines.append("  " + "  ".join(str(count) for count in counts))
+    lines.append("Direct")
+    lines.extend("  " + "  ".join(f"{value: .16f}" for value in position) for position in scaled_positions)
+    return "\n".join(lines) + "\n"
+
+
+def replace_or_append_incar_tag(text: str, tag: str, value: str) -> str:
+    pattern = re.compile(rf"^\s*{re.escape(tag)}\s*=", re.IGNORECASE)
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if pattern.match(line):
+            lines[index] = f"{tag} = {value}"
+            return "\n".join(lines) + "\n"
+    lines.append(f"{tag} = {value}")
+    return "\n".join(lines) + "\n"
+
+
+def template_incar_with_tags(template: Path, magmom_line: str, isif: int) -> str:
+    incar = template / "INCAR"
+    if not incar.is_file():
+        raise FileNotFoundError(f"Missing template file: {incar}")
+    text = incar.read_text(encoding="utf-8", errors="replace")
+    text = replace_or_append_incar_tag(text, "MAGMOM", magmom_line.split("=", 1)[1].strip())
+    text = replace_or_append_incar_tag(text, "ISPIN", "2")
+    text = replace_or_append_incar_tag(text, "ISIF", str(isif))
+    return text
+
+
+def copy_relax_vasp_files(template: Path, run_dir: Path, poscar_text: str, incar_text: str) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "POSCAR").write_text(poscar_text, encoding="utf-8")
+    (run_dir / "INCAR").write_text(incar_text, encoding="utf-8")
+    for name in ("KPOINTS", "POTCAR"):
+        src = template / name
+        if not src.is_file():
+            raise FileNotFoundError(f"Missing template file: {src}")
+        shutil.copy2(src, run_dir / name)
+
+
+def parse_seed_spins(raw: str) -> list[str]:
+    seeds = []
+    for item in raw.replace(";", ",").split(","):
+        seed = item.strip().lower()
+        if not seed:
+            continue
+        if seed not in {"fm", "afm"}:
+            raise ValueError("--seed-spins accepts fm, afm, or comma-separated fm,afm.")
+        if seed not in seeds:
+            seeds.append(seed)
+    if not seeds:
+        raise ValueError("At least one seed spin mode is required.")
+    return seeds
+
+
+def seed_moments(
+    species: Any,
+    magnetic_elements: list[str],
+    moment_specs: dict[str, list[float]],
+    seed: str,
+) -> tuple[list[float], str]:
+    from atomi.vasp.magmom import element_atom_indices
+
+    moments = [0.0] * species.total_atoms
+    pattern_tokens: list[str] = []
+    for element in magnetic_elements:
+        indices = element_atom_indices(species, element)
+        if not indices:
+            raise ValueError(f"Element {element} not found in POSCAR.")
+        magnitude = (moment_specs.get(element) or [1.0])[0]
+        signs = [1] * len(indices)
+        if seed == "afm":
+            signs = [1 if index % 2 == 0 else -1 for index in range(len(indices))]
+        for atom_index, sign in zip(indices, signs):
+            moments[atom_index] = magnitude * sign
+        pattern_tokens.append(f"{element}:{' '.join(format_number(magnitude * sign) for sign in signs)}")
+    return moments, "; ".join(pattern_tokens)
+
+
+def safe_float_label(value: float) -> str:
+    return f"{value:.4f}".rstrip("0").rstrip(".").replace("-", "m").replace(".", "p")
+
+
+def relative_run_path(path: Path, root: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(root.resolve()))
+    except ValueError:
+        return str(path.resolve())
+
+
+def write_runlist(path: Path, run_dirs: list[Path], root: Path) -> None:
+    path.write_text(
+        "\n".join(relative_run_path(run_dir, root) for run_dir in run_dirs) + ("\n" if run_dirs else ""),
+        encoding="utf-8",
+    )
+
+
+def parse_relax_index(path: Path) -> list[dict[str, str]]:
+    if not path.is_file():
+        raise FileNotFoundError(f"Relaxation index not found: {path}")
+    return read_csv(path)
 
 
 def tool_status(tool: str) -> dict[str, str | bool]:
@@ -996,6 +1151,14 @@ def write_quick_shell(path: Path, rows: list[dict[str, str]]) -> None:
 
 
 def quick_opt_main(argv: list[str] | None = None) -> None:
+    argv = list(argv or [])
+    if argv and argv[0] in {"relax-seeds", "relax_seed", "relax-seed"}:
+        relax_seeds_main(argv[1:])
+        return
+    if argv and argv[0] in {"relax-summary", "summary", "summarize-relax"}:
+        relax_summary_main(argv[1:])
+        return
+
     parser = argparse.ArgumentParser(
         prog="materials-opt",
         description="Create a compact Atomi spin and ATAT ionic/lattice optimization scaffold.",
@@ -1117,6 +1280,330 @@ def quick_opt_main(argv: list[str] | None = None) -> None:
     if missing_template_files:
         print(f"Template warning             : missing {', '.join(missing_template_files)}")
     print("Next                         : cd into the workspace and run the magit enum command from QUICK_OPT_COMMANDS.md.")
+
+
+def relax_seeds_main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="materials-opt relax-seeds",
+        description="Prepare FM/AFM seed and ISIF=2 volume-scan VASP folders.",
+    )
+    parser.add_argument("--poscar", type=Path, default=Path("POSCAR"))
+    parser.add_argument("--template", type=Path, default=Path("VASP_TEMPLATE"))
+    parser.add_argument("--outdir", type=Path, default=Path("RELAX_SEEDS_OPT"))
+    parser.add_argument("--system", default="material")
+    parser.add_argument("--formula", default="")
+    parser.add_argument("--magnetic-element", action="append", required=True)
+    parser.add_argument("--nonmagnetic-element", action="append", default=[])
+    parser.add_argument("--moment", action="append", required=True, help="Moment magnitude, e.g. U=2.")
+    parser.add_argument("--seed-spins", default="fm,afm", help="Comma-separated seed modes: fm,afm.")
+    parser.add_argument(
+        "--volume-scale",
+        type=float,
+        nargs="+",
+        default=[0.94, 0.97, 1.0, 1.03, 1.06],
+        help="Relative volume scale factors by default.",
+    )
+    parser.add_argument("--scale-kind", choices=("volume", "linear"), default="volume")
+    parser.add_argument("--isif-volume", type=int, default=2)
+    parser.add_argument("--isif-shape", type=int, default=3)
+    parser.add_argument("--moment-guard", action="append", default=[])
+    parser.add_argument("--moment-guard-tol", type=float, default=0.7)
+    parser.add_argument("--nonmagnetic-tolerance", type=float, default=0.25)
+    parser.add_argument("--decimals", type=int, default=3)
+    args = parser.parse_args(argv)
+
+    from atomi.vasp.magmom import format_magmom_line, read_poscar_structure
+
+    template = args.template.expanduser().resolve()
+    if not template.is_dir():
+        raise FileNotFoundError(f"VASP template directory not found: {template}")
+    structure = read_poscar_structure(args.poscar.expanduser().resolve())
+    species = structure.species
+    moment_specs = parse_moment_specs(args.moment)
+    magnetic_elements = split_items(args.magnetic_element)
+    nonmagnetic_elements = split_items(args.nonmagnetic_element)
+    seeds = parse_seed_spins(args.seed_spins)
+    guards = build_guard_specs(
+        magnetic_elements,
+        nonmagnetic_elements,
+        moment_specs,
+        args.moment_guard_tol,
+        args.nonmagnetic_tolerance,
+        args.moment_guard,
+    )
+
+    root = args.outdir.expanduser().resolve()
+    seed_root = root / "01_seed_spins"
+    volume_root = root / "02_volume_isif2"
+    shape_root = root / "03_shape_isif3"
+    summary_root = root / "04_summary"
+    for path in (seed_root, volume_root, shape_root, summary_root):
+        path.mkdir(parents=True, exist_ok=True)
+
+    original_volume = cell_volume(structure.cell)
+    rows: list[dict[str, Any]] = []
+    run_dirs: list[Path] = []
+    run_index = 0
+    for seed in seeds:
+        moments, pattern_text = seed_moments(species, magnetic_elements, moment_specs, seed)
+        magmom_line = format_magmom_line(
+            species,
+            moments,
+            selected_elements=magnetic_elements + nonmagnetic_elements,
+            decimals=args.decimals,
+            compact_zero=True,
+        )
+        seed_poscar = write_poscar_text(
+            f"{args.system} {seed} seed",
+            species.symbols,
+            species.counts,
+            structure.cell,
+            structure.scaled_positions,
+        )
+        seed_incar = template_incar_with_tags(template, magmom_line, args.isif_volume)
+        copy_relax_vasp_files(template, seed_root / seed, seed_poscar, seed_incar)
+
+        for volume_scale in args.volume_scale:
+            run_index += 1
+            new_cell, linear_scale = scaled_cell(structure.cell, volume_scale, args.scale_kind)
+            volume = cell_volume(new_cell)
+            name = f"run_{run_index:04d}_{seed}_v{safe_float_label(volume_scale)}"
+            run_dir = volume_root / name
+            poscar_text = write_poscar_text(
+                f"{args.system} {seed} volume_scale={volume_scale:g}",
+                species.symbols,
+                species.counts,
+                new_cell,
+                structure.scaled_positions,
+            )
+            incar_text = template_incar_with_tags(template, magmom_line, args.isif_volume)
+            copy_relax_vasp_files(template, run_dir, poscar_text, incar_text)
+            run_dirs.append(run_dir)
+            rows.append(
+                {
+                    "run_index": run_index,
+                    "stage": "volume_isif2",
+                    "seed": seed,
+                    "spin_pattern": pattern_text,
+                    "volume_scale": f"{volume_scale:.10g}",
+                    "linear_scale": f"{linear_scale:.10g}",
+                    "volume_A3": f"{volume:.10f}",
+                    "volume_per_atom_A3": f"{volume / species.total_atoms:.10f}",
+                    "run_dir": relative_run_path(run_dir, root),
+                }
+            )
+
+    write_csv(root / "relax_index.csv", rows, RELAX_INDEX_FIELDS)
+    write_csv(root / "SUMMARY.csv", rows, RELAX_INDEX_FIELDS)
+    write_csv(volume_root / "SUMMARY.csv", rows, RELAX_INDEX_FIELDS)
+    write_runlist(root / "runlist.txt", run_dirs, root)
+    write_runlist(root / "runlist_volume_isif2.txt", run_dirs, root)
+    write_json(
+        root / "relax_plan.json",
+        {
+            "schema": "atomi.materials.relax_seeds.v1",
+            "system": args.system,
+            "formula": args.formula,
+            "source_poscar": str(args.poscar.expanduser().resolve()),
+            "template": str(template),
+            "magnetic_elements": magnetic_elements,
+            "nonmagnetic_elements": nonmagnetic_elements,
+            "moment_specs": {
+                key: [format_number(value) for value in values]
+                for key, values in moment_specs.items()
+            },
+            "moment_guards": guards,
+            "seed_spins": seeds,
+            "scale_kind": args.scale_kind,
+            "volume_scales": args.volume_scale,
+            "original_volume_A3": original_volume,
+            "isif_volume": args.isif_volume,
+            "isif_shape": args.isif_shape,
+            "runlist": str(root / "runlist.txt"),
+            "summary_command": (
+                "materials-opt relax-summary --workspace . --stage volume_isif2 "
+                "--moment-guard " + " --moment-guard ".join(guards)
+            ),
+            "notes": [
+                "Run VASP array jobs with runlist.txt first.",
+                "After jobs finish or stop, run materials-opt relax-summary from the workspace.",
+                "Use the best physical rows to start ISIF=3 shape relaxation.",
+            ],
+        },
+    )
+    (shape_root / "README.md").write_text(
+        "After the ISIF=2 volume scan, copy/promote the best physical volume candidates here "
+        "with ISIF=3 for full shape relaxation.\n",
+        encoding="utf-8",
+    )
+
+    print(f"Relax-seeds workspace : {root}")
+    print(f"Seed folders          : {seed_root}")
+    print(f"Volume scan folders   : {len(run_dirs)}")
+    print(f"Runlist               : {root / 'runlist.txt'}")
+    print(f"Index                 : {root / 'relax_index.csv'}")
+    print(f"Initial SUMMARY       : {root / 'SUMMARY.csv'}")
+    print("Next                  : run your VASP array on runlist.txt, then run materials-opt relax-summary --workspace .")
+
+
+def relax_summary_main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="materials-opt relax-summary",
+        description="Summarize relax-seeds VASP outputs with energy, spin, and E-V plots.",
+    )
+    parser.add_argument("--workspace", type=Path, default=Path("."))
+    parser.add_argument("--stage", default="volume_isif2")
+    parser.add_argument("--runlist", type=Path)
+    parser.add_argument("--index", type=Path)
+    parser.add_argument("--log-dir", type=Path)
+    parser.add_argument("--output-prefix", type=Path)
+    parser.add_argument("--energy", choices=("toten", "without_entropy", "e0", "f", "dav"), default="toten")
+    parser.add_argument("--stopped-after-min", type=float, default=15.0)
+    parser.add_argument("--dav-average-window", type=int, default=10)
+    parser.add_argument("--moment-guard", action="append", default=[])
+    parser.add_argument("--moment-guard-tol", type=float, default=0.7)
+    parser.add_argument("--no-plot", action="store_true")
+    args = parser.parse_args(argv)
+
+    from atomi.vasp.spin_report import (
+        build_run_reports,
+        parse_moment_guards,
+        write_atom_table,
+        write_markdown_report,
+        write_magmom_lines,
+        write_physics_filtered_tables,
+        write_run_summary,
+        output_paths,
+    )
+
+    root = args.workspace.expanduser().resolve()
+    plan_path = root / "relax_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.is_file() else {}
+    index_path = args.index or root / "relax_index.csv"
+    rows = [row for row in parse_relax_index(index_path) if row.get("stage") == args.stage]
+    if not rows:
+        raise ValueError(f"No rows for stage {args.stage!r} in {index_path}")
+    runlist = args.runlist or root / ("runlist_volume_isif2.txt" if args.stage == "volume_isif2" else f"runlist_{args.stage}.txt")
+    if not runlist.is_file():
+        raise FileNotFoundError(f"Runlist not found: {runlist}")
+    guards = args.moment_guard or plan.get("moment_guards", [])
+    moment_guards = parse_moment_guards(guards, args.moment_guard_tol)
+    prefix = args.output_prefix or root / "04_summary" / args.stage / "spin_energy"
+    reports = build_run_reports(
+        runlist=runlist,
+        spin_index=None,
+        log_dir=args.log_dir or root,
+        energy_kind=args.energy,
+        stopped_after_minutes=args.stopped_after_min,
+        dav_average_window=args.dav_average_window,
+        species_override=None,
+        natoms=None,
+        change_threshold=0.25,
+        order_threshold=0.2,
+        moment_guards=moment_guards,
+    )
+    paths = output_paths(prefix)
+    write_run_summary(reports, paths["summary"])
+    write_atom_table(reports, paths["atoms"])
+    if moment_guards:
+        write_physics_filtered_tables(reports, paths)
+    write_markdown_report(reports, paths["report"])
+    write_magmom_lines(reports, prefix.parent, decimals=3, compress_tol=0.05)
+
+    report_by_index = {report.index: report for report in reports}
+    enriched: list[dict[str, Any]] = []
+    energies = [
+        report.energy_eV
+        for report in reports
+        if report.energy_eV is not None
+    ]
+    minimum = min(energies) if energies else None
+    for row in rows:
+        report = report_by_index.get(int(row["run_index"]))
+        energy = None if report is None else report.energy_eV
+        enriched.append(
+            {
+                **row,
+                "energy_eV": "" if energy is None else f"{energy:.10f}",
+                "relative_energy_eV": "" if energy is None or minimum is None else f"{energy - minimum:.10f}",
+                "energy_kind": "" if report is None else report.energy_kind,
+                "status": "" if report is None else report.status,
+                "physics_guard_status": "" if report is None else report.physics_guard_status,
+                "physics_guard_bad_count": "" if report is None else report.physics_guard_bad_count,
+                "mag_status": "" if report is None else report.mag_status,
+                "total_moment": "" if report is None or report.total_moment is None else f"{report.total_moment:.8f}",
+                "max_abs_moment": "" if report is None or report.max_abs_moment is None else f"{report.max_abs_moment:.8f}",
+                "element_order": "" if report is None else json.dumps(report.element_order, sort_keys=True),
+                "changed_by_element": "" if report is None else json.dumps(report.changed_by_element, sort_keys=True),
+                "energy_source": "" if report is None or report.energy_source is None else str(report.energy_source),
+                "mag_source": "" if report is None or report.mag_source is None else str(report.mag_source),
+                "warning": "" if report is None else report.warning,
+            }
+        )
+
+    summary_path = root / f"SUMMARY_{args.stage}.csv"
+    write_csv(summary_path, enriched, RELAX_SUMMARY_FIELDS)
+    write_csv(root / "SUMMARY.csv", enriched, RELAX_SUMMARY_FIELDS)
+    stage_dir = root / ("02_volume_isif2" if args.stage == "volume_isif2" else args.stage)
+    if stage_dir.is_dir():
+        write_csv(stage_dir / "SUMMARY.csv", enriched, RELAX_SUMMARY_FIELDS)
+    plot_path = None if args.no_plot else write_energy_volume_plot(enriched, root / "04_summary" / args.stage / "energy_volume.png")
+
+    usable = sum(1 for row in enriched if row["energy_eV"])
+    accepted = sum(1 for row in enriched if row["physics_guard_status"] == "OK")
+    print(f"Rows summarized      : {len(enriched)}")
+    print(f"Rows with energy     : {usable}")
+    if moment_guards:
+        print(f"Physics accepted     : {accepted}")
+    print(f"SUMMARY              : {summary_path}")
+    print(f"Spin-report summary  : {paths['summary']}")
+    if plot_path:
+        print(f"Energy-volume plot   : {plot_path}")
+    elif not args.no_plot:
+        print("Energy-volume plot   : not written (matplotlib unavailable or no energy rows)")
+
+
+def write_energy_volume_plot(rows: list[dict[str, Any]], path: Path) -> Path | None:
+    usable = []
+    for row in rows:
+        energy = finite_float(row.get("relative_energy_eV"))
+        volume = finite_float(row.get("volume_A3"))
+        if energy is None or volume is None:
+            continue
+        usable.append((volume, energy, row.get("seed", ""), row.get("physics_guard_status", "")))
+    if not usable:
+        return None
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    seed_colors = {"fm": "tab:blue", "afm": "tab:orange"}
+    seen_labels: set[str] = set()
+    for volume, energy, seed, physics in usable:
+        physical = physics in {"OK", "NOT_APPLIED", ""}
+        color = seed_colors.get(seed, "tab:green") if physical else "0.65"
+        alpha = 0.95 if physical else 0.35
+        label = seed if physical else f"{seed} unphysical"
+        if label in seen_labels:
+            label = None
+        else:
+            seen_labels.add(label)
+        ax.scatter(volume, energy, s=42, color=color, alpha=alpha, edgecolors="black" if physical else "none", label=label)
+    ax.set_xlabel("Cell volume (A^3)")
+    ax.set_ylabel("Relative energy (eV)")
+    ax.set_title("Energy-volume scan")
+    ax.grid(True, alpha=0.3)
+    if seen_labels:
+        ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return path
 
 
 def status_main(argv: list[str] | None = None) -> None:

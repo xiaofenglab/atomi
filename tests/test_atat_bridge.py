@@ -264,3 +264,80 @@ def test_quick_materials_opt_writes_uc2_command_scaffold(tmp_path: Path, capsys)
     assert "vasp-branch-live" in command_text
     assert "vasp-spin-report" in command_text
     assert "atat-bridge ce-handoff" in command_text
+
+
+def test_materials_opt_relax_seeds_prepares_volume_scan(tmp_path: Path, capsys) -> None:
+    template = tmp_path / "VASP_TEMPLATE"
+    template.mkdir()
+    poscar = tmp_path / "POSCAR"
+    poscar.write_text(
+        "UC2 demo\n"
+        "1.0\n"
+        "2 0 0\n"
+        "0 1 0\n"
+        "0 0 1\n"
+        "U C\n"
+        "2 4\n"
+        "Direct\n"
+        "0 0 0\n"
+        "0.5 0.5 0.5\n"
+        "0.25 0.25 0.25\n"
+        "0.75 0.75 0.75\n"
+        "0.25 0.75 0.25\n"
+        "0.75 0.25 0.75\n",
+        encoding="utf-8",
+    )
+    for name, text in {
+        "INCAR": "ENCUT = 520\n",
+        "KPOINTS": "Gamma\n",
+        "POTCAR": "fake\n",
+    }.items():
+        (template / name).write_text(text, encoding="utf-8")
+    out = tmp_path / "uc2_relax"
+
+    atomi_main(
+        [
+            "materials-opt",
+            "relax-seeds",
+            "--system",
+            "UC2",
+            "--formula",
+            "UC2",
+            "--poscar",
+            str(poscar),
+            "--template",
+            str(template),
+            "--outdir",
+            str(out),
+            "--magnetic-element",
+            "U",
+            "--nonmagnetic-element",
+            "C",
+            "--moment",
+            "U=2",
+            "--seed-spins",
+            "fm,afm",
+            "--volume-scale",
+            "0.98",
+            "1.02",
+        ]
+    )
+
+    assert "Relax-seeds workspace" in capsys.readouterr().out
+    runlist = (out / "runlist.txt").read_text(encoding="utf-8").splitlines()
+    assert len(runlist) == 4
+    assert (out / "01_seed_spins" / "fm" / "INCAR").exists()
+    assert (out / "02_volume_isif2" / "SUMMARY.csv").exists()
+    index_rows = rows(out / "relax_index.csv")
+    assert {row["seed"] for row in index_rows} == {"fm", "afm"}
+    assert {row["volume_scale"] for row in index_rows} == {"0.98", "1.02"}
+    incar = (out / runlist[0] / "INCAR").read_text(encoding="utf-8")
+    assert "ISIF = 2" in incar
+    assert "MAGMOM =" in incar
+
+    atomi_main(["materials-opt", "relax-summary", "--workspace", str(out), "--no-plot"])
+
+    assert "Rows summarized" in capsys.readouterr().out
+    summary = rows(out / "SUMMARY_volume_isif2.csv")
+    assert len(summary) == 4
+    assert (out / "04_summary" / "volume_isif2" / "spin_energy_run_summary.csv").exists()
