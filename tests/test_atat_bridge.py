@@ -38,8 +38,8 @@ def test_atat_bridge_init_writes_stage_and_species_maps(tmp_path: Path) -> None:
 
     species = rows(out / "pseudo_species_map.csv")
     labels = {row["pseudo_species"] for row in species}
-    assert {"U4p", "U4m", "U5p", "U5m", "Gdp", "Gdm", "O", "V_O"}.issubset(labels)
-    gd = [row for row in species if row["pseudo_species"] == "Gdp"][0]
+    assert {"U4", "U5", "Gd3", "O", "V_O"}.issubset(labels)
+    gd = [row for row in species if row["pseudo_species"] == "Gd3"][0]
     assert gd["moment_guard"] == "Gd=7,-7@0.6"
     stages = rows(out / "atat_atomi_stage_map.csv")
     assert stages[0]["stage_id"] == "01_motif_search"
@@ -251,10 +251,14 @@ def test_quick_materials_opt_writes_uc2_command_scaffold(tmp_path: Path, capsys)
     assert (out / "00_vasp_template" / "POSCAR").read_text(encoding="utf-8").startswith("UC2 demo")
     assert (out / "pseudo_species_map.csv").exists()
     species = rows(out / "pseudo_species_map.csv")
-    assert {"U2p", "U2m", "C"}.issubset({row["pseudo_species"] for row in species})
+    assert {"U", "C"}.issubset({row["pseudo_species"] for row in species})
+    spin_guard = rows(out / "spin_guard_map.csv")
+    assert spin_guard[0]["element"] == "U"
+    assert spin_guard[0]["allowed_moments"] == "2,-2"
     plan = json.loads((out / "quick_opt_plan.json").read_text(encoding="utf-8"))
     assert plan["schema"] == bridge.QUICK_OPT_SCHEMA
     assert plan["moment_guards"] == ["U=2,-2@0.7", "C=0@0.25"]
+    assert plan["spin_owner"].startswith("Atomi magit")
     command_text = (out / "QUICK_OPT_COMMANDS.md").read_text(encoding="utf-8")
     assert "magit enum" in command_text
     assert "vasp-branch-live" in command_text
