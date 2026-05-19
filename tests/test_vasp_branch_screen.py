@@ -197,6 +197,50 @@ def test_branch_screen_accepts_runlist_and_streams_live_scan(tmp_path: Path, cap
     assert "BAD" in table or "WARN" in table
 
 
+def test_live_monitor_uses_array_artifact_by_runlist_index(tmp_path: Path, capsys) -> None:
+    run_a = tmp_path / "frame_005" / "u_site_a"
+    run_b = tmp_path / "frame_005" / "u_site_b"
+    write_branch(run_a, energy=-8.0, moments=[7.0, 2.0, 0.0])
+    write_branch(run_b, energy=-1.0, moments=[7.0, 2.0, 0.0])
+    (run_b / "OUTCAR").unlink()
+    (run_b / "OSZICAR").unlink()
+    artifact_run = tmp_path / "bwforcluster-vasp_array.sbatch.99999.2.260518_030213" / "scratch" / "run"
+    write_branch(artifact_run, energy=-20.0, moments=[7.0, 0.1, 0.0])
+    runlist = tmp_path / "runlist.txt"
+    runlist.write_text("frame_005/u_site_a\nframe_005/u_site_b\n", encoding="utf-8")
+    outdir = tmp_path / "out"
+
+    branch_screen.main(
+        [
+            "--runlist",
+            str(runlist),
+            "--log-dir",
+            str(tmp_path),
+            "--outdir",
+            str(outdir),
+            "--moment-guard",
+            "U=2@0.5",
+            "--live",
+            "--live-count",
+            "1",
+            "--refresh",
+            "0.1",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert "u_site_b" in output
+    rows = read_csv(outdir / "stage1_branch_summary.csv")
+    row_b = [row for row in rows if row["branch_id"] == "u_site_b"][0]
+    assert row_b["energy_eV"] == "-20.0"
+    assert "bwforcluster-vasp_array" in row_b["energy_source"]
+    assert "bwforcluster-vasp_array" in row_b["mag_source"]
+    assert row_b["output_run_dir"].endswith("scratch/run")
+    assert row_b["mag_status"] == "OK"
+    assert row_b["physics_guard_status"] == "FAIL"
+    assert row_b["current_step"] == "1"
+
+
 def test_live_monitor_defaults_to_runlist_not_directory_discovery(tmp_path: Path, monkeypatch, capsys) -> None:
     run_a = tmp_path / "frame_004" / "u_site_a"
     extra = tmp_path / "unlisted_but_vasp_like"

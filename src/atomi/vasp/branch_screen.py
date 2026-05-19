@@ -19,6 +19,7 @@ from typing import Any
 from atomi.vasp.checks import (
     _latest_vasp_energy,
     _run_is_done,
+    array_indexed_output_candidates,
 )
 from atomi.vasp.magmom import existing_magmom_values
 from atomi.vasp.spin_report import (
@@ -27,8 +28,11 @@ from atomi.vasp.spin_report import (
     build_atom_reports,
     changed_counts_by_element,
     element_order_from_atoms,
-    extract_last_magnetization_block,
+    extract_first_available_magnetization,
+    first_incar_file,
+    first_species_file,
     initial_order_from_atoms,
+    magnetization_candidate_files,
     parse_moment_guards,
     read_species_labels,
     summarize_counts,
@@ -74,6 +78,7 @@ class BranchReport:
     relative_energy_eV: float | None = None
     energy_kind: str = ""
     energy_source: Path | None = None
+    output_run_dir: Path | None = None
     convergence_status: str = "NO_OUTPUT"
     newest_output: Path | None = None
     newest_output_age_min: float | None = None
@@ -163,17 +168,19 @@ def load_branch_index(path: Path) -> list[BranchInput]:
 def load_branch_runlist(path: Path, single_frame_id: str | None = None) -> list[BranchInput]:
     rows: list[BranchInput] = []
     base = path.parent.resolve()
+    run_index = 0
     for line_number, raw in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
+        run_index += 1
         run_dir = _resolve_run_dir(line, base)
         rows.append(
             BranchInput(
                 frame_id=single_frame_id or run_dir.parent.name,
                 branch_id=run_dir.name or f"branch_{line_number:04d}",
                 run_dir=run_dir,
-                metadata={"runlist": str(path), "runlist_index": str(line_number)},
+                metadata={"runlist": str(path), "runlist_index": str(run_index), "runlist_line": str(line_number)},
             )
         )
     return rows
@@ -228,25 +235,60 @@ def vasp_output_candidates(run_dir: Path) -> list[Path]:
     return sorted(unique, key=lambda item: item.stat().st_mtime if item.exists() else 0.0, reverse=True)
 
 
+def branch_array_index(branch: BranchInput) -> int | None:
+    raw = branch.metadata.get("runlist_index") or branch.metadata.get("index") or branch.metadata.get("array_index")
+    if raw is None:
+        return None
+    try:
+        return int(str(raw))
+    except ValueError:
+        return None
+
+
+def branch_log_dir(branch: BranchInput, args: argparse.Namespace) -> Path:
+    if args.log_dir is not None:
+        return args.log_dir
+    runlist = branch.metadata.get("runlist")
+    if runlist:
+        return Path(runlist).expanduser().resolve().parent
+    return branch.run_dir.parent
+
+
+def branch_output_candidates(branch: BranchInput, args: argparse.Namespace, deep_artifacts: bool = True) -> list[Path]:
+    candidates = list(vasp_output_candidates(branch.run_dir))
+    index = branch_array_index(branch)
+    if index is not None:
+        candidates.extend(array_indexed_output_candidates(index, branch_log_dir(branch, args), deep=deep_artifacts))
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(path)
+    return sorted(unique, key=lambda item: item.stat().st_mtime if item.exists() else 0.0, reverse=True)
+
+
 def _energy_rank(path: Path) -> int:
     name = path.name
-    if name.startswith("OUTCAR"):
-        return 0
-    if name == "OSZICAR":
-        return 1
     if name.startswith("vasp.out"):
-        return 2
+        return 0
     if name.startswith("vasprun.xml"):
+        return 1
+    if name == "OSZICAR":
+        return 2
+    if name.startswith("OUTCAR"):
         return 3
     return 4
 
 
 def latest_branch_energy(
-    run_dir: Path,
+    candidates: list[Path],
     preferred_kind: str = "toten",
     dav_average_window: int = 10,
 ) -> tuple[float | None, str, Path | None]:
-    candidates = sorted(vasp_output_candidates(run_dir), key=lambda path: (_energy_rank(path), -path.stat().st_mtime))
+    candidates = sorted(candidates, key=lambda path: (_energy_rank(path), -path.stat().st_mtime))
     for path in candidates:
         if path.name.startswith("vasprun.xml"):
             energy = latest_vasprun_energy(path)
@@ -280,22 +322,25 @@ def latest_vasprun_energy(path: Path) -> float | None:
         return None
 
 
-def classify_convergence(run_dir: Path, stopped_after_minutes: float) -> tuple[str, Path | None, float | None, list[str]]:
-    candidates = vasp_output_candidates(run_dir)
+def classify_convergence(
+    run_dir: Path,
+    stopped_after_minutes: float,
+    candidates: list[Path],
+) -> tuple[str, Path | None, float | None, list[str]]:
     if not candidates:
         return "NO_OUTPUT", None, None, ["missing outputs"]
     newest = candidates[0]
     age_min = (time.time() - newest.stat().st_mtime) / 60.0
     reasons: list[str] = []
     outcar_text = ""
-    for name in ("OUTCAR", "OUTCAR.gz"):
-        path = run_dir / name
-        if path.is_file():
-            try:
-                outcar_text = _read_text(path, limit=2_000_000).lower()
-            except OSError:
-                outcar_text = ""
-            break
+    for path in candidates:
+        if path.name not in {"OUTCAR", "OUTCAR.gz"}:
+            continue
+        try:
+            outcar_text = _read_text(path, limit=2_000_000).lower()
+        except OSError:
+            outcar_text = ""
+        break
     if any(pattern in outcar_text for pattern in ERROR_PATTERNS):
         return "ERROR", newest, age_min, ["VASP error marker found"]
     if _run_is_done(run_dir) or DONE_TEXT.lower() in outcar_text:
@@ -308,6 +353,24 @@ def classify_convergence(run_dir: Path, stopped_after_minutes: float) -> tuple[s
         reasons.append(f"newest output older than {stopped_after_minutes:g} min")
         return "STOPPED", newest, age_min, reasons
     return "RUNNING", newest, age_min, []
+
+
+def scf_candidate(candidates: list[Path]) -> Path | None:
+    ranks = {"OSZICAR": 0, "vasp.out": 1, "OUTCAR": 2, "OUTCAR.gz": 3}
+    ranked: list[tuple[int, float, Path]] = []
+    for path in candidates:
+        if path.name == "OSZICAR":
+            rank = ranks["OSZICAR"]
+        elif path.name.startswith("vasp.out"):
+            rank = ranks["vasp.out"]
+        elif path.name == "OUTCAR":
+            rank = ranks["OUTCAR"]
+        else:
+            continue
+        ranked.append((rank, -(path.stat().st_mtime if path.exists() else 0.0), path))
+    if not ranked:
+        return None
+    return sorted(ranked)[0][2]
 
 
 def parse_oszicar_scf(path: Path) -> tuple[list[float], list[float]]:
@@ -457,6 +520,8 @@ def tracked_site_status(
 
 def analyze_spin(
     run_dir: Path,
+    branch_index: int | None,
+    log_dir: Path | None,
     moment_guards: dict[str, tuple[list[float], float]],
     track_atoms: list[int],
     change_threshold: float,
@@ -464,10 +529,17 @@ def analyze_spin(
     localized_min_abs: float,
     natoms: int | None,
 ) -> dict[str, Any]:
-    outcar = spin_candidate(run_dir)
-    if outcar is None:
+    if branch_index is None:
+        outcar = spin_candidate(run_dir)
+        candidates = [outcar] if outcar is not None else []
+    else:
+        candidates = magnetization_candidate_files(branch_index, run_dir, log_dir)
+    if not candidates:
         return {"mag_status": "NO_OUTCAR"}
-    species_file = default_species_file(run_dir)
+    mag_source, block, mag_warning = extract_first_available_magnetization(candidates, expected=natoms)
+    if block is None or mag_source is None:
+        return {"mag_status": "NO_MAGNETIZATION", "mag_source": candidates[0], "warning": mag_warning}
+    species_file = first_species_file(run_dir, mag_source)
     expected = natoms
     labels: list[str] = []
     species = None
@@ -476,16 +548,19 @@ def analyze_spin(
         labels, species, species_warning = read_species_labels(species_file, expected)
         if expected is None and species is not None:
             expected = species.total_atoms
-        block = extract_last_magnetization_block(outcar, natoms=expected)
+        if expected is not None and len(block.rows) != expected:
+            mag_source, block, mag_warning = extract_first_available_magnetization(candidates, expected=expected)
+            if block is None or mag_source is None:
+                return {"mag_status": "NO_MAGNETIZATION", "mag_source": candidates[0], "warning": mag_warning}
     except Exception as exc:
-        return {"mag_status": "NO_MAGNETIZATION", "mag_source": outcar, "warning": str(exc)}
+        return {"mag_status": "NO_MAGNETIZATION", "mag_source": mag_source, "warning": str(exc)}
     if not labels:
         labels = ["X"] * len(block.rows)
     if len(labels) < len(block.rows):
         labels = labels + ["X"] * (len(block.rows) - len(labels))
     initial = None
-    incar = run_dir / "INCAR"
-    if incar.is_file() and species is not None:
+    incar = first_incar_file(run_dir, mag_source)
+    if incar is not None and species is not None:
         initial = existing_magmom_values(incar, species.total_atoms)
     atom_reports = build_atom_reports(block.moments, labels, initial, change_threshold=change_threshold)
     physics_status, physics_bad_count, physics_bad_by_element = apply_moment_guards(atom_reports, moment_guards)
@@ -497,7 +572,8 @@ def analyze_spin(
     )
     element_order, element_sum = element_order_from_atoms(atom_reports, threshold=order_threshold)
     return {
-        "mag_source": outcar,
+        "mag_source": mag_source,
+        "output_run_dir": mag_source.parent,
         "mag_status": "ONSITE_MATRIX" if block.source_kind == "onsite_density_matrix" else ("WARN" if block.warning else "OK"),
         "total_moment": sum(block.moments),
         "max_abs_moment": max((abs(value) for value in block.moments), default=0.0),
@@ -518,22 +594,26 @@ def analyze_spin(
 
 def evaluate_branch(branch: BranchInput, args: argparse.Namespace) -> BranchReport:
     report = BranchReport(frame_id=branch.frame_id, branch_id=branch.branch_id, run_dir=branch.run_dir)
+    candidates = branch_output_candidates(branch, args, deep_artifacts=True)
     energy, kind, source = latest_branch_energy(
-        branch.run_dir,
+        candidates,
         preferred_kind=args.energy,
         dav_average_window=args.dav_average_window,
     )
     report.energy_eV = energy
     report.energy_kind = kind
     report.energy_source = source
-    convergence, newest, age_min, convergence_reasons = classify_convergence(branch.run_dir, args.stopped_after_min)
+    if source is not None:
+        report.output_run_dir = source.parent
+    convergence, newest, age_min, convergence_reasons = classify_convergence(branch.run_dir, args.stopped_after_min, candidates)
     report.convergence_status = convergence
     report.newest_output = newest
     report.newest_output_age_min = age_min
     report.reasons.extend(convergence_reasons)
 
-    dEs, _energies = parse_oszicar_scf(branch.run_dir / "OSZICAR")
-    report.current_step = parse_oszicar_current_step(branch.run_dir / "OSZICAR")
+    scf_path = scf_candidate(candidates)
+    dEs, _energies = parse_oszicar_scf(scf_path) if scf_path is not None else ([], [])
+    report.current_step = parse_oszicar_current_step(scf_path) if scf_path is not None else None
     scf_status, last_de, recent_median, ratio, scf_reasons = classify_scf(
         dEs,
         warning_de=args.scf_warning_de,
@@ -550,6 +630,8 @@ def evaluate_branch(branch: BranchInput, args: argparse.Namespace) -> BranchRepo
 
     spin = analyze_spin(
         branch.run_dir,
+        branch_index=branch_array_index(branch),
+        log_dir=branch_log_dir(branch, args),
         moment_guards=args._moment_guards,
         track_atoms=args._track_atoms,
         change_threshold=args.spin_change_threshold,
@@ -661,6 +743,7 @@ def report_to_dict(report: BranchReport) -> dict[str, Any]:
         "relative_energy_eV": report.relative_energy_eV,
         "energy_kind": report.energy_kind,
         "energy_source": "" if report.energy_source is None else str(report.energy_source),
+        "output_run_dir": "" if report.output_run_dir is None else str(report.output_run_dir),
         "convergence_status": report.convergence_status,
         "newest_output": "" if report.newest_output is None else str(report.newest_output),
         "newest_output_age_min": report.newest_output_age_min,
@@ -702,10 +785,12 @@ def write_csv(reports: list[BranchReport], path: Path) -> None:
         "relative_energy_eV",
         "energy_kind",
         "energy_source",
+        "output_run_dir",
         "convergence_status",
         "current_step",
         "last_de",
         "scf_status",
+        "mag_source",
         "mag_status",
         "total_moment",
         "max_abs_moment",
@@ -1020,6 +1105,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("root", nargs="?", type=Path, default=Path("."), help="Root containing frame/branch VASP folders.")
     parser.add_argument("--index", type=Path, help="CSV with run_dir/path plus optional frame_id and branch_id columns.")
     parser.add_argument("--runlist", type=Path, help="Plain runlist.txt containing one branch directory per line.")
+    parser.add_argument(
+        "--log-dir",
+        type=Path,
+        help="Directory containing array logs/artifacts such as vasp.out*.<index> and bwforcluster*.<index>.*. Default: runlist parent.",
+    )
     parser.add_argument("--outdir", type=Path, default=Path("."), help="Output directory for stage-1 summaries.")
     parser.add_argument("--max-depth", type=int, default=2, help="Discovery depth below root when --index is not given.")
     parser.add_argument(
