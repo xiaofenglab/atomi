@@ -825,6 +825,29 @@ def _spin_status(report: BranchReport) -> str:
     return spin_status
 
 
+def _run_pointer(path: Path, parent_is_shared: bool) -> str:
+    name = path.name or str(path)
+    parent = path.parent.name
+    if parent_is_shared or not parent:
+        return name
+    return f"{parent}/{name}"
+
+
+def _shared_parent(paths: list[Path]) -> bool:
+    parents = {path.parent.name for path in paths if path.parent.name}
+    return len(parents) <= 1
+
+
+def run_pointer_labels(reports: list[BranchReport]) -> dict[Path, str]:
+    parent_is_shared = _shared_parent([report.run_dir for report in reports])
+    return {report.run_dir: _run_pointer(report.run_dir, parent_is_shared) for report in reports}
+
+
+def branch_pointer_labels(branches: list[BranchInput]) -> dict[Path, str]:
+    parent_is_shared = _shared_parent([branch.run_dir for branch in branches])
+    return {branch.run_dir: _run_pointer(branch.run_dir, parent_is_shared) for branch in branches}
+
+
 def format_live_table(reports: list[BranchReport], args: argparse.Namespace, iteration: int) -> str:
     counts: dict[str, int] = {}
     for report in reports:
@@ -836,18 +859,20 @@ def format_live_table(reports: list[BranchReport], args: argparse.Namespace, ite
         f"Branches={len(reports)}   GOOD={counts.get('continue', 0)}   WARN={counts.get('warning', 0)}   BAD={counts.get('stop', 0)}",
         f"Outputs: {args.outdir / 'stage1_branch_summary.csv'} ; {args.outdir / 'stage2_survivors_runlist.txt'}",
         "",
-        "run  frame        branch        step      energy     relE      dE      conv      scf       spin      trk   rec   note",
-        "---  -----------  ------------  -----  ----------  -------  --------  --------  --------  --------  ----  ----  ----------------",
+        "run  path                    frame        branch        step      energy     relE      dE      conv      scf       spin      trk   rec   note",
+        "---  ----------------------  -----------  ------------  -----  ----------  -------  --------  --------  --------  --------  ----  ----  ----------------",
     ]
     sorted_reports = sorted(
         reports,
         key=lambda item: (item.frame_id, item.rank_in_frame or 999999, item.branch_id),
     )
+    path_labels = run_pointer_labels(sorted_reports)
     for index, report in enumerate(sorted_reports, start=1):
         step = "-" if report.current_step is None else str(report.current_step)
         spin_status = _spin_status(report)
         lines.append(
             f"{str(index).rjust(3)}  "
+            f"{_short(path_labels.get(report.run_dir, report.run_dir.name), 22)}  "
             f"{_short(report.frame_id, 11)}  "
             f"{_short(report.branch_id, 12)}  "
             f"{step.rjust(5)}  "
@@ -879,16 +904,17 @@ def format_scan_header(args: argparse.Namespace, iteration: int, total: int) -> 
         f"Atomi VASP Branch Scan Monitor | pass {iteration} | {now} | branches={total}",
         f"Outputs after pass: {args.outdir / 'stage1_branch_summary.csv'} ; {args.outdir / 'stage2_survivors_runlist.txt'}",
         "Rows are streamed as soon as each branch is parsed; per-frame ranks are final after the pass completes.",
-        "run        frame        branch        step      energy     relE      dE      conv      scf       spin      trk   rec   note",
-        "---------  -----------  ------------  -----  ----------  -------  --------  --------  --------  --------  ----  ----  ----------------",
+        "run        path                    frame        branch        step      energy     relE      dE      conv      scf       spin      trk   rec   note",
+        "---------  ----------------------  -----------  ------------  -----  ----------  -------  --------  --------  --------  --------  ----  ----  ----------------",
     ]
     return "\n".join(lines)
 
 
-def format_scan_row(report: BranchReport, index: int, total: int) -> str:
+def format_scan_row(report: BranchReport, index: int, total: int, run_label: str | None = None) -> str:
     step = "-" if report.current_step is None else str(report.current_step)
     return (
         f"{str(index).rjust(3)}/{str(total).ljust(3)}  "
+        f"{_short(run_label or report.run_dir.name, 22)}  "
         f"{_short(report.frame_id, 11)}  "
         f"{_short(report.branch_id, 12)}  "
         f"{step.rjust(5)}  "
@@ -1083,9 +1109,11 @@ def run_live_scan(args: argparse.Namespace) -> None:
             branches = load_branches_from_args(args)
             reports: list[BranchReport] = []
             total = len(branches)
+            path_labels = branch_pointer_labels(branches)
             print(format_scan_header(args, iteration, total), flush=True)
             for index, branch in enumerate(branches, start=1):
-                label = f"scanning run {index}/{total} {branch.frame_id}/{branch.branch_id}"
+                run_label = path_labels.get(branch.run_dir, branch.run_dir.name)
+                label = f"scanning run {index}/{total} {run_label}"
                 with ScanSpinner(label):
                     report = evaluate_branch(branch, args)
                 reports.append(report)
@@ -1095,7 +1123,7 @@ def run_live_scan(args: argparse.Namespace) -> None:
                     warn_window=args.energy_window_warning,
                     stop_window=args.energy_window_stop,
                 )
-                print(format_scan_row(report, index, total), flush=True)
+                print(format_scan_row(report, index, total, run_label=run_label), flush=True)
             rank_and_classify(
                 reports,
                 keep_per_frame=args.keep_per_frame,

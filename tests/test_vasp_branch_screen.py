@@ -164,8 +164,10 @@ def test_branch_screen_accepts_runlist_and_streams_live_scan(tmp_path: Path, cap
     )
     output = capsys.readouterr().out
     assert "Atomi VASP Branch Scan Monitor" in output
+    assert "path" in output
     assert "1/2" in output
     assert "2/2" in output
+    assert "u_site_a" in output
     assert "Pass 1 complete" in output
 
     rows = read_csv(outdir / "stage1_branch_summary.csv")
@@ -189,6 +191,25 @@ def test_branch_screen_accepts_runlist_and_streams_live_scan(tmp_path: Path, cap
     args.refresh = 10
     table = branch_screen.format_live_table(reports, args, iteration=1)
     assert "Atomi VASP Branch Live Monitor" in table
+    assert "path" in table
     assert "u_site_a" in table
     assert "GOOD" in table
     assert "BAD" in table or "WARN" in table
+
+
+def test_run_pointer_uses_parent_only_when_needed(tmp_path: Path) -> None:
+    shared = [
+        branch_screen.BranchInput("f1", "a", tmp_path / "frame_001" / "spin_a"),
+        branch_screen.BranchInput("f1", "b", tmp_path / "frame_001" / "spin_b"),
+    ]
+    labels = branch_screen.branch_pointer_labels(shared)
+    assert labels[shared[0].run_dir] == "spin_a"
+    assert labels[shared[1].run_dir] == "spin_b"
+
+    mixed = [
+        branch_screen.BranchInput("f1", "a", tmp_path / "frame_001" / "spin_a"),
+        branch_screen.BranchInput("f2", "a", tmp_path / "frame_002" / "spin_a"),
+    ]
+    labels = branch_screen.branch_pointer_labels(mixed)
+    assert labels[mixed[0].run_dir] == "frame_001/spin_a"
+    assert labels[mixed[1].run_dir] == "frame_002/spin_a"
