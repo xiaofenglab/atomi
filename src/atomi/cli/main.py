@@ -525,6 +525,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         spin_report.add_argument("spin_report_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("vasp-branch-screen", "screen-vasp-branches", "vasp-stage1-screen"):
+        branch_screen = subparsers.add_parser(
+            command_name,
+            help="Stage-1 fail-fast screening of VASP spin/localization branches.",
+        )
+        branch_screen.add_argument("branch_screen_args", nargs=argparse.REMAINDER)
+
     vasp_phonopy_neareq = subparsers.add_parser(
         "vasp-phonopy-neareq",
         help="Prepare phonopy and MLIP near-equilibrium VASP datasets.",
@@ -983,6 +990,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.spin_report import main as vasp_spin_report_main
 
         vasp_spin_report_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in ("vasp-branch-screen", "screen-vasp-branches", "vasp-stage1-screen"):
+        from atomi.vasp.branch_screen import main as vasp_branch_screen_main
+
+        vasp_branch_screen_main(raw_args[1:])
         return
     if raw_args and raw_args[0] == "vasp-phonopy-neareq":
         from atomi.vasp.phonopy_neareq import main as vasp_phonopy_neareq_main
@@ -1486,6 +1498,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.spin_report import main as vasp_spin_report_main
 
         vasp_spin_report_main(args.spin_report_args)
+        return
+
+    if args.subcommand in ("vasp-branch-screen", "screen-vasp-branches", "vasp-stage1-screen"):
+        from atomi.vasp.branch_screen import main as vasp_branch_screen_main
+
+        vasp_branch_screen_main(args.branch_screen_args)
         return
 
     if args.subcommand == "vasp-phonopy-neareq":
