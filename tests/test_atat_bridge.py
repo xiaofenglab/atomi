@@ -806,6 +806,62 @@ def test_parent_defect_run_mcsqs_converts_bestsqs_to_poscar(tmp_path: Path, monk
     assert plan["outputs"]["atat_vasp"].endswith("atat_vasp")
 
 
+def test_parent_defect_run_mcsqs_failure_keeps_direct_outputs(tmp_path: Path, monkeypatch) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    mcsqs = fake_bin / "mcsqs"
+    mcsqs.write_text("#!/bin/sh\nexit 139\n", encoding="utf-8")
+    mcsqs.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    poscar = tmp_path / "POSCAR"
+    poscar.write_text(
+        "UO2 parent\n"
+        "1.0\n"
+        "5 0 0\n"
+        "0 5 0\n"
+        "0 0 5\n"
+        "U O\n"
+        "2 4\n"
+        "Direct\n"
+        "0 0 0\n"
+        "0.5 0.5 0.5\n"
+        "0.25 0.25 0.25\n"
+        "0.75 0.75 0.75\n"
+        "0.25 0.75 0.25\n"
+        "0.75 0.25 0.75\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "parent_defect"
+
+    bridge.parent_defect_main(
+        [
+            "--poscar",
+            str(poscar),
+            "--outdir",
+            str(out),
+            "--substitute",
+            "U=Gd",
+            "--charge",
+            "U=4",
+            "--charge",
+            "Gd=3",
+            "--charge",
+            "O=-2",
+            "--vacancy-element",
+            "O",
+            "--engine",
+            "both",
+            "--run-mcsqs",
+        ]
+    )
+
+    plan = json.loads((out / "parent_defect_plan.json").read_text(encoding="utf-8"))
+    assert plan["mcsqs"]["status"] == "failed"
+    assert (out / "atat" / "mcsqs_failed.txt").exists()
+    assert (out / "candidates" / "01_ordered" / "POSCAR").exists()
+    assert not (out / "atat_vasp").exists()
+
+
 def test_materials_opt_relax_seeds_prepares_volume_scan(tmp_path: Path, capsys) -> None:
     template = tmp_path / "VASP_TEMPLATE"
     template.mkdir()

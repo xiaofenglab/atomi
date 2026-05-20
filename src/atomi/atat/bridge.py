@@ -2950,6 +2950,7 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--atat-atoms", type=int, default=0, help="Optional mcsqs -n target. Default: full supercell atom count.")
     parser.add_argument("--mcsqs-time", type=float, help="Optional mcsqs -T wall-clock limit.")
     parser.add_argument("--run-mcsqs", action="store_true", help="Run mcsqs and convert bestsqs.out to VASP POSCAR folders.")
+    parser.add_argument("--mcsqs-strict", action="store_true", help="Exit with an error if mcsqs fails. Default: keep direct outputs and write a failure note.")
     parser.add_argument("--atat-poscar-outdir", type=Path, help="Output directory for converted ATAT bestsqs POSCARs. Default: OUTDIR/atat_vasp.")
     args = parser.parse_args(argv)
 
@@ -3079,6 +3080,9 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
         args.atat_atoms = atat_atoms
 
     atat_vasp_outdir = args.atat_poscar_outdir.expanduser().resolve() if args.atat_poscar_outdir else root / "atat_vasp"
+    mcsqs_status = "not_requested"
+    mcsqs_message = ""
+    mcsqs_command: list[str] = []
     if args.run_mcsqs:
         if args.engine == "direct":
             raise RuntimeError("--run-mcsqs requires --engine atat or --engine both.")
@@ -3088,14 +3092,46 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
         command = ["mcsqs", f"-n={args.atat_atoms}"]
         if args.mcsqs_time is not None:
             command.append(f"-T={args.mcsqs_time:g}")
-        subprocess.run(command, cwd=atat_dir, check=True)
+        mcsqs_command = command
+        result = subprocess.run(command, cwd=atat_dir)
+        if result.returncode != 0:
+            mcsqs_status = "failed"
+            if result.returncode < 0:
+                mcsqs_message = f"mcsqs stopped by signal {-result.returncode}; direct POSCAR candidates and rndstr.in were kept."
+            else:
+                mcsqs_message = f"mcsqs exited with code {result.returncode}; direct POSCAR candidates and rndstr.in were kept."
+            (atat_dir / "mcsqs_failed.txt").write_text(
+                "\n".join(
+                    [
+                        mcsqs_message,
+                        "Command:",
+                        " ".join(command),
+                        "",
+                        "Next options:",
+                        "- use the direct candidates in ../candidates",
+                        "- rerun mcsqs manually with a different -n/-T",
+                        "- inspect rndstr.in for ATAT compatibility",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            if args.mcsqs_strict:
+                raise RuntimeError(mcsqs_message)
+        else:
+            mcsqs_status = "ok"
         bestsqs = atat_dir / "bestsqs.out"
-        if not bestsqs.is_file():
-            raise RuntimeError(f"mcsqs finished but did not write {bestsqs}")
-        convert_args = ["--input", str(bestsqs), "--outdir", str(atat_vasp_outdir)]
-        if args.vasp_template:
-            convert_args.extend(["--vasp-template", str(args.vasp_template)])
-        atat_poscar_main(convert_args)
+        if result.returncode == 0 and bestsqs.is_file():
+            convert_args = ["--input", str(bestsqs), "--outdir", str(atat_vasp_outdir)]
+            if args.vasp_template:
+                convert_args.extend(["--vasp-template", str(args.vasp_template)])
+            atat_poscar_main(convert_args)
+        elif result.returncode == 0:
+            mcsqs_status = "no_bestsqs"
+            mcsqs_message = f"mcsqs finished but did not write {bestsqs}; direct POSCAR candidates and rndstr.in were kept."
+            (atat_dir / "mcsqs_failed.txt").write_text(mcsqs_message + "\n", encoding="utf-8")
+            if args.mcsqs_strict:
+                raise RuntimeError(mcsqs_message)
 
     write_csv(root / "parent_defect_candidate_index.csv", rows, PARENT_DEFECT_FIELDS)
     (root / "runlist.txt").write_text(("\n".join(runlist) + "\n") if runlist else "", encoding="utf-8")
@@ -3114,6 +3150,13 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
             "charge_before_vacancy": info["charge_before_vacancy"],
             "charge_after_vacancy": info["charge_after_vacancy"],
             "engine": args.engine,
+            "mcsqs": {
+                "requested": bool(args.run_mcsqs),
+                "status": mcsqs_status,
+                "message": mcsqs_message,
+                "command": mcsqs_command,
+                "strict": bool(args.mcsqs_strict),
+            },
             "vacancy_guard": {
                 "enabled": vacancy_guard.enabled,
                 "center_elements": sorted(vacancy_guard.center_elements or []),
@@ -3152,7 +3195,10 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
     if args.engine in {"both", "atat"}:
         print(f"ATAT handoff            : {root / 'atat'}")
         if args.run_mcsqs:
-            print(f"ATAT VASP folders       : {atat_vasp_outdir}")
+            print(f"ATAT mcsqs status       : {mcsqs_status}")
+            if mcsqs_message:
+                print(f"ATAT mcsqs message      : {mcsqs_message}")
+            print(f"ATAT VASP folders       : {atat_vasp_outdir if mcsqs_status == 'ok' else 'not written'}")
         else:
             print("ATAT next step          : cd atat && ./run_mcsqs.sh")
 
