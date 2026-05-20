@@ -593,7 +593,7 @@ def test_materials_opt_atat_poscar_removes_vacancy_pseudo_atoms(tmp_path: Path) 
         "0 0 0 Gd\n"
         "0.5 0.5 0.5 U\n"
         "0.25 0.25 0.25 O\n"
-        "0.75 0.75 0.75 Va\n",
+        "0.75 0.75 0.75 Vac\n",
         encoding="utf-8",
     )
     template = tmp_path / "VASP_TEMPLATE"
@@ -621,6 +621,7 @@ def test_materials_opt_atat_poscar_removes_vacancy_pseudo_atoms(tmp_path: Path) 
     assert index[0]["removed_vacancies"] == "1"
     poscar = (out / "candidates" / "01_bestsqs" / "POSCAR").read_text(encoding="utf-8")
     assert "Va" not in poscar
+    assert "Vac" not in poscar
     assert "Gd" in poscar
     assert "ISYM = 0" in (out / "candidates" / "01_bestsqs" / "INCAR").read_text(encoding="utf-8")
     assert (out / "runlist.txt").read_text(encoding="utf-8").strip().endswith("01_bestsqs")
@@ -683,13 +684,11 @@ def test_materials_opt_parent_defect_charge_compensates_and_scales(tmp_path: Pat
     assert len(index) == 3
     assert all(row["stoichiometry"] == "Gd2 O3" for row in index)
     rndstr = (out / "atat" / "rndstr.in").read_text(encoding="utf-8")
-    numeric_lines = [
-        line
-        for line in rndstr.splitlines()
-        if line and not line.startswith("#") and len(line.split()) == 3
-    ]
-    assert len(numeric_lines) >= 6
-    assert "O=0.75,Va=0.25" in rndstr
+    numeric_lines = [line for line in rndstr.splitlines() if line and len(line.split()) == 3]
+    assert len(numeric_lines) == 6
+    assert not rndstr.startswith("#")
+    assert "O=0.75,Vac=0.25" in rndstr
+    assert "Va=0.25" not in rndstr
     assert "U=Gd" not in rndstr
     assert "Gd" in (out / "candidates" / "01_ordered" / "POSCAR").read_text(encoding="utf-8")
 
