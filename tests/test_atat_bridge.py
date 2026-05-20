@@ -683,7 +683,14 @@ def test_materials_opt_parent_defect_charge_compensates_and_scales(tmp_path: Pat
     assert len(index) == 3
     assert all(row["stoichiometry"] == "Gd2 O3" for row in index)
     rndstr = (out / "atat" / "rndstr.in").read_text(encoding="utf-8")
+    numeric_lines = [
+        line
+        for line in rndstr.splitlines()
+        if line and not line.startswith("#") and len(line.split()) == 3
+    ]
+    assert len(numeric_lines) >= 6
     assert "O=0.75,Va=0.25" in rndstr
+    assert "U=Gd" not in rndstr
     assert "Gd" in (out / "candidates" / "01_ordered" / "POSCAR").read_text(encoding="utf-8")
 
 
