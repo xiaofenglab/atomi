@@ -91,6 +91,7 @@ def test_write_private_template_and_discovery_script(tmp_path: Path) -> None:
 
     assert config["site"] == "new_cluster"
     assert config["privacy"] == "local-only; do not commit or push"
+    assert "atat" in config["profiles"]
     assert "vasp_cpu" in config["profiles"]
     assert "lammps_md_engine" in config["profiles"]
     assert config["profiles"]["lammps_md_engine"]["modules"] == []
@@ -151,6 +152,14 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
                         "python": "/private/moose_env/bin/python",
                         "database_paths": ["/private/tdb/uo2.tdb", "/private/tdb/gduo2.tdb"],
                     },
+                    "atat": {
+                        "root": "/private/atat",
+                        "bin": "/private/atat/src",
+                        "executables": {
+                            "mcsqs": "/private/atat/src/mcsqs",
+                            "corrdump": "/private/atat/src/corrdump",
+                        },
+                    },
                 },
             }
         ),
@@ -162,6 +171,7 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
 
     assert result["config_found"] is True
     assert result["profile_names"] == [
+        "atat",
         "calphad",
         "cp2k",
         "lammps_md_engine",
@@ -194,6 +204,10 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
     assert "export ATOMI_MOOSE_MODULES='moose/module petsc/module'" in env_text
     assert "export ATOMI_CALPHAD_PYTHON=/private/moose_env/bin/python" in env_text
     assert "export ATOMI_CALPHAD_DATABASES=/private/tdb/uo2.tdb,/private/tdb/gduo2.tdb" in env_text
+    assert "export ATOMI_ATAT_ROOT=/private/atat" in env_text
+    assert "export ATOMI_ATAT_BIN=/private/atat/src" in env_text
+    assert "export ATOMI_ATAT_MCSQS=/private/atat/src/mcsqs" in env_text
+    assert 'export PATH="/private/atat/src:$PATH"' in env_text
     assert "export ATOMI_PDFGETX3_EXE=/private/pdfgetx3_env/bin/pdfgetx3" in env_text
     assert "export ATOMI_PDFGETX3_ENV=/private/pdfgetx3_env" in env_text
     assert "export ATOMI_PDFGETX3_WHEELHOUSE=/private/wheels/pdfgetx3" in env_text

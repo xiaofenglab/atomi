@@ -284,6 +284,17 @@ def build_hpc_config_template(site: str = "") -> dict[str, Any]:
             "Set ATOMI_HPC_CONFIG to this file when running Atomi commands.",
         ],
         "profiles": {
+            "atat": {
+                "root": "",
+                "bin": "",
+                "executables": {},
+                "missing_executables": [],
+                "ready": {},
+                "environment": {
+                    "ATOMI_ATAT_ROOT": "",
+                    "ATOMI_ATAT_BIN": "",
+                },
+            },
             "vasp_cpu": {
                 "scheduler": "slurm",
                 "partition": "",
@@ -766,6 +777,25 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
                 ",".join(str(item) for item in databases if _nonempty(item)),
             )
 
+    atat = profiles.get("atat", {})
+    if isinstance(atat, dict):
+        env = atat.get("environment", {})
+        if isinstance(env, dict):
+            for key, value in env.items():
+                if _nonempty(value) and str(key).startswith("ATOMI_"):
+                    exports[str(key)] = str(value)
+        if _nonempty(atat.get("root")):
+            exports.setdefault("ATOMI_ATAT_ROOT", str(atat["root"]))
+        for field in ("bin", "bin_dir", "src", "executable_dir"):
+            if _nonempty(atat.get(field)):
+                exports.setdefault("ATOMI_ATAT_BIN", str(atat[field]))
+                break
+        executables = atat.get("executables")
+        if isinstance(executables, dict):
+            for tool in ("mcsqs", "corrdump", "maps", "mmaps", "genstr", "emc2"):
+                if _nonempty(executables.get(tool)):
+                    exports.setdefault(f"ATOMI_ATAT_{tool.upper()}", str(executables[tool]))
+
     if config_path is not None:
         exports[CONFIG_ENV_VAR] = str(config_path.expanduser().resolve())
 
@@ -791,6 +821,17 @@ def render_env_script(config: dict[str, Any], config_path: Path | None = None) -
     ]
     for key, value in exports.items():
         lines.append(f"export {key}={_quote_export_value(value)}")
+    atat_bin = exports.get("ATOMI_ATAT_BIN")
+    if _nonempty(atat_bin):
+        escaped_atat_bin = atat_bin.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`")
+        lines.extend(
+            [
+                'case ":$PATH:" in',
+                f'  *":{atat_bin}:"*) ;;',
+                f'  *) export PATH="{escaped_atat_bin}:$PATH" ;;',
+                "esac",
+            ]
+        )
     lines.append("")
     return "\n".join(lines)
 

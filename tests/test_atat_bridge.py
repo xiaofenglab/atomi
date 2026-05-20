@@ -75,6 +75,32 @@ def test_atat_doctor_json_cli(capsys, monkeypatch, tmp_path: Path) -> None:
     assert "can_generate_sqs" in payload["ready"]
 
 
+def test_atat_doctor_updates_private_hpc_config(tmp_path: Path, monkeypatch, capsys) -> None:
+    fake_root = tmp_path / "atat"
+    fake_bin = fake_root / "src"
+    fake_bin.mkdir(parents=True)
+    for tool in ("mcsqs", "corrdump", "maps", "mmaps", "genstr", "emc2", "mapsrep", "checkcell", "cellcvrt"):
+        path = fake_bin / tool
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+    monkeypatch.setenv("PATH", str(fake_bin))
+    config = tmp_path / "atomi_hpc_config.kit.local.json"
+    config.write_text(json.dumps({"site": "KIT", "profiles": {}, "environment_exports": {}}), encoding="utf-8")
+
+    atomi_main(["atat-doctor", "--update-hpc-config", str(config)])
+
+    assert "HPC config updated" in capsys.readouterr().out
+    data = json.loads(config.read_text(encoding="utf-8"))
+    profile = data["profiles"]["atat"]
+    assert profile["root"] == str(fake_root)
+    assert profile["bin"] == str(fake_bin)
+    assert profile["executables"]["mcsqs"] == str(fake_bin / "mcsqs")
+    assert profile["ready"]["can_generate_sqs"] is True
+    assert "str2poscar" in profile["missing_executables"]
+    assert data["environment_exports"]["ATOMI_ATAT_ROOT"] == str(fake_root)
+    assert data["environment_exports"]["ATOMI_ATAT_BIN"] == str(fake_bin)
+
+
 def test_atat_ce_handoff_filters_physics_accepted_rows(tmp_path: Path) -> None:
     summary = tmp_path / "stage1_branch_summary.csv"
     fields = [
