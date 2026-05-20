@@ -2615,6 +2615,8 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--mcsqs-quadruplet-diameter", type=float, help="Optional ATAT mcsqs -4 quadruplet cluster diameter.")
     parser.add_argument("--mcsqs-time", type=float, help="Optional mcsqs -T wall-clock limit.")
     parser.add_argument("--run-mcsqs", action="store_true", help="Run mcsqs immediately if available.")
+    parser.add_argument("--mcsqs-strict", action="store_true", help="Exit with an error if mcsqs fails. Default: keep direct outputs and write a failure note.")
+    parser.add_argument("--atat-poscar-outdir", type=Path, help="Output directory for converted ATAT bestsqs POSCARs. Default: OUTDIR/atat_vasp.")
     args = parser.parse_args(argv)
 
     if args.target_occupancy is not None and not (0.0 < args.target_occupancy <= 1.0):
@@ -2791,6 +2793,38 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
 
     write_csv(root / "vacancy_candidate_index.csv", rows, VACANCY_CANDIDATE_FIELDS)
     (root / "runlist.txt").write_text(("\n".join(runlist) + "\n") if runlist else "", encoding="utf-8")
+    atat_vasp_outdir = args.atat_poscar_outdir.expanduser().resolve() if args.atat_poscar_outdir else root / "atat_vasp"
+    mcsqs_status = "not_requested"
+    mcsqs_message = ""
+    mcsqs_cluster_command: list[str] = []
+    mcsqs_search_command: list[str] = []
+    if args.run_mcsqs:
+        if args.engine == "direct":
+            raise RuntimeError("--run-mcsqs requires --engine atat or --engine both.")
+        if shutil.which("mcsqs") is None:
+            raise RuntimeError("mcsqs was requested with --run-mcsqs, but it is not on PATH.")
+        result = run_mcsqs_workflow(atat_dir, args)
+        mcsqs_cluster_command = result.cluster_command
+        mcsqs_search_command = result.search_command
+        mcsqs_status = result.status
+        mcsqs_message = result.message
+        if result.status != "ok":
+            if args.mcsqs_strict:
+                raise RuntimeError(mcsqs_message)
+        bestsqs = atat_dir / "bestsqs.out"
+        if result.status == "ok" and bestsqs.is_file():
+            convert_args = ["--input", str(bestsqs), "--outdir", str(atat_vasp_outdir)]
+            convert_args.extend(["--vacancy-label", args.vacancy_label])
+            if args.vasp_template:
+                convert_args.extend(["--vasp-template", str(args.vasp_template)])
+            atat_poscar_main(convert_args)
+        elif result.status == "ok":
+            mcsqs_status = "no_bestsqs"
+            mcsqs_message = f"mcsqs finished but did not write {bestsqs}; direct POSCAR candidates and rndstr.in were kept."
+            (atat_dir / "mcsqs_failed.txt").write_text(mcsqs_message + "\n", encoding="utf-8")
+            if args.mcsqs_strict:
+                raise RuntimeError(mcsqs_message)
+
     write_json(
         root / "vacancy_cif_plan.json",
         {
@@ -2811,6 +2845,15 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
             "n_partial_sites": sum(len(group["indices"]) for group in occupation_groups),
             "n_keep_partial_element": keep_total,
             "n_vacancy": vacancy_total,
+            "mcsqs": {
+                "requested": bool(args.run_mcsqs),
+                "status": mcsqs_status,
+                "message": mcsqs_message,
+                "command": mcsqs_search_command,
+                "cluster_command": mcsqs_cluster_command,
+                "search_command": mcsqs_search_command,
+                "strict": bool(args.mcsqs_strict),
+            },
             "vacancy_guard": {
                 "enabled": vacancy_guard.enabled,
                 "center_elements": sorted(vacancy_guard.center_elements or []),
@@ -2857,6 +2900,7 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
                 "supercell_analysis": str(root / "supercell_candidate_analysis.csv"),
                 "rndstr": str(atat_dir / "rndstr.in") if args.engine in {"both", "atat"} else "",
                 "run_mcsqs": str(atat_dir / "run_mcsqs.sh") if args.engine in {"both", "atat"} else "",
+                "atat_vasp": str(atat_vasp_outdir) if args.engine in {"both", "atat"} else "",
                 "candidate_index": str(root / "vacancy_candidate_index.csv"),
                 "runlist": str(root / "runlist.txt"),
             },
@@ -2867,15 +2911,6 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
             ],
         },
     )
-
-    if args.run_mcsqs:
-        if args.engine == "direct":
-            raise RuntimeError("--run-mcsqs requires --engine atat or --engine both.")
-        if shutil.which("mcsqs") is None:
-            raise RuntimeError("mcsqs was requested with --run-mcsqs, but it is not on PATH.")
-        result = run_mcsqs_workflow(atat_dir, args)
-        if result.status != "ok":
-            raise RuntimeError(result.message)
 
     print(f"Vacancy CIF workspace : {root}")
     print(f"Occupational sites    : {sum(len(group['indices']) for group in occupation_groups)}")
@@ -2894,6 +2929,11 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
         f"{'on' if vacancy_guard.enabled else 'off'}; nearest={vacancy_guard.coordination_number}; "
         f"max missing/center={vacancy_guard.max_missing}; centers={','.join(sorted(vacancy_guard.center_elements or [])) or 'auto'}"
     )
+    if args.run_mcsqs:
+        print(f"ATAT mcsqs status     : {mcsqs_status}")
+        if mcsqs_message:
+            print(f"ATAT mcsqs message    : {mcsqs_message}")
+        print(f"ATAT VASP folders     : {atat_vasp_outdir if mcsqs_status == 'ok' else 'not written'}")
     print(f"Supercell analysis    : {root / 'supercell_candidate_analysis.csv'}")
     print(f"ATAT rndstr.in        : {(atat_dir / 'rndstr.in') if args.engine in {'both', 'atat'} else 'skipped'}")
     print(f"Candidates            : {len(rows) if args.engine in {'both', 'direct'} else 'skipped'}")

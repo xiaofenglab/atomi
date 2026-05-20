@@ -365,6 +365,93 @@ def test_materials_opt_vacancy_cif_writes_explicit_poscars_and_atat_input(tmp_pa
     assert len((out / "runlist.txt").read_text(encoding="utf-8").splitlines()) == 3
 
 
+def test_materials_opt_vacancy_cif_run_mcsqs_converts_bestsqs_to_poscar(tmp_path: Path, monkeypatch) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    mcsqs = fake_bin / "mcsqs"
+    mcsqs.write_text(
+        "#!/bin/sh\n"
+        "case \"$*\" in\n"
+        "  *-2=*)\n"
+        "    echo \"$@\" > mcsqs_cluster_args.txt\n"
+        "    echo clusters > clusters.out\n"
+        "    exit 0\n"
+        "    ;;\n"
+        "esac\n"
+        "echo \"$@\" > mcsqs_search_args.txt\n"
+        "cat > bestsqs.out <<'EOF'\n"
+        "5 0 0\n"
+        "0 5 0\n"
+        "0 0 5\n"
+        "0 0 0 Gd\n"
+        "0.5 0.5 0.5 Gd\n"
+        "0.25 0.25 0.25 O\n"
+        "0.75 0.75 0.75 Va\n"
+        "EOF\n",
+        encoding="utf-8",
+    )
+    mcsqs.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    cif = tmp_path / "partial_gd2o3.cif"
+    cif.write_text(
+        "data_demo\n"
+        "_symmetry_space_group_name_H-M   P1\n"
+        "_cell_length_a 5\n"
+        "_cell_length_b 5\n"
+        "_cell_length_c 5\n"
+        "_cell_angle_alpha 90\n"
+        "_cell_angle_beta 90\n"
+        "_cell_angle_gamma 90\n"
+        "_symmetry_Int_Tables_number 1\n"
+        "loop_\n"
+        "_space_group_symop_operation_xyz\n"
+        "x,y,z\n"
+        "loop_\n"
+        "_atom_site_label\n"
+        "_atom_site_type_symbol\n"
+        "_atom_site_fract_x\n"
+        "_atom_site_fract_y\n"
+        "_atom_site_fract_z\n"
+        "_atom_site_occupancy\n"
+        "Gd1 Gd 0 0 0 1\n"
+        "Gd2 Gd 0.5 0.5 0.5 1\n"
+        "O1 O 0.25 0.25 0.25 1\n"
+        "O2 O 0.75 0.75 0.75 0.2\n",
+        encoding="utf-8",
+    )
+    template = tmp_path / "VASP_TEMPLATE"
+    template.mkdir()
+    (template / "INCAR").write_text("ENCUT = 520\n", encoding="utf-8")
+    (template / "KPOINTS").write_text("Gamma\n", encoding="utf-8")
+    (template / "POTCAR").write_text("fake\n", encoding="utf-8")
+    out = tmp_path / "vacancy"
+
+    bridge.vacancy_candidate_main(
+        [
+            "--cif",
+            str(cif),
+            "--outdir",
+            str(out),
+            "--supercell",
+            "1x1x5",
+            "--run-mcsqs",
+            "--vasp-template",
+            str(template),
+        ]
+    )
+
+    assert "-2=6" in (out / "atat" / "mcsqs_cluster_args.txt").read_text(encoding="utf-8")
+    assert "-n=" in (out / "atat" / "mcsqs_search_args.txt").read_text(encoding="utf-8")
+    poscar_text = (out / "atat_vasp" / "candidates" / "01_bestsqs" / "POSCAR").read_text(encoding="utf-8")
+    assert "Va" not in poscar_text
+    assert "Gd" in poscar_text
+    assert "ISYM = 0" in (out / "atat_vasp" / "candidates" / "01_bestsqs" / "INCAR").read_text(encoding="utf-8")
+    plan = json.loads((out / "vacancy_cif_plan.json").read_text(encoding="utf-8"))
+    assert plan["mcsqs"]["status"] == "ok"
+    assert "-2=6" in plan["mcsqs"]["cluster_command"]
+    assert plan["outputs"]["atat_vasp"].endswith("atat_vasp")
+
+
 def test_materials_opt_vacancy_cif_auto_uses_multiple_vacancy_sites(tmp_path: Path) -> None:
     cif = tmp_path / "partial_multi.cif"
     cif.write_text(
