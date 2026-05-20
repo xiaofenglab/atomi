@@ -5,8 +5,6 @@ import json
 import os
 from pathlib import Path
 
-import pytest
-
 from atomi.cli.main import main as atomi_main
 from atomi.atat import bridge
 
@@ -491,7 +489,7 @@ def test_materials_opt_vacancy_cif_materializes_mixed_species_site(tmp_path: Pat
     assert "U" in poscar_text
 
 
-def test_materials_opt_vacancy_cif_default_does_not_auto_repeat(tmp_path: Path) -> None:
+def test_materials_opt_vacancy_cif_default_auto_prefers_compact_repeat(tmp_path: Path) -> None:
     cif = tmp_path / "partial_single.cif"
     cif.write_text(
         "data_demo\n"
@@ -517,8 +515,21 @@ def test_materials_opt_vacancy_cif_default_does_not_auto_repeat(tmp_path: Path) 
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="Use --supercell auto"):
-        bridge.vacancy_candidate_main(["--cif", str(cif), "--outdir", str(tmp_path / "out")])
+    bridge.vacancy_candidate_main(["--cif", str(cif), "--outdir", str(tmp_path / "out")])
+
+    plan = json.loads((tmp_path / "out" / "vacancy_cif_plan.json").read_text(encoding="utf-8"))
+    assert plan["repeat"] == [1, 1, 2]
+
+
+def test_choose_integer_repeat_avoids_slab_when_compact_repeat_exists() -> None:
+    repeat = bridge.choose_integer_repeat(
+        [(1, 0.2)],
+        max_repeat=5,
+        cell_lengths=(1.0, 1.0, 1.0),
+        max_aspect=2.5,
+    )
+
+    assert repeat == (2, 2, 5)
 
 
 def test_materials_opt_relax_seeds_prepares_volume_scan(tmp_path: Path, capsys) -> None:

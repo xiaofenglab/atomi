@@ -1510,11 +1510,21 @@ def parse_repeat(value: str | None) -> tuple[int, int, int] | None:
     return repeat  # type: ignore[return-value]
 
 
-def choose_integer_repeat(requirements: list[tuple[int, float]], max_repeat: int) -> tuple[int, int, int]:
+def repeat_aspect_ratio(repeat: tuple[int, int, int], cell_lengths: tuple[float, float, float] | None) -> float:
+    lengths = cell_lengths or (1.0, 1.0, 1.0)
+    repeated = [max(1.0e-12, float(length) * repeat[index]) for index, length in enumerate(lengths)]
+    return max(repeated) / min(repeated)
+
+
+def choose_integer_repeat(
+    requirements: list[tuple[int, float]],
+    max_repeat: int,
+    cell_lengths: tuple[float, float, float] | None = None,
+    max_aspect: float = 2.5,
+) -> tuple[int, int, int]:
     if not requirements:
         return (1, 1, 1)
-    best: tuple[int, int, int] | None = None
-    best_volume: int | None = None
+    candidates: list[tuple[int, float, int, tuple[int, int, int]]] = []
     fractions = [(n_sites, Fraction(occupancy).limit_denominator(128)) for n_sites, occupancy in requirements]
     for a in range(1, max_repeat + 1):
         for b in range(1, max_repeat + 1):
@@ -1522,17 +1532,17 @@ def choose_integer_repeat(requirements: list[tuple[int, float]], max_repeat: int
                 volume = a * b * c
                 if any((n_sites * volume * frac.numerator) % frac.denominator != 0 for n_sites, frac in fractions):
                     continue
-                if best is None or volume < (best_volume or 10**9) or (
-                    volume == best_volume and max(a, b, c) < max(best)
-                ):
-                    best = (a, b, c)
-                    best_volume = volume
-    if best is None:
+                repeat = (a, b, c)
+                candidates.append((volume, repeat_aspect_ratio(repeat, cell_lengths), max(repeat), repeat))
+    if not candidates:
         raise ValueError(
             "Could not find a compact integer supercell for the partial occupancy. "
             "Pass --supercell explicitly or increase --max-repeat."
         )
-    return best
+    compact = [item for item in candidates if item[1] <= max_aspect]
+    if compact:
+        return min(compact, key=lambda item: (item[0], item[1], item[2], item[3]))[3]
+    return min(candidates, key=lambda item: (item[1], item[0], item[2], item[3]))[3]
 
 
 def repeated_occupancies(occupancies: list[float], repeat: tuple[int, int, int]) -> list[float]:
@@ -1584,11 +1594,36 @@ def min_pair_distance(atoms: Any, indices: list[int]) -> float | None:
     return min(distance_between_indices(atoms, i, j) for i, j in itertools.combinations(indices, 2))
 
 
+def evenly_spaced_indices(candidates: list[int], count: int) -> list[int]:
+    if count >= len(candidates):
+        return list(candidates)
+    if count <= 0:
+        return []
+    if count == 1:
+        return [candidates[0]]
+    chosen: list[int] = []
+    used: set[int] = set()
+    last = len(candidates) - 1
+    for i in range(count):
+        pos = int(round(i * last / (count - 1)))
+        while pos in used and pos < last:
+            pos += 1
+        while pos in used and pos > 0:
+            pos -= 1
+        used.add(pos)
+        chosen.append(candidates[pos])
+    return sorted(chosen)
+
+
 def greedy_vacancy_set(atoms: Any, candidates: list[int], n_vacancy: int, mode: str) -> list[int]:
     if n_vacancy >= len(candidates):
         return list(candidates)
     if n_vacancy <= 0:
         return []
+    if len(candidates) * min(n_vacancy, len(candidates) - n_vacancy) > 20000:
+        if mode == "clustered":
+            return sorted(candidates[:n_vacancy])
+        return evenly_spaced_indices(candidates, n_vacancy)
     n_keep = len(candidates) - n_vacancy
     if n_keep < n_vacancy:
         keep_mode = "clustered" if mode == "separated" else "separated"
@@ -1665,7 +1700,7 @@ def occupation_counts_for_group(group: dict[str, Any]) -> dict[str, int]:
             raise ValueError(
                 f"Selected supercell does not make occupancy integer for site {group.get('label')} "
                 f"({len(indices)} sites at {symbol}={float(fraction):g}). "
-                "Use --supercell auto for the smallest integer repeat, or pass an explicit repeat such as 2x2x2."
+                "Use --supercell auto for an integer compact repeat, or pass an explicit repeat such as 2x2x2."
             )
         counts[symbol] = count
     missing = len(indices) - sum(counts.values())
@@ -1866,10 +1901,16 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--vacancy-label", default="Va", help="ATAT vacancy pseudo-species label.")
     parser.add_argument(
         "--supercell",
-        default="1x1x1",
-        help="Supercell repeat such as 1x1x1 or 2x2x2. Use 'auto' to find the smallest integer-occupancy repeat.",
+        default="auto",
+        help="auto or a repeat such as 1x1x1 / 2x2x2. Auto finds an integer-occupancy compact repeat.",
     )
     parser.add_argument("--max-repeat", type=int, default=6, help="Largest repeat searched for --supercell auto.")
+    parser.add_argument(
+        "--auto-max-aspect",
+        type=float,
+        default=2.5,
+        help="For --supercell auto, prefer the smallest integer repeat with repeated-cell max/min length <= this value.",
+    )
     parser.add_argument("--vasp-template", type=Path, help="Optional VASP template copied beside each POSCAR.")
     parser.add_argument("--seed", type=int, default=20260520)
     parser.add_argument("--atat-atoms", type=int, default=0, help="Optional mcsqs -n target. Default: full supercell atom count.")
@@ -1906,6 +1947,8 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     repeat = parse_repeat(args.supercell) or choose_integer_repeat(
         occupation_requirements(initial_occupation_groups),
         args.max_repeat,
+        tuple(float(value) for value in atoms0.cell.lengths()),
+        args.auto_max_aspect,
     )
     atoms = atoms0.repeat(repeat)
     site_labels = repeat_metadata(labels0, repeat)
