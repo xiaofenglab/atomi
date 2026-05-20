@@ -2187,9 +2187,35 @@ def build_mcsqs_cluster_command(args: argparse.Namespace) -> list[str]:
 
 def build_mcsqs_search_command(args: argparse.Namespace) -> list[str]:
     mcsqs_parts = ["mcsqs", f"-n={args.atat_atoms}"]
-    if args.mcsqs_time is not None:
-        mcsqs_parts.append(f"-T={args.mcsqs_time:g}")
+    temperature = getattr(args, "mcsqs_temperature", None)
+    max_steps = getattr(args, "mcsqs_max_steps", None)
+    if temperature is not None:
+        mcsqs_parts.append(f"-T={temperature:g}")
+    if max_steps is not None and max_steps > 0:
+        mcsqs_parts.append(f"-ms={max_steps}")
     return mcsqs_parts
+
+
+def normalize_sbatch_time(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        seconds = int(value)
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        if ":" in text:
+            return text
+        try:
+            seconds = int(float(text))
+        except ValueError:
+            return text
+    if seconds <= 0:
+        return None
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 def load_atat_hpc_config(args: argparse.Namespace) -> tuple[dict[str, Any], Path | None]:
@@ -2241,7 +2267,9 @@ def write_atat_mcsqs_sbatch(atat_dir: Path, args: argparse.Namespace) -> Path:
     script_name = getattr(args, "mcsqs_sbatch_script", "submit_mcsqs.sbatch") or "submit_mcsqs.sbatch"
     path = atat_dir / script_name
     job_name = sbatch_value(profile, sbatch, "job_name", "name", default="atat_sqs")
-    time_value = sbatch_value(profile, sbatch, "time", "walltime", default="02:00:00")
+    requested_walltime = normalize_sbatch_time(getattr(args, "mcsqs_walltime", None))
+    legacy_walltime = normalize_sbatch_time(getattr(args, "mcsqs_time", None))
+    time_value = requested_walltime or legacy_walltime or sbatch_value(profile, sbatch, "time", "walltime", default="02:00:00")
     cpus = sbatch_value(profile, sbatch, "cpus_per_task", "cpus", default=1)
     nodes = sbatch_value(profile, sbatch, "nodes", default=1)
     ntasks = sbatch_value(profile, sbatch, "ntasks", "tasks", default=1)
@@ -2426,7 +2454,7 @@ def format_mcsqs_failure_note(
             "",
             "Next options:",
             "- use the direct candidates in ../candidates",
-            "- rerun mcsqs manually with a different -n/-T",
+            "- rerun mcsqs manually with a different -n or -ms",
             "- inspect rndstr.in for ATAT compatibility",
         ]
     )
@@ -2473,7 +2501,7 @@ def format_mcsqs_workflow_failure_note(
             "Next options:",
             "- use the direct candidates in ../candidates",
             "- rerun cluster generation with a different -2/-3/-4 cutoff",
-            "- rerun SQS search manually with a different -n/-T",
+            "- rerun SQS search manually with a different -n or -ms",
             "- inspect rndstr.in for ATAT compatibility",
         ]
     )
@@ -2766,7 +2794,10 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--mcsqs-pair-diameter", type=float, default=6.0, help="ATAT mcsqs -2 pair cluster diameter. Use <=0 to disable.")
     parser.add_argument("--mcsqs-triplet-diameter", type=float, help="Optional ATAT mcsqs -3 triplet cluster diameter.")
     parser.add_argument("--mcsqs-quadruplet-diameter", type=float, help="Optional ATAT mcsqs -4 quadruplet cluster diameter.")
-    parser.add_argument("--mcsqs-time", type=float, help="Optional mcsqs -T wall-clock limit.")
+    parser.add_argument("--mcsqs-time", type=float, help="Deprecated legacy alias for --mcsqs-walltime in seconds; not passed to ATAT -T.")
+    parser.add_argument("--mcsqs-walltime", help="Slurm walltime for submit_mcsqs.sbatch, e.g. 00:30:00 or 1800.")
+    parser.add_argument("--mcsqs-temperature", type=float, help="Optional ATAT mcsqs -T Monte Carlo temperature. This is not wall time.")
+    parser.add_argument("--mcsqs-max-steps", type=int, help="Optional ATAT mcsqs -ms maximum Monte Carlo steps.")
     parser.add_argument("--run-mcsqs", action="store_true", help="Run mcsqs immediately if available.")
     parser.add_argument("--mcsqs-strict", action="store_true", help="Exit with an error if mcsqs fails. Default: keep direct outputs and write a failure note.")
     parser.add_argument("--atat-poscar-outdir", type=Path, help="Output directory for converted ATAT bestsqs POSCARs. Default: OUTDIR/atat_vasp.")
@@ -3372,7 +3403,10 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--mcsqs-pair-diameter", type=float, default=6.0, help="ATAT mcsqs -2 pair cluster diameter. Use <=0 to disable.")
     parser.add_argument("--mcsqs-triplet-diameter", type=float, help="Optional ATAT mcsqs -3 triplet cluster diameter.")
     parser.add_argument("--mcsqs-quadruplet-diameter", type=float, help="Optional ATAT mcsqs -4 quadruplet cluster diameter.")
-    parser.add_argument("--mcsqs-time", type=float, help="Optional mcsqs -T wall-clock limit.")
+    parser.add_argument("--mcsqs-time", type=float, help="Deprecated legacy alias for --mcsqs-walltime in seconds; not passed to ATAT -T.")
+    parser.add_argument("--mcsqs-walltime", help="Slurm walltime for submit_mcsqs.sbatch, e.g. 00:30:00 or 1800.")
+    parser.add_argument("--mcsqs-temperature", type=float, help="Optional ATAT mcsqs -T Monte Carlo temperature. This is not wall time.")
+    parser.add_argument("--mcsqs-max-steps", type=int, help="Optional ATAT mcsqs -ms maximum Monte Carlo steps.")
     parser.add_argument("--run-mcsqs", action="store_true", help="Run mcsqs and convert bestsqs.out to VASP POSCAR folders.")
     parser.add_argument("--mcsqs-strict", action="store_true", help="Exit with an error if mcsqs fails. Default: keep direct outputs and write a failure note.")
     parser.add_argument("--atat-vacancy-label", default="Vac", help="Vacancy pseudo-species label written to parent-defect ATAT rndstr.in.")
@@ -3521,6 +3555,9 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
                 mcsqs_triplet_diameter=args.mcsqs_triplet_diameter,
                 mcsqs_quadruplet_diameter=args.mcsqs_quadruplet_diameter,
                 mcsqs_time=args.mcsqs_time,
+                mcsqs_walltime=args.mcsqs_walltime,
+                mcsqs_temperature=args.mcsqs_temperature,
+                mcsqs_max_steps=args.mcsqs_max_steps,
                 vasp_template=args.vasp_template,
                 hpc_config=args.hpc_config,
                 mcsqs_sbatch_script=args.mcsqs_sbatch_script,

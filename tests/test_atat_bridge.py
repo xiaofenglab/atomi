@@ -363,6 +363,8 @@ def test_materials_opt_vacancy_cif_writes_explicit_poscars_and_atat_input(tmp_pa
             str(template),
             "--hpc-config",
             str(hpc_config),
+            "--mcsqs-time",
+            "1800",
         ]
     )
 
@@ -388,7 +390,7 @@ def test_materials_opt_vacancy_cif_writes_explicit_poscars_and_atat_input(tmp_pa
     assert (out / "atat" / "run_mcsqs.sh").exists()
     sbatch = (out / "atat" / "submit_mcsqs.sbatch").read_text(encoding="utf-8")
     assert "#SBATCH --job-name=atat_test" in sbatch
-    assert "#SBATCH --time=03:00:00" in sbatch
+    assert "#SBATCH --time=00:30:00" in sbatch
     assert "#SBATCH --cpus-per-task=2" in sbatch
     assert "bash run_mcsqs.sh" in sbatch
     assert "ATOMI_ATAT_BIN=/opt/atat/src" in sbatch
@@ -471,7 +473,9 @@ def test_materials_opt_vacancy_cif_run_mcsqs_converts_bestsqs_to_poscar(tmp_path
     )
 
     assert "-2=6" in (out / "atat" / "mcsqs_cluster_args.txt").read_text(encoding="utf-8")
-    assert "-n=" in (out / "atat" / "mcsqs_search_args.txt").read_text(encoding="utf-8")
+    search_args = (out / "atat" / "mcsqs_search_args.txt").read_text(encoding="utf-8")
+    assert "-n=" in search_args
+    assert "-T=" not in search_args
     poscar_text = (out / "atat_vasp" / "candidates" / "01_bestsqs" / "POSCAR").read_text(encoding="utf-8")
     assert "Va" not in poscar_text
     assert "Gd" in poscar_text
@@ -930,7 +934,9 @@ def test_parent_defect_run_mcsqs_converts_bestsqs_to_poscar(tmp_path: Path, monk
 
     assert (out / "atat" / "bestsqs.out").exists()
     assert "-2=6" in (out / "atat" / "mcsqs_cluster_args.txt").read_text(encoding="utf-8")
-    assert "-n=" in (out / "atat" / "mcsqs_search_args.txt").read_text(encoding="utf-8")
+    search_args = (out / "atat" / "mcsqs_search_args.txt").read_text(encoding="utf-8")
+    assert "-n=" in search_args
+    assert "-T=" not in search_args
     poscar_text = (out / "atat_vasp" / "candidates" / "01_bestsqs" / "POSCAR").read_text(encoding="utf-8")
     assert "Va" not in poscar_text
     assert "Gd" in poscar_text
