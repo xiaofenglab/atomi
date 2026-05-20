@@ -363,6 +363,77 @@ def test_materials_opt_vacancy_cif_writes_explicit_poscars_and_atat_input(tmp_pa
     assert len((out / "runlist.txt").read_text(encoding="utf-8").splitlines()) == 3
 
 
+def test_materials_opt_vacancy_cif_auto_uses_multiple_vacancy_sites(tmp_path: Path) -> None:
+    cif = tmp_path / "partial_multi.cif"
+    cif.write_text(
+        "data_demo\n"
+        "_symmetry_space_group_name_H-M   P1\n"
+        "_cell_length_a 5\n"
+        "_cell_length_b 5\n"
+        "_cell_length_c 5\n"
+        "_cell_angle_alpha 90\n"
+        "_cell_angle_beta 90\n"
+        "_cell_angle_gamma 90\n"
+        "_symmetry_Int_Tables_number 1\n"
+        "loop_\n"
+        "_space_group_symop_operation_xyz\n"
+        "x,y,z\n"
+        "loop_\n"
+        "_atom_site_label\n"
+        "_atom_site_type_symbol\n"
+        "_atom_site_fract_x\n"
+        "_atom_site_fract_y\n"
+        "_atom_site_fract_z\n"
+        "_atom_site_occupancy\n"
+        "Gd1 Gd 0 0 0 1\n"
+        "Gd2 Gd 0.5 0.5 0.5 0.5\n"
+        "O1 O 0.25 0.25 0.25 1\n"
+        "O2 O 0.75 0.75 0.75 0.5\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "vacancy"
+
+    bridge.vacancy_candidate_main(
+        [
+            "--cif",
+            str(cif),
+            "--outdir",
+            str(out),
+            "--supercell",
+            "1x1x2",
+        ]
+    )
+
+    plan = json.loads((out / "vacancy_cif_plan.json").read_text(encoding="utf-8"))
+    assert plan["selected_site_labels"] == ["Gd2", "O2"]
+    groups = {group["label"]: group for group in plan["vacancy_groups"]}
+    assert groups["Gd2"]["n_vacancy"] == 1
+    assert groups["O2"]["n_vacancy"] == 1
+    rndstr = (out / "atat" / "rndstr.in").read_text(encoding="utf-8")
+    assert "Gd=0.5,Va=0.5" in rndstr
+    assert "O=0.5,Va=0.5" in rndstr
+    index = rows(out / "vacancy_candidate_index.csv")
+    assert all(row["n_Va"] == "2" for row in index)
+    assert all(row["site_label"] == "Gd2,O2" for row in index)
+
+    filtered = tmp_path / "vacancy_o_only"
+    bridge.vacancy_candidate_main(
+        [
+            "--cif",
+            str(cif),
+            "--outdir",
+            str(filtered),
+            "--partial-element",
+            "O",
+            "--supercell",
+            "1x1x2",
+        ]
+    )
+    filtered_plan = json.loads((filtered / "vacancy_cif_plan.json").read_text(encoding="utf-8"))
+    assert filtered_plan["selected_site_labels"] == ["O2"]
+    assert filtered_plan["vacancy_groups"][0]["element"] == "O"
+
+
 def test_materials_opt_relax_seeds_prepares_volume_scan(tmp_path: Path, capsys) -> None:
     template = tmp_path / "VASP_TEMPLATE"
     template.mkdir()
