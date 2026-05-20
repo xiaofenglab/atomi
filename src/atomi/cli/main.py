@@ -134,6 +134,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     lammps_md_array.add_argument("workflow_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("poscar2lammps", "vasp2lammps-data", "lammps-data-init"):
+        lammps_data = subparsers.add_parser(
+            command_name,
+            help="Convert POSCAR/CONTCAR to a LAMMPS data file for MD initialization.",
+        )
+        lammps_data.add_argument("poscar_data_args", nargs=argparse.REMAINDER)
+
     lammps_postprocess = subparsers.add_parser(
         "lammps-postprocess",
         help="Postprocess one LAMMPS NPT thermo log with window diagnostics.",
@@ -706,6 +713,11 @@ def main(argv: list[str] | None = None) -> None:
 
         production_array(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("poscar2lammps", "vasp2lammps-data", "lammps-data-init"):
+        from atomi.lammps.poscar_data import main as poscar_data_main
+
+        poscar_data_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "lammps-postprocess":
         from atomi.lammps.postprocess import main as lammps_postprocess_main
 
@@ -1176,6 +1188,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.lammps.workflow_cli import production_array
 
         production_array(args.workflow_args)
+        return
+
+    if args.subcommand in ("poscar2lammps", "vasp2lammps-data", "lammps-data-init"):
+        from atomi.lammps.poscar_data import main as poscar_data_main
+
+        poscar_data_main(args.poscar_data_args)
         return
 
     if args.subcommand == "lammps-postprocess":
