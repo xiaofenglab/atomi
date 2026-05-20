@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from atomi.cli.main import main as atomi_main
-from atomi.ml.mace.lammps2extxyz import main
+from atomi.lammps.dump_extxyz import main
 
 
 def write_dump(path: Path) -> None:
@@ -56,6 +56,7 @@ def test_lammps2extxyz_writes_last_window_outputs(tmp_path: Path, capsys) -> Non
     output = capsys.readouterr().out
     assert "Selected frames" in output
     summary = json.loads((tmp_path / "uo2_1500K_summary.json").read_text(encoding="utf-8"))
+    assert summary["schema"] == "atomi.lammps.dump_extxyz.v1"
     assert summary["n_total_frames"] == 3
     assert summary["n_selected_frames"] == 2
     assert Path(summary["outputs"]["multi_frame_extxyz"]).exists()

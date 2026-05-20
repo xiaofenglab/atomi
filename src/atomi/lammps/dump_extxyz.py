@@ -1,4 +1,4 @@
-"""Convert LAMMPS dump trajectories into extxyz files for ASE/MACE workflows."""
+"""Convert LAMMPS dump trajectories into extxyz files for MD/PDF workflows."""
 
 from __future__ import annotations
 
@@ -66,12 +66,13 @@ def convert_lammps_dump_to_extxyz(
     outputs = write_selected_frames(outdir, prefix, frames)
     summary.update(
         {
-            "schema": "atomi.ml.mace.lammps2extxyz.v1",
+            "schema": "atomi.lammps.dump_extxyz.v1",
             "outputs": outputs,
             "notes": [
-                "Use *_lastwindow.extxyz for MACE/RDF/PDF windowed workflows.",
+                "Use *_lastwindow.extxyz for RDF/PDF/S(Q) windowed workflows.",
                 "Use *_lastframe.extxyz for a single final snapshot.",
                 "Use *_avgframe.extxyz mainly for visualization/reference.",
+                "Full pdf_lammps/pdf_lammps_series analysis already writes these selected extxyz files by default.",
             ],
         }
     )
@@ -84,7 +85,7 @@ def convert_lammps_dump_to_extxyz(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="lammps2extxyz",
-        description="Convert the last window of a LAMMPS dump trajectory to extxyz for MACE/ASE.",
+        description="Convert the last window of a LAMMPS dump trajectory to extxyz for MD/PDF/ASE analysis.",
     )
     parser.add_argument("--dump", required=True, type=Path, help="LAMMPS dump/trajectory file.")
     parser.add_argument("--dump-format", default="lammps-dump-text", help="ASE dump format. Default: lammps-dump-text.")
