@@ -729,6 +729,83 @@ def test_materials_opt_parent_defect_auto_repeats_for_integer_vacancy(tmp_path: 
     assert plan["n_vacancy"] == 1
 
 
+def test_parent_defect_run_mcsqs_converts_bestsqs_to_poscar(tmp_path: Path, monkeypatch) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    mcsqs = fake_bin / "mcsqs"
+    mcsqs.write_text(
+        "#!/bin/sh\n"
+        "cat > bestsqs.out <<'EOF'\n"
+        "5 0 0\n"
+        "0 5 0\n"
+        "0 0 5\n"
+        "0 0 0 Gd\n"
+        "0.5 0.5 0.5 U\n"
+        "0.25 0.25 0.25 O\n"
+        "0.75 0.75 0.75 Va\n"
+        "EOF\n",
+        encoding="utf-8",
+    )
+    mcsqs.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    poscar = tmp_path / "POSCAR"
+    poscar.write_text(
+        "UO2 parent\n"
+        "1.0\n"
+        "5 0 0\n"
+        "0 5 0\n"
+        "0 0 5\n"
+        "U O\n"
+        "2 4\n"
+        "Direct\n"
+        "0 0 0\n"
+        "0.5 0.5 0.5\n"
+        "0.25 0.25 0.25\n"
+        "0.75 0.75 0.75\n"
+        "0.25 0.75 0.25\n"
+        "0.75 0.25 0.75\n",
+        encoding="utf-8",
+    )
+    template = tmp_path / "VASP_TEMPLATE"
+    template.mkdir()
+    (template / "INCAR").write_text("ENCUT = 520\n", encoding="utf-8")
+    (template / "KPOINTS").write_text("Gamma\n", encoding="utf-8")
+    (template / "POTCAR").write_text("fake\n", encoding="utf-8")
+    out = tmp_path / "parent_defect"
+
+    bridge.parent_defect_main(
+        [
+            "--poscar",
+            str(poscar),
+            "--outdir",
+            str(out),
+            "--substitute",
+            "U=Gd:0.5",
+            "--charge",
+            "U=4",
+            "--charge",
+            "Gd=3",
+            "--charge",
+            "O=-2",
+            "--vacancy-element",
+            "O",
+            "--engine",
+            "both",
+            "--run-mcsqs",
+            "--vasp-template",
+            str(template),
+        ]
+    )
+
+    assert (out / "atat" / "bestsqs.out").exists()
+    poscar_text = (out / "atat_vasp" / "candidates" / "01_bestsqs" / "POSCAR").read_text(encoding="utf-8")
+    assert "Va" not in poscar_text
+    assert "Gd" in poscar_text
+    assert "ISYM = 0" in (out / "atat_vasp" / "candidates" / "01_bestsqs" / "INCAR").read_text(encoding="utf-8")
+    plan = json.loads((out / "parent_defect_plan.json").read_text(encoding="utf-8"))
+    assert plan["outputs"]["atat_vasp"].endswith("atat_vasp")
+
+
 def test_materials_opt_relax_seeds_prepares_volume_scan(tmp_path: Path, capsys) -> None:
     template = tmp_path / "VASP_TEMPLATE"
     template.mkdir()

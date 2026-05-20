@@ -2947,6 +2947,10 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--coordination-number", type=int, default=8, help="Nearest ligand sites counted around each center for the vacancy guard.")
     parser.add_argument("--max-vacancies-per-center", type=int, default=2, help="Warn/retry when a center has more than this many vacancies among nearest ligand sites.")
     parser.add_argument("--vacancy-guard-attempts", type=int, default=200, help="Random retry attempts used to satisfy the vacancy guard.")
+    parser.add_argument("--atat-atoms", type=int, default=0, help="Optional mcsqs -n target. Default: full supercell atom count.")
+    parser.add_argument("--mcsqs-time", type=float, help="Optional mcsqs -T wall-clock limit.")
+    parser.add_argument("--run-mcsqs", action="store_true", help="Run mcsqs and convert bestsqs.out to VASP POSCAR folders.")
+    parser.add_argument("--atat-poscar-outdir", type=Path, help="Output directory for converted ATAT bestsqs POSCARs. Default: OUTDIR/atat_vasp.")
     args = parser.parse_args(argv)
 
     read, write = import_ase_atoms()
@@ -3067,10 +3071,31 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
             n_vacancy_sites = count_symbols(atoms).get(args.vacancy_element, 0)
             vacancy_fraction = int(info["n_vacancy"]) / n_vacancy_sites if n_vacancy_sites else 0.0
         write_atat_rndstr(atat_dir / "rndstr.in", atoms, parent_defect_site_specs(atoms, substitutions, args.vacancy_element, vacancy_fraction))
+        atat_atoms = args.atat_atoms if args.atat_atoms > 0 else len(atoms)
         write_atat_vacancy_scripts(
             atat_dir,
-            argparse.Namespace(atat_atoms=len(atoms), mcsqs_time=None, vasp_template=args.vasp_template),
+            argparse.Namespace(atat_atoms=atat_atoms, mcsqs_time=args.mcsqs_time, vasp_template=args.vasp_template),
         )
+        args.atat_atoms = atat_atoms
+
+    atat_vasp_outdir = args.atat_poscar_outdir.expanduser().resolve() if args.atat_poscar_outdir else root / "atat_vasp"
+    if args.run_mcsqs:
+        if args.engine == "direct":
+            raise RuntimeError("--run-mcsqs requires --engine atat or --engine both.")
+        atat_dir = root / "atat"
+        if shutil.which("mcsqs") is None:
+            raise RuntimeError("mcsqs was requested with --run-mcsqs, but it is not on PATH.")
+        command = ["mcsqs", f"-n={args.atat_atoms}"]
+        if args.mcsqs_time is not None:
+            command.append(f"-T={args.mcsqs_time:g}")
+        subprocess.run(command, cwd=atat_dir, check=True)
+        bestsqs = atat_dir / "bestsqs.out"
+        if not bestsqs.is_file():
+            raise RuntimeError(f"mcsqs finished but did not write {bestsqs}")
+        convert_args = ["--input", str(bestsqs), "--outdir", str(atat_vasp_outdir)]
+        if args.vasp_template:
+            convert_args.extend(["--vasp-template", str(args.vasp_template)])
+        atat_poscar_main(convert_args)
 
     write_csv(root / "parent_defect_candidate_index.csv", rows, PARENT_DEFECT_FIELDS)
     (root / "runlist.txt").write_text(("\n".join(runlist) + "\n") if runlist else "", encoding="utf-8")
@@ -3102,6 +3127,7 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
                 "candidate_index": str(root / "parent_defect_candidate_index.csv"),
                 "runlist": str(root / "runlist.txt"),
                 "atat_rndstr": str(root / "atat" / "rndstr.in") if args.engine in {"both", "atat"} else "",
+                "atat_vasp": str(atat_vasp_outdir) if args.engine in {"both", "atat"} else "",
             },
         },
     )
@@ -3125,7 +3151,10 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
         print("Direct POSCAR folders   : skipped (--engine atat)")
     if args.engine in {"both", "atat"}:
         print(f"ATAT handoff            : {root / 'atat'}")
-        print("ATAT next step          : cd atat && ./run_mcsqs.sh")
+        if args.run_mcsqs:
+            print(f"ATAT VASP folders       : {atat_vasp_outdir}")
+        else:
+            print("ATAT next step          : cd atat && ./run_mcsqs.sh")
 
 
 def quick_opt_main(argv: list[str] | None = None) -> None:
