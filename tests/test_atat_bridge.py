@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from atomi.cli.main import main as atomi_main
 from atomi.atat import bridge
 
@@ -487,6 +489,36 @@ def test_materials_opt_vacancy_cif_materializes_mixed_species_site(tmp_path: Pat
     poscar_text = (out / "candidates" / "03_sqs_random_like" / "POSCAR").read_text(encoding="utf-8")
     assert "Va" not in poscar_text
     assert "U" in poscar_text
+
+
+def test_materials_opt_vacancy_cif_default_does_not_auto_repeat(tmp_path: Path) -> None:
+    cif = tmp_path / "partial_single.cif"
+    cif.write_text(
+        "data_demo\n"
+        "_symmetry_space_group_name_H-M   P1\n"
+        "_cell_length_a 5\n"
+        "_cell_length_b 5\n"
+        "_cell_length_c 5\n"
+        "_cell_angle_alpha 90\n"
+        "_cell_angle_beta 90\n"
+        "_cell_angle_gamma 90\n"
+        "_symmetry_Int_Tables_number 1\n"
+        "loop_\n"
+        "_space_group_symop_operation_xyz\n"
+        "x,y,z\n"
+        "loop_\n"
+        "_atom_site_label\n"
+        "_atom_site_type_symbol\n"
+        "_atom_site_fract_x\n"
+        "_atom_site_fract_y\n"
+        "_atom_site_fract_z\n"
+        "_atom_site_occupancy\n"
+        "O1 O 0 0 0 0.5\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Use --supercell auto"):
+        bridge.vacancy_candidate_main(["--cif", str(cif), "--outdir", str(tmp_path / "out")])
 
 
 def test_materials_opt_relax_seeds_prepares_volume_scan(tmp_path: Path, capsys) -> None:

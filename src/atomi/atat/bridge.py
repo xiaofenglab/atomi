@@ -1664,7 +1664,8 @@ def occupation_counts_for_group(group: dict[str, Any]) -> dict[str, int]:
         if not math.isclose(count, len(indices) * float(fraction), abs_tol=1.0e-6):
             raise ValueError(
                 f"Selected supercell does not make occupancy integer for site {group.get('label')} "
-                f"({len(indices)} sites at {symbol}={float(fraction):g})."
+                f"({len(indices)} sites at {symbol}={float(fraction):g}). "
+                "Use --supercell auto for the smallest integer repeat, or pass an explicit repeat such as 2x2x2."
             )
         counts[symbol] = count
     missing = len(indices) - sum(counts.values())
@@ -1863,7 +1864,11 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--site-label", help="Optional CIF atom-site label to select, e.g. O2.")
     parser.add_argument("--target-occupancy", type=float, help="Override CIF occupancy for the partial sublattice.")
     parser.add_argument("--vacancy-label", default="Va", help="ATAT vacancy pseudo-species label.")
-    parser.add_argument("--supercell", default="auto", help="auto or repeat such as 1x1x5.")
+    parser.add_argument(
+        "--supercell",
+        default="1x1x1",
+        help="Supercell repeat such as 1x1x1 or 2x2x2. Use 'auto' to find the smallest integer-occupancy repeat.",
+    )
     parser.add_argument("--max-repeat", type=int, default=6, help="Largest repeat searched for --supercell auto.")
     parser.add_argument("--vasp-template", type=Path, help="Optional VASP template copied beside each POSCAR.")
     parser.add_argument("--seed", type=int, default=20260520)
