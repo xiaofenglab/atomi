@@ -159,6 +159,22 @@ SUPERCELL_ANALYSIS_FIELDS = [
     "recommended",
     "notes",
 ]
+PARENT_DEFECT_FIELDS = [
+    "candidate_id",
+    "kind",
+    "poscar",
+    "repeat",
+    "linear_scale",
+    "vacancy_element",
+    "n_vacancy",
+    "substitutions_json",
+    "species_counts_json",
+    "stoichiometry",
+    "charge_before_vacancy",
+    "charge_after_vacancy",
+    "min_vacancy_distance_A",
+    "notes",
+]
 
 
 @dataclass
@@ -229,6 +245,19 @@ def split_items(items: list[str] | None) -> list[str]:
             text = part.strip()
             if text:
                 values.append(text)
+    return values
+
+
+def parse_key_float(items: list[str] | None, option: str) -> dict[str, float]:
+    values: dict[str, float] = {}
+    for raw in split_items(items):
+        if "=" not in raw:
+            raise ValueError(f"{option} expects Element=value, got {raw!r}.")
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"{option} has an empty key in {raw!r}.")
+        values[key] = float(value.strip())
     return values
 
 
@@ -1890,6 +1919,10 @@ def atoms_with_occupational_assignments(atoms: Any, assignments: dict[int, str],
     return clean
 
 
+def set_atom_symbol(atoms: Any, index: int, symbol: str) -> None:
+    atoms[index].symbol = symbol
+
+
 def composition_string(atoms: Any) -> str:
     counts: dict[str, int] = {}
     for symbol in atoms.get_chemical_symbols():
@@ -2305,10 +2338,388 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     print(f"Runlist               : {root / 'runlist.txt'}")
 
 
+@dataclass
+class SubstitutionSpec:
+    source: str
+    target: str
+    fraction: float = 1.0
+
+
+def parse_substitution_specs(items: list[str] | None) -> list[SubstitutionSpec]:
+    specs: list[SubstitutionSpec] = []
+    for raw in split_items(items):
+        if "=" not in raw:
+            raise ValueError(f"--substitute expects Source=Target[:fraction], got {raw!r}.")
+        source, rhs = raw.split("=", 1)
+        source = source.strip()
+        rhs = rhs.strip()
+        fraction = 1.0
+        for sep in (":", "@"):
+            if sep in rhs:
+                rhs, frac_text = rhs.split(sep, 1)
+                fraction = float(frac_text.strip())
+                break
+        target = rhs.strip()
+        if not source or not target:
+            raise ValueError(f"Invalid --substitute {raw!r}.")
+        if not (0.0 <= fraction <= 1.0):
+            raise ValueError(f"Substitution fraction must be in [0, 1], got {raw!r}.")
+        specs.append(SubstitutionSpec(source=source, target=target, fraction=fraction))
+    return specs
+
+
+def count_symbols(atoms: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for symbol in atoms.get_chemical_symbols():
+        counts[symbol] = counts.get(symbol, 0) + 1
+    return counts
+
+
+def parent_defect_counts(
+    base_counts: dict[str, int],
+    substitutions: list[SubstitutionSpec],
+    repeat: tuple[int, int, int],
+    charges: dict[str, float],
+    vacancy_element: str | None,
+    explicit_vacancy_count: int | None,
+) -> dict[str, Any]:
+    volume = repeat_volume(repeat)
+    counts = {symbol: count * volume for symbol, count in base_counts.items()}
+    sub_counts: dict[str, int] = {}
+    for spec in substitutions:
+        available = counts.get(spec.source, 0)
+        n_replace = int(round(available * spec.fraction))
+        if not math.isclose(n_replace, available * spec.fraction, abs_tol=1.0e-6):
+            raise ValueError(
+                f"Repeat {repeat_text(repeat)} does not make substitution {spec.source}->{spec.target} "
+                f"fraction {spec.fraction:g} integral."
+            )
+        counts[spec.source] = available - n_replace
+        counts[spec.target] = counts.get(spec.target, 0) + n_replace
+        sub_counts[f"{spec.source}->{spec.target}"] = n_replace
+    charge_before = sum(charges.get(symbol, 0.0) * count for symbol, count in counts.items())
+    n_vacancy = explicit_vacancy_count or 0
+    if explicit_vacancy_count is None and vacancy_element and charges:
+        vacancy_charge = charges.get(vacancy_element)
+        if vacancy_charge is None or math.isclose(vacancy_charge, 0.0, abs_tol=1.0e-12):
+            raise ValueError(f"Need nonzero --charge {vacancy_element}=value to auto-compute vacancies.")
+        raw_vacancy = charge_before / vacancy_charge
+        n_vacancy = int(round(raw_vacancy))
+        if not math.isclose(n_vacancy, raw_vacancy, abs_tol=1.0e-6):
+            raise ValueError(
+                f"Repeat {repeat_text(repeat)} gives non-integer vacancy count {raw_vacancy:g} "
+                f"for {vacancy_element} charge compensation."
+            )
+    if n_vacancy < 0:
+        raise ValueError(f"Computed negative vacancy count {n_vacancy}; choose a different vacancy species or charges.")
+    if vacancy_element and n_vacancy > counts.get(vacancy_element, 0):
+        raise ValueError(
+            f"Need {n_vacancy} {vacancy_element} vacancies but only {counts.get(vacancy_element, 0)} sites exist."
+        )
+    final_counts = dict(counts)
+    if vacancy_element:
+        final_counts[vacancy_element] = final_counts.get(vacancy_element, 0) - n_vacancy
+    charge_after = charge_before
+    if vacancy_element:
+        charge_after -= charges.get(vacancy_element, 0.0) * n_vacancy
+    return {
+        "counts_before_vacancy": counts,
+        "final_counts": {symbol: count for symbol, count in final_counts.items() if count},
+        "substitution_counts": sub_counts,
+        "n_vacancy": n_vacancy,
+        "charge_before_vacancy": charge_before,
+        "charge_after_vacancy": charge_after,
+    }
+
+
+def parent_defect_analysis_rows(
+    atoms: Any,
+    substitutions: list[SubstitutionSpec],
+    charges: dict[str, float],
+    vacancy_element: str | None,
+    explicit_vacancy_count: int | None,
+    max_repeat: int,
+    max_aspect: float,
+) -> list[dict[str, Any]]:
+    base_counts = count_symbols(atoms)
+    cell_lengths = tuple(float(value) for value in atoms.cell.lengths())
+    rows: list[dict[str, Any]] = []
+    for a in range(1, max_repeat + 1):
+        for b in range(1, max_repeat + 1):
+            for c in range(1, max_repeat + 1):
+                repeat = (a, b, c)
+                try:
+                    info = parent_defect_counts(
+                        base_counts,
+                        substitutions,
+                        repeat,
+                        charges,
+                        vacancy_element,
+                        explicit_vacancy_count * repeat_volume(repeat) if explicit_vacancy_count is not None else None,
+                    )
+                except ValueError:
+                    continue
+                aspect = repeat_aspect_ratio(repeat, cell_lengths)
+                rows.append(
+                    {
+                        "repeat": repeat_text(repeat),
+                        "repeat_tuple": repeat,
+                        "repeat_a": a,
+                        "repeat_b": b,
+                        "repeat_c": c,
+                        "repeat_volume": repeat_volume(repeat),
+                        "aspect_ratio": f"{aspect:.6g}",
+                        "estimated_total_atoms": sum(info["final_counts"].values()),
+                        "selected_sites": sum(info["substitution_counts"].values()),
+                        "n_vacancy": info["n_vacancy"],
+                        "selected_species_counts_json": json.dumps(info["final_counts"], sort_keys=True),
+                        "within_max_aspect": "true" if aspect <= max_aspect else "false",
+                        "notes": "",
+                    }
+                )
+    return sorted(rows, key=lambda row: (int(row["repeat_volume"]), float(row["aspect_ratio"]), row["repeat"]))
+
+
+def choose_indices_for_mode(atoms: Any, indices: list[int], count: int, mode: str, seed: int) -> list[int]:
+    indices = sorted(indices)
+    if count >= len(indices):
+        return list(indices)
+    if count <= 0:
+        return []
+    if mode == "random":
+        return random_vacancy_set(indices, count, seed)
+    if mode in {"clustered", "clustered_vacancy"}:
+        return greedy_vacancy_set(atoms, indices, count, "clustered")
+    if mode in {"ordered", "layered"}:
+        scaled = atoms.get_scaled_positions(wrap=True)
+        return sorted(indices, key=lambda idx: (float(scaled[idx][2]), float(scaled[idx][1]), float(scaled[idx][0])))[:count]
+    return greedy_vacancy_set(atoms, indices, count, "separated")
+
+
+def apply_parent_defect_assignments(
+    atoms: Any,
+    substitutions: list[SubstitutionSpec],
+    vacancy_element: str | None,
+    n_vacancy: int,
+    mode: str,
+    seed: int,
+) -> tuple[Any, dict[str, int], list[int]]:
+    work = atoms.copy()
+    sub_counts: dict[str, int] = {}
+    for offset, spec in enumerate(substitutions):
+        source_indices = [idx for idx, atom in enumerate(work) if atom.symbol == spec.source]
+        n_replace = int(round(len(source_indices) * spec.fraction))
+        chosen = choose_indices_for_mode(work, source_indices, n_replace, mode, seed + offset)
+        for idx in chosen:
+            set_atom_symbol(work, idx, spec.target)
+        sub_counts[f"{spec.source}->{spec.target}"] = len(chosen)
+    vacancies: list[int] = []
+    if vacancy_element and n_vacancy:
+        vacancy_indices = [idx for idx, atom in enumerate(work) if atom.symbol == vacancy_element]
+        vacancy_mode = "clustered" if mode == "clustered" else ("random" if mode == "random" else "separated")
+        vacancies = choose_indices_for_mode(work, vacancy_indices, n_vacancy, vacancy_mode, seed + 1000)
+        for idx in sorted(vacancies, reverse=True):
+            del work[idx]
+    return work, sub_counts, vacancies
+
+
+def parent_defect_site_specs(
+    atoms: Any,
+    substitutions: list[SubstitutionSpec],
+    vacancy_element: str | None,
+    vacancy_fraction: float,
+) -> list[str]:
+    specs: list[str] = []
+    sub_by_source = {spec.source: spec for spec in substitutions}
+    for atom in atoms:
+        if atom.symbol in sub_by_source:
+            spec = sub_by_source[atom.symbol]
+            if math.isclose(spec.fraction, 1.0, abs_tol=1.0e-12):
+                specs.append(spec.target)
+            elif math.isclose(spec.fraction, 0.0, abs_tol=1.0e-12):
+                specs.append(spec.source)
+            else:
+                specs.append(f"{spec.source}={1.0 - spec.fraction:.12g},{spec.target}={spec.fraction:.12g}")
+        elif vacancy_element and atom.symbol == vacancy_element and vacancy_fraction > 0:
+            specs.append(f"{vacancy_element}={1.0 - vacancy_fraction:.12g},Va={vacancy_fraction:.12g}")
+        else:
+            specs.append(atom.symbol)
+    return specs
+
+
+def parent_defect_main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="materials-opt parent-defect",
+        description="Generate charge-compensated substitution/vacancy structures from a parent POSCAR.",
+    )
+    parser.add_argument("--poscar", type=Path, required=True, help="Parent POSCAR/CONTCAR.")
+    parser.add_argument("--outdir", type=Path, default=Path("PARENT_DEFECT_CANDIDATES"))
+    parser.add_argument("--substitute", action="append", required=True, help="Source=Target[:fraction], e.g. U=Gd or U=Gd:0.5.")
+    parser.add_argument("--charge", action="append", default=[], help="Formal charge, e.g. U=4 Gd=3 O=-2.")
+    parser.add_argument("--vacancy-element", help="Species to remove for charge compensation, e.g. O.")
+    parser.add_argument("--vacancy-count", type=int, help="Explicit vacancy count in the parent cell before auto repeat.")
+    parser.add_argument("--radius", action="append", default=[], help="Ionic radius for scaling, e.g. U=1.00 Gd=0.938.")
+    parser.add_argument("--scale-mode", choices=("none", "ionic-radius"), default="none")
+    parser.add_argument("--linear-scale", type=float, help="Explicit linear scale applied after supercell repeat.")
+    parser.add_argument("--supercell", default="auto", help="auto or repeat such as 2x2x2.")
+    parser.add_argument("--max-repeat", type=int, default=6)
+    parser.add_argument("--auto-max-atoms", type=int, default=800)
+    parser.add_argument("--auto-max-aspect", type=float, default=2.5)
+    parser.add_argument("--auto-objective", choices=("balanced", "smallest", "compact"), default="balanced")
+    parser.add_argument("--engine", choices=("both", "direct", "atat"), default="both")
+    parser.add_argument("--vasp-template", type=Path)
+    parser.add_argument("--seed", type=int, default=20260520)
+    args = parser.parse_args(argv)
+
+    read, write = import_ase_atoms()
+    atoms0 = read(args.poscar.expanduser().resolve(), format="vasp")
+    substitutions = parse_substitution_specs(args.substitute)
+    charges = parse_key_float(args.charge, "--charge")
+    radii = parse_key_float(args.radius, "--radius")
+    explicit_repeat = parse_repeat(args.supercell)
+    analysis_rows = parent_defect_analysis_rows(
+        atoms0,
+        substitutions,
+        charges,
+        args.vacancy_element,
+        args.vacancy_count,
+        args.max_repeat,
+        args.auto_max_aspect,
+    )
+    auto_max_atoms = args.auto_max_atoms if args.auto_max_atoms and args.auto_max_atoms > 0 else None
+    repeat = explicit_repeat or choose_repeat_from_analysis(
+        analysis_rows,
+        max_atoms=auto_max_atoms,
+        max_aspect=args.auto_max_aspect,
+        objective=args.auto_objective,
+    )
+    for row in analysis_rows:
+        row["within_max_atoms"] = "true" if auto_max_atoms is None or int(row["estimated_total_atoms"]) <= auto_max_atoms else "false"
+        row["recommended"] = "true" if tuple(row["repeat_tuple"]) == repeat else "false"
+        if row["recommended"] == "true":
+            row["notes"] = f"selected by {'explicit --supercell' if explicit_repeat else args.auto_objective + ' auto policy'}"
+    info = parent_defect_counts(
+        count_symbols(atoms0),
+        substitutions,
+        repeat,
+        charges,
+        args.vacancy_element,
+        args.vacancy_count * repeat_volume(repeat) if args.vacancy_count is not None else None,
+    )
+    atoms = atoms0.repeat(repeat)
+    linear_scale = args.linear_scale if args.linear_scale is not None else 1.0
+    if args.scale_mode == "ionic-radius" and args.linear_scale is None:
+        numerator = 0.0
+        denominator = 0.0
+        for spec in substitutions:
+            source_radius = radii.get(spec.source)
+            target_radius = radii.get(spec.target)
+            if source_radius is None or target_radius is None:
+                raise ValueError(f"Need --radius for both {spec.source} and {spec.target} when using --scale-mode ionic-radius.")
+            n_source = count_symbols(atoms0).get(spec.source, 0) * repeat_volume(repeat)
+            n_replace = n_source * spec.fraction
+            denominator += n_replace * source_radius
+            numerator += n_replace * target_radius
+        linear_scale = numerator / denominator if denominator else 1.0
+    if not math.isclose(linear_scale, 1.0, abs_tol=1.0e-12):
+        atoms.set_cell(atoms.cell * linear_scale, scale_atoms=True)
+
+    root = args.outdir.expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    write_csv(root / "supercell_candidate_analysis.csv", analysis_rows, SUPERCELL_ANALYSIS_FIELDS)
+    rows: list[dict[str, Any]] = []
+    runlist: list[str] = []
+    modes = ["ordered", "random", "clustered"]
+    if args.engine in {"both", "direct"}:
+        candidates_dir = root / "candidates"
+        candidates_dir.mkdir(exist_ok=True)
+        for idx, mode in enumerate(modes, start=1):
+            final_atoms, sub_counts, vacancies = apply_parent_defect_assignments(
+                atoms,
+                substitutions,
+                args.vacancy_element,
+                int(info["n_vacancy"]),
+                mode,
+                args.seed + idx,
+            )
+            run_dir = candidates_dir / f"{idx:02d}_{mode}"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            write(run_dir / "POSCAR", final_atoms, format="vasp", direct=True, vasp5=True, sort=False)
+            copy_vasp_template_for_vacancy(args.vasp_template.expanduser().resolve() if args.vasp_template else None, run_dir)
+            symbols = final_atoms.get_chemical_symbols()
+            counts = {symbol: symbols.count(symbol) for symbol in sorted(set(symbols))}
+            min_vv = min_pair_distance(atoms, vacancies)
+            rows.append(
+                {
+                    "candidate_id": f"{idx:02d}_{mode}",
+                    "kind": mode,
+                    "poscar": str((run_dir / "POSCAR").resolve()),
+                    "repeat": repeat_text(repeat),
+                    "linear_scale": f"{linear_scale:.12g}",
+                    "vacancy_element": args.vacancy_element or "",
+                    "n_vacancy": info["n_vacancy"],
+                    "substitutions_json": json.dumps(sub_counts, sort_keys=True),
+                    "species_counts_json": json.dumps(counts, sort_keys=True),
+                    "stoichiometry": composition_string(final_atoms),
+                    "charge_before_vacancy": f"{info['charge_before_vacancy']:.12g}",
+                    "charge_after_vacancy": f"{info['charge_after_vacancy']:.12g}",
+                    "min_vacancy_distance_A": "" if min_vv is None else f"{min_vv:.8f}",
+                    "notes": "Parent POSCAR substitution/vacancy route; use ISYM=0 for VASP relaxation.",
+                }
+            )
+            runlist.append(str(run_dir.resolve()))
+    if args.engine in {"both", "atat"}:
+        atat_dir = root / "atat"
+        vacancy_fraction = 0.0
+        if args.vacancy_element:
+            n_vacancy_sites = count_symbols(atoms).get(args.vacancy_element, 0)
+            vacancy_fraction = int(info["n_vacancy"]) / n_vacancy_sites if n_vacancy_sites else 0.0
+        write_atat_rndstr(atat_dir / "rndstr.in", atoms, parent_defect_site_specs(atoms, substitutions, args.vacancy_element, vacancy_fraction))
+        write_atat_vacancy_scripts(atat_dir, argparse.Namespace(atat_atoms=len(atoms), mcsqs_time=None))
+
+    write_csv(root / "parent_defect_candidate_index.csv", rows, PARENT_DEFECT_FIELDS)
+    (root / "runlist.txt").write_text(("\n".join(runlist) + "\n") if runlist else "", encoding="utf-8")
+    write_json(
+        root / "parent_defect_plan.json",
+        {
+            "schema": "atomi.materials.parent_defect.v1",
+            "source_poscar": str(args.poscar.expanduser().resolve()),
+            "repeat": repeat,
+            "linear_scale": linear_scale,
+            "substitutions": [spec.__dict__ for spec in substitutions],
+            "charges": charges,
+            "radii": radii,
+            "vacancy_element": args.vacancy_element,
+            "n_vacancy": info["n_vacancy"],
+            "charge_before_vacancy": info["charge_before_vacancy"],
+            "charge_after_vacancy": info["charge_after_vacancy"],
+            "engine": args.engine,
+            "outputs": {
+                "supercell_analysis": str(root / "supercell_candidate_analysis.csv"),
+                "candidate_index": str(root / "parent_defect_candidate_index.csv"),
+                "runlist": str(root / "runlist.txt"),
+                "atat_rndstr": str(root / "atat" / "rndstr.in") if args.engine in {"both", "atat"} else "",
+            },
+        },
+    )
+    print(f"Parent defect workspace : {root}")
+    print(f"Supercell repeat        : {repeat_text(repeat)}")
+    print(f"Linear scale            : {linear_scale:.12g}")
+    print(f"Substitutions           : {json.dumps(info['substitution_counts'], sort_keys=True)}")
+    print(f"Vacancies               : {info['n_vacancy']} {args.vacancy_element or ''}".rstrip())
+    print(f"Charge after vacancies  : {info['charge_after_vacancy']:.12g}")
+    print(f"Supercell analysis      : {root / 'supercell_candidate_analysis.csv'}")
+    print(f"Candidate index         : {root / 'parent_defect_candidate_index.csv'}")
+    print(f"Runlist                 : {root / 'runlist.txt'}")
+
+
 def quick_opt_main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else list(argv)
     if argv and argv[0] in {"vacancy-cif", "vacany-cif", "cif-vacancy", "partial-occupancy"}:
         vacancy_candidate_main(argv[1:])
+        return
+    if argv and argv[0] in {"parent-defect", "defect-poscar", "substitution-defect", "poscar-defect"}:
+        parent_defect_main(argv[1:])
         return
     if argv and argv[0] in {"relax-seeds", "relax_seed", "relax-seed"}:
         relax_seeds_main(argv[1:])
@@ -2814,6 +3225,8 @@ def build_parser() -> argparse.ArgumentParser:
     ce_parser.add_argument("args", nargs=argparse.REMAINDER)
     vacancy_parser = subparsers.add_parser("vacancy-cif", help="Build explicit vacancy POSCARs from partial-occupancy CIF.")
     vacancy_parser.add_argument("args", nargs=argparse.REMAINDER)
+    parent_parser = subparsers.add_parser("parent-defect", help="Build substitution/vacancy POSCARs from a parent POSCAR.")
+    parent_parser.add_argument("args", nargs=argparse.REMAINDER)
     quick_parser = subparsers.add_parser("quick-opt", help="Create a quick materials optimization scaffold.")
     quick_parser.add_argument("args", nargs=argparse.REMAINDER)
     return parser
@@ -2835,6 +3248,8 @@ def main(argv: list[str] | None = None) -> None:
         ce_handoff_main(rest)
     elif command in {"vacancy-cif", "vacany-cif", "cif-vacancy", "partial-occupancy"}:
         vacancy_candidate_main(rest)
+    elif command in {"parent-defect", "defect-poscar", "substitution-defect", "poscar-defect"}:
+        parent_defect_main(rest)
     elif command in {"quick-opt", "quick", "materials-opt"}:
         quick_opt_main(rest)
     else:

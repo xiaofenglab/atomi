@@ -557,6 +557,109 @@ def test_vacancy_cif_auto_balances_atom_budget_and_compactness() -> None:
     assert compact == (2, 2, 5)
 
 
+def test_materials_opt_parent_defect_charge_compensates_and_scales(tmp_path: Path) -> None:
+    poscar = tmp_path / "POSCAR"
+    poscar.write_text(
+        "UO2 parent\n"
+        "1.0\n"
+        "5 0 0\n"
+        "0 5 0\n"
+        "0 0 5\n"
+        "U O\n"
+        "2 4\n"
+        "Direct\n"
+        "0 0 0\n"
+        "0.5 0.5 0.5\n"
+        "0.25 0.25 0.25\n"
+        "0.75 0.75 0.75\n"
+        "0.25 0.75 0.25\n"
+        "0.75 0.25 0.75\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "parent_defect"
+
+    atomi_main(
+        [
+            "materials-opt",
+            "parent-defect",
+            "--poscar",
+            str(poscar),
+            "--outdir",
+            str(out),
+            "--substitute",
+            "U=Gd",
+            "--charge",
+            "U=4",
+            "--charge",
+            "Gd=3",
+            "--charge",
+            "O=-2",
+            "--vacancy-element",
+            "O",
+            "--scale-mode",
+            "ionic-radius",
+            "--radius",
+            "U=1.0",
+            "--radius",
+            "Gd=0.9",
+        ]
+    )
+
+    plan = json.loads((out / "parent_defect_plan.json").read_text(encoding="utf-8"))
+    assert plan["repeat"] == [1, 1, 1]
+    assert plan["n_vacancy"] == 1
+    assert plan["charge_after_vacancy"] == 0
+    assert plan["linear_scale"] == 0.9
+    index = rows(out / "parent_defect_candidate_index.csv")
+    assert len(index) == 3
+    assert all(row["stoichiometry"] == "Gd2 O3" for row in index)
+    rndstr = (out / "atat" / "rndstr.in").read_text(encoding="utf-8")
+    assert "O=0.75,Va=0.25" in rndstr
+    assert "Gd" in (out / "candidates" / "01_ordered" / "POSCAR").read_text(encoding="utf-8")
+
+
+def test_materials_opt_parent_defect_auto_repeats_for_integer_vacancy(tmp_path: Path) -> None:
+    poscar = tmp_path / "POSCAR"
+    poscar.write_text(
+        "UO2 primitive-like\n"
+        "1.0\n"
+        "5 0 0\n"
+        "0 5 0\n"
+        "0 0 5\n"
+        "U O\n"
+        "1 2\n"
+        "Direct\n"
+        "0 0 0\n"
+        "0.25 0.25 0.25\n"
+        "0.75 0.75 0.75\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "parent_defect_auto"
+
+    bridge.parent_defect_main(
+        [
+            "--poscar",
+            str(poscar),
+            "--outdir",
+            str(out),
+            "--substitute",
+            "U=Gd",
+            "--charge",
+            "U=4",
+            "--charge",
+            "Gd=3",
+            "--charge",
+            "O=-2",
+            "--vacancy-element",
+            "O",
+        ]
+    )
+
+    plan = json.loads((out / "parent_defect_plan.json").read_text(encoding="utf-8"))
+    assert plan["repeat"] == [1, 1, 2]
+    assert plan["n_vacancy"] == 1
+
+
 def test_materials_opt_relax_seeds_prepares_volume_scan(tmp_path: Path, capsys) -> None:
     template = tmp_path / "VASP_TEMPLATE"
     template.mkdir()
