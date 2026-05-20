@@ -658,6 +658,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mace_vasp2extxyz.add_argument("convert_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("mace-lammps2extxyz", "lammps2extxyz", "lammps-to-extxyz"):
+        mace_lammps2extxyz = subparsers.add_parser(
+            command_name,
+            help="Convert LAMMPS dump trajectories into extxyz files for MACE/ASE.",
+        )
+        mace_lammps2extxyz.add_argument("convert_args", nargs=argparse.REMAINDER)
+
     mace_convert_lammps = subparsers.add_parser(
         "mace-convert-lammps",
         help="Convert a MACE .model file to a LAMMPS .pt model.",
@@ -691,6 +698,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.ml.mace.vasp2extxyz import main as mace_vasp2extxyz_main
 
         mace_vasp2extxyz_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in ("mace-lammps2extxyz", "lammps2extxyz", "lammps-to-extxyz"):
+        from atomi.ml.mace.lammps2extxyz import main as mace_lammps2extxyz_main
+
+        mace_lammps2extxyz_main(raw_args[1:])
         return
     if raw_args and raw_args[0] == "mace-convert-lammps":
         from atomi.ml.mace.convert import main as mace_convert_main
@@ -1670,6 +1682,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.ml.mace.vasp2extxyz import main as mace_vasp2extxyz_main
 
         mace_vasp2extxyz_main(args.convert_args)
+        return
+
+    if args.subcommand in ("mace-lammps2extxyz", "lammps2extxyz", "lammps-to-extxyz"):
+        from atomi.ml.mace.lammps2extxyz import main as mace_lammps2extxyz_main
+
+        mace_lammps2extxyz_main(args.convert_args)
         return
 
     if args.subcommand == "mace-convert-lammps":

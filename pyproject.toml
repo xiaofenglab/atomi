@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "atomi"
-version = "0.4.37"
+version = "0.4.38"
 description = "Reusable HPC workflow tools for computational materials science."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -199,6 +199,9 @@ mace-energy-outliers = "atomi.ml.mace.outliers:main"
 mace-update-outliers = "atomi.ml.mace.update_outliers:main"
 mace-check-extxyz = "atomi.ml.mace.check_extxyz:main"
 mace-vasp2extxyz = "atomi.ml.mace.vasp2extxyz:main"
+mace-lammps2extxyz = "atomi.ml.mace.lammps2extxyz:main"
+lammps2extxyz = "atomi.ml.mace.lammps2extxyz:main"
+lammps-to-extxyz = "atomi.ml.mace.lammps2extxyz:main"
 mace-convert-lammps = "atomi.ml.mace.convert:main"
 
 [tool.setuptools.packages.find]

@@ -1,3 +1,3 @@
 """Reusable HPC workflow tools for computational materials science."""
 
-__version__ = "0.4.37"
+__version__ = "0.4.38"

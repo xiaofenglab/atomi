@@ -63,6 +63,19 @@ def test_poscar2lammps_replicates_cell(tmp_path: Path) -> None:
     assert metadata["replicate"] == [2, 1, 1]
 
 
+def test_poscar2lammps_can_sort_by_species(tmp_path: Path) -> None:
+    poscar = tmp_path / "POSCAR"
+    write_poscar(poscar)
+    out = tmp_path / "sorted.data"
+
+    main([str(poscar), "--out", str(out), "--species-order", "O", "U", "--sort-by-species"])
+
+    metadata = json.loads((tmp_path / "sorted.data.json").read_text(encoding="utf-8"))
+    assert metadata["species_order"] == ["O", "U"]
+    assert metadata["sorted_by_species"] is True
+    assert metadata["lammps_type_map"] == {"O": 1, "U": 2}
+
+
 def test_atomi_dispatches_poscar2lammps(tmp_path: Path) -> None:
     poscar = tmp_path / "POSCAR"
     write_poscar(poscar)

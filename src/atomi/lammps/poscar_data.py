@@ -70,6 +70,13 @@ def validate_species_order(atoms, specorder: list[str]) -> None:
         )
 
 
+def sort_atoms_by_species_order(atoms, specorder: list[str]):
+    symbols = atoms.get_chemical_symbols()
+    order_rank = {symbol: rank for rank, symbol in enumerate(specorder)}
+    indices = sorted(range(len(symbols)), key=lambda idx: (order_rank.get(symbols[idx], len(specorder)), idx))
+    return atoms[indices]
+
+
 def relative_to_config(path: Path, config_path: Path) -> str:
     try:
         return str(path.resolve().relative_to(config_path.parent.resolve()))
@@ -94,6 +101,7 @@ def convert_poscar_to_lammps_data(
     reduce_cell: bool = False,
     force_skew: bool = False,
     atom_type_labels: bool = False,
+    sort_by_species: bool = False,
     metadata_out: Path | None = None,
     update_config: Path | None = None,
 ) -> dict[str, object]:
@@ -105,6 +113,8 @@ def convert_poscar_to_lammps_data(
     atoms.wrap()
     specorder = species_order or poscar_species_order(poscar)
     validate_species_order(atoms, specorder)
+    if sort_by_species:
+        atoms = sort_atoms_by_species_order(atoms, specorder)
     _write_lammps_data(
         atoms,
         out=out,
@@ -127,6 +137,7 @@ def convert_poscar_to_lammps_data(
         "replicate": list(replicate),
         "natoms": len(atoms),
         "species_order": specorder,
+        "sorted_by_species": sort_by_species,
         "lammps_type_map": type_map,
         "md_engine_initial_structure": str(out),
     }
@@ -159,6 +170,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-skew", action="store_true", help="Force triclinic LAMMPS box output.")
     parser.add_argument("--atom-type-labels", action="store_true", help="Write LAMMPS atom type labels when supported.")
     parser.add_argument(
+        "--sort-by-species",
+        action="store_true",
+        help="Reorder atom IDs by --species-order before writing, matching older v2l.py behavior.",
+    )
+    parser.add_argument(
         "--metadata-out",
         type=Path,
         default=None,
@@ -189,6 +205,7 @@ def main(argv: list[str] | None = None) -> None:
         reduce_cell=args.reduce_cell,
         force_skew=args.force_skew,
         atom_type_labels=args.atom_type_labels,
+        sort_by_species=args.sort_by_species,
         metadata_out=metadata_out,
         update_config=args.update_config,
     )
