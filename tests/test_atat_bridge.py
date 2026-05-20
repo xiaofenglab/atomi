@@ -291,7 +291,7 @@ def test_materials_opt_vacancy_cif_writes_explicit_poscars_and_atat_input(tmp_pa
         "Gd1 Gd 0 0 0 1\n"
         "Gd2 Gd 0.5 0.5 0.5 1\n"
         "O1 O 0.25 0.25 0.25 1\n"
-        "O2 O 0.75 0.75 0.75 0.2\n",
+        "O2 O 0.75 0.75 0.75 0.2(1)\n",
         encoding="utf-8",
     )
     template = tmp_path / "VASP_TEMPLATE"
@@ -325,12 +325,14 @@ def test_materials_opt_vacancy_cif_writes_explicit_poscars_and_atat_input(tmp_pa
         "sqs_random_like",
     }
     assert all(row["n_Va"] == "4" for row in index)
+    assert all(row["site_label"] == "O2" for row in index)
     assert all(row["reasonable_stoichiometry"] == "true" for row in index)
     poscar = out / "candidates" / "01_vacancy_separated" / "POSCAR"
     assert "Va" not in poscar.read_text(encoding="utf-8")
     assert "ISYM = 0" in (out / "candidates" / "01_vacancy_separated" / "INCAR").read_text(encoding="utf-8")
     rndstr = (out / "atat" / "rndstr.in").read_text(encoding="utf-8")
     assert "O=0.2,Va=0.8" in rndstr
+    assert rndstr.count("O=0.2,Va=0.8") == 5
     assert (out / "atat" / "run_mcsqs.sh").exists()
     assert len((out / "runlist.txt").read_text(encoding="utf-8").splitlines()) == 3
 

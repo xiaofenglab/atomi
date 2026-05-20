@@ -131,6 +131,9 @@ VACANCY_CANDIDATE_FIELDS = [
     "n_Gd",
     "n_O",
     "n_Va",
+    "n_partial_element",
+    "species_counts_json",
+    "site_label",
     "vacancy_fraction",
     "min_vacancy_distance_A",
     "stoichiometry",
@@ -1181,10 +1184,25 @@ def import_ase_atoms() -> tuple[Any, Any]:
     return read, write
 
 
+def parse_cif_number(value: Any) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip().strip("'\"")
+    if not text or text in {".", "?"}:
+        return None
+    text = re.sub(r"\([^)]*\)$", "", text)
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
 def occupancy_from_ase_info(atoms: Any, default: float = 1.0) -> list[float]:
     occupancies = [default for _ in atoms]
     raw = atoms.info.get("occupancy") or atoms.info.get("occupancies")
     if not isinstance(raw, dict):
+        return occupancies
+    if not raw or len(raw) != len(atoms) or max((int(key) for key in raw if str(key).isdigit()), default=-1) >= len(atoms):
         return occupancies
     for key, value in raw.items():
         try:
@@ -1235,45 +1253,141 @@ def cif_atom_site_occupancies(path: Path) -> list[dict[str, Any]]:
             parts = line.replace("'", "").replace('"', "").split()
             if len(parts) >= len(tags):
                 item = dict(zip(tags, parts))
+                label = item.get("_atom_site_label") or ""
                 symbol = item.get("_atom_site_type_symbol") or item.get("_atom_site_label") or ""
                 symbol = re.sub(r"[^A-Za-z]+", "", symbol)
-                occ = finite_float(item.get("_atom_site_occupancy"))
-                fx = finite_float(item.get("_atom_site_fract_x"))
-                fy = finite_float(item.get("_atom_site_fract_y"))
-                fz = finite_float(item.get("_atom_site_fract_z"))
+                occ = parse_cif_number(item.get("_atom_site_occupancy"))
+                fx = parse_cif_number(item.get("_atom_site_fract_x"))
+                fy = parse_cif_number(item.get("_atom_site_fract_y"))
+                fz = parse_cif_number(item.get("_atom_site_fract_z"))
                 if symbol and occ is not None:
-                    rows.append({"symbol": symbol, "occupancy": occ, "frac": (fx, fy, fz)})
+                    rows.append({"label": label, "symbol": symbol, "occupancy": occ, "frac": (fx, fy, fz)})
             i += 1
     return rows
 
 
-def infer_partial_occupancies_from_cif(
+def group_cif_sites(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        frac = row.get("frac") or (None, None, None)
+        if any(value is None for value in frac):
+            continue
+        key = tuple(round(float(value) % 1.0, 7) for value in frac)
+        group = groups.setdefault(
+            key,
+            {
+                "label": row.get("label") or safe_name(row.get("symbol") or "site"),
+                "frac": tuple(float(value) % 1.0 for value in frac),
+                "occupants": {},
+                "raw_labels": [],
+            },
+        )
+        symbol = row.get("symbol")
+        if symbol:
+            group["occupants"][symbol] = group["occupants"].get(symbol, 0.0) + float(row["occupancy"])
+        if row.get("label"):
+            group["raw_labels"].append(row["label"])
+    return list(groups.values())
+
+
+def fractional_close(a: Any, b: Any, tol: float = 1.0e-4) -> bool:
+    return all(abs(((float(x) - float(y) + 0.5) % 1.0) - 0.5) <= tol for x, y in zip(a, b))
+
+
+def equivalent_site_positions(atoms: Any, frac: tuple[float, float, float]) -> list[Any]:
+    spacegroup = atoms.info.get("spacegroup")
+    if spacegroup is None:
+        return [frac]
+    try:
+        sites, _ = spacegroup.equivalent_sites([frac], symprec=1.0e-3, onduplicates="keep")
+    except Exception:
+        return [frac]
+    return list(sites)
+
+
+def match_cif_group_indices(atoms: Any, group: dict[str, Any]) -> list[int]:
+    positions = equivalent_site_positions(atoms, group["frac"])
+    allowed = set(group["occupants"])
+    scaled = atoms.get_scaled_positions(wrap=True)
+    matched: list[int] = []
+    for index, atom in enumerate(atoms):
+        if allowed and atom.symbol not in allowed:
+            continue
+        if any(fractional_close(scaled[index], site) for site in positions):
+            matched.append(index)
+    return matched
+
+
+def site_spec_from_occupants(
+    occupants: dict[str, float],
+    vacancy_label: str,
+    target_element: str | None = None,
+    target_occupancy: float | None = None,
+) -> tuple[dict[str, float], str]:
+    clean = {symbol: float(value) for symbol, value in occupants.items() if float(value) > 1.0e-10}
+    if target_element and target_occupancy is not None and target_element in clean:
+        scale_rest = max(0.0, 1.0 - float(target_occupancy))
+        other_total = sum(value for symbol, value in clean.items() if symbol != target_element)
+        adjusted = {target_element: float(target_occupancy)}
+        if other_total > 1.0e-12:
+            for symbol, value in clean.items():
+                if symbol != target_element:
+                    adjusted[symbol] = scale_rest * value / other_total
+        clean = adjusted
+    total = sum(clean.values())
+    if total < 1.0 - 1.0e-10:
+        clean[vacancy_label] = 1.0 - total
+    if vacancy_label not in clean and len(clean) == 1:
+        symbol, value = next(iter(clean.items()))
+        if math.isclose(value, 1.0, abs_tol=1.0e-10):
+            return clean, symbol
+    spec = ",".join(f"{symbol}={value:.12g}" for symbol, value in clean.items())
+    return clean, spec
+
+
+def infer_site_occupancy_specs_from_cif(
     atoms: Any,
     cif_path: Path,
     partial_element: str,
     target_occupancy: float | None,
-) -> list[float]:
-    occupancies = occupancy_from_ase_info(atoms)
-    if any(occ < 0.999 for occ in occupancies):
-        return occupancies
-    if target_occupancy is not None:
-        return [
-            float(target_occupancy) if atom.symbol == partial_element else 1.0
-            for atom in atoms
-        ]
+    vacancy_label: str,
+    site_label: str | None = None,
+) -> tuple[list[float], list[str], list[str], list[dict[str, Any]]]:
+    occupancies = [1.0 for _ in atoms]
+    site_labels = ["" for _ in atoms]
+    site_specs = [atom.symbol for atom in atoms]
     raw_rows = cif_atom_site_occupancies(cif_path)
-    partial_values = [
-        float(row["occupancy"])
-        for row in raw_rows
-        if row.get("symbol") == partial_element and finite_float(row.get("occupancy")) is not None
-        and 0.0 < float(row["occupancy"]) < 0.999
-    ]
-    if not partial_values:
-        return occupancies
-    # Fallback when symmetry expansion hides exact site tags: assign the
-    # dominant partial occupancy to the requested element and report that choice.
-    inferred = partial_values[0]
-    return [inferred if atom.symbol == partial_element else 1.0 for atom in atoms]
+    groups = group_cif_sites(raw_rows)
+    annotated_groups: list[dict[str, Any]] = []
+    for group in groups:
+        labels = {str(label) for label in group.get("raw_labels", [])}
+        selected_by_label = site_label is not None and site_label in labels
+        selected_by_partial = site_label is None and partial_element in group["occupants"] and sum(group["occupants"].values()) < 0.999
+        selected = selected_by_label or selected_by_partial
+        occupants, spec = site_spec_from_occupants(
+            group["occupants"],
+            vacancy_label,
+            target_element=partial_element if selected else None,
+            target_occupancy=target_occupancy if selected else None,
+        )
+        indices = match_cif_group_indices(atoms, group)
+        for index in indices:
+            site_labels[index] = group["label"]
+            site_specs[index] = spec
+            occupancies[index] = occupants.get(atoms[index].symbol, 1.0)
+        annotated_groups.append(
+            {
+                **group,
+                "occupants": occupants,
+                "site_spec": spec,
+                "indices": indices,
+                "selected": selected,
+            }
+        )
+    if any(0.0 < occ < 0.999 for occ in occupancies):
+        return occupancies, site_labels, site_specs, annotated_groups
+    ase_occupancies = occupancy_from_ase_info(atoms)
+    return ase_occupancies, site_labels, site_specs, annotated_groups
 
 
 def parse_repeat(value: str | None) -> tuple[int, int, int] | None:
@@ -1316,6 +1430,14 @@ def choose_integer_repeat(n_partial: int, occupancy: float, max_repeat: int) -> 
 
 def repeated_occupancies(occupancies: list[float], repeat: tuple[int, int, int]) -> list[float]:
     return occupancies * (repeat[0] * repeat[1] * repeat[2])
+
+
+def repeat_metadata(values: list[Any], repeat: tuple[int, int, int]) -> list[Any]:
+    return list(values) * (repeat[0] * repeat[1] * repeat[2])
+
+
+def site_spec_contains_vacancy(spec: str, element: str, vacancy_label: str) -> bool:
+    return f"{element}=" in spec and f"{vacancy_label}=" in spec
 
 
 def distance_between_indices(atoms: Any, i: int, j: int) -> float:
@@ -1410,24 +1532,18 @@ def copy_vasp_template_for_vacancy(template: Path | None, run_dir: Path) -> None
 def write_atat_rndstr(
     path: Path,
     atoms: Any,
-    partial_indices: set[int],
-    occupancy: float,
-    partial_element: str,
-    vacancy_label: str,
+    site_specs: list[str],
 ) -> None:
     cell = atoms.cell.array
     scaled = atoms.get_scaled_positions(wrap=True)
     lines = [
         "# Generated by atomi materials-opt vacancy-cif",
-        "# Fixed sites are written as single species; partially occupied sites use O=x,Va=1-x.",
+        "# Fixed sites are written as single species; disordered sites use ATAT species fractions.",
     ]
     for vector in cell:
         lines.append(" ".join(f"{float(value):.12f}" for value in vector))
     for index, atom in enumerate(atoms):
-        if index in partial_indices:
-            species = f"{partial_element}={occupancy:.12g},{vacancy_label}={1.0 - occupancy:.12g}"
-        else:
-            species = atom.symbol
+        species = site_specs[index] if index < len(site_specs) else atom.symbol
         lines.append(
             " ".join(f"{float(value):.12f}" for value in scaled[index]) + f" {species}"
         )
@@ -1473,6 +1589,7 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--cif", type=Path, required=True, help="Input CIF with partial occupancy.")
     parser.add_argument("--outdir", type=Path, default=Path("VACANCY_CIF_CANDIDATES"))
     parser.add_argument("--partial-element", default="O", help="Element occupying the partial vacancy sublattice.")
+    parser.add_argument("--site-label", help="Optional CIF atom-site label to select, e.g. O2.")
     parser.add_argument("--target-occupancy", type=float, help="Override CIF occupancy for the partial sublattice.")
     parser.add_argument("--vacancy-label", default="Va", help="ATAT vacancy pseudo-species label.")
     parser.add_argument("--supercell", default="auto", help="auto or repeat such as 1x1x5.")
@@ -1489,30 +1606,39 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     read, write = import_ase_atoms()
     cif = args.cif.expanduser().resolve()
     atoms0 = read(cif, fractional_occupancies=True, store_tags=True)
-    occupancies0 = infer_partial_occupancies_from_cif(
+    occupancies0, labels0, specs0, site_groups = infer_site_occupancy_specs_from_cif(
         atoms0,
         cif,
         args.partial_element,
         args.target_occupancy,
+        args.vacancy_label,
+        args.site_label,
     )
     partial0 = [
         index
-        for index, (atom, occ) in enumerate(zip(atoms0, occupancies0))
-        if atom.symbol == args.partial_element and 0.0 < occ < 0.999
+        for index, (atom, occ, spec) in enumerate(zip(atoms0, occupancies0, specs0))
+        if atom.symbol == args.partial_element and 0.0 < occ < 0.999 and site_spec_contains_vacancy(spec, args.partial_element, args.vacancy_label)
     ]
     if not partial0:
         raise ValueError(
-            f"No partial {args.partial_element} site was detected. "
-            "Pass --target-occupancy if ASE/CIF parsing does not expose occupancy."
+            f"No vacancy-bearing partial {args.partial_element} site was detected. "
+            "Pass --site-label and/or --target-occupancy if CIF parsing does not expose the intended site."
+        )
+    selected_labels = sorted({labels0[index] for index in partial0 if labels0[index]})
+    if args.site_label is None and len(selected_labels) > 1:
+        raise ValueError(
+            "Multiple vacancy-bearing partial sites were detected: "
+            f"{', '.join(selected_labels)}. Pass --site-label to choose one."
         )
     occupancy = args.target_occupancy if args.target_occupancy is not None else occupancies0[partial0[0]]
     repeat = parse_repeat(args.supercell) or choose_integer_repeat(len(partial0), occupancy, args.max_repeat)
     atoms = atoms0.repeat(repeat)
     occupancies = repeated_occupancies(occupancies0, repeat)
+    site_specs = repeat_metadata(specs0, repeat)
     partial = [
         index
-        for index, (atom, occ) in enumerate(zip(atoms, occupancies))
-        if atom.symbol == args.partial_element and 0.0 < occ < 0.999
+        for index, (atom, occ, spec) in enumerate(zip(atoms, occupancies, site_specs))
+        if atom.symbol == args.partial_element and 0.0 < occ < 0.999 and site_spec_contains_vacancy(spec, args.partial_element, args.vacancy_label)
     ]
     n_keep = int(round(len(partial) * occupancy))
     if not math.isclose(n_keep, len(partial) * occupancy, abs_tol=1.0e-6):
@@ -1531,10 +1657,7 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     write_atat_rndstr(
         atat_dir / "rndstr.in",
         atoms,
-        set(partial),
-        float(occupancy),
-        args.partial_element,
-        args.vacancy_label,
+        site_specs,
     )
     if args.atat_atoms <= 0:
         args.atat_atoms = len(atoms)
@@ -1559,6 +1682,7 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
         vacancy_fraction = len(vacancies) / len(partial) if partial else 0.0
         reasonable = math.isclose(1.0 - vacancy_fraction, occupancy, abs_tol=1.0e-8)
         count_symbols = final_atoms.get_chemical_symbols()
+        counts = {symbol: count_symbols.count(symbol) for symbol in sorted(set(count_symbols))}
         rows.append(
             {
                 "candidate_id": case_id,
@@ -1567,6 +1691,9 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
                 "n_Gd": count_symbols.count("Gd"),
                 "n_O": count_symbols.count("O"),
                 "n_Va": len(vacancies),
+                "n_partial_element": count_symbols.count(args.partial_element),
+                "species_counts_json": json.dumps(counts, sort_keys=True),
+                "site_label": ",".join(selected_labels),
                 "vacancy_fraction": f"{vacancy_fraction:.12g}",
                 "min_vacancy_distance_A": "" if min_vv is None else f"{min_vv:.8f}",
                 "stoichiometry": composition_string(final_atoms),
@@ -1586,12 +1713,25 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
             "schema": "atomi.materials.vacancy_cif.v1",
             "source_cif": str(cif),
             "partial_element": args.partial_element,
+            "site_label": args.site_label,
+            "selected_site_labels": selected_labels,
             "vacancy_label": args.vacancy_label,
             "occupancy": occupancy,
             "repeat": repeat,
             "n_partial_sites": len(partial),
             "n_keep_partial_element": n_keep,
             "n_vacancy": n_vacancy,
+            "site_groups": [
+                {
+                    "label": group.get("label"),
+                    "raw_labels": group.get("raw_labels"),
+                    "occupants": group.get("occupants"),
+                    "site_spec": group.get("site_spec"),
+                    "multiplicity": len(group.get("indices", [])),
+                    "selected": group.get("selected"),
+                }
+                for group in site_groups
+            ],
             "outputs": {
                 "rndstr": str(atat_dir / "rndstr.in"),
                 "run_mcsqs": str(atat_dir / "run_mcsqs.sh"),
@@ -1613,6 +1753,7 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
 
     print(f"Vacancy CIF workspace : {root}")
     print(f"Partial sites         : {len(partial)} {args.partial_element} sites")
+    print(f"Site label            : {','.join(selected_labels) or 'unknown'}")
     print(f"Occupancy             : {occupancy:.12g} keep {n_keep}, vacancy {n_vacancy}")
     print(f"Supercell repeat      : {repeat[0]} {repeat[1]} {repeat[2]}")
     print(f"ATAT rndstr.in        : {atat_dir / 'rndstr.in'}")
@@ -1628,7 +1769,7 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
 
 def quick_opt_main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else list(argv)
-    if argv and argv[0] in {"vacancy-cif", "cif-vacancy", "partial-occupancy"}:
+    if argv and argv[0] in {"vacancy-cif", "vacany-cif", "cif-vacancy", "partial-occupancy"}:
         vacancy_candidate_main(argv[1:])
         return
     if argv and argv[0] in {"relax-seeds", "relax_seed", "relax-seed"}:
@@ -2128,7 +2269,7 @@ def main(argv: list[str] | None = None) -> None:
         index_main(rest)
     elif command in {"ce-handoff", "ce", "ce-plan"}:
         ce_handoff_main(rest)
-    elif command in {"vacancy-cif", "cif-vacancy", "partial-occupancy"}:
+    elif command in {"vacancy-cif", "vacany-cif", "cif-vacancy", "partial-occupancy"}:
         vacancy_candidate_main(rest)
     elif command in {"quick-opt", "quick", "materials-opt"}:
         quick_opt_main(rest)
