@@ -741,6 +741,7 @@ def test_parent_defect_run_mcsqs_converts_bestsqs_to_poscar(tmp_path: Path, monk
     mcsqs = fake_bin / "mcsqs"
     mcsqs.write_text(
         "#!/bin/sh\n"
+        "echo \"$@\" > mcsqs_args.txt\n"
         "cat > bestsqs.out <<'EOF'\n"
         "5 0 0\n"
         "0 5 0\n"
@@ -804,12 +805,14 @@ def test_parent_defect_run_mcsqs_converts_bestsqs_to_poscar(tmp_path: Path, monk
     )
 
     assert (out / "atat" / "bestsqs.out").exists()
+    assert "-2=6" in (out / "atat" / "mcsqs_args.txt").read_text(encoding="utf-8")
     poscar_text = (out / "atat_vasp" / "candidates" / "01_bestsqs" / "POSCAR").read_text(encoding="utf-8")
     assert "Va" not in poscar_text
     assert "Gd" in poscar_text
     assert "ISYM = 0" in (out / "atat_vasp" / "candidates" / "01_bestsqs" / "INCAR").read_text(encoding="utf-8")
     plan = json.loads((out / "parent_defect_plan.json").read_text(encoding="utf-8"))
     assert plan["outputs"]["atat_vasp"].endswith("atat_vasp")
+    assert "-2=6" in plan["mcsqs"]["command"]
 
 
 def test_parent_defect_run_mcsqs_failure_keeps_direct_outputs(tmp_path: Path, monkeypatch) -> None:

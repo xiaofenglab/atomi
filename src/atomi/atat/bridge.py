@@ -2169,10 +2169,24 @@ def write_atat_rndstr(
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def write_atat_vacancy_scripts(atat_dir: Path, args: argparse.Namespace) -> None:
+def build_mcsqs_command(args: argparse.Namespace) -> list[str]:
     mcsqs_parts = ["mcsqs", f"-n={args.atat_atoms}"]
+    pair = getattr(args, "mcsqs_pair_diameter", None)
+    triplet = getattr(args, "mcsqs_triplet_diameter", None)
+    quadruplet = getattr(args, "mcsqs_quadruplet_diameter", None)
+    if pair is not None and pair > 0:
+        mcsqs_parts.append(f"-2={pair:g}")
+    if triplet is not None and triplet > 0:
+        mcsqs_parts.append(f"-3={triplet:g}")
+    if quadruplet is not None and quadruplet > 0:
+        mcsqs_parts.append(f"-4={quadruplet:g}")
     if args.mcsqs_time is not None:
         mcsqs_parts.append(f"-T={args.mcsqs_time:g}")
+    return mcsqs_parts
+
+
+def write_atat_vacancy_scripts(atat_dir: Path, args: argparse.Namespace) -> None:
+    mcsqs_parts = build_mcsqs_command(args)
     template = getattr(args, "vasp_template", None)
     template_args = ""
     if template:
@@ -2423,6 +2437,9 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-vacancies-per-center", type=int, default=2, help="Warn/retry when a center has more than this many vacancies among nearest ligand sites.")
     parser.add_argument("--vacancy-guard-attempts", type=int, default=200, help="Random retry attempts used to satisfy the vacancy guard.")
     parser.add_argument("--atat-atoms", type=int, default=0, help="Optional mcsqs -n target. Default: full supercell atom count.")
+    parser.add_argument("--mcsqs-pair-diameter", type=float, default=6.0, help="ATAT mcsqs -2 pair cluster diameter. Use <=0 to disable.")
+    parser.add_argument("--mcsqs-triplet-diameter", type=float, help="Optional ATAT mcsqs -3 triplet cluster diameter.")
+    parser.add_argument("--mcsqs-quadruplet-diameter", type=float, help="Optional ATAT mcsqs -4 quadruplet cluster diameter.")
     parser.add_argument("--mcsqs-time", type=float, help="Optional mcsqs -T wall-clock limit.")
     parser.add_argument("--run-mcsqs", action="store_true", help="Run mcsqs immediately if available.")
     args = parser.parse_args(argv)
@@ -2976,6 +2993,9 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-vacancies-per-center", type=int, default=2, help="Warn/retry when a center has more than this many vacancies among nearest ligand sites.")
     parser.add_argument("--vacancy-guard-attempts", type=int, default=200, help="Random retry attempts used to satisfy the vacancy guard.")
     parser.add_argument("--atat-atoms", type=int, default=0, help="Optional mcsqs -n target. Default: full supercell atom count.")
+    parser.add_argument("--mcsqs-pair-diameter", type=float, default=6.0, help="ATAT mcsqs -2 pair cluster diameter. Use <=0 to disable.")
+    parser.add_argument("--mcsqs-triplet-diameter", type=float, help="Optional ATAT mcsqs -3 triplet cluster diameter.")
+    parser.add_argument("--mcsqs-quadruplet-diameter", type=float, help="Optional ATAT mcsqs -4 quadruplet cluster diameter.")
     parser.add_argument("--mcsqs-time", type=float, help="Optional mcsqs -T wall-clock limit.")
     parser.add_argument("--run-mcsqs", action="store_true", help="Run mcsqs and convert bestsqs.out to VASP POSCAR folders.")
     parser.add_argument("--mcsqs-strict", action="store_true", help="Exit with an error if mcsqs fails. Default: keep direct outputs and write a failure note.")
@@ -3114,7 +3134,14 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
         atat_atoms = args.atat_atoms if args.atat_atoms > 0 else len(atoms)
         write_atat_vacancy_scripts(
             atat_dir,
-            argparse.Namespace(atat_atoms=atat_atoms, mcsqs_time=args.mcsqs_time, vasp_template=args.vasp_template),
+            argparse.Namespace(
+                atat_atoms=atat_atoms,
+                mcsqs_pair_diameter=args.mcsqs_pair_diameter,
+                mcsqs_triplet_diameter=args.mcsqs_triplet_diameter,
+                mcsqs_quadruplet_diameter=args.mcsqs_quadruplet_diameter,
+                mcsqs_time=args.mcsqs_time,
+                vasp_template=args.vasp_template,
+            ),
         )
         args.atat_atoms = atat_atoms
 
@@ -3128,9 +3155,7 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
         atat_dir = root / "atat"
         if shutil.which("mcsqs") is None:
             raise RuntimeError("mcsqs was requested with --run-mcsqs, but it is not on PATH.")
-        command = ["mcsqs", f"-n={args.atat_atoms}"]
-        if args.mcsqs_time is not None:
-            command.append(f"-T={args.mcsqs_time:g}")
+        command = build_mcsqs_command(args)
         mcsqs_command = command
         result = subprocess.run(command, cwd=atat_dir, capture_output=True, text=True)
         (atat_dir / "mcsqs.out").write_text(result.stdout or "", encoding="utf-8")
