@@ -557,6 +557,33 @@ def test_vacancy_cif_auto_balances_atom_budget_and_compactness() -> None:
     assert compact == (2, 2, 5)
 
 
+def test_vacancy_guard_limits_random_missing_neighbors() -> None:
+    from ase import Atoms
+
+    positions = [(5, 5, 5), (15, 15, 15)]
+    for base in ((5, 5, 5), (15, 15, 15)):
+        for dx in (-1, 1):
+            for dy in (-1, 1):
+                for dz in (-1, 1):
+                    positions.append((base[0] + dx, base[1] + dy, base[2] + dz))
+    atoms = Atoms("U2O16", positions=positions, cell=[30, 30, 30], pbc=True)
+    candidates = list(range(2, 18))
+    guard = bridge.VacancyGuard(
+        center_elements={"U"},
+        ligand_elements={"O"},
+        coordination_number=8,
+        max_missing=2,
+        attempts=500,
+    )
+
+    chosen = bridge.guarded_random_vacancy_set(atoms, candidates, 4, 7, guard, candidates)
+    report = bridge.vacancy_guard_report(atoms, chosen, candidates, guard)
+
+    assert len(chosen) == 4
+    assert report.status == "OK"
+    assert report.max_missing <= 2
+
+
 def test_materials_opt_atat_poscar_removes_vacancy_pseudo_atoms(tmp_path: Path) -> None:
     bestsqs = tmp_path / "bestsqs.out"
     bestsqs.write_text(

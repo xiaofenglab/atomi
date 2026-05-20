@@ -142,6 +142,10 @@ VACANCY_CANDIDATE_FIELDS = [
     "assigned_site_species_json",
     "removed_partial_site_indices",
     "kept_partial_site_indices",
+    "vacancy_guard_status",
+    "vacancy_guard_max_missing",
+    "vacancy_guard_bad_centers",
+    "vacancy_guard_worst_center",
     "notes",
 ]
 SUPERCELL_ANALYSIS_FIELDS = [
@@ -174,6 +178,10 @@ PARENT_DEFECT_FIELDS = [
     "charge_before_vacancy",
     "charge_after_vacancy",
     "min_vacancy_distance_A",
+    "vacancy_guard_status",
+    "vacancy_guard_max_missing",
+    "vacancy_guard_bad_centers",
+    "vacancy_guard_worst_center",
     "notes",
 ]
 ATAT_POSCAR_FIELDS = [
@@ -211,6 +219,33 @@ class PseudoSpecies:
             "moment_guard": self.moment_guard,
             "vasp_element": self.vasp_element or self.element,
             "notes": self.notes,
+        }
+
+
+@dataclass
+class VacancyGuard:
+    enabled: bool = True
+    center_elements: set[str] | None = None
+    ligand_elements: set[str] | None = None
+    coordination_number: int = 8
+    max_missing: int = 2
+    attempts: int = 200
+
+
+@dataclass
+class VacancyGuardReport:
+    status: str
+    max_missing: int = 0
+    bad_centers: int = 0
+    worst_center: str = ""
+    notes: str = ""
+
+    def row(self) -> dict[str, str]:
+        return {
+            "vacancy_guard_status": self.status,
+            "vacancy_guard_max_missing": str(self.max_missing),
+            "vacancy_guard_bad_centers": str(self.bad_centers),
+            "vacancy_guard_worst_center": self.worst_center,
         }
 
 
@@ -1745,6 +1780,55 @@ def min_pair_distance(atoms: Any, indices: list[int]) -> float | None:
     return min(distance_between_indices(atoms, i, j) for i, j in itertools.combinations(indices, 2))
 
 
+def vacancy_guard_report(
+    atoms: Any,
+    vacancy_indices: list[int],
+    ligand_indices: list[int],
+    guard: VacancyGuard | None,
+) -> VacancyGuardReport:
+    if guard is None or not guard.enabled:
+        return VacancyGuardReport("OFF")
+    if not vacancy_indices:
+        return VacancyGuardReport("SKIP", notes="no vacancies")
+    if guard.coordination_number <= 0:
+        return VacancyGuardReport("SKIP", notes="coordination number disabled")
+    ligand_set = set(ligand_indices) | set(vacancy_indices)
+    if not ligand_set:
+        return VacancyGuardReport("SKIP", notes="no ligand/vacancy sites")
+    ligand_symbols = guard.ligand_elements or {atoms[index].symbol for index in ligand_set}
+    center_elements = guard.center_elements or {
+        atom.symbol
+        for atom in atoms
+        if atom.symbol not in ligand_symbols
+    }
+    centers = [index for index, atom in enumerate(atoms) if atom.symbol in center_elements]
+    if not centers:
+        return VacancyGuardReport("SKIP", notes="no coordination centers")
+
+    vacancy_set = set(vacancy_indices)
+    max_missing = 0
+    bad_centers = 0
+    worst_center = ""
+    for center in centers:
+        nearest = sorted(
+            ligand_set,
+            key=lambda index: distance_between_indices(atoms, center, index),
+        )[: guard.coordination_number]
+        missing = sum(1 for index in nearest if index in vacancy_set)
+        if missing > max_missing:
+            max_missing = missing
+            worst_center = f"{atoms[center].symbol}{center + 1}"
+        if missing > guard.max_missing:
+            bad_centers += 1
+    status = "OK" if bad_centers == 0 else "WARN"
+    notes = "" if status == "OK" else f"{bad_centers} center(s) have >{guard.max_missing} nearby vacancies"
+    return VacancyGuardReport(status, max_missing, bad_centers, worst_center, notes)
+
+
+def vacancy_guard_score(report: VacancyGuardReport) -> tuple[int, int]:
+    return (report.bad_centers, report.max_missing)
+
+
 def evenly_spaced_indices(candidates: list[int], count: int) -> list[int]:
     if count >= len(candidates):
         return list(candidates)
@@ -1805,6 +1889,34 @@ def random_vacancy_set(candidates: list[int], n_vacancy: int, seed: int) -> list
     return sorted(rng.sample(candidates, n_vacancy))
 
 
+def guarded_random_vacancy_set(
+    atoms: Any,
+    candidates: list[int],
+    n_vacancy: int,
+    seed: int,
+    guard: VacancyGuard | None,
+    ligand_indices: list[int] | None = None,
+) -> list[int]:
+    if guard is None or not guard.enabled or n_vacancy <= 0:
+        return random_vacancy_set(candidates, n_vacancy, seed)
+    if n_vacancy >= len(candidates):
+        return list(candidates)
+    ligand_pool = ligand_indices or candidates
+    rng = random.Random(seed)
+    best = random_vacancy_set(candidates, n_vacancy, seed)
+    best_report = vacancy_guard_report(atoms, best, ligand_pool, guard)
+    attempts = max(1, guard.attempts)
+    for _attempt in range(attempts):
+        chosen = sorted(rng.sample(candidates, n_vacancy))
+        report = vacancy_guard_report(atoms, chosen, ligand_pool, guard)
+        if report.status in {"OK", "SKIP", "OFF"}:
+            return chosen
+        if vacancy_guard_score(report) < vacancy_guard_score(best_report):
+            best = chosen
+            best_report = report
+    return best
+
+
 def occupation_groups_from_metadata(
     atoms: Any,
     site_labels: list[str],
@@ -1842,6 +1954,34 @@ def occupation_requirements(groups: list[dict[str, Any]]) -> list[tuple[int, flo
     return requirements
 
 
+def vacancy_ligand_elements_from_groups(groups: list[dict[str, Any]], vacancy_label: str) -> set[str]:
+    elements: set[str] = set()
+    for group in groups:
+        species = group.get("species", {})
+        if vacancy_label not in species:
+            continue
+        elements.update(symbol for symbol in species if symbol != vacancy_label)
+    return elements
+
+
+def make_vacancy_guard(
+    enabled: bool,
+    center_elements: list[str],
+    ligand_elements: set[str] | None,
+    coordination_number: int,
+    max_missing: int,
+    attempts: int,
+) -> VacancyGuard:
+    return VacancyGuard(
+        enabled=enabled,
+        center_elements=set(center_elements) if center_elements else None,
+        ligand_elements=ligand_elements or None,
+        coordination_number=coordination_number,
+        max_missing=max_missing,
+        attempts=attempts,
+    )
+
+
 def occupation_counts_for_group(group: dict[str, Any]) -> dict[str, int]:
     indices = group.get("indices", [])
     counts: dict[str, int] = {}
@@ -1876,7 +2016,32 @@ def choose_occupations_by_group(
     mode: str,
     seed: int,
     vacancy_label: str,
+    guard: VacancyGuard | None = None,
 ) -> dict[int, str]:
+    if mode == "sqs_random_like" and guard is not None and guard.enabled:
+        best: dict[int, str] | None = None
+        best_report = VacancyGuardReport("WARN", max_missing=10**9, bad_centers=10**9)
+        for attempt in range(max(1, guard.attempts)):
+            trial = choose_occupations_by_group(
+                atoms,
+                groups,
+                mode,
+                seed + attempt,
+                vacancy_label,
+                None,
+            )
+            vacancies = sorted(index for index, symbol in trial.items() if symbol == vacancy_label)
+            ligand_elements = guard.ligand_elements or vacancy_ligand_elements_from_groups(groups, vacancy_label)
+            ligand_indices = [index for index, atom in enumerate(atoms) if atom.symbol in ligand_elements] or [
+                index for group in groups for index in group.get("indices", [])
+            ]
+            report = vacancy_guard_report(atoms, vacancies, ligand_indices, guard)
+            if best is None or vacancy_guard_score(report) < vacancy_guard_score(best_report):
+                best = trial
+                best_report = report
+            if report.status in {"OK", "SKIP", "OFF"}:
+                return trial
+        return best or {}
     assignments: dict[int, str] = {}
     for offset, group in enumerate(groups):
         indices = sorted(int(index) for index in group.get("indices", []))
@@ -2220,6 +2385,16 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--vasp-template", type=Path, help="Optional VASP template copied beside each POSCAR.")
     parser.add_argument("--seed", type=int, default=20260520)
+    parser.add_argument("--vacancy-guard", choices=("on", "off"), default="on", help="Keep random vacancy candidates from over-emptying local coordination shells.")
+    parser.add_argument(
+        "--coordination-center-element",
+        action="append",
+        default=[],
+        help="Element to treat as coordination center for vacancy guard, e.g. U or Gd. Repeatable. Default: infer non-vacancy-site elements.",
+    )
+    parser.add_argument("--coordination-number", type=int, default=8, help="Nearest ligand sites counted around each center for the vacancy guard.")
+    parser.add_argument("--max-vacancies-per-center", type=int, default=2, help="Warn/retry when a center has more than this many vacancies among nearest ligand sites.")
+    parser.add_argument("--vacancy-guard-attempts", type=int, default=200, help="Random retry attempts used to satisfy the vacancy guard.")
     parser.add_argument("--atat-atoms", type=int, default=0, help="Optional mcsqs -n target. Default: full supercell atom count.")
     parser.add_argument("--mcsqs-time", type=float, help="Optional mcsqs -T wall-clock limit.")
     parser.add_argument("--run-mcsqs", action="store_true", help="Run mcsqs immediately if available.")
@@ -2305,6 +2480,15 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
         site_specs,
         args.vacancy_label,
     )
+    guard_ligands = vacancy_ligand_elements_from_groups(occupation_groups, args.vacancy_label)
+    vacancy_guard = make_vacancy_guard(
+        args.vacancy_guard == "on",
+        split_items(args.coordination_center_element),
+        guard_ligands,
+        args.coordination_number,
+        args.max_vacancies_per_center,
+        args.vacancy_guard_attempts,
+    )
     vacancy_total = sum(occupation_counts_for_group(group).get(args.vacancy_label, 0) for group in occupation_groups)
     keep_total = sum(
         len(group["indices"]) - occupation_counts_for_group(group).get(args.vacancy_label, 0)
@@ -2331,7 +2515,7 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     occupation_sets = {
         "vacancy_separated": choose_occupations_by_group(atoms, occupation_groups, "vacancy_separated", args.seed, args.vacancy_label),
         "vacancy_clustered": choose_occupations_by_group(atoms, occupation_groups, "vacancy_clustered", args.seed, args.vacancy_label),
-        "sqs_random_like": choose_occupations_by_group(atoms, occupation_groups, "sqs_random_like", args.seed, args.vacancy_label),
+        "sqs_random_like": choose_occupations_by_group(atoms, occupation_groups, "sqs_random_like", args.seed, args.vacancy_label, vacancy_guard),
     }
     rows: list[dict[str, Any]] = []
     runlist: list[str] = []
@@ -2347,6 +2531,8 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
             vacancies = sorted(index for index, symbol in assignments.items() if symbol == args.vacancy_label)
             kept = sorted(set(all_partial_indices) - set(vacancies))
             min_vv = min_pair_distance(atoms, vacancies)
+            guard_ligand_indices = [idx for idx, atom in enumerate(atoms) if atom.symbol in guard_ligands] or all_partial_indices
+            guard_report = vacancy_guard_report(atoms, vacancies, guard_ligand_indices, vacancy_guard)
             vacancy_fraction = len(vacancies) / len(all_partial_indices) if all_partial_indices else 0.0
             reasonable = len(vacancies) == vacancy_total
             count_symbols = final_atoms.get_chemical_symbols()
@@ -2376,7 +2562,12 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
                     "assigned_site_species_json": json.dumps(assigned_counts, sort_keys=True),
                     "removed_partial_site_indices": " ".join(str(item + 1) for item in vacancies),
                     "kept_partial_site_indices": " ".join(str(item + 1) for item in kept),
-                    "notes": "Occupational species made explicit and vacancy pseudo-atoms removed; use ISYM=0 for VASP relaxation.",
+                    **guard_report.row(),
+                    "notes": (
+                        "Occupational species made explicit and vacancy pseudo-atoms removed; use ISYM=0 for VASP relaxation."
+                        if not guard_report.notes
+                        else f"Occupational species made explicit and vacancy pseudo-atoms removed; {guard_report.notes}; use ISYM=0 for VASP relaxation."
+                    ),
                 }
             )
             runlist.append(str(run_dir.resolve()))
@@ -2403,6 +2594,14 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
             "n_partial_sites": sum(len(group["indices"]) for group in occupation_groups),
             "n_keep_partial_element": keep_total,
             "n_vacancy": vacancy_total,
+            "vacancy_guard": {
+                "enabled": vacancy_guard.enabled,
+                "center_elements": sorted(vacancy_guard.center_elements or []),
+                "ligand_elements": sorted(vacancy_guard.ligand_elements or []),
+                "coordination_number": vacancy_guard.coordination_number,
+                "max_vacancies_per_center": vacancy_guard.max_missing,
+                "attempts": vacancy_guard.attempts,
+            },
             "occupational_groups": [
                 {
                     "label": group["label"],
@@ -2471,6 +2670,11 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
             f"fractions={fraction_text}  counts={count_text}"
         )
     print(f"Supercell repeat      : {repeat[0]} {repeat[1]} {repeat[2]}")
+    print(
+        "Vacancy guard         : "
+        f"{'on' if vacancy_guard.enabled else 'off'}; nearest={vacancy_guard.coordination_number}; "
+        f"max missing/center={vacancy_guard.max_missing}; centers={','.join(sorted(vacancy_guard.center_elements or [])) or 'auto'}"
+    )
     print(f"Supercell analysis    : {root / 'supercell_candidate_analysis.csv'}")
     print(f"ATAT rndstr.in        : {(atat_dir / 'rndstr.in') if args.engine in {'both', 'atat'} else 'skipped'}")
     print(f"Candidates            : {len(rows) if args.engine in {'both', 'direct'} else 'skipped'}")
@@ -2625,14 +2829,22 @@ def parent_defect_analysis_rows(
     return sorted(rows, key=lambda row: (int(row["repeat_volume"]), float(row["aspect_ratio"]), row["repeat"]))
 
 
-def choose_indices_for_mode(atoms: Any, indices: list[int], count: int, mode: str, seed: int) -> list[int]:
+def choose_indices_for_mode(
+    atoms: Any,
+    indices: list[int],
+    count: int,
+    mode: str,
+    seed: int,
+    guard: VacancyGuard | None = None,
+    ligand_indices: list[int] | None = None,
+) -> list[int]:
     indices = sorted(indices)
     if count >= len(indices):
         return list(indices)
     if count <= 0:
         return []
     if mode == "random":
-        return random_vacancy_set(indices, count, seed)
+        return guarded_random_vacancy_set(atoms, indices, count, seed, guard, ligand_indices)
     if mode in {"clustered", "clustered_vacancy"}:
         return greedy_vacancy_set(atoms, indices, count, "clustered")
     if mode in {"ordered", "layered"}:
@@ -2648,7 +2860,8 @@ def apply_parent_defect_assignments(
     n_vacancy: int,
     mode: str,
     seed: int,
-) -> tuple[Any, dict[str, int], list[int]]:
+    guard: VacancyGuard | None = None,
+) -> tuple[Any, dict[str, int], list[int], VacancyGuardReport]:
     work = atoms.copy()
     sub_counts: dict[str, int] = {}
     for offset, spec in enumerate(substitutions):
@@ -2659,13 +2872,23 @@ def apply_parent_defect_assignments(
             set_atom_symbol(work, idx, spec.target)
         sub_counts[f"{spec.source}->{spec.target}"] = len(chosen)
     vacancies: list[int] = []
+    guard_report = VacancyGuardReport("SKIP", notes="no vacancies")
     if vacancy_element and n_vacancy:
         vacancy_indices = [idx for idx, atom in enumerate(work) if atom.symbol == vacancy_element]
         vacancy_mode = "clustered" if mode == "clustered" else ("random" if mode == "random" else "separated")
-        vacancies = choose_indices_for_mode(work, vacancy_indices, n_vacancy, vacancy_mode, seed + 1000)
+        vacancies = choose_indices_for_mode(
+            work,
+            vacancy_indices,
+            n_vacancy,
+            vacancy_mode,
+            seed + 1000,
+            guard,
+            vacancy_indices,
+        )
+        guard_report = vacancy_guard_report(work, vacancies, vacancy_indices, guard)
         for idx in sorted(vacancies, reverse=True):
             del work[idx]
-    return work, sub_counts, vacancies
+    return work, sub_counts, vacancies, guard_report
 
 
 def parent_defect_site_specs(
@@ -2714,6 +2937,16 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--engine", choices=("both", "direct", "atat"), default="both")
     parser.add_argument("--vasp-template", type=Path)
     parser.add_argument("--seed", type=int, default=20260520)
+    parser.add_argument("--vacancy-guard", choices=("on", "off"), default="on", help="Keep random vacancy candidates from over-emptying local coordination shells.")
+    parser.add_argument(
+        "--coordination-center-element",
+        action="append",
+        default=[],
+        help="Element to treat as coordination center for vacancy guard, e.g. U or Gd. Repeatable. Default: infer non-vacancy elements.",
+    )
+    parser.add_argument("--coordination-number", type=int, default=8, help="Nearest ligand sites counted around each center for the vacancy guard.")
+    parser.add_argument("--max-vacancies-per-center", type=int, default=2, help="Warn/retry when a center has more than this many vacancies among nearest ligand sites.")
+    parser.add_argument("--vacancy-guard-attempts", type=int, default=200, help="Random retry attempts used to satisfy the vacancy guard.")
     args = parser.parse_args(argv)
 
     read, write = import_ase_atoms()
@@ -2768,6 +3001,14 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
         linear_scale = numerator / denominator if denominator else 1.0
     if not math.isclose(linear_scale, 1.0, abs_tol=1.0e-12):
         atoms.set_cell(atoms.cell * linear_scale, scale_atoms=True)
+    vacancy_guard = make_vacancy_guard(
+        args.vacancy_guard == "on",
+        split_items(args.coordination_center_element),
+        {args.vacancy_element} if args.vacancy_element else None,
+        args.coordination_number,
+        args.max_vacancies_per_center,
+        args.vacancy_guard_attempts,
+    )
 
     root = args.outdir.expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -2779,13 +3020,14 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
         candidates_dir = root / "candidates"
         candidates_dir.mkdir(exist_ok=True)
         for idx, mode in enumerate(modes, start=1):
-            final_atoms, sub_counts, vacancies = apply_parent_defect_assignments(
+            final_atoms, sub_counts, vacancies, guard_report = apply_parent_defect_assignments(
                 atoms,
                 substitutions,
                 args.vacancy_element,
                 int(info["n_vacancy"]),
                 mode,
                 args.seed + idx,
+                vacancy_guard,
             )
             run_dir = candidates_dir / f"{idx:02d}_{mode}"
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -2809,7 +3051,12 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
                     "charge_before_vacancy": f"{info['charge_before_vacancy']:.12g}",
                     "charge_after_vacancy": f"{info['charge_after_vacancy']:.12g}",
                     "min_vacancy_distance_A": "" if min_vv is None else f"{min_vv:.8f}",
-                    "notes": "Parent POSCAR substitution/vacancy route; use ISYM=0 for VASP relaxation.",
+                    **guard_report.row(),
+                    "notes": (
+                        "Parent POSCAR substitution/vacancy route; use ISYM=0 for VASP relaxation."
+                        if not guard_report.notes
+                        else f"Parent POSCAR substitution/vacancy route; {guard_report.notes}; use ISYM=0 for VASP relaxation."
+                    ),
                 }
             )
             runlist.append(str(run_dir.resolve()))
@@ -2842,6 +3089,14 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
             "charge_before_vacancy": info["charge_before_vacancy"],
             "charge_after_vacancy": info["charge_after_vacancy"],
             "engine": args.engine,
+            "vacancy_guard": {
+                "enabled": vacancy_guard.enabled,
+                "center_elements": sorted(vacancy_guard.center_elements or []),
+                "ligand_elements": sorted(vacancy_guard.ligand_elements or []),
+                "coordination_number": vacancy_guard.coordination_number,
+                "max_vacancies_per_center": vacancy_guard.max_missing,
+                "attempts": vacancy_guard.attempts,
+            },
             "outputs": {
                 "supercell_analysis": str(root / "supercell_candidate_analysis.csv"),
                 "candidate_index": str(root / "parent_defect_candidate_index.csv"),
@@ -2855,6 +3110,11 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
     print(f"Linear scale            : {linear_scale:.12g}")
     print(f"Substitutions           : {json.dumps(info['substitution_counts'], sort_keys=True)}")
     print(f"Vacancies               : {info['n_vacancy']} {args.vacancy_element or ''}".rstrip())
+    print(
+        "Vacancy guard           : "
+        f"{'on' if vacancy_guard.enabled else 'off'}; nearest={vacancy_guard.coordination_number}; "
+        f"max missing/center={vacancy_guard.max_missing}; centers={','.join(sorted(vacancy_guard.center_elements or [])) or 'auto'}"
+    )
     print(f"Charge after vacancies  : {info['charge_after_vacancy']:.12g}")
     print(f"Supercell analysis      : {root / 'supercell_candidate_analysis.csv'}")
     print(f"Candidate index         : {root / 'parent_defect_candidate_index.csv'}")
