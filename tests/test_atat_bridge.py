@@ -557,6 +557,48 @@ def test_vacancy_cif_auto_balances_atom_budget_and_compactness() -> None:
     assert compact == (2, 2, 5)
 
 
+def test_materials_opt_atat_poscar_removes_vacancy_pseudo_atoms(tmp_path: Path) -> None:
+    bestsqs = tmp_path / "bestsqs.out"
+    bestsqs.write_text(
+        "5 0 0\n"
+        "0 5 0\n"
+        "0 0 5\n"
+        "0 0 0 Gd\n"
+        "0.5 0.5 0.5 U\n"
+        "0.25 0.25 0.25 O\n"
+        "0.75 0.75 0.75 Va\n",
+        encoding="utf-8",
+    )
+    template = tmp_path / "VASP_TEMPLATE"
+    template.mkdir()
+    (template / "INCAR").write_text("ENCUT = 520\n", encoding="utf-8")
+    (template / "KPOINTS").write_text("Gamma\n", encoding="utf-8")
+    (template / "POTCAR").write_text("fake\n", encoding="utf-8")
+    out = tmp_path / "atat_vasp"
+
+    atomi_main(
+        [
+            "materials-opt",
+            "atat-poscar",
+            "--input",
+            str(bestsqs),
+            "--outdir",
+            str(out),
+            "--vasp-template",
+            str(template),
+        ]
+    )
+
+    index = rows(out / "atat_poscar_candidate_index.csv")
+    assert len(index) == 1
+    assert index[0]["removed_vacancies"] == "1"
+    poscar = (out / "candidates" / "01_bestsqs" / "POSCAR").read_text(encoding="utf-8")
+    assert "Va" not in poscar
+    assert "Gd" in poscar
+    assert "ISYM = 0" in (out / "candidates" / "01_bestsqs" / "INCAR").read_text(encoding="utf-8")
+    assert (out / "runlist.txt").read_text(encoding="utf-8").strip().endswith("01_bestsqs")
+
+
 def test_materials_opt_parent_defect_charge_compensates_and_scales(tmp_path: Path) -> None:
     poscar = tmp_path / "POSCAR"
     poscar.write_text(
