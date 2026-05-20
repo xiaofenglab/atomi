@@ -266,6 +266,75 @@ def test_quick_materials_opt_writes_uc2_command_scaffold(tmp_path: Path, capsys)
     assert "atat-bridge ce-handoff" in command_text
 
 
+def test_materials_opt_vacancy_cif_writes_explicit_poscars_and_atat_input(tmp_path: Path, capsys) -> None:
+    cif = tmp_path / "partial_gd2o3.cif"
+    cif.write_text(
+        "data_demo\n"
+        "_symmetry_space_group_name_H-M   P1\n"
+        "_cell_length_a 5\n"
+        "_cell_length_b 5\n"
+        "_cell_length_c 5\n"
+        "_cell_angle_alpha 90\n"
+        "_cell_angle_beta 90\n"
+        "_cell_angle_gamma 90\n"
+        "_symmetry_Int_Tables_number 1\n"
+        "loop_\n"
+        "_space_group_symop_operation_xyz\n"
+        "x,y,z\n"
+        "loop_\n"
+        "_atom_site_label\n"
+        "_atom_site_type_symbol\n"
+        "_atom_site_fract_x\n"
+        "_atom_site_fract_y\n"
+        "_atom_site_fract_z\n"
+        "_atom_site_occupancy\n"
+        "Gd1 Gd 0 0 0 1\n"
+        "Gd2 Gd 0.5 0.5 0.5 1\n"
+        "O1 O 0.25 0.25 0.25 1\n"
+        "O2 O 0.75 0.75 0.75 0.2\n",
+        encoding="utf-8",
+    )
+    template = tmp_path / "VASP_TEMPLATE"
+    template.mkdir()
+    (template / "INCAR").write_text("ENCUT = 520\n", encoding="utf-8")
+    (template / "KPOINTS").write_text("Gamma\n", encoding="utf-8")
+    (template / "POTCAR").write_text("fake\n", encoding="utf-8")
+    out = tmp_path / "vacancy"
+
+    atomi_main(
+        [
+            "materials-opt",
+            "vacancy-cif",
+            "--cif",
+            str(cif),
+            "--outdir",
+            str(out),
+            "--supercell",
+            "1x1x5",
+            "--vasp-template",
+            str(template),
+        ]
+    )
+
+    assert "Vacancy CIF workspace" in capsys.readouterr().out
+    index = rows(out / "vacancy_candidate_index.csv")
+    assert len(index) == 3
+    assert {row["kind"] for row in index} == {
+        "vacancy_clustered",
+        "vacancy_separated",
+        "sqs_random_like",
+    }
+    assert all(row["n_Va"] == "4" for row in index)
+    assert all(row["reasonable_stoichiometry"] == "true" for row in index)
+    poscar = out / "candidates" / "01_vacancy_separated" / "POSCAR"
+    assert "Va" not in poscar.read_text(encoding="utf-8")
+    assert "ISYM = 0" in (out / "candidates" / "01_vacancy_separated" / "INCAR").read_text(encoding="utf-8")
+    rndstr = (out / "atat" / "rndstr.in").read_text(encoding="utf-8")
+    assert "O=0.2,Va=0.8" in rndstr
+    assert (out / "atat" / "run_mcsqs.sh").exists()
+    assert len((out / "runlist.txt").read_text(encoding="utf-8").splitlines()) == 3
+
+
 def test_materials_opt_relax_seeds_prepares_volume_scan(tmp_path: Path, capsys) -> None:
     template = tmp_path / "VASP_TEMPLATE"
     template.mkdir()

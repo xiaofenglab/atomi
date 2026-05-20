@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import csv
 import json
+import math
 import os
+import random
 import re
 import shutil
+import subprocess
+import sys
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -117,6 +123,21 @@ RELAX_SUMMARY_FIELDS = RELAX_INDEX_FIELDS + [
     "energy_source",
     "mag_source",
     "warning",
+]
+VACANCY_CANDIDATE_FIELDS = [
+    "candidate_id",
+    "kind",
+    "poscar",
+    "n_Gd",
+    "n_O",
+    "n_Va",
+    "vacancy_fraction",
+    "min_vacancy_distance_A",
+    "stoichiometry",
+    "reasonable_stoichiometry",
+    "removed_partial_site_indices",
+    "kept_partial_site_indices",
+    "notes",
 ]
 
 
@@ -1150,8 +1171,466 @@ def write_quick_shell(path: Path, rows: list[dict[str, str]]) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def import_ase_atoms() -> tuple[Any, Any]:
+    try:
+        from ase.io import read, write
+    except ImportError as exc:
+        raise RuntimeError(
+            "ASE is required for materials-opt vacancy-cif. Install atomi with ASE support."
+        ) from exc
+    return read, write
+
+
+def occupancy_from_ase_info(atoms: Any, default: float = 1.0) -> list[float]:
+    occupancies = [default for _ in atoms]
+    raw = atoms.info.get("occupancy") or atoms.info.get("occupancies")
+    if not isinstance(raw, dict):
+        return occupancies
+    for key, value in raw.items():
+        try:
+            index = int(key)
+        except (TypeError, ValueError):
+            continue
+        if index < 0 or index >= len(occupancies):
+            continue
+        if isinstance(value, dict):
+            symbol = atoms[index].symbol
+            number = finite_float(value.get(symbol))
+            if number is None and value:
+                number = max((finite_float(item) or 0.0) for item in value.values())
+        else:
+            number = finite_float(value)
+        if number is not None and 0.0 < number <= 1.0:
+            occupancies[index] = float(number)
+    return occupancies
+
+
+def cif_atom_site_occupancies(path: Path) -> list[dict[str, Any]]:
+    """Small CIF loop parser for atom-site occupancy fallback.
+
+    ASE handles the structure and symmetry. This parser only recovers explicit
+    occupancy values from the input loop when ASE does not expose them.
+    """
+    text = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    rows: list[dict[str, Any]] = []
+    i = 0
+    while i < len(text):
+        if text[i].strip().lower() != "loop_":
+            i += 1
+            continue
+        i += 1
+        tags: list[str] = []
+        while i < len(text) and text[i].strip().startswith("_"):
+            tags.append(text[i].strip())
+            i += 1
+        if not any(tag.startswith("_atom_site_") for tag in tags):
+            continue
+        while i < len(text):
+            line = text[i].strip()
+            if not line or line.startswith("#"):
+                i += 1
+                continue
+            if line.lower() == "loop_" or line.startswith("_") or line.startswith("data_"):
+                break
+            parts = line.replace("'", "").replace('"', "").split()
+            if len(parts) >= len(tags):
+                item = dict(zip(tags, parts))
+                symbol = item.get("_atom_site_type_symbol") or item.get("_atom_site_label") or ""
+                symbol = re.sub(r"[^A-Za-z]+", "", symbol)
+                occ = finite_float(item.get("_atom_site_occupancy"))
+                fx = finite_float(item.get("_atom_site_fract_x"))
+                fy = finite_float(item.get("_atom_site_fract_y"))
+                fz = finite_float(item.get("_atom_site_fract_z"))
+                if symbol and occ is not None:
+                    rows.append({"symbol": symbol, "occupancy": occ, "frac": (fx, fy, fz)})
+            i += 1
+    return rows
+
+
+def infer_partial_occupancies_from_cif(
+    atoms: Any,
+    cif_path: Path,
+    partial_element: str,
+    target_occupancy: float | None,
+) -> list[float]:
+    occupancies = occupancy_from_ase_info(atoms)
+    if any(occ < 0.999 for occ in occupancies):
+        return occupancies
+    if target_occupancy is not None:
+        return [
+            float(target_occupancy) if atom.symbol == partial_element else 1.0
+            for atom in atoms
+        ]
+    raw_rows = cif_atom_site_occupancies(cif_path)
+    partial_values = [
+        float(row["occupancy"])
+        for row in raw_rows
+        if row.get("symbol") == partial_element and finite_float(row.get("occupancy")) is not None
+        and 0.0 < float(row["occupancy"]) < 0.999
+    ]
+    if not partial_values:
+        return occupancies
+    # Fallback when symmetry expansion hides exact site tags: assign the
+    # dominant partial occupancy to the requested element and report that choice.
+    inferred = partial_values[0]
+    return [inferred if atom.symbol == partial_element else 1.0 for atom in atoms]
+
+
+def parse_repeat(value: str | None) -> tuple[int, int, int] | None:
+    if value is None or value.lower() == "auto":
+        return None
+    parts = [part for part in re.split(r"[x, ]+", value.strip()) if part]
+    if len(parts) != 3:
+        raise ValueError("--supercell must be auto or three integers such as 1 1 5 / 1x1x5.")
+    repeat = tuple(int(part) for part in parts)
+    if any(item <= 0 for item in repeat):
+        raise ValueError("--supercell repeat values must be positive.")
+    return repeat  # type: ignore[return-value]
+
+
+def choose_integer_repeat(n_partial: int, occupancy: float, max_repeat: int) -> tuple[int, int, int]:
+    if n_partial <= 0:
+        return (1, 1, 1)
+    best: tuple[int, int, int] | None = None
+    best_volume: int | None = None
+    frac = Fraction(occupancy).limit_denominator(128)
+    for a in range(1, max_repeat + 1):
+        for b in range(1, max_repeat + 1):
+            for c in range(1, max_repeat + 1):
+                volume = a * b * c
+                keep = n_partial * volume * frac.numerator
+                if keep % frac.denominator != 0:
+                    continue
+                if best is None or volume < (best_volume or 10**9) or (
+                    volume == best_volume and max(a, b, c) < max(best)
+                ):
+                    best = (a, b, c)
+                    best_volume = volume
+    if best is None:
+        raise ValueError(
+            "Could not find a compact integer supercell for the partial occupancy. "
+            "Pass --supercell explicitly or increase --max-repeat."
+        )
+    return best
+
+
+def repeated_occupancies(occupancies: list[float], repeat: tuple[int, int, int]) -> list[float]:
+    return occupancies * (repeat[0] * repeat[1] * repeat[2])
+
+
+def distance_between_indices(atoms: Any, i: int, j: int) -> float:
+    return float(atoms.get_distance(i, j, mic=True))
+
+
+def min_pair_distance(atoms: Any, indices: list[int]) -> float | None:
+    if len(indices) < 2:
+        return None
+    return min(distance_between_indices(atoms, i, j) for i, j in itertools.combinations(indices, 2))
+
+
+def greedy_vacancy_set(atoms: Any, candidates: list[int], n_vacancy: int, mode: str) -> list[int]:
+    if n_vacancy >= len(candidates):
+        return list(candidates)
+    if n_vacancy <= 0:
+        return []
+    selected = [candidates[0]]
+    remaining = candidates[1:]
+    while len(selected) < n_vacancy and remaining:
+        if mode == "clustered":
+            chosen = min(
+                remaining,
+                key=lambda idx: min(distance_between_indices(atoms, idx, item) for item in selected),
+            )
+        else:
+            chosen = max(
+                remaining,
+                key=lambda idx: min(distance_between_indices(atoms, idx, item) for item in selected),
+            )
+        selected.append(chosen)
+        remaining.remove(chosen)
+    return sorted(selected)
+
+
+def random_vacancy_set(candidates: list[int], n_vacancy: int, seed: int) -> list[int]:
+    rng = random.Random(seed)
+    if n_vacancy >= len(candidates):
+        return list(candidates)
+    return sorted(rng.sample(candidates, n_vacancy))
+
+
+def composition_string(atoms: Any) -> str:
+    counts: dict[str, int] = {}
+    for symbol in atoms.get_chemical_symbols():
+        counts[symbol] = counts.get(symbol, 0) + 1
+    return " ".join(f"{symbol}{counts[symbol]}" for symbol in sorted(counts))
+
+
+def atoms_without_indices(atoms: Any, remove: list[int]) -> Any:
+    clean = atoms.copy()
+    for index in sorted(remove, reverse=True):
+        del clean[index]
+    return clean
+
+
+def ensure_isym_zero(incar_text: str) -> str:
+    lines = incar_text.splitlines()
+    replaced = False
+    out: list[str] = []
+    for line in lines:
+        if re.match(r"^\s*ISYM\s*=", line, flags=re.IGNORECASE):
+            out.append("ISYM = 0")
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        out.append("ISYM = 0")
+    return "\n".join(out).rstrip() + "\n"
+
+
+def copy_vasp_template_for_vacancy(template: Path | None, run_dir: Path) -> None:
+    if template is None:
+        return
+    if not template.is_dir():
+        raise FileNotFoundError(f"VASP template directory not found: {template}")
+    for item in template.iterdir():
+        if item.name == "POSCAR":
+            continue
+        target = run_dir / item.name
+        if item.is_dir():
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.copytree(item, target)
+        else:
+            shutil.copy2(item, target)
+    incar = run_dir / "INCAR"
+    if incar.is_file():
+        incar.write_text(ensure_isym_zero(incar.read_text(encoding="utf-8")), encoding="utf-8")
+
+
+def write_atat_rndstr(
+    path: Path,
+    atoms: Any,
+    partial_indices: set[int],
+    occupancy: float,
+    partial_element: str,
+    vacancy_label: str,
+) -> None:
+    cell = atoms.cell.array
+    scaled = atoms.get_scaled_positions(wrap=True)
+    lines = [
+        "# Generated by atomi materials-opt vacancy-cif",
+        "# Fixed sites are written as single species; partially occupied sites use O=x,Va=1-x.",
+    ]
+    for vector in cell:
+        lines.append(" ".join(f"{float(value):.12f}" for value in vector))
+    for index, atom in enumerate(atoms):
+        if index in partial_indices:
+            species = f"{partial_element}={occupancy:.12g},{vacancy_label}={1.0 - occupancy:.12g}"
+        else:
+            species = atom.symbol
+        lines.append(
+            " ".join(f"{float(value):.12f}" for value in scaled[index]) + f" {species}"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_atat_vacancy_scripts(atat_dir: Path, args: argparse.Namespace) -> None:
+    mcsqs_parts = ["mcsqs", f"-n={args.atat_atoms}"]
+    if args.mcsqs_time is not None:
+        mcsqs_parts.append(f"-T={args.mcsqs_time:g}")
+    script = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "",
+        "# Run this inside the ATAT handoff directory.",
+        "# bestsqs.out still contains the vacancy pseudo-species; convert/remove Va before VASP.",
+        " ".join(mcsqs_parts),
+        "if command -v str2poscar >/dev/null 2>&1 && [ -f bestsqs.out ]; then",
+        "  str2poscar < bestsqs.out > POSCAR_with_Va",
+        "fi",
+    ]
+    path = atat_dir / "run_mcsqs.sh"
+    path.write_text("\n".join(script) + "\n", encoding="utf-8")
+    path.chmod(0o755)
+    (atat_dir / "README.md").write_text(
+        "This folder contains ATAT inputs for the partially occupied vacancy sublattice.\n"
+        "Use `./run_mcsqs.sh` to generate `bestsqs.out`. Atomi's direct candidates already "
+        "remove vacancy pseudo-atoms from POSCAR; ATAT-converted structures should be cleaned "
+        "the same way before VASP.\n",
+        encoding="utf-8",
+    )
+
+
+def vacancy_candidate_main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="materials-opt vacancy-cif",
+        description=(
+            "Convert a CIF partial-occupancy anion site into explicit O/vacancy "
+            "VASP POSCAR candidates and ATAT rndstr.in handoff files."
+        ),
+    )
+    parser.add_argument("--cif", type=Path, required=True, help="Input CIF with partial occupancy.")
+    parser.add_argument("--outdir", type=Path, default=Path("VACANCY_CIF_CANDIDATES"))
+    parser.add_argument("--partial-element", default="O", help="Element occupying the partial vacancy sublattice.")
+    parser.add_argument("--target-occupancy", type=float, help="Override CIF occupancy for the partial sublattice.")
+    parser.add_argument("--vacancy-label", default="Va", help="ATAT vacancy pseudo-species label.")
+    parser.add_argument("--supercell", default="auto", help="auto or repeat such as 1x1x5.")
+    parser.add_argument("--max-repeat", type=int, default=6, help="Largest repeat searched for --supercell auto.")
+    parser.add_argument("--vasp-template", type=Path, help="Optional VASP template copied beside each POSCAR.")
+    parser.add_argument("--seed", type=int, default=20260520)
+    parser.add_argument("--atat-atoms", type=int, default=0, help="Optional mcsqs -n target. Default: full supercell atom count.")
+    parser.add_argument("--mcsqs-time", type=float, help="Optional mcsqs -T wall-clock limit.")
+    parser.add_argument("--run-mcsqs", action="store_true", help="Run mcsqs immediately if available.")
+    args = parser.parse_args(argv)
+
+    if args.target_occupancy is not None and not (0.0 < args.target_occupancy <= 1.0):
+        raise ValueError("--target-occupancy must be in (0, 1].")
+    read, write = import_ase_atoms()
+    cif = args.cif.expanduser().resolve()
+    atoms0 = read(cif, fractional_occupancies=True, store_tags=True)
+    occupancies0 = infer_partial_occupancies_from_cif(
+        atoms0,
+        cif,
+        args.partial_element,
+        args.target_occupancy,
+    )
+    partial0 = [
+        index
+        for index, (atom, occ) in enumerate(zip(atoms0, occupancies0))
+        if atom.symbol == args.partial_element and 0.0 < occ < 0.999
+    ]
+    if not partial0:
+        raise ValueError(
+            f"No partial {args.partial_element} site was detected. "
+            "Pass --target-occupancy if ASE/CIF parsing does not expose occupancy."
+        )
+    occupancy = args.target_occupancy if args.target_occupancy is not None else occupancies0[partial0[0]]
+    repeat = parse_repeat(args.supercell) or choose_integer_repeat(len(partial0), occupancy, args.max_repeat)
+    atoms = atoms0.repeat(repeat)
+    occupancies = repeated_occupancies(occupancies0, repeat)
+    partial = [
+        index
+        for index, (atom, occ) in enumerate(zip(atoms, occupancies))
+        if atom.symbol == args.partial_element and 0.0 < occ < 0.999
+    ]
+    n_keep = int(round(len(partial) * occupancy))
+    if not math.isclose(n_keep, len(partial) * occupancy, abs_tol=1.0e-6):
+        raise ValueError(
+            "The chosen supercell does not make the partial occupancy integer. "
+            "Use --supercell auto or provide a larger repeat."
+        )
+    n_vacancy = len(partial) - n_keep
+    if n_keep < 0 or n_vacancy < 0:
+        raise ValueError("Invalid occupancy produced negative site counts.")
+
+    root = args.outdir.expanduser().resolve()
+    candidates_dir = root / "candidates"
+    atat_dir = root / "atat"
+    candidates_dir.mkdir(parents=True, exist_ok=True)
+    write_atat_rndstr(
+        atat_dir / "rndstr.in",
+        atoms,
+        set(partial),
+        float(occupancy),
+        args.partial_element,
+        args.vacancy_label,
+    )
+    if args.atat_atoms <= 0:
+        args.atat_atoms = len(atoms)
+    write_atat_vacancy_scripts(atat_dir, args)
+
+    vacancy_sets = {
+        "vacancy_separated": greedy_vacancy_set(atoms, partial, n_vacancy, "separated"),
+        "vacancy_clustered": greedy_vacancy_set(atoms, partial, n_vacancy, "clustered"),
+        "sqs_random_like": random_vacancy_set(partial, n_vacancy, args.seed),
+    }
+    rows: list[dict[str, Any]] = []
+    runlist: list[str] = []
+    for index, (kind, vacancies) in enumerate(vacancy_sets.items(), start=1):
+        case_id = f"{index:02d}_{kind}"
+        run_dir = candidates_dir / case_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        final_atoms = atoms_without_indices(atoms, vacancies)
+        write(run_dir / "POSCAR", final_atoms, format="vasp", direct=True, vasp5=True, sort=False)
+        copy_vasp_template_for_vacancy(args.vasp_template.expanduser().resolve() if args.vasp_template else None, run_dir)
+        kept = sorted(set(partial) - set(vacancies))
+        min_vv = min_pair_distance(atoms, vacancies)
+        vacancy_fraction = len(vacancies) / len(partial) if partial else 0.0
+        reasonable = math.isclose(1.0 - vacancy_fraction, occupancy, abs_tol=1.0e-8)
+        count_symbols = final_atoms.get_chemical_symbols()
+        rows.append(
+            {
+                "candidate_id": case_id,
+                "kind": kind,
+                "poscar": str((run_dir / "POSCAR").resolve()),
+                "n_Gd": count_symbols.count("Gd"),
+                "n_O": count_symbols.count("O"),
+                "n_Va": len(vacancies),
+                "vacancy_fraction": f"{vacancy_fraction:.12g}",
+                "min_vacancy_distance_A": "" if min_vv is None else f"{min_vv:.8f}",
+                "stoichiometry": composition_string(final_atoms),
+                "reasonable_stoichiometry": "true" if reasonable else "false",
+                "removed_partial_site_indices": " ".join(str(item + 1) for item in vacancies),
+                "kept_partial_site_indices": " ".join(str(item + 1) for item in kept),
+                "notes": "Vacancy pseudo-atoms removed; use ISYM=0 for VASP relaxation.",
+            }
+        )
+        runlist.append(str(run_dir.resolve()))
+
+    write_csv(root / "vacancy_candidate_index.csv", rows, VACANCY_CANDIDATE_FIELDS)
+    (root / "runlist.txt").write_text("\n".join(runlist) + "\n", encoding="utf-8")
+    write_json(
+        root / "vacancy_cif_plan.json",
+        {
+            "schema": "atomi.materials.vacancy_cif.v1",
+            "source_cif": str(cif),
+            "partial_element": args.partial_element,
+            "vacancy_label": args.vacancy_label,
+            "occupancy": occupancy,
+            "repeat": repeat,
+            "n_partial_sites": len(partial),
+            "n_keep_partial_element": n_keep,
+            "n_vacancy": n_vacancy,
+            "outputs": {
+                "rndstr": str(atat_dir / "rndstr.in"),
+                "run_mcsqs": str(atat_dir / "run_mcsqs.sh"),
+                "candidate_index": str(root / "vacancy_candidate_index.csv"),
+                "runlist": str(root / "runlist.txt"),
+            },
+            "notes": [
+                "Final POSCAR files never contain fractional occupancy or vacancy pseudo-atoms.",
+                "ATAT handles the O/Va occupational sublattice in rndstr.in; VASP receives only explicit atoms.",
+                "Use ISYM=0 for subsequent VASP relaxations.",
+            ],
+        },
+    )
+
+    if args.run_mcsqs:
+        if shutil.which("mcsqs") is None:
+            raise RuntimeError("mcsqs was requested with --run-mcsqs, but it is not on PATH.")
+        subprocess.run(["mcsqs", f"-n={args.atat_atoms}"], cwd=atat_dir, check=True)
+
+    print(f"Vacancy CIF workspace : {root}")
+    print(f"Partial sites         : {len(partial)} {args.partial_element} sites")
+    print(f"Occupancy             : {occupancy:.12g} keep {n_keep}, vacancy {n_vacancy}")
+    print(f"Supercell repeat      : {repeat[0]} {repeat[1]} {repeat[2]}")
+    print(f"ATAT rndstr.in        : {atat_dir / 'rndstr.in'}")
+    print(f"Candidates            : {len(rows)}")
+    for row in rows:
+        print(
+            f"  {row['candidate_id']:>18s}  {row['stoichiometry']}  "
+            f"V_O={row['n_Va']}  min V_O-V_O={row['min_vacancy_distance_A'] or 'n/a'} A"
+        )
+    print(f"Candidate index       : {root / 'vacancy_candidate_index.csv'}")
+    print(f"Runlist               : {root / 'runlist.txt'}")
+
+
 def quick_opt_main(argv: list[str] | None = None) -> None:
-    argv = list(argv or [])
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv and argv[0] in {"vacancy-cif", "cif-vacancy", "partial-occupancy"}:
+        vacancy_candidate_main(argv[1:])
+        return
     if argv and argv[0] in {"relax-seeds", "relax_seed", "relax-seed"}:
         relax_seeds_main(argv[1:])
         return
@@ -1609,7 +2088,7 @@ def write_energy_volume_plot(rows: list[dict[str, Any]], path: Path) -> Path | N
 def status_main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="atat-doctor", description="Report ATAT tool availability for Atomi bridges.")
     parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     report = inspect_atat_environment()
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
@@ -1628,13 +2107,15 @@ def build_parser() -> argparse.ArgumentParser:
     index_parser.add_argument("args", nargs=argparse.REMAINDER)
     ce_parser = subparsers.add_parser("ce-handoff", help="Build a CE/MC handoff from accepted Atomi DFT rows.")
     ce_parser.add_argument("args", nargs=argparse.REMAINDER)
+    vacancy_parser = subparsers.add_parser("vacancy-cif", help="Build explicit vacancy POSCARs from partial-occupancy CIF.")
+    vacancy_parser.add_argument("args", nargs=argparse.REMAINDER)
     quick_parser = subparsers.add_parser("quick-opt", help="Create a quick materials optimization scaffold.")
     quick_parser.add_argument("args", nargs=argparse.REMAINDER)
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
-    argv = list(argv or [])
+    argv = sys.argv[1:] if argv is None else list(argv)
     if not argv:
         status_main([])
         return
@@ -1647,6 +2128,8 @@ def main(argv: list[str] | None = None) -> None:
         index_main(rest)
     elif command in {"ce-handoff", "ce", "ce-plan"}:
         ce_handoff_main(rest)
+    elif command in {"vacancy-cif", "cif-vacancy", "partial-occupancy"}:
+        vacancy_candidate_main(rest)
     elif command in {"quick-opt", "quick", "materials-opt"}:
         quick_opt_main(rest)
     else:
