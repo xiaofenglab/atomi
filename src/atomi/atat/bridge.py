@@ -2183,7 +2183,7 @@ def write_atat_vacancy_scripts(atat_dir: Path, args: argparse.Namespace) -> None
         "",
         "# Run this inside the ATAT handoff directory.",
         "# bestsqs.out still contains the vacancy pseudo-species; convert/remove Vac/Va before VASP.",
-        " ".join(mcsqs_parts),
+        " ".join(mcsqs_parts) + " > mcsqs.out 2> mcsqs.err",
         "if [ -f bestsqs.out ]; then",
         "  if command -v materials-opt >/dev/null 2>&1; then",
         f"    materials-opt atat-poscar --input bestsqs.out --outdir vasp_from_atat{template_args}",
@@ -2208,6 +2208,33 @@ def write_atat_vacancy_scripts(atat_dir: Path, args: argparse.Namespace) -> None
         "and remove vacancy pseudo-atoms from POSCAR.\n",
         encoding="utf-8",
     )
+
+
+def format_mcsqs_failure_note(
+    message: str,
+    command: list[str],
+    stdout: str = "",
+    stderr: str = "",
+) -> str:
+    lines = [
+        message,
+        "Command:",
+        " ".join(command),
+    ]
+    if stdout.strip():
+        lines.extend(["", "mcsqs stdout:", stdout.strip()])
+    if stderr.strip():
+        lines.extend(["", "mcsqs stderr:", stderr.strip()])
+    lines.extend(
+        [
+            "",
+            "Next options:",
+            "- use the direct candidates in ../candidates",
+            "- rerun mcsqs manually with a different -n/-T",
+            "- inspect rndstr.in for ATAT compatibility",
+        ]
+    )
+    return "\n".join(lines) + "\n"
 
 
 def numeric_vector(parts: list[str]) -> list[float] | None:
@@ -3105,7 +3132,9 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
         if args.mcsqs_time is not None:
             command.append(f"-T={args.mcsqs_time:g}")
         mcsqs_command = command
-        result = subprocess.run(command, cwd=atat_dir)
+        result = subprocess.run(command, cwd=atat_dir, capture_output=True, text=True)
+        (atat_dir / "mcsqs.out").write_text(result.stdout or "", encoding="utf-8")
+        (atat_dir / "mcsqs.err").write_text(result.stderr or "", encoding="utf-8")
         if result.returncode != 0:
             mcsqs_status = "failed"
             if result.returncode < 0:
@@ -3113,19 +3142,7 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
             else:
                 mcsqs_message = f"mcsqs exited with code {result.returncode}; direct POSCAR candidates and rndstr.in were kept."
             (atat_dir / "mcsqs_failed.txt").write_text(
-                "\n".join(
-                    [
-                        mcsqs_message,
-                        "Command:",
-                        " ".join(command),
-                        "",
-                        "Next options:",
-                        "- use the direct candidates in ../candidates",
-                        "- rerun mcsqs manually with a different -n/-T",
-                        "- inspect rndstr.in for ATAT compatibility",
-                    ]
-                )
-                + "\n",
+                format_mcsqs_failure_note(mcsqs_message, command, result.stdout or "", result.stderr or ""),
                 encoding="utf-8",
             )
             if args.mcsqs_strict:

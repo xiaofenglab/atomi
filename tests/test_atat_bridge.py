@@ -816,7 +816,7 @@ def test_parent_defect_run_mcsqs_failure_keeps_direct_outputs(tmp_path: Path, mo
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     mcsqs = fake_bin / "mcsqs"
-    mcsqs.write_text("#!/bin/sh\nexit 139\n", encoding="utf-8")
+    mcsqs.write_text("#!/bin/sh\necho bad input\necho detail >&2\nexit 1\n", encoding="utf-8")
     mcsqs.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
     poscar = tmp_path / "POSCAR"
@@ -863,7 +863,11 @@ def test_parent_defect_run_mcsqs_failure_keeps_direct_outputs(tmp_path: Path, mo
 
     plan = json.loads((out / "parent_defect_plan.json").read_text(encoding="utf-8"))
     assert plan["mcsqs"]["status"] == "failed"
-    assert (out / "atat" / "mcsqs_failed.txt").exists()
+    failure = (out / "atat" / "mcsqs_failed.txt").read_text(encoding="utf-8")
+    assert "bad input" in failure
+    assert "detail" in failure
+    assert (out / "atat" / "mcsqs.out").read_text(encoding="utf-8").strip() == "bad input"
+    assert (out / "atat" / "mcsqs.err").read_text(encoding="utf-8").strip() == "detail"
     assert (out / "candidates" / "01_ordered" / "POSCAR").exists()
     assert not (out / "atat_vasp").exists()
 
