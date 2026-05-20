@@ -1507,9 +1507,24 @@ def run_batch(args: argparse.Namespace) -> None:
         print("Hint               : check runlist root, --log-dir, and whether stopped array artifacts contain OUTCAR.")
 
 
+def default_single_outcar(root: Path = Path(".")) -> Path | None:
+    for name in ("OUTCAR", "OUTCAR.gz"):
+        path = root / name
+        if path.is_file():
+            return path
+    return None
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.outcar is None and args.runlist is None:
+        default_runlist = Path("runlist.txt")
+        default_outcar = default_single_outcar()
+        if default_runlist.is_file():
+            args.runlist = default_runlist
+        elif default_outcar is not None:
+            args.outcar = default_outcar
     if args.outcar is not None:
         run_single(args)
         return

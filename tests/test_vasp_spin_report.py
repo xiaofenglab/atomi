@@ -184,6 +184,20 @@ def test_single_outcar_writes_magmom_files(tmp_path: Path, capsys) -> None:
     assert "MAGMOM = +7.100 +7.000 +1.000 -2.100 +0.020 -0.020" in vasp_line
 
 
+def test_spincheck_no_args_uses_current_outcar(tmp_path: Path, monkeypatch, capsys) -> None:
+    write_outcar(tmp_path / "OUTCAR")
+    write_poscar(tmp_path / "POSCAR")
+    write_incar(tmp_path / "INCAR")
+    monkeypatch.chdir(tmp_path)
+
+    main([])
+
+    output = capsys.readouterr().out
+    assert "Moment rows" in output
+    assert "Physics guard" in output
+    assert (tmp_path / "spin_report_MAGMOM_vasp.txt").exists()
+
+
 def test_single_outcar_gz_writes_magmom_files(tmp_path: Path) -> None:
     outcar = tmp_path / "OUTCAR.gz"
     poscar = tmp_path / "POSCAR"
