@@ -325,6 +325,28 @@ def test_materials_opt_vacancy_cif_writes_explicit_poscars_and_atat_input(tmp_pa
     (template / "INCAR").write_text("ENCUT = 520\n", encoding="utf-8")
     (template / "KPOINTS").write_text("Gamma\n", encoding="utf-8")
     (template / "POTCAR").write_text("fake\n", encoding="utf-8")
+    hpc_config = tmp_path / "atomi_hpc_config.kit.local.json"
+    hpc_config.write_text(
+        json.dumps(
+            {
+                "profiles": {
+                    "atat": {
+                        "root": "/opt/atat",
+                        "bin": "/opt/atat/src",
+                        "environment": {"ATOMI_ATAT_ROOT": "/opt/atat", "ATOMI_ATAT_BIN": "/opt/atat/src"},
+                    },
+                    "atat_sqs": {
+                        "scheduler": "slurm",
+                        "job_name": "atat_test",
+                        "time": "03:00:00",
+                        "mem": "8G",
+                        "cpus_per_task": 2,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     out = tmp_path / "vacancy"
 
     atomi_main(
@@ -339,6 +361,8 @@ def test_materials_opt_vacancy_cif_writes_explicit_poscars_and_atat_input(tmp_pa
             "1x1x5",
             "--vasp-template",
             str(template),
+            "--hpc-config",
+            str(hpc_config),
         ]
     )
 
@@ -362,6 +386,12 @@ def test_materials_opt_vacancy_cif_writes_explicit_poscars_and_atat_input(tmp_pa
     assert "O=0.2,Va=0.8" in rndstr
     assert rndstr.count("O=0.2,Va=0.8") == 5
     assert (out / "atat" / "run_mcsqs.sh").exists()
+    sbatch = (out / "atat" / "submit_mcsqs.sbatch").read_text(encoding="utf-8")
+    assert "#SBATCH --job-name=atat_test" in sbatch
+    assert "#SBATCH --time=03:00:00" in sbatch
+    assert "#SBATCH --cpus-per-task=2" in sbatch
+    assert "bash run_mcsqs.sh" in sbatch
+    assert "ATOMI_ATAT_BIN=/opt/atat/src" in sbatch
     assert len((out / "runlist.txt").read_text(encoding="utf-8").splitlines()) == 3
 
 

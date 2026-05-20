@@ -2192,6 +2192,143 @@ def build_mcsqs_search_command(args: argparse.Namespace) -> list[str]:
     return mcsqs_parts
 
 
+def load_atat_hpc_config(args: argparse.Namespace) -> tuple[dict[str, Any], Path | None]:
+    explicit = getattr(args, "hpc_config", None)
+    path = explicit.expanduser().resolve() if explicit else default_hpc_config_for_atat()
+    if path is None or not path.is_file():
+        return {}, None
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), path
+    except Exception:
+        return {}, path
+
+
+def first_nonempty(*values: Any) -> Any:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def sbatch_value(profile: dict[str, Any], sbatch: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    for key in keys:
+        value = first_nonempty(sbatch.get(key), profile.get(key))
+        if value is not None:
+            return value
+    return default
+
+
+def sbatch_line(option: str, value: Any) -> str | None:
+    if value is None or value == "" or value is False:
+        return None
+    return f"#SBATCH --{option}={value}"
+
+
+def shell_export_line(key: str, value: str) -> str:
+    text = str(value)
+    if "$" not in text:
+        return f"export {key}={shlex.quote(text)}"
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`")
+    return f'export {key}="{escaped}"'
+
+
+def write_atat_mcsqs_sbatch(atat_dir: Path, args: argparse.Namespace) -> Path:
+    config, config_path = load_atat_hpc_config(args)
+    profiles = config.get("profiles", {}) if isinstance(config, dict) else {}
+    profile = profiles.get("atat_sqs") or profiles.get("atat", {})
+    atat_profile = profiles.get("atat", {})
+    sbatch = profile.get("sbatch", {}) if isinstance(profile.get("sbatch"), dict) else {}
+    script_name = getattr(args, "mcsqs_sbatch_script", "submit_mcsqs.sbatch") or "submit_mcsqs.sbatch"
+    path = atat_dir / script_name
+    job_name = sbatch_value(profile, sbatch, "job_name", "name", default="atat_sqs")
+    time_value = sbatch_value(profile, sbatch, "time", "walltime", default="02:00:00")
+    cpus = sbatch_value(profile, sbatch, "cpus_per_task", "cpus", default=1)
+    nodes = sbatch_value(profile, sbatch, "nodes", default=1)
+    ntasks = sbatch_value(profile, sbatch, "ntasks", "tasks", default=1)
+    partition = sbatch_value(profile, sbatch, "partition", "queue")
+    account = sbatch_value(profile, sbatch, "account", "allocation")
+    qos = sbatch_value(profile, sbatch, "qos")
+    mem = sbatch_value(profile, sbatch, "mem", "memory")
+    mem_per_cpu = sbatch_value(profile, sbatch, "mem_per_cpu")
+    mail_type = sbatch_value(profile, sbatch, "mail_type")
+    mail_user = sbatch_value(profile, sbatch, "mail_user")
+    header = [
+        "#!/usr/bin/env bash",
+        sbatch_line("job-name", job_name),
+        "#SBATCH --output=atat_mcsqs.%x.%j.out",
+        "#SBATCH --error=atat_mcsqs.%x.%j.err",
+        sbatch_line("partition", partition),
+        sbatch_line("account", account),
+        sbatch_line("qos", qos),
+        sbatch_line("nodes", nodes),
+        sbatch_line("ntasks", ntasks),
+        sbatch_line("cpus-per-task", cpus),
+        sbatch_line("mem", mem),
+        sbatch_line("mem-per-cpu", mem_per_cpu),
+        sbatch_line("time", time_value),
+        sbatch_line("mail-type", mail_type),
+        sbatch_line("mail-user", mail_user),
+    ]
+    lines = [line for line in header if line]
+    lines.extend(
+        [
+            "",
+            "set -euo pipefail",
+            "",
+            'WORKDIR="${SLURM_SUBMIT_DIR:-$(pwd)}"',
+            'cd "$WORKDIR"',
+            "",
+            "# Apply private Atomi HPC config when available.",
+            'if [ -z "${ATOMI_HPC_CONFIG:-}" ] && [ -f "$HOME/atomi_hpc/atomi_hpc_env.sh" ]; then',
+            '  source "$HOME/atomi_hpc/atomi_hpc_env.sh"',
+            "fi",
+        ]
+    )
+    if config_path is not None:
+        lines.append(shell_export_line("ATOMI_HPC_CONFIG", str(config_path)))
+    module_commands = profile.get("module_commands") or []
+    if not module_commands:
+        modules = profile.get("modules") or []
+        module_commands = [f"module load {module}" for module in modules]
+    if module_commands:
+        lines.extend(["", "# Site module setup from the private HPC profile."])
+        lines.extend(str(command) for command in module_commands)
+    environment = {}
+    for source in (atat_profile.get("environment"), profile.get("environment")):
+        if isinstance(source, dict):
+            environment.update(source)
+    atat_bin = first_nonempty(
+        os.environ.get("ATOMI_ATAT_BIN"),
+        environment.get("ATOMI_ATAT_BIN"),
+        atat_profile.get("bin"),
+        atat_profile.get("src"),
+        atat_profile.get("executable_dir"),
+    )
+    atat_root = first_nonempty(os.environ.get("ATOMI_ATAT_ROOT"), environment.get("ATOMI_ATAT_ROOT"), atat_profile.get("root"))
+    lines.extend(["", "# ATAT executable path."])
+    if atat_root:
+        lines.append(shell_export_line("ATOMI_ATAT_ROOT", str(atat_root)))
+    if atat_bin:
+        lines.append(shell_export_line("ATOMI_ATAT_BIN", str(atat_bin)))
+        lines.append('export PATH="$ATOMI_ATAT_BIN:$PATH"')
+    for key, value in sorted(environment.items()):
+        if key not in {"ATOMI_ATAT_ROOT", "ATOMI_ATAT_BIN"} and value:
+            lines.append(shell_export_line(str(key), str(value)))
+    lines.extend(
+        [
+            "",
+            "echo \"ATAT SQS job started on $(hostname) at $(date)\"",
+            "echo \"Workdir: $WORKDIR\"",
+            "echo \"mcsqs: $(command -v mcsqs || true)\"",
+            "bash run_mcsqs.sh",
+            "echo \"ATAT SQS job finished at $(date)\"",
+        ]
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
 def write_atat_vacancy_scripts(atat_dir: Path, args: argparse.Namespace) -> None:
     cluster_parts = build_mcsqs_cluster_command(args)
     search_parts = build_mcsqs_search_command(args)
@@ -2243,14 +2380,30 @@ def write_atat_vacancy_scripts(atat_dir: Path, args: argparse.Namespace) -> None
     path = atat_dir / "run_mcsqs.sh"
     path.write_text("\n".join(script) + "\n", encoding="utf-8")
     path.chmod(0o755)
+    sbatch_path = write_atat_mcsqs_sbatch(atat_dir, args)
     (atat_dir / "README.md").write_text(
         "This folder contains ATAT inputs for CIF occupational sublattices.\n"
         "Use `./run_mcsqs.sh` to generate `clusters.out`, then `bestsqs.out`. If Atomi is on PATH, the script also "
         "runs `materials-opt atat-poscar` to write VASP-ready POSCAR folders with vacancy "
         "pseudo-atoms removed. Atomi's direct candidates already make mixed species explicit "
-        "and remove vacancy pseudo-atoms from POSCAR.\n",
+        "and remove vacancy pseudo-atoms from POSCAR.\n"
+        f"For longer searches on Slurm, submit `{sbatch_path.name}` from this directory.\n",
         encoding="utf-8",
     )
+
+
+def submit_mcsqs_sbatch_if_requested(args: argparse.Namespace, atat_dir: Path) -> None:
+    if not getattr(args, "submit_mcsqs", False):
+        return
+    if getattr(args, "engine", "") == "direct":
+        raise RuntimeError("--submit-mcsqs requires --engine atat or --engine both.")
+    if getattr(args, "run_mcsqs", False):
+        raise RuntimeError("--submit-mcsqs cannot be combined with --run-mcsqs; choose batch or foreground.")
+    script_name = getattr(args, "mcsqs_sbatch_script", "submit_mcsqs.sbatch") or "submit_mcsqs.sbatch"
+    script = atat_dir / script_name
+    if shutil.which("sbatch") is None:
+        raise RuntimeError("sbatch was requested with --submit-mcsqs, but it is not on PATH.")
+    subprocess.run(["sbatch", str(script)], cwd=atat_dir, check=True)
 
 
 def format_mcsqs_failure_note(
@@ -2617,7 +2770,12 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--run-mcsqs", action="store_true", help="Run mcsqs immediately if available.")
     parser.add_argument("--mcsqs-strict", action="store_true", help="Exit with an error if mcsqs fails. Default: keep direct outputs and write a failure note.")
     parser.add_argument("--atat-poscar-outdir", type=Path, help="Output directory for converted ATAT bestsqs POSCARs. Default: OUTDIR/atat_vasp.")
+    parser.add_argument("--mcsqs-sbatch-script", default="submit_mcsqs.sbatch", help="Slurm script written beside run_mcsqs.sh.")
+    parser.add_argument("--submit-mcsqs", action="store_true", help="Submit the generated mcsqs Slurm script instead of running mcsqs in the foreground.")
+    parser.add_argument("--hpc-config", type=Path, help="Private Atomi HPC config JSON used to fill the mcsqs Slurm script.")
     args = parser.parse_args(argv)
+    if args.run_mcsqs and args.submit_mcsqs:
+        raise ValueError("--run-mcsqs and --submit-mcsqs are mutually exclusive.")
 
     if args.target_occupancy is not None and not (0.0 < args.target_occupancy <= 1.0):
         raise ValueError("--target-occupancy must be in (0, 1].")
@@ -2900,6 +3058,7 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
                 "supercell_analysis": str(root / "supercell_candidate_analysis.csv"),
                 "rndstr": str(atat_dir / "rndstr.in") if args.engine in {"both", "atat"} else "",
                 "run_mcsqs": str(atat_dir / "run_mcsqs.sh") if args.engine in {"both", "atat"} else "",
+                "submit_mcsqs": str(atat_dir / args.mcsqs_sbatch_script) if args.engine in {"both", "atat"} else "",
                 "atat_vasp": str(atat_vasp_outdir) if args.engine in {"both", "atat"} else "",
                 "candidate_index": str(root / "vacancy_candidate_index.csv"),
                 "runlist": str(root / "runlist.txt"),
@@ -2911,6 +3070,7 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
             ],
         },
     )
+    submit_mcsqs_sbatch_if_requested(args, atat_dir)
 
     print(f"Vacancy CIF workspace : {root}")
     print(f"Occupational sites    : {sum(len(group['indices']) for group in occupation_groups)}")
@@ -2936,6 +3096,7 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
         print(f"ATAT VASP folders     : {atat_vasp_outdir if mcsqs_status == 'ok' else 'not written'}")
     print(f"Supercell analysis    : {root / 'supercell_candidate_analysis.csv'}")
     print(f"ATAT rndstr.in        : {(atat_dir / 'rndstr.in') if args.engine in {'both', 'atat'} else 'skipped'}")
+    print(f"ATAT sbatch          : {(atat_dir / args.mcsqs_sbatch_script) if args.engine in {'both', 'atat'} else 'skipped'}")
     print(f"Candidates            : {len(rows) if args.engine in {'both', 'direct'} else 'skipped'}")
     for row in rows:
         print(
@@ -3216,7 +3377,12 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--mcsqs-strict", action="store_true", help="Exit with an error if mcsqs fails. Default: keep direct outputs and write a failure note.")
     parser.add_argument("--atat-vacancy-label", default="Vac", help="Vacancy pseudo-species label written to parent-defect ATAT rndstr.in.")
     parser.add_argument("--atat-poscar-outdir", type=Path, help="Output directory for converted ATAT bestsqs POSCARs. Default: OUTDIR/atat_vasp.")
+    parser.add_argument("--mcsqs-sbatch-script", default="submit_mcsqs.sbatch", help="Slurm script written beside run_mcsqs.sh.")
+    parser.add_argument("--submit-mcsqs", action="store_true", help="Submit the generated mcsqs Slurm script instead of running mcsqs in the foreground.")
+    parser.add_argument("--hpc-config", type=Path, help="Private Atomi HPC config JSON used to fill the mcsqs Slurm script.")
     args = parser.parse_args(argv)
+    if args.run_mcsqs and args.submit_mcsqs:
+        raise ValueError("--run-mcsqs and --submit-mcsqs are mutually exclusive.")
 
     read, write = import_ase_atoms()
     atoms0 = read(args.poscar.expanduser().resolve(), format="vasp")
@@ -3356,6 +3522,8 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
                 mcsqs_quadruplet_diameter=args.mcsqs_quadruplet_diameter,
                 mcsqs_time=args.mcsqs_time,
                 vasp_template=args.vasp_template,
+                hpc_config=args.hpc_config,
+                mcsqs_sbatch_script=args.mcsqs_sbatch_script,
             ),
         )
         args.atat_atoms = atat_atoms
@@ -3433,10 +3601,12 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
                 "candidate_index": str(root / "parent_defect_candidate_index.csv"),
                 "runlist": str(root / "runlist.txt"),
                 "atat_rndstr": str(root / "atat" / "rndstr.in") if args.engine in {"both", "atat"} else "",
+                "submit_mcsqs": str(root / "atat" / args.mcsqs_sbatch_script) if args.engine in {"both", "atat"} else "",
                 "atat_vasp": str(atat_vasp_outdir) if args.engine in {"both", "atat"} else "",
             },
         },
     )
+    submit_mcsqs_sbatch_if_requested(args, root / "atat")
     print(f"Parent defect workspace : {root}")
     print(f"Supercell repeat        : {repeat_text(repeat)}")
     print(f"Linear scale            : {linear_scale:.12g}")
@@ -3457,13 +3627,16 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
         print("Direct POSCAR folders   : skipped (--engine atat)")
     if args.engine in {"both", "atat"}:
         print(f"ATAT handoff            : {root / 'atat'}")
+        print(f"ATAT sbatch             : {root / 'atat' / args.mcsqs_sbatch_script}")
         if args.run_mcsqs:
             print(f"ATAT mcsqs status       : {mcsqs_status}")
             if mcsqs_message:
                 print(f"ATAT mcsqs message      : {mcsqs_message}")
             print(f"ATAT VASP folders       : {atat_vasp_outdir if mcsqs_status == 'ok' else 'not written'}")
+        elif args.submit_mcsqs:
+            print(f"ATAT submitted          : sbatch {root / 'atat' / args.mcsqs_sbatch_script}")
         else:
-            print("ATAT next step          : cd atat && ./run_mcsqs.sh")
+            print("ATAT next step          : cd atat && sbatch submit_mcsqs.sbatch")
 
 
 def quick_opt_main(argv: list[str] | None = None) -> None:
