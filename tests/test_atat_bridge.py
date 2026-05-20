@@ -741,7 +741,14 @@ def test_parent_defect_run_mcsqs_converts_bestsqs_to_poscar(tmp_path: Path, monk
     mcsqs = fake_bin / "mcsqs"
     mcsqs.write_text(
         "#!/bin/sh\n"
-        "echo \"$@\" > mcsqs_args.txt\n"
+        "case \"$*\" in\n"
+        "  *-2=*)\n"
+        "    echo \"$@\" > mcsqs_cluster_args.txt\n"
+        "    echo clusters > clusters.out\n"
+        "    exit 0\n"
+        "    ;;\n"
+        "esac\n"
+        "echo \"$@\" > mcsqs_search_args.txt\n"
         "cat > bestsqs.out <<'EOF'\n"
         "5 0 0\n"
         "0 5 0\n"
@@ -805,14 +812,16 @@ def test_parent_defect_run_mcsqs_converts_bestsqs_to_poscar(tmp_path: Path, monk
     )
 
     assert (out / "atat" / "bestsqs.out").exists()
-    assert "-2=6" in (out / "atat" / "mcsqs_args.txt").read_text(encoding="utf-8")
+    assert "-2=6" in (out / "atat" / "mcsqs_cluster_args.txt").read_text(encoding="utf-8")
+    assert "-n=" in (out / "atat" / "mcsqs_search_args.txt").read_text(encoding="utf-8")
     poscar_text = (out / "atat_vasp" / "candidates" / "01_bestsqs" / "POSCAR").read_text(encoding="utf-8")
     assert "Va" not in poscar_text
     assert "Gd" in poscar_text
     assert "ISYM = 0" in (out / "atat_vasp" / "candidates" / "01_bestsqs" / "INCAR").read_text(encoding="utf-8")
     plan = json.loads((out / "parent_defect_plan.json").read_text(encoding="utf-8"))
     assert plan["outputs"]["atat_vasp"].endswith("atat_vasp")
-    assert "-2=6" in plan["mcsqs"]["command"]
+    assert "-2=6" in plan["mcsqs"]["cluster_command"]
+    assert "-n=" in " ".join(plan["mcsqs"]["search_command"])
 
 
 def test_parent_defect_run_mcsqs_failure_keeps_direct_outputs(tmp_path: Path, monkeypatch) -> None:
@@ -869,8 +878,8 @@ def test_parent_defect_run_mcsqs_failure_keeps_direct_outputs(tmp_path: Path, mo
     failure = (out / "atat" / "mcsqs_failed.txt").read_text(encoding="utf-8")
     assert "bad input" in failure
     assert "detail" in failure
-    assert (out / "atat" / "mcsqs.out").read_text(encoding="utf-8").strip() == "bad input"
-    assert (out / "atat" / "mcsqs.err").read_text(encoding="utf-8").strip() == "detail"
+    assert (out / "atat" / "mcsqs_clusters.out").read_text(encoding="utf-8").strip() == "bad input"
+    assert (out / "atat" / "mcsqs_clusters.err").read_text(encoding="utf-8").strip() == "detail"
     assert (out / "candidates" / "01_ordered" / "POSCAR").exists()
     assert not (out / "atat_vasp").exists()
 

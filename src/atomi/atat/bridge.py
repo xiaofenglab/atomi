@@ -2169,8 +2169,8 @@ def write_atat_rndstr(
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def build_mcsqs_command(args: argparse.Namespace) -> list[str]:
-    mcsqs_parts = ["mcsqs", f"-n={args.atat_atoms}"]
+def build_mcsqs_cluster_command(args: argparse.Namespace) -> list[str]:
+    mcsqs_parts = ["mcsqs"]
     pair = getattr(args, "mcsqs_pair_diameter", None)
     triplet = getattr(args, "mcsqs_triplet_diameter", None)
     quadruplet = getattr(args, "mcsqs_quadruplet_diameter", None)
@@ -2180,24 +2180,53 @@ def build_mcsqs_command(args: argparse.Namespace) -> list[str]:
         mcsqs_parts.append(f"-3={triplet:g}")
     if quadruplet is not None and quadruplet > 0:
         mcsqs_parts.append(f"-4={quadruplet:g}")
+    if len(mcsqs_parts) == 1:
+        return []
+    return mcsqs_parts
+
+
+def build_mcsqs_search_command(args: argparse.Namespace) -> list[str]:
+    mcsqs_parts = ["mcsqs", f"-n={args.atat_atoms}"]
     if args.mcsqs_time is not None:
         mcsqs_parts.append(f"-T={args.mcsqs_time:g}")
     return mcsqs_parts
 
 
 def write_atat_vacancy_scripts(atat_dir: Path, args: argparse.Namespace) -> None:
-    mcsqs_parts = build_mcsqs_command(args)
+    cluster_parts = build_mcsqs_cluster_command(args)
+    search_parts = build_mcsqs_search_command(args)
     template = getattr(args, "vasp_template", None)
     template_args = ""
     if template:
         template_args = f" --vasp-template {shlex.quote(str(Path(template).expanduser().resolve()))}"
+    mcsqs_lines = []
+    if cluster_parts:
+        mcsqs_lines.extend(
+            [
+                "# First generate ATAT clusters.out from the requested pair/triplet cutoffs.",
+                " ".join(cluster_parts) + " > mcsqs_clusters.out 2> mcsqs_clusters.err",
+            ]
+        )
+    else:
+        mcsqs_lines.extend(
+            [
+                "# Cluster generation disabled; this assumes a compatible clusters.out already exists.",
+                "test -f clusters.out",
+            ]
+        )
+    mcsqs_lines.extend(
+        [
+            "# Then run the SQS search using the generated clusters.out.",
+            " ".join(search_parts) + " > mcsqs.out 2> mcsqs.err",
+        ]
+    )
     script = [
         "#!/usr/bin/env bash",
         "set -euo pipefail",
         "",
         "# Run this inside the ATAT handoff directory.",
         "# bestsqs.out still contains the vacancy pseudo-species; convert/remove Vac/Va before VASP.",
-        " ".join(mcsqs_parts) + " > mcsqs.out 2> mcsqs.err",
+        *mcsqs_lines,
         "if [ -f bestsqs.out ]; then",
         "  if command -v materials-opt >/dev/null 2>&1; then",
         f"    materials-opt atat-poscar --input bestsqs.out --outdir vasp_from_atat{template_args}",
@@ -2216,7 +2245,7 @@ def write_atat_vacancy_scripts(atat_dir: Path, args: argparse.Namespace) -> None
     path.chmod(0o755)
     (atat_dir / "README.md").write_text(
         "This folder contains ATAT inputs for CIF occupational sublattices.\n"
-        "Use `./run_mcsqs.sh` to generate `bestsqs.out`. If Atomi is on PATH, the script also "
+        "Use `./run_mcsqs.sh` to generate `clusters.out`, then `bestsqs.out`. If Atomi is on PATH, the script also "
         "runs `materials-opt atat-poscar` to write VASP-ready POSCAR folders with vacancy "
         "pseudo-atoms removed. Atomi's direct candidates already make mixed species explicit "
         "and remove vacancy pseudo-atoms from POSCAR.\n",
@@ -2249,6 +2278,150 @@ def format_mcsqs_failure_note(
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+@dataclass
+class MCSQSWorkflowResult:
+    status: str
+    message: str
+    cluster_command: list[str]
+    search_command: list[str]
+    cluster_returncode: int | None = None
+    search_returncode: int | None = None
+
+
+def format_mcsqs_workflow_failure_note(
+    message: str,
+    cluster_command: list[str],
+    search_command: list[str],
+    cluster_stdout: str = "",
+    cluster_stderr: str = "",
+    search_stdout: str = "",
+    search_stderr: str = "",
+) -> str:
+    lines = [
+        message,
+        "Cluster command:",
+        " ".join(cluster_command) if cluster_command else "skipped; expected existing clusters.out",
+        "Search command:",
+        " ".join(search_command),
+    ]
+    if cluster_stdout.strip():
+        lines.extend(["", "mcsqs cluster stdout:", cluster_stdout.strip()])
+    if cluster_stderr.strip():
+        lines.extend(["", "mcsqs cluster stderr:", cluster_stderr.strip()])
+    if search_stdout.strip():
+        lines.extend(["", "mcsqs search stdout:", search_stdout.strip()])
+    if search_stderr.strip():
+        lines.extend(["", "mcsqs search stderr:", search_stderr.strip()])
+    lines.extend(
+        [
+            "",
+            "Next options:",
+            "- use the direct candidates in ../candidates",
+            "- rerun cluster generation with a different -2/-3/-4 cutoff",
+            "- rerun SQS search manually with a different -n/-T",
+            "- inspect rndstr.in for ATAT compatibility",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def run_mcsqs_workflow(atat_dir: Path, args: argparse.Namespace) -> MCSQSWorkflowResult:
+    cluster_command = build_mcsqs_cluster_command(args)
+    search_command = build_mcsqs_search_command(args)
+    cluster_stdout = ""
+    cluster_stderr = ""
+    cluster_returncode: int | None = None
+    if cluster_command:
+        cluster_result = subprocess.run(cluster_command, cwd=atat_dir, capture_output=True, text=True)
+        cluster_stdout = cluster_result.stdout or ""
+        cluster_stderr = cluster_result.stderr or ""
+        cluster_returncode = cluster_result.returncode
+        (atat_dir / "mcsqs_clusters.out").write_text(cluster_stdout, encoding="utf-8")
+        (atat_dir / "mcsqs_clusters.err").write_text(cluster_stderr, encoding="utf-8")
+        if cluster_result.returncode != 0:
+            if cluster_result.returncode < 0:
+                message = (
+                    f"mcsqs cluster generation stopped by signal {-cluster_result.returncode}; "
+                    "direct POSCAR candidates and rndstr.in were kept."
+                )
+            else:
+                message = (
+                    f"mcsqs cluster generation exited with code {cluster_result.returncode}; "
+                    "direct POSCAR candidates and rndstr.in were kept."
+                )
+            (atat_dir / "mcsqs_failed.txt").write_text(
+                format_mcsqs_workflow_failure_note(
+                    message,
+                    cluster_command,
+                    search_command,
+                    cluster_stdout,
+                    cluster_stderr,
+                ),
+                encoding="utf-8",
+            )
+            return MCSQSWorkflowResult(
+                status="failed",
+                message=message,
+                cluster_command=cluster_command,
+                search_command=search_command,
+                cluster_returncode=cluster_result.returncode,
+            )
+    elif not (atat_dir / "clusters.out").is_file():
+        message = (
+            "mcsqs cluster generation is disabled and clusters.out is missing; "
+            "direct POSCAR candidates and rndstr.in were kept."
+        )
+        (atat_dir / "mcsqs_failed.txt").write_text(
+            format_mcsqs_workflow_failure_note(message, cluster_command, search_command),
+            encoding="utf-8",
+        )
+        return MCSQSWorkflowResult(
+            status="failed",
+            message=message,
+            cluster_command=cluster_command,
+            search_command=search_command,
+        )
+
+    search_result = subprocess.run(search_command, cwd=atat_dir, capture_output=True, text=True)
+    search_stdout = search_result.stdout or ""
+    search_stderr = search_result.stderr or ""
+    (atat_dir / "mcsqs.out").write_text(search_stdout, encoding="utf-8")
+    (atat_dir / "mcsqs.err").write_text(search_stderr, encoding="utf-8")
+    if search_result.returncode != 0:
+        if search_result.returncode < 0:
+            message = f"mcsqs search stopped by signal {-search_result.returncode}; direct POSCAR candidates and rndstr.in were kept."
+        else:
+            message = f"mcsqs search exited with code {search_result.returncode}; direct POSCAR candidates and rndstr.in were kept."
+        (atat_dir / "mcsqs_failed.txt").write_text(
+            format_mcsqs_workflow_failure_note(
+                message,
+                cluster_command,
+                search_command,
+                cluster_stdout,
+                cluster_stderr,
+                search_stdout,
+                search_stderr,
+            ),
+            encoding="utf-8",
+        )
+        return MCSQSWorkflowResult(
+            status="failed",
+            message=message,
+            cluster_command=cluster_command,
+            search_command=search_command,
+            cluster_returncode=cluster_returncode,
+            search_returncode=search_result.returncode,
+        )
+    return MCSQSWorkflowResult(
+        status="ok",
+        message="",
+        cluster_command=cluster_command,
+        search_command=search_command,
+        cluster_returncode=cluster_returncode,
+        search_returncode=search_result.returncode,
+    )
 
 
 def numeric_vector(parts: list[str]) -> list[float] | None:
@@ -2700,7 +2873,9 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
             raise RuntimeError("--run-mcsqs requires --engine atat or --engine both.")
         if shutil.which("mcsqs") is None:
             raise RuntimeError("mcsqs was requested with --run-mcsqs, but it is not on PATH.")
-        subprocess.run(["mcsqs", f"-n={args.atat_atoms}"], cwd=atat_dir, check=True)
+        result = run_mcsqs_workflow(atat_dir, args)
+        if result.status != "ok":
+            raise RuntimeError(result.message)
 
     print(f"Vacancy CIF workspace : {root}")
     print(f"Occupational sites    : {sum(len(group['indices']) for group in occupation_groups)}")
@@ -3148,40 +3323,30 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
     atat_vasp_outdir = args.atat_poscar_outdir.expanduser().resolve() if args.atat_poscar_outdir else root / "atat_vasp"
     mcsqs_status = "not_requested"
     mcsqs_message = ""
-    mcsqs_command: list[str] = []
+    mcsqs_cluster_command: list[str] = []
+    mcsqs_search_command: list[str] = []
     if args.run_mcsqs:
         if args.engine == "direct":
             raise RuntimeError("--run-mcsqs requires --engine atat or --engine both.")
         atat_dir = root / "atat"
         if shutil.which("mcsqs") is None:
             raise RuntimeError("mcsqs was requested with --run-mcsqs, but it is not on PATH.")
-        command = build_mcsqs_command(args)
-        mcsqs_command = command
-        result = subprocess.run(command, cwd=atat_dir, capture_output=True, text=True)
-        (atat_dir / "mcsqs.out").write_text(result.stdout or "", encoding="utf-8")
-        (atat_dir / "mcsqs.err").write_text(result.stderr or "", encoding="utf-8")
-        if result.returncode != 0:
-            mcsqs_status = "failed"
-            if result.returncode < 0:
-                mcsqs_message = f"mcsqs stopped by signal {-result.returncode}; direct POSCAR candidates and rndstr.in were kept."
-            else:
-                mcsqs_message = f"mcsqs exited with code {result.returncode}; direct POSCAR candidates and rndstr.in were kept."
-            (atat_dir / "mcsqs_failed.txt").write_text(
-                format_mcsqs_failure_note(mcsqs_message, command, result.stdout or "", result.stderr or ""),
-                encoding="utf-8",
-            )
+        result = run_mcsqs_workflow(atat_dir, args)
+        mcsqs_cluster_command = result.cluster_command
+        mcsqs_search_command = result.search_command
+        mcsqs_status = result.status
+        mcsqs_message = result.message
+        if result.status != "ok":
             if args.mcsqs_strict:
                 raise RuntimeError(mcsqs_message)
-        else:
-            mcsqs_status = "ok"
         bestsqs = atat_dir / "bestsqs.out"
-        if result.returncode == 0 and bestsqs.is_file():
+        if result.status == "ok" and bestsqs.is_file():
             convert_args = ["--input", str(bestsqs), "--outdir", str(atat_vasp_outdir)]
             convert_args.extend(["--vacancy-label", args.atat_vacancy_label])
             if args.vasp_template:
                 convert_args.extend(["--vasp-template", str(args.vasp_template)])
             atat_poscar_main(convert_args)
-        elif result.returncode == 0:
+        elif result.status == "ok":
             mcsqs_status = "no_bestsqs"
             mcsqs_message = f"mcsqs finished but did not write {bestsqs}; direct POSCAR candidates and rndstr.in were kept."
             (atat_dir / "mcsqs_failed.txt").write_text(mcsqs_message + "\n", encoding="utf-8")
@@ -3210,7 +3375,9 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
                 "requested": bool(args.run_mcsqs),
                 "status": mcsqs_status,
                 "message": mcsqs_message,
-                "command": mcsqs_command,
+                "command": mcsqs_search_command,
+                "cluster_command": mcsqs_cluster_command,
+                "search_command": mcsqs_search_command,
                 "strict": bool(args.mcsqs_strict),
             },
             "vacancy_guard": {
