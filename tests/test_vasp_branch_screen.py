@@ -146,6 +146,31 @@ def test_branch_screen_uses_index_and_spin_guard_stop(tmp_path: Path) -> None:
     assert (outdir / "stage2_survivors_runlist.txt").read_text(encoding="utf-8") == ""
 
 
+def test_branch_screen_auto_infers_spin_guard_from_poscar_incar(tmp_path: Path) -> None:
+    run = tmp_path / "branches" / "frame_auto" / "u_lost"
+    write_branch(run, energy=-5.0, moments=[7.0, 0.1, 0.0])
+    index = tmp_path / "branches.csv"
+    index.write_text(f"frame_id,branch_id,run_dir\nframe_auto,u_lost,{run}\n", encoding="utf-8")
+    outdir = tmp_path / "out"
+
+    atomi_main(
+        [
+            "vasp-branch-screen",
+            "--index",
+            str(index),
+            "--outdir",
+            str(outdir),
+            "--spin-fail-action",
+            "stop",
+        ]
+    )
+
+    rows = read_csv(outdir / "stage1_branch_summary.csv")
+    assert rows[0]["physics_guard_status"] == "FAIL"
+    assert rows[0]["physics_guard_bad_by_element"] == '{"U": 1}'
+    assert rows[0]["action"] == "stop"
+
+
 def test_branch_screen_accepts_runlist_and_streams_live_scan(tmp_path: Path, capsys) -> None:
     run_a = tmp_path / "frame_003" / "u_site_a"
     run_b = tmp_path / "frame_003" / "u_site_b"

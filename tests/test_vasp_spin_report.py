@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from atomi.cli.main import main as atomi_main
-from atomi.vasp.spin_report import extract_last_magnetization_block, main
+from atomi.vasp.spin_report import (
+    extract_last_magnetization_block,
+    guard_rule_text,
+    infer_moment_guards_from_files,
+    main,
+)
 
 
 def write_poscar(path: Path) -> None:
@@ -242,6 +247,7 @@ def test_batch_spin_energy_report(tmp_path: Path, capsys) -> None:
     assert "order" in output
     assert "Gd:AFM>FM" in output
     assert "U:AFM" in output
+    assert "Physics guard" in output
     summary_path = tmp_path / "reports" / "spin_energy_run_summary.csv"
     atom_path = tmp_path / "reports" / "spin_energy_atom_moments.csv"
     report_path = tmp_path / "reports" / "spin_energy_report.md"
@@ -259,6 +265,20 @@ def test_batch_spin_energy_report(tmp_path: Path, capsys) -> None:
     assert atom_rows[0]["element"] == "Gd"
     assert atom_rows[0]["changed"] == "no"
     assert (tmp_path / "reports" / "magmom_lines" / "001_spin_001_MAGMOM.txt").exists()
+
+
+def test_auto_moment_guard_infers_multiple_integer_states_from_incar(tmp_path: Path) -> None:
+    run = tmp_path / "spin_u4_u5"
+    run.mkdir()
+    write_poscar(run / "POSCAR")
+    (run / "INCAR").write_text("MAGMOM = 7 -7 2 1 2*0\n", encoding="utf-8")
+
+    guards = infer_moment_guards_from_files(run / "POSCAR", run / "INCAR", default_tol=0.6)
+
+    text = guard_rule_text(guards)
+    assert "Gd=[+7.000,-7.000] tol=0.6" in text
+    assert "U=[+2.000,-2.000,+1.000,-1.000] tol=0.6" in text
+    assert "O=[+0.000] tol=0.25" in text
 
 
 def test_batch_spin_physics_guard_writes_filtered_tables(tmp_path: Path) -> None:

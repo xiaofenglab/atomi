@@ -294,12 +294,38 @@ def _onsite_row(ion: int, angular_l: int, moment: float) -> MagnetizationRow:
     return row
 
 
+def read_poscar_species_auto(species_file: Path) -> PoscarSpecies:
+    try:
+        return read_poscar_species(species_file)
+    except Exception as original_exc:
+        try:
+            from ase.io import read as ase_read
+        except Exception as import_exc:  # pragma: no cover - depends on optional runtime state.
+            raise original_exc from import_exc
+        try:
+            atoms = ase_read(str(species_file), format="vasp")
+            symbols = list(atoms.get_chemical_symbols())
+        except Exception as ase_exc:
+            raise original_exc from ase_exc
+        if not symbols:
+            raise original_exc
+        grouped_symbols: list[str] = []
+        counts: list[int] = []
+        for symbol in symbols:
+            if grouped_symbols and grouped_symbols[-1] == symbol:
+                counts[-1] += 1
+            else:
+                grouped_symbols.append(symbol)
+                counts.append(1)
+        return PoscarSpecies(symbols=grouped_symbols, counts=counts)
+
+
 def read_species_labels(species_file: Path | None, natoms: int | None) -> tuple[list[str], PoscarSpecies | None, str]:
     if species_file is None:
         count = natoms or 0
         return ["X"] * count, None, "none"
     try:
-        species = read_poscar_species(species_file)
+        species = read_poscar_species_auto(species_file)
     except Exception as exc:  # pragma: no cover - defensive path, message is tested indirectly.
         count = natoms or 0
         return ["X"] * count, None, f"Could not parse species file {species_file}: {exc}"
@@ -354,9 +380,143 @@ def parse_moment_guards(values: list[str], default_tol: float) -> dict[str, tupl
     return guards
 
 
+def _append_unique_float(values: list[float], value: float, tolerance: float = 1.0e-9) -> None:
+    if not any(abs(existing - value) <= tolerance for existing in values):
+        values.append(value)
+
+
+def _integer_like_magnitude(value: float, integer_tol: float) -> float:
+    magnitude = abs(value)
+    nearest = round(magnitude)
+    if nearest > 0 and abs(magnitude - nearest) <= integer_tol:
+        return float(nearest)
+    return round(magnitude, 3)
+
+
+def infer_moment_guards_from_initial_moments(
+    species: PoscarSpecies,
+    moments: list[float] | None,
+    default_tol: float,
+    integer_tol: float = 0.35,
+    zero_tol: float = 0.25,
+    zero_threshold: float = 0.25,
+) -> dict[str, tuple[list[float], float]]:
+    """Infer element moment guards from POSCAR order and initial INCAR MAGMOM."""
+
+    if moments is None:
+        return {}
+    guards: dict[str, tuple[list[float], float]] = {}
+    offset = 0
+    for element, count in zip(species.symbols, species.counts):
+        values = moments[offset : offset + count]
+        offset += count
+        if not values:
+            continue
+        targets: list[float] = []
+        has_zero = False
+        for value in values:
+            if abs(value) <= zero_threshold:
+                has_zero = True
+                continue
+            magnitude = _integer_like_magnitude(value, integer_tol=integer_tol)
+            _append_unique_float(targets, magnitude)
+            _append_unique_float(targets, -magnitude)
+        if has_zero:
+            _append_unique_float(targets, 0.0)
+        if not targets:
+            continue
+        tolerance = zero_tol if targets == [0.0] else default_tol
+        guards[element] = (targets, tolerance)
+    return guards
+
+
+def infer_moment_guards_from_files(
+    species_file: Path | None,
+    incar: Path | None,
+    default_tol: float,
+    integer_tol: float = 0.35,
+    zero_tol: float = 0.25,
+    zero_threshold: float = 0.25,
+) -> dict[str, tuple[list[float], float]]:
+    if species_file is None or incar is None or not species_file.is_file() or not incar.is_file():
+        return {}
+    try:
+        species = read_poscar_species_auto(species_file)
+        moments = existing_magmom_values(incar, species.total_atoms)
+    except Exception:
+        return {}
+    return infer_moment_guards_from_initial_moments(
+        species=species,
+        moments=moments,
+        default_tol=default_tol,
+        integer_tol=integer_tol,
+        zero_tol=zero_tol,
+        zero_threshold=zero_threshold,
+    )
+
+
+def infer_moment_guards_from_run_dirs(
+    run_dirs: list[Path],
+    default_tol: float,
+    species_override: Path | None = None,
+    incar_override: Path | None = None,
+    integer_tol: float = 0.35,
+    zero_tol: float = 0.25,
+    zero_threshold: float = 0.25,
+) -> dict[str, tuple[list[float], float]]:
+    if species_override is not None and incar_override is not None:
+        guards = infer_moment_guards_from_files(
+            species_override,
+            incar_override,
+            default_tol=default_tol,
+            integer_tol=integer_tol,
+            zero_tol=zero_tol,
+            zero_threshold=zero_threshold,
+        )
+        if guards:
+            return guards
+    for run_dir in run_dirs:
+        species_file = species_override or default_species_file(run_dir)
+        incar = incar_override or default_incar(run_dir)
+        guards = infer_moment_guards_from_files(
+            species_file,
+            incar,
+            default_tol=default_tol,
+            integer_tol=integer_tol,
+            zero_tol=zero_tol,
+            zero_threshold=zero_threshold,
+        )
+        if guards:
+            return guards
+    return {}
+
+
+def merge_moment_guards(
+    inferred: dict[str, tuple[list[float], float]],
+    explicit: dict[str, tuple[list[float], float]],
+) -> dict[str, tuple[list[float], float]]:
+    guards = dict(inferred)
+    guards.update(explicit)
+    return guards
+
+
+def runlist_dirs(runlist: Path) -> list[Path]:
+    base = runlist.parent.resolve()
+    dirs: list[Path] = []
+    for run in iter_runlist(runlist):
+        dirs.append(run if run.is_absolute() else (base / run).resolve())
+    return dirs
+
+
+def auto_moment_guard_notice(guards: dict[str, tuple[list[float], float]], enabled: bool) -> str:
+    if not enabled:
+        return "disabled"
+    return guard_rule_text(guards) if guards else "not inferred"
+
+
 def guard_rule_text(guards: dict[str, tuple[list[float], float]]) -> str:
     pieces = []
-    for element in sorted(guards):
+    for element in guards:
         targets, tolerance = guards[element]
         values = ",".join(format_float(value, decimals=3) for value in targets)
         pieces.append(f"{element}=[{values}] tol={tolerance:g}")
@@ -738,7 +898,7 @@ def build_run_reports(
         expected = natoms
         if expected is None and species_file is not None:
             try:
-                expected = read_poscar_species(species_file).total_atoms
+                expected = read_poscar_species_auto(species_file).total_atoms
             except Exception:
                 expected = None
         mag_source, block, mag_warning = extract_first_available_magnetization(candidates, expected=expected)
@@ -753,7 +913,7 @@ def build_run_reports(
         expected = natoms
         if expected is None and species_file is not None:
             try:
-                expected = read_poscar_species(species_file).total_atoms
+                expected = read_poscar_species_auto(species_file).total_atoms
             except Exception:
                 expected = None
         if expected is not None and block.expected_atoms is not None and len(block.rows) != expected:
@@ -1185,6 +1345,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-prefix", type=Path, default=Path("spin_report"))
     parser.add_argument("--natoms", type=int, help="Expected atom count. Defaults to OUTCAR NIONS or POSCAR.")
     parser.add_argument("--species", type=Path, help="POSCAR/CONTCAR for atom species labels.")
+    parser.add_argument("--incar", type=Path, help="INCAR for initial MAGMOM labels and automatic spin guards.")
     parser.add_argument("--format", choices=("expanded", "vasp", "both"), default="both")
     parser.add_argument("--spin-index", type=Path, help="Optional magit spin_index.csv.")
     parser.add_argument("--log-dir", type=Path, help="Directory containing array logs for energy fallback.")
@@ -1205,6 +1366,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Physics guard for final moments, repeatable: Element=v1,v2 or Element=v1,v2@tol.",
     )
     parser.add_argument("--moment-guard-tol", type=float, default=0.6, help="Default tolerance for --moment-guard.")
+    parser.add_argument(
+        "--no-auto-moment-guard",
+        action="store_true",
+        help="Disable default physics guards inferred from POSCAR/CONTCAR plus INCAR MAGMOM.",
+    )
+    parser.add_argument(
+        "--auto-moment-integer-tol",
+        type=float,
+        default=0.35,
+        help="Treat initial MAGMOM values within this distance of an integer as that integer.",
+    )
+    parser.add_argument(
+        "--auto-zero-tol",
+        type=float,
+        default=0.25,
+        help="Tolerance for automatically inferred near-zero/nonmagnetic elements.",
+    )
     parser.add_argument("--compress-tol", type=float, default=0.05)
     parser.add_argument("--decimals", type=int, default=3)
     parser.add_argument("--no-plot", action="store_true")
@@ -1212,9 +1390,43 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def prepare_batch_moment_guards(args: argparse.Namespace, runlist: Path) -> dict[str, tuple[list[float], float]]:
+    inferred: dict[str, tuple[list[float], float]] = {}
+    if not args.no_auto_moment_guard:
+        inferred = infer_moment_guards_from_run_dirs(
+            runlist_dirs(runlist),
+            default_tol=args.moment_guard_tol,
+            species_override=args.species,
+            incar_override=args.incar,
+            integer_tol=args.auto_moment_integer_tol,
+            zero_tol=args.auto_zero_tol,
+        )
+    explicit = parse_moment_guards(args.moment_guard, args.moment_guard_tol)
+    return merge_moment_guards(inferred, explicit)
+
+
+def prepare_single_moment_guards(
+    args: argparse.Namespace,
+    species_file: Path | None,
+    incar: Path | None,
+) -> dict[str, tuple[list[float], float]]:
+    inferred: dict[str, tuple[list[float], float]] = {}
+    if not args.no_auto_moment_guard:
+        inferred = infer_moment_guards_from_files(
+            species_file,
+            incar,
+            default_tol=args.moment_guard_tol,
+            integer_tol=args.auto_moment_integer_tol,
+            zero_tol=args.auto_zero_tol,
+        )
+    explicit = parse_moment_guards(args.moment_guard, args.moment_guard_tol)
+    return merge_moment_guards(inferred, explicit)
+
+
 def run_single(args: argparse.Namespace) -> None:
     block = extract_last_magnetization_block(args.outcar, natoms=args.natoms)
-    labels, _species, warning = read_species_labels(args.species, args.natoms or len(block.rows))
+    species_file = args.species or default_species_file(args.outcar.parent)
+    labels, species, warning = read_species_labels(species_file, args.natoms or len(block.rows))
     if warning:
         print(f"Warning            : {warning}")
     write_single_outputs(
@@ -1227,12 +1439,24 @@ def run_single(args: argparse.Namespace) -> None:
         compress_tol=args.compress_tol,
     )
     print_single_summary(block, labels)
+    incar = args.incar or default_incar(args.outcar.parent)
+    moment_guards = prepare_single_moment_guards(args, species_file, incar)
+    if moment_guards:
+        initial = None
+        if incar is not None and species is not None:
+            initial = existing_magmom_values(incar, species.total_atoms)
+        atoms = build_atom_reports(block.moments, labels, initial, args.change_threshold)
+        status, bad_count, bad_by_element = apply_moment_guards(atoms, moment_guards)
+        print(f"Physics guard      : {guard_rule_text(moment_guards)}")
+        print(f"Physics status     : {status}  bad_sites={bad_count}  by_element={bad_by_element or {}}")
+    else:
+        print(f"Physics guard      : {auto_moment_guard_notice(moment_guards, not args.no_auto_moment_guard)}")
     print(f"Wrote prefix       : {args.output_prefix}")
 
 
 def run_batch(args: argparse.Namespace) -> None:
     runlist = args.runlist or Path("runlist.txt")
-    moment_guards = parse_moment_guards(args.moment_guard, args.moment_guard_tol)
+    moment_guards = prepare_batch_moment_guards(args, runlist)
     reports = build_run_reports(
         runlist=runlist,
         spin_index=args.spin_index,

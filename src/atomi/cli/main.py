@@ -533,21 +533,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vasp_update_magmom.add_argument("magmom_args", nargs=argparse.REMAINDER)
 
-    for command_name in ("vasp-spin-report", "spin-report"):
+    for command_name in ("vasp-spin-report", "spin-report", "spincheck"):
         spin_report = subparsers.add_parser(
             command_name,
             help="Correlate VASP final magnetic moments with run energies.",
         )
         spin_report.add_argument("spin_report_args", nargs=argparse.REMAINDER)
 
-    for command_name in ("vasp-branch-screen", "screen-vasp-branches", "vasp-stage1-screen"):
+    for command_name in ("vasp-branch-screen", "screen-vasp-branches", "vasp-stage1-screen", "spinscreen"):
         branch_screen = subparsers.add_parser(
             command_name,
             help="Stage-1 fail-fast screening of VASP spin/localization branches.",
         )
         branch_screen.add_argument("branch_screen_args", nargs=argparse.REMAINDER)
 
-    for command_name in ("vasp-branch-live", "vasp-branch-monitor"):
+    for command_name in ("vasp-branch-live", "vasp-branch-monitor", "spinlive"):
         branch_live = subparsers.add_parser(
             command_name,
             help="Live terminal monitor for VASP spin/localization branches.",
@@ -1023,17 +1023,17 @@ def main(argv: list[str] | None = None) -> None:
 
         vasp_update_magmom_main(raw_args[1:])
         return
-    if raw_args and raw_args[0] in ("vasp-spin-report", "spin-report"):
+    if raw_args and raw_args[0] in ("vasp-spin-report", "spin-report", "spincheck"):
         from atomi.vasp.spin_report import main as vasp_spin_report_main
 
         vasp_spin_report_main(raw_args[1:])
         return
-    if raw_args and raw_args[0] in ("vasp-branch-screen", "screen-vasp-branches", "vasp-stage1-screen"):
+    if raw_args and raw_args[0] in ("vasp-branch-screen", "screen-vasp-branches", "vasp-stage1-screen", "spinscreen"):
         from atomi.vasp.branch_screen import main as vasp_branch_screen_main
 
         vasp_branch_screen_main(raw_args[1:])
         return
-    if raw_args and raw_args[0] in ("vasp-branch-live", "vasp-branch-monitor"):
+    if raw_args and raw_args[0] in ("vasp-branch-live", "vasp-branch-monitor", "spinlive"):
         from atomi.vasp.branch_screen import monitor_main as vasp_branch_monitor_main
 
         vasp_branch_monitor_main(raw_args[1:])
@@ -1554,19 +1554,19 @@ def main(argv: list[str] | None = None) -> None:
         vasp_update_magmom_main(args.magmom_args)
         return
 
-    if args.subcommand in ("vasp-spin-report", "spin-report"):
+    if args.subcommand in ("vasp-spin-report", "spin-report", "spincheck"):
         from atomi.vasp.spin_report import main as vasp_spin_report_main
 
         vasp_spin_report_main(args.spin_report_args)
         return
 
-    if args.subcommand in ("vasp-branch-screen", "screen-vasp-branches", "vasp-stage1-screen"):
+    if args.subcommand in ("vasp-branch-screen", "screen-vasp-branches", "vasp-stage1-screen", "spinscreen"):
         from atomi.vasp.branch_screen import main as vasp_branch_screen_main
 
         vasp_branch_screen_main(args.branch_screen_args)
         return
 
-    if args.subcommand in ("vasp-branch-live", "vasp-branch-monitor"):
+    if args.subcommand in ("vasp-branch-live", "vasp-branch-monitor", "spinlive"):
         from atomi.vasp.branch_screen import monitor_main as vasp_branch_monitor_main
 
         vasp_branch_monitor_main(args.branch_screen_args)

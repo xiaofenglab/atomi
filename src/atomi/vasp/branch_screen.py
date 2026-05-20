@@ -31,6 +31,9 @@ from atomi.vasp.spin_report import (
     extract_first_available_magnetization,
     first_incar_file,
     first_species_file,
+    guard_rule_text,
+    infer_moment_guards_from_run_dirs,
+    merge_moment_guards,
     initial_order_from_atoms,
     magnetization_candidate_files,
     parse_moment_guards,
@@ -973,6 +976,7 @@ def format_live_table(reports: list[BranchReport], args: argparse.Namespace, ite
         "Atomi VASP Branch Live Monitor",
         f"Updated: {now}   refresh={args.refresh:g}s   iteration={iteration}",
         f"Branches={len(reports)}   GOOD={counts.get('continue', 0)}   WARN={counts.get('warning', 0)}   BAD={counts.get('stop', 0)}",
+        f"Spin guard: {guard_rule_text(args._moment_guards) if args._moment_guards else 'not inferred'}",
         f"Outputs: {args.outdir / 'stage1_branch_summary.csv'} ; {args.outdir / 'stage2_survivors_runlist.txt'}",
         "",
         "run  path                    frame        branch        step      energy     relE      dE      conv      scf       guard     chg       order             trk   rec   note",
@@ -1021,6 +1025,7 @@ def format_scan_header(args: argparse.Namespace, iteration: int, total: int) -> 
     lines = [
         "=" * 118,
         f"Atomi VASP Branch Scan Monitor | pass {iteration} | {now} | branches={total}",
+        f"Spin guard: {guard_rule_text(args._moment_guards) if args._moment_guards else 'not inferred'}",
         f"Outputs after pass: {args.outdir / 'stage1_branch_summary.csv'} ; {args.outdir / 'stage2_survivors_runlist.txt'}",
         "Rows are streamed as soon as each branch is parsed; per-frame ranks are final after the pass completes.",
         "run        path                    frame        branch        step      energy     relE      dE      conv      scf       guard     chg       order             trk   rec   note",
@@ -1167,6 +1172,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scf-bad-action", choices=("warning", "stop"), default="stop", help="Action for BAD_DE/OSCILLATING SCF.")
     parser.add_argument("--moment-guard", action="append", default=[], help="Element moment targets, e.g. U=-2,-1,1,2@0.8. Repeatable.")
     parser.add_argument("--moment-guard-tol", type=float, default=0.8, help="Default tolerance for --moment-guard.")
+    parser.add_argument(
+        "--no-auto-moment-guard",
+        action="store_true",
+        help="Disable default physics guards inferred from branch POSCAR/CONTCAR plus INCAR MAGMOM.",
+    )
+    parser.add_argument(
+        "--auto-moment-integer-tol",
+        type=float,
+        default=0.35,
+        help="Treat initial MAGMOM values within this distance of an integer as that integer.",
+    )
+    parser.add_argument(
+        "--auto-zero-tol",
+        type=float,
+        default=0.25,
+        help="Tolerance for automatically inferred near-zero/nonmagnetic elements.",
+    )
     parser.add_argument("--spin-fail-action", choices=("warning", "stop"), default="warning", help="Action when element moment guard fails.")
     parser.add_argument("--track-atom", action="append", default=[], help="Track intended localized atom indices, e.g. 35 or U:35. Repeatable or comma-separated.")
     parser.add_argument("--track-fail-action", choices=("warning", "stop"), default="warning", help="Action when tracked atom loses/flips moment.")
@@ -1188,10 +1210,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def prepare_moment_guards(args: argparse.Namespace) -> dict[str, tuple[list[float], float]]:
+    inferred: dict[str, tuple[list[float], float]] = {}
+    if not args.no_auto_moment_guard:
+        try:
+            branches = load_branches_from_args(args)
+        except FileNotFoundError:
+            branches = []
+        inferred = infer_moment_guards_from_run_dirs(
+            [branch.run_dir for branch in branches],
+            default_tol=args.moment_guard_tol,
+            integer_tol=args.auto_moment_integer_tol,
+            zero_tol=args.auto_zero_tol,
+        )
+    explicit = parse_moment_guards(args.moment_guard, args.moment_guard_tol)
+    return merge_moment_guards(inferred, explicit)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
-    args._moment_guards = parse_moment_guards(args.moment_guard, args.moment_guard_tol)
     args._track_atoms = parse_track_atoms(args.track_atom)
     if args.live:
         if args.index is None and args.runlist is None and not args.discover:
@@ -1203,8 +1241,10 @@ def main(argv: list[str] | None = None) -> None:
                     "to scan nearby VASP-like folders."
                 )
             args.runlist = default_runlist
+        args._moment_guards = prepare_moment_guards(args)
         run_live(args)
         return
+    args._moment_guards = prepare_moment_guards(args)
     iteration = 0
     while True:
         iteration += 1
