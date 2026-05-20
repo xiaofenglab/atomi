@@ -143,6 +143,22 @@ VACANCY_CANDIDATE_FIELDS = [
     "kept_partial_site_indices",
     "notes",
 ]
+SUPERCELL_ANALYSIS_FIELDS = [
+    "repeat",
+    "repeat_a",
+    "repeat_b",
+    "repeat_c",
+    "repeat_volume",
+    "aspect_ratio",
+    "estimated_total_atoms",
+    "selected_sites",
+    "n_vacancy",
+    "selected_species_counts_json",
+    "within_max_atoms",
+    "within_max_aspect",
+    "recommended",
+    "notes",
+]
 
 
 @dataclass
@@ -1510,10 +1526,116 @@ def parse_repeat(value: str | None) -> tuple[int, int, int] | None:
     return repeat  # type: ignore[return-value]
 
 
+def repeat_text(repeat: tuple[int, int, int]) -> str:
+    return f"{repeat[0]}x{repeat[1]}x{repeat[2]}"
+
+
 def repeat_aspect_ratio(repeat: tuple[int, int, int], cell_lengths: tuple[float, float, float] | None) -> float:
     lengths = cell_lengths or (1.0, 1.0, 1.0)
     repeated = [max(1.0e-12, float(length) * repeat[index]) for index, length in enumerate(lengths)]
     return max(repeated) / min(repeated)
+
+
+def repeat_volume(repeat: tuple[int, int, int]) -> int:
+    return repeat[0] * repeat[1] * repeat[2]
+
+
+def occupation_counts_for_repeat(groups: list[dict[str, Any]], repeat: tuple[int, int, int]) -> dict[str, int]:
+    volume = repeat_volume(repeat)
+    counts: dict[str, int] = {}
+    for group in groups:
+        n_sites = len(group.get("indices", [])) * volume
+        for symbol, fraction in group.get("species", {}).items():
+            count = int(round(n_sites * float(fraction)))
+            counts[symbol] = counts.get(symbol, 0) + count
+    return dict(sorted(counts.items()))
+
+
+def repeat_analysis_rows(
+    requirements: list[tuple[int, float]],
+    max_repeat: int,
+    groups: list[dict[str, Any]],
+    n_base_atoms: int,
+    vacancy_label: str,
+    cell_lengths: tuple[float, float, float] | None = None,
+    max_aspect: float = 2.5,
+) -> list[dict[str, Any]]:
+    if not requirements:
+        repeat = (1, 1, 1)
+        return [
+            {
+                "repeat": repeat_text(repeat),
+                "repeat_tuple": repeat,
+                "repeat_a": repeat[0],
+                "repeat_b": repeat[1],
+                "repeat_c": repeat[2],
+                "repeat_volume": 1,
+                "aspect_ratio": f"{repeat_aspect_ratio(repeat, cell_lengths):.6g}",
+                "estimated_total_atoms": n_base_atoms,
+                "selected_sites": 0,
+                "n_vacancy": 0,
+                "selected_species_counts_json": "{}",
+                "within_max_aspect": "true",
+                "notes": "No fractional occupational requirements.",
+            }
+        ]
+    rows: list[dict[str, Any]] = []
+    fractions = [(n_sites, Fraction(occupancy).limit_denominator(128)) for n_sites, occupancy in requirements]
+    for a in range(1, max_repeat + 1):
+        for b in range(1, max_repeat + 1):
+            for c in range(1, max_repeat + 1):
+                repeat = (a, b, c)
+                volume = repeat_volume(repeat)
+                if any((n_sites * volume * frac.numerator) % frac.denominator != 0 for n_sites, frac in fractions):
+                    continue
+                counts = occupation_counts_for_repeat(groups, repeat)
+                n_vacancy = counts.get(vacancy_label, 0)
+                aspect = repeat_aspect_ratio(repeat, cell_lengths)
+                rows.append(
+                    {
+                        "repeat": repeat_text(repeat),
+                        "repeat_tuple": repeat,
+                        "repeat_a": a,
+                        "repeat_b": b,
+                        "repeat_c": c,
+                        "repeat_volume": volume,
+                        "aspect_ratio": f"{aspect:.6g}",
+                        "estimated_total_atoms": n_base_atoms * volume - n_vacancy,
+                        "selected_sites": sum(len(group.get("indices", [])) * volume for group in groups),
+                        "n_vacancy": n_vacancy,
+                        "selected_species_counts_json": json.dumps(counts, sort_keys=True),
+                        "within_max_aspect": "true" if aspect <= max_aspect else "false",
+                        "notes": "",
+                    }
+                )
+    return sorted(rows, key=lambda row: (int(row["repeat_volume"]), float(row["aspect_ratio"]), row["repeat"]))
+
+
+def choose_repeat_from_analysis(
+    rows: list[dict[str, Any]],
+    max_atoms: int | None,
+    max_aspect: float,
+    objective: str,
+) -> tuple[int, int, int]:
+    if not rows:
+        raise ValueError(
+            "Could not find a compact integer supercell for the partial occupancy. "
+            "Pass --supercell explicitly or increase --max-repeat."
+        )
+    limited = [row for row in rows if max_atoms is None or int(row["estimated_total_atoms"]) <= max_atoms]
+    pool = limited or rows
+    if objective == "smallest":
+        chosen = min(pool, key=lambda row: (int(row["repeat_volume"]), float(row["aspect_ratio"]), row["repeat"]))
+    elif objective == "compact":
+        compact_pool = [row for row in pool if float(row["aspect_ratio"]) <= max_aspect] or pool
+        chosen = min(compact_pool, key=lambda row: (float(row["aspect_ratio"]), int(row["repeat_volume"]), row["repeat"]))
+    else:
+        compact_pool = [row for row in pool if float(row["aspect_ratio"]) <= max_aspect]
+        if compact_pool:
+            chosen = min(compact_pool, key=lambda row: (int(row["repeat_volume"]), float(row["aspect_ratio"]), row["repeat"]))
+        else:
+            chosen = min(pool, key=lambda row: (int(row["repeat_volume"]), float(row["aspect_ratio"]), row["repeat"]))
+    return tuple(int(chosen[key]) for key in ("repeat_a", "repeat_b", "repeat_c"))  # type: ignore[return-value]
 
 
 def choose_integer_repeat(
@@ -1522,27 +1644,16 @@ def choose_integer_repeat(
     cell_lengths: tuple[float, float, float] | None = None,
     max_aspect: float = 2.5,
 ) -> tuple[int, int, int]:
-    if not requirements:
-        return (1, 1, 1)
-    candidates: list[tuple[int, float, int, tuple[int, int, int]]] = []
-    fractions = [(n_sites, Fraction(occupancy).limit_denominator(128)) for n_sites, occupancy in requirements]
-    for a in range(1, max_repeat + 1):
-        for b in range(1, max_repeat + 1):
-            for c in range(1, max_repeat + 1):
-                volume = a * b * c
-                if any((n_sites * volume * frac.numerator) % frac.denominator != 0 for n_sites, frac in fractions):
-                    continue
-                repeat = (a, b, c)
-                candidates.append((volume, repeat_aspect_ratio(repeat, cell_lengths), max(repeat), repeat))
-    if not candidates:
-        raise ValueError(
-            "Could not find a compact integer supercell for the partial occupancy. "
-            "Pass --supercell explicitly or increase --max-repeat."
-        )
-    compact = [item for item in candidates if item[1] <= max_aspect]
-    if compact:
-        return min(compact, key=lambda item: (item[0], item[1], item[2], item[3]))[3]
-    return min(candidates, key=lambda item: (item[1], item[0], item[2], item[3]))[3]
+    rows = repeat_analysis_rows(
+        requirements,
+        max_repeat,
+        groups=[],
+        n_base_atoms=0,
+        vacancy_label="Va",
+        cell_lengths=cell_lengths,
+        max_aspect=max_aspect,
+    )
+    return choose_repeat_from_analysis(rows, max_atoms=None, max_aspect=max_aspect, objective="balanced")
 
 
 def repeated_occupancies(occupancies: list[float], repeat: tuple[int, int, int]) -> list[float]:
@@ -1906,10 +2017,28 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--max-repeat", type=int, default=6, help="Largest repeat searched for --supercell auto.")
     parser.add_argument(
+        "--auto-max-atoms",
+        type=int,
+        default=800,
+        help="For --supercell auto, prefer repeats with this many final atoms or fewer. Use 0 to disable.",
+    )
+    parser.add_argument(
         "--auto-max-aspect",
         type=float,
         default=2.5,
         help="For --supercell auto, prefer the smallest integer repeat with repeated-cell max/min length <= this value.",
+    )
+    parser.add_argument(
+        "--auto-objective",
+        choices=("balanced", "smallest", "compact"),
+        default="balanced",
+        help="Auto-repeat policy: balanced respects the atom budget before compactness; smallest minimizes atoms; compact prioritizes shape.",
+    )
+    parser.add_argument(
+        "--engine",
+        choices=("both", "direct", "atat"),
+        default="both",
+        help="Generation path: direct writes explicit POSCAR candidates, atat writes only ATAT SQS handoff, both does both.",
     )
     parser.add_argument("--vasp-template", type=Path, help="Optional VASP template copied beside each POSCAR.")
     parser.add_argument("--seed", type=int, default=20260520)
@@ -1944,12 +2073,51 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
             "Pass --site-label and/or --target-occupancy if CIF parsing does not expose the intended site."
         )
     selected_labels = sorted({str(group["label"]) for group in initial_occupation_groups if group.get("label")})
-    repeat = parse_repeat(args.supercell) or choose_integer_repeat(
-        occupation_requirements(initial_occupation_groups),
+    requirements = occupation_requirements(initial_occupation_groups)
+    cell_lengths = tuple(float(value) for value in atoms0.cell.lengths())
+    auto_max_atoms = args.auto_max_atoms if args.auto_max_atoms and args.auto_max_atoms > 0 else None
+    analysis_rows = repeat_analysis_rows(
+        requirements,
         args.max_repeat,
-        tuple(float(value) for value in atoms0.cell.lengths()),
+        initial_occupation_groups,
+        len(atoms0),
+        args.vacancy_label,
+        cell_lengths,
         args.auto_max_aspect,
     )
+    explicit_repeat = parse_repeat(args.supercell)
+    repeat = explicit_repeat or choose_repeat_from_analysis(
+        analysis_rows,
+        max_atoms=auto_max_atoms,
+        max_aspect=args.auto_max_aspect,
+        objective=args.auto_objective,
+    )
+    for row in analysis_rows:
+        within_atoms = auto_max_atoms is None or int(row["estimated_total_atoms"]) <= auto_max_atoms
+        row["within_max_atoms"] = "true" if within_atoms else "false"
+        row["recommended"] = "true" if tuple(row["repeat_tuple"]) == repeat else "false"
+        if row["recommended"] == "true":
+            row["notes"] = f"selected by {'explicit --supercell' if explicit_repeat else args.auto_objective + ' auto policy'}"
+    if explicit_repeat and not any(tuple(row["repeat_tuple"]) == repeat for row in analysis_rows):
+        analysis_rows.append(
+            {
+                "repeat": repeat_text(repeat),
+                "repeat_tuple": repeat,
+                "repeat_a": repeat[0],
+                "repeat_b": repeat[1],
+                "repeat_c": repeat[2],
+                "repeat_volume": repeat_volume(repeat),
+                "aspect_ratio": f"{repeat_aspect_ratio(repeat, cell_lengths):.6g}",
+                "estimated_total_atoms": "",
+                "selected_sites": "",
+                "n_vacancy": "",
+                "selected_species_counts_json": "{}",
+                "within_max_atoms": "",
+                "within_max_aspect": "",
+                "recommended": "true",
+                "notes": "explicit repeat; integer counts checked during generation",
+            }
+        )
     atoms = atoms0.repeat(repeat)
     site_labels = repeat_metadata(labels0, repeat)
     site_specs = repeat_metadata(specs0, repeat)
@@ -1968,15 +2136,19 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     root = args.outdir.expanduser().resolve()
     candidates_dir = root / "candidates"
     atat_dir = root / "atat"
-    candidates_dir.mkdir(parents=True, exist_ok=True)
-    write_atat_rndstr(
-        atat_dir / "rndstr.in",
-        atoms,
-        site_specs,
-    )
-    if args.atat_atoms <= 0:
-        args.atat_atoms = len(atoms)
-    write_atat_vacancy_scripts(atat_dir, args)
+    root.mkdir(parents=True, exist_ok=True)
+    write_csv(root / "supercell_candidate_analysis.csv", analysis_rows, SUPERCELL_ANALYSIS_FIELDS)
+    if args.engine in {"both", "direct"}:
+        candidates_dir.mkdir(parents=True, exist_ok=True)
+    if args.engine in {"both", "atat"}:
+        write_atat_rndstr(
+            atat_dir / "rndstr.in",
+            atoms,
+            site_specs,
+        )
+        if args.atat_atoms <= 0:
+            args.atat_atoms = len(atoms)
+        write_atat_vacancy_scripts(atat_dir, args)
 
     occupation_sets = {
         "vacancy_separated": choose_occupations_by_group(atoms, occupation_groups, "vacancy_separated", args.seed, args.vacancy_label),
@@ -1985,53 +2157,54 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     }
     rows: list[dict[str, Any]] = []
     runlist: list[str] = []
-    for index, (kind, assignments) in enumerate(occupation_sets.items(), start=1):
-        case_id = f"{index:02d}_{kind}"
-        run_dir = candidates_dir / case_id
-        run_dir.mkdir(parents=True, exist_ok=True)
-        final_atoms = atoms_with_occupational_assignments(atoms, assignments, args.vacancy_label)
-        write(run_dir / "POSCAR", final_atoms, format="vasp", direct=True, vasp5=True, sort=False)
-        copy_vasp_template_for_vacancy(args.vasp_template.expanduser().resolve() if args.vasp_template else None, run_dir)
-        all_partial_indices = sorted({index for group in occupation_groups for index in group["indices"]})
-        vacancies = sorted(index for index, symbol in assignments.items() if symbol == args.vacancy_label)
-        kept = sorted(set(all_partial_indices) - set(vacancies))
-        min_vv = min_pair_distance(atoms, vacancies)
-        vacancy_fraction = len(vacancies) / len(all_partial_indices) if all_partial_indices else 0.0
-        reasonable = len(vacancies) == vacancy_total
-        count_symbols = final_atoms.get_chemical_symbols()
-        counts = {symbol: count_symbols.count(symbol) for symbol in sorted(set(count_symbols))}
-        assigned_counts = assignment_counts(assignments)
-        selected_real_species = {
-            symbol
-            for group in occupation_groups
-            for symbol in group["species"]
-            if symbol != args.vacancy_label
-        }
-        rows.append(
-            {
-                "candidate_id": case_id,
-                "kind": kind,
-                "poscar": str((run_dir / "POSCAR").resolve()),
-                "n_Gd": count_symbols.count("Gd"),
-                "n_O": count_symbols.count("O"),
-                "n_Va": len(vacancies),
-                "n_partial_element": sum(count_symbols.count(element) for element in (partial_elements or selected_real_species)),
-                "species_counts_json": json.dumps(counts, sort_keys=True),
-                "site_label": ",".join(selected_labels),
-                "vacancy_fraction": f"{vacancy_fraction:.12g}",
-                "min_vacancy_distance_A": "" if min_vv is None else f"{min_vv:.8f}",
-                "stoichiometry": composition_string(final_atoms),
-                "reasonable_stoichiometry": "true" if reasonable else "false",
-                "assigned_site_species_json": json.dumps(assigned_counts, sort_keys=True),
-                "removed_partial_site_indices": " ".join(str(item + 1) for item in vacancies),
-                "kept_partial_site_indices": " ".join(str(item + 1) for item in kept),
-                "notes": "Occupational species made explicit and vacancy pseudo-atoms removed; use ISYM=0 for VASP relaxation.",
+    if args.engine in {"both", "direct"}:
+        for index, (kind, assignments) in enumerate(occupation_sets.items(), start=1):
+            case_id = f"{index:02d}_{kind}"
+            run_dir = candidates_dir / case_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            final_atoms = atoms_with_occupational_assignments(atoms, assignments, args.vacancy_label)
+            write(run_dir / "POSCAR", final_atoms, format="vasp", direct=True, vasp5=True, sort=False)
+            copy_vasp_template_for_vacancy(args.vasp_template.expanduser().resolve() if args.vasp_template else None, run_dir)
+            all_partial_indices = sorted({index for group in occupation_groups for index in group["indices"]})
+            vacancies = sorted(index for index, symbol in assignments.items() if symbol == args.vacancy_label)
+            kept = sorted(set(all_partial_indices) - set(vacancies))
+            min_vv = min_pair_distance(atoms, vacancies)
+            vacancy_fraction = len(vacancies) / len(all_partial_indices) if all_partial_indices else 0.0
+            reasonable = len(vacancies) == vacancy_total
+            count_symbols = final_atoms.get_chemical_symbols()
+            counts = {symbol: count_symbols.count(symbol) for symbol in sorted(set(count_symbols))}
+            assigned_counts = assignment_counts(assignments)
+            selected_real_species = {
+                symbol
+                for group in occupation_groups
+                for symbol in group["species"]
+                if symbol != args.vacancy_label
             }
-        )
-        runlist.append(str(run_dir.resolve()))
+            rows.append(
+                {
+                    "candidate_id": case_id,
+                    "kind": kind,
+                    "poscar": str((run_dir / "POSCAR").resolve()),
+                    "n_Gd": count_symbols.count("Gd"),
+                    "n_O": count_symbols.count("O"),
+                    "n_Va": len(vacancies),
+                    "n_partial_element": sum(count_symbols.count(element) for element in (partial_elements or selected_real_species)),
+                    "species_counts_json": json.dumps(counts, sort_keys=True),
+                    "site_label": ",".join(selected_labels),
+                    "vacancy_fraction": f"{vacancy_fraction:.12g}",
+                    "min_vacancy_distance_A": "" if min_vv is None else f"{min_vv:.8f}",
+                    "stoichiometry": composition_string(final_atoms),
+                    "reasonable_stoichiometry": "true" if reasonable else "false",
+                    "assigned_site_species_json": json.dumps(assigned_counts, sort_keys=True),
+                    "removed_partial_site_indices": " ".join(str(item + 1) for item in vacancies),
+                    "kept_partial_site_indices": " ".join(str(item + 1) for item in kept),
+                    "notes": "Occupational species made explicit and vacancy pseudo-atoms removed; use ISYM=0 for VASP relaxation.",
+                }
+            )
+            runlist.append(str(run_dir.resolve()))
 
     write_csv(root / "vacancy_candidate_index.csv", rows, VACANCY_CANDIDATE_FIELDS)
-    (root / "runlist.txt").write_text("\n".join(runlist) + "\n", encoding="utf-8")
+    (root / "runlist.txt").write_text(("\n".join(runlist) + "\n") if runlist else "", encoding="utf-8")
     write_json(
         root / "vacancy_cif_plan.json",
         {
@@ -2041,7 +2214,14 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
             "site_label": args.site_label,
             "selected_site_labels": selected_labels,
             "vacancy_label": args.vacancy_label,
+            "engine": args.engine,
             "repeat": repeat,
+            "auto_supercell": {
+                "objective": args.auto_objective,
+                "max_atoms": auto_max_atoms,
+                "max_aspect": args.auto_max_aspect,
+                "max_repeat": args.max_repeat,
+            },
             "n_partial_sites": sum(len(group["indices"]) for group in occupation_groups),
             "n_keep_partial_element": keep_total,
             "n_vacancy": vacancy_total,
@@ -2080,8 +2260,9 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
                 for group in site_groups
             ],
             "outputs": {
-                "rndstr": str(atat_dir / "rndstr.in"),
-                "run_mcsqs": str(atat_dir / "run_mcsqs.sh"),
+                "supercell_analysis": str(root / "supercell_candidate_analysis.csv"),
+                "rndstr": str(atat_dir / "rndstr.in") if args.engine in {"both", "atat"} else "",
+                "run_mcsqs": str(atat_dir / "run_mcsqs.sh") if args.engine in {"both", "atat"} else "",
                 "candidate_index": str(root / "vacancy_candidate_index.csv"),
                 "runlist": str(root / "runlist.txt"),
             },
@@ -2094,6 +2275,8 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     )
 
     if args.run_mcsqs:
+        if args.engine == "direct":
+            raise RuntimeError("--run-mcsqs requires --engine atat or --engine both.")
         if shutil.which("mcsqs") is None:
             raise RuntimeError("mcsqs was requested with --run-mcsqs, but it is not on PATH.")
         subprocess.run(["mcsqs", f"-n={args.atat_atoms}"], cwd=atat_dir, check=True)
@@ -2110,8 +2293,9 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
             f"fractions={fraction_text}  counts={count_text}"
         )
     print(f"Supercell repeat      : {repeat[0]} {repeat[1]} {repeat[2]}")
-    print(f"ATAT rndstr.in        : {atat_dir / 'rndstr.in'}")
-    print(f"Candidates            : {len(rows)}")
+    print(f"Supercell analysis    : {root / 'supercell_candidate_analysis.csv'}")
+    print(f"ATAT rndstr.in        : {(atat_dir / 'rndstr.in') if args.engine in {'both', 'atat'} else 'skipped'}")
+    print(f"Candidates            : {len(rows) if args.engine in {'both', 'direct'} else 'skipped'}")
     for row in rows:
         print(
             f"  {row['candidate_id']:>18s}  {row['stoichiometry']}  "

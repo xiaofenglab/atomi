@@ -353,6 +353,8 @@ def test_materials_opt_vacancy_cif_writes_explicit_poscars_and_atat_input(tmp_pa
     assert all(row["n_Va"] == "4" for row in index)
     assert all(row["site_label"] == "O2" for row in index)
     assert all(row["reasonable_stoichiometry"] == "true" for row in index)
+    supercells = rows(out / "supercell_candidate_analysis.csv")
+    assert any(row["repeat"] == "1x1x5" and row["recommended"] == "true" for row in supercells)
     poscar = out / "candidates" / "01_vacancy_separated" / "POSCAR"
     assert "Va" not in poscar.read_text(encoding="utf-8")
     assert "ISYM = 0" in (out / "candidates" / "01_vacancy_separated" / "INCAR").read_text(encoding="utf-8")
@@ -530,6 +532,29 @@ def test_choose_integer_repeat_avoids_slab_when_compact_repeat_exists() -> None:
     )
 
     assert repeat == (2, 2, 5)
+
+
+def test_vacancy_cif_auto_balances_atom_budget_and_compactness() -> None:
+    group = {
+        "label": "O2",
+        "species": {"O": 0.2, "Va": 0.8},
+        "indices": list(range(16)),
+    }
+    rows_ = bridge.repeat_analysis_rows(
+        [(16, 0.2), (16, 0.8)],
+        max_repeat=5,
+        groups=[group],
+        n_base_atoms=96,
+        vacancy_label="Va",
+        cell_lengths=(1.0, 1.0, 1.0),
+        max_aspect=2.5,
+    )
+
+    small = bridge.choose_repeat_from_analysis(rows_, max_atoms=800, max_aspect=2.5, objective="balanced")
+    compact = bridge.choose_repeat_from_analysis(rows_, max_atoms=2000, max_aspect=2.5, objective="balanced")
+
+    assert small == (1, 1, 5)
+    assert compact == (2, 2, 5)
 
 
 def test_materials_opt_relax_seeds_prepares_volume_scan(tmp_path: Path, capsys) -> None:
