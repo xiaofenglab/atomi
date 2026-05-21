@@ -2678,6 +2678,39 @@ def read_atat_structure(path: Path, vacancy_label: str = "Vac") -> tuple[Any, in
     return Atoms(symbols=symbols, scaled_positions=scaled_positions, cell=cell, pbc=True), removed
 
 
+COMMON_LIGAND_ELEMENTS = {
+    "H",
+    "B",
+    "C",
+    "N",
+    "O",
+    "F",
+    "Si",
+    "P",
+    "S",
+    "Cl",
+    "As",
+    "Se",
+    "Br",
+    "Te",
+    "I",
+    "At",
+}
+
+
+def order_cations_before_ligands(atoms: Any) -> Any:
+    symbols = atoms.get_chemical_symbols()
+    order = sorted(
+        range(len(symbols)),
+        key=lambda index: (
+            1 if symbols[index] in COMMON_LIGAND_ELEMENTS else 0,
+            symbols.index(symbols[index]),
+            index,
+        ),
+    )
+    return atoms[order]
+
+
 def atat_poscar_main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="materials-opt atat-poscar",
@@ -2701,6 +2734,7 @@ def atat_poscar_main(argv: list[str] | None = None) -> None:
         run_dir = candidates_dir / f"{index:02d}_{safe_name(source.stem)}"
         run_dir.mkdir(parents=True, exist_ok=True)
         poscar = run_dir / "POSCAR"
+        atoms = order_cations_before_ligands(atoms)
         write(poscar, atoms, format="vasp", direct=True, vasp5=True, sort=False)
         copy_vasp_template_for_vacancy(args.vasp_template.expanduser().resolve() if args.vasp_template else None, run_dir)
         symbols = atoms.get_chemical_symbols()

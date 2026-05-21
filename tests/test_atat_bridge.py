@@ -711,9 +711,9 @@ def test_materials_opt_atat_poscar_removes_vacancy_pseudo_atoms(tmp_path: Path) 
         "5 0 0\n"
         "0 5 0\n"
         "0 0 5\n"
+        "0.25 0.25 0.25 O\n"
         "0 0 0 Gd\n"
         "0.5 0.5 0.5 U\n"
-        "0.25 0.25 0.25 O\n"
         "0.75 0.75 0.75 Vac\n",
         encoding="utf-8",
     )
@@ -743,6 +743,7 @@ def test_materials_opt_atat_poscar_removes_vacancy_pseudo_atoms(tmp_path: Path) 
     poscar = (out / "candidates" / "01_bestsqs" / "POSCAR").read_text(encoding="utf-8")
     assert "Va" not in poscar
     assert "Vac" not in poscar
+    assert poscar.splitlines()[5].split() == ["Gd", "U", "O"]
     assert "Gd" in poscar
     assert "ISYM = 0" in (out / "candidates" / "01_bestsqs" / "INCAR").read_text(encoding="utf-8")
     assert (out / "runlist.txt").read_text(encoding="utf-8").strip().endswith("01_bestsqs")
