@@ -11,7 +11,7 @@ from atomi.vasp.checks import (
     collect_run_energies,
     vasp_energies,
 )
-from atomi.viz.lammps import read_thermo_rows, summarize_thermo
+from atomi.viz.lammps import read_thermo_rows, summarize_recent_runtime_fraction, summarize_thermo
 from atomi.viz.vasp_live import count_dav_steps
 
 
@@ -381,3 +381,21 @@ def test_read_lammps_thermo_rows(tmp_path: Path) -> None:
     assert rows[-1].step == 100
     assert summary.npoints == 2
     assert summary.temp_avg == 305
+
+
+def test_lammps_recent_runtime_fraction_uses_last_step_span(tmp_path: Path) -> None:
+    log = tmp_path / "log.lammps"
+    log.write_text(
+        "Step Temp PotEng TotEng Press Volume\n"
+        "0 300 -10 -9 100 1000\n"
+        "100 320 -12 -11 80 1010\n"
+        "200 340 -14 -13 60 1020\n"
+        "400 380 -18 -17 20 1040\n",
+        encoding="utf-8",
+    )
+
+    summary = summarize_recent_runtime_fraction(read_thermo_rows(log), fraction=0.2)
+
+    assert summary["npoints"] == 1.0
+    assert summary["step_min"] == 400
+    assert summary["temp"] == 380

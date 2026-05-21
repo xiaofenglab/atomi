@@ -176,8 +176,53 @@ def _print_live_header(logfile: Path, rows: list[LammpsThermoRow], interval: flo
     print(f" Latest P      : {_fmt(latest.pressure)}")
     print(f" Latest V      : {_fmt(latest.volume)}")
     print(f" Latest PE     : {_fmt(latest.potential_energy)}")
+    recent = summarize_recent_runtime_fraction(rows, fraction=0.2)
+    if recent:
+        print(
+            " Last 20% avg  : "
+            f"T={_fmt(recent['temp'])} K, "
+            f"P={_fmt(recent['pressure'])}, "
+            f"V={_fmt(recent['volume'])}, "
+            f"PE={_fmt(recent['potential_energy'])}"
+        )
+        print(
+            f" Avg window    : {int(recent['npoints'])} pts, "
+            f"steps {_fmt(recent['step_min'])} to {_fmt(recent['step_max'])}"
+        )
     print("============================================================")
     print()
+
+
+def summarize_recent_runtime_fraction(rows: list[LammpsThermoRow], fraction: float = 0.2) -> dict[str, float | None]:
+    """Average thermo values over the last fraction of elapsed step span."""
+    window = _recent_runtime_rows(rows, fraction=fraction)
+    if not window:
+        return {}
+    return {
+        "npoints": float(len(window)),
+        "step_min": window[0].step,
+        "step_max": window[-1].step,
+        "temp": _mean(_series(window, "temp")),
+        "pressure": _mean(_series(window, "pressure")),
+        "volume": _mean(_series(window, "volume")),
+        "potential_energy": _mean(_series(window, "potential_energy")),
+    }
+
+
+def _recent_runtime_rows(rows: list[LammpsThermoRow], fraction: float = 0.2) -> list[LammpsThermoRow]:
+    if not rows:
+        return []
+    if not 0 < fraction <= 1:
+        raise ValueError("fraction must be between 0 and 1.")
+    first_step = rows[0].step
+    last_step = rows[-1].step
+    span = last_step - first_step
+    if span > 0:
+        cutoff = last_step - fraction * span
+        window = [row for row in rows if row.step >= cutoff]
+        return window or [rows[-1]]
+    start = max(0, math.floor(len(rows) * (1.0 - fraction)))
+    return rows[start:]
 
 
 def _run_gnuplot(logfile: Path, script: Path, window: int) -> None:
