@@ -399,3 +399,26 @@ def test_lammps_recent_runtime_fraction_uses_last_step_span(tmp_path: Path) -> N
     assert summary["npoints"] == 1.0
     assert summary["step_min"] == 400
     assert summary["temp"] == 380
+    assert summary["temp_std"] == 0.0
+
+
+def test_lammps_recent_runtime_fraction_reports_error_percent(tmp_path: Path) -> None:
+    log = tmp_path / "log.lammps"
+    log.write_text(
+        "Step Temp PotEng TotEng Press Volume\n"
+        "0 300 -10 -9 100 1000\n"
+        "100 320 -12 -11 80 1010\n"
+        "200 340 -14 -13 60 1020\n"
+        "400 380 -18 -17 20 1040\n",
+        encoding="utf-8",
+    )
+
+    summary = summarize_recent_runtime_fraction(read_thermo_rows(log), fraction=0.5)
+
+    assert summary["npoints"] == 2.0
+    assert summary["temp"] == 360
+    assert summary["temp_std"] == 20
+    assert summary["temp_std_percent"] == pytest.approx(5.5555556)
+    assert summary["potential_energy"] == -16
+    assert summary["potential_energy_std"] == 2
+    assert summary["potential_energy_std_percent"] == pytest.approx(12.5)

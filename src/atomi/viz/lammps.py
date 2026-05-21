@@ -178,12 +178,13 @@ def _print_live_header(logfile: Path, rows: list[LammpsThermoRow], interval: flo
     print(f" Latest PE     : {_fmt(latest.potential_energy)}")
     recent = summarize_recent_runtime_fraction(rows, fraction=0.2)
     if recent:
+        print(" Last 20% avg")
+        print(f"   T  : {_fmt_avg_error(recent['temp'], recent['temp_std'], recent['temp_std_percent'])} K")
+        print(f"   P  : {_fmt_avg_error(recent['pressure'], recent['pressure_std'], recent['pressure_std_percent'])}")
+        print(f"   V  : {_fmt_avg_error(recent['volume'], recent['volume_std'], recent['volume_std_percent'])}")
         print(
-            " Last 20% avg  : "
-            f"T={_fmt(recent['temp'])} K, "
-            f"P={_fmt(recent['pressure'])}, "
-            f"V={_fmt(recent['volume'])}, "
-            f"PE={_fmt(recent['potential_energy'])}"
+            "   PE : "
+            f"{_fmt_avg_error(recent['potential_energy'], recent['potential_energy_std'], recent['potential_energy_std_percent'])}"
         )
         print(
             f" Avg window    : {int(recent['npoints'])} pts, "
@@ -198,14 +199,34 @@ def summarize_recent_runtime_fraction(rows: list[LammpsThermoRow], fraction: flo
     window = _recent_runtime_rows(rows, fraction=fraction)
     if not window:
         return {}
+    temps = _series(window, "temp")
+    pressures = _series(window, "pressure")
+    volumes = _series(window, "volume")
+    potential_energies = _series(window, "potential_energy")
+    temp_avg = _mean(temps)
+    pressure_avg = _mean(pressures)
+    volume_avg = _mean(volumes)
+    potential_energy_avg = _mean(potential_energies)
+    temp_std = _std(temps)
+    pressure_std = _std(pressures)
+    volume_std = _std(volumes)
+    potential_energy_std = _std(potential_energies)
     return {
         "npoints": float(len(window)),
         "step_min": window[0].step,
         "step_max": window[-1].step,
-        "temp": _mean(_series(window, "temp")),
-        "pressure": _mean(_series(window, "pressure")),
-        "volume": _mean(_series(window, "volume")),
-        "potential_energy": _mean(_series(window, "potential_energy")),
+        "temp": temp_avg,
+        "temp_std": temp_std,
+        "temp_std_percent": _relative_abs_percent(temp_std, temp_avg),
+        "pressure": pressure_avg,
+        "pressure_std": pressure_std,
+        "pressure_std_percent": _relative_abs_percent(pressure_std, pressure_avg),
+        "volume": volume_avg,
+        "volume_std": volume_std,
+        "volume_std_percent": _relative_abs_percent(volume_std, volume_avg),
+        "potential_energy": potential_energy_avg,
+        "potential_energy_std": potential_energy_std,
+        "potential_energy_std_percent": _relative_abs_percent(potential_energy_std, potential_energy_avg),
     }
 
 
@@ -276,6 +297,12 @@ def _relative_percent(value: float | None, reference: float | None) -> float | N
     return 100.0 * value / reference
 
 
+def _relative_abs_percent(value: float | None, reference: float | None) -> float | None:
+    if value is None or reference in (None, 0):
+        return None
+    return 100.0 * value / abs(reference)
+
+
 def _volume_drift_percent(volumes: list[float]) -> float | None:
     if len(volumes) < 2:
         return None
@@ -293,3 +320,7 @@ def _fmt(value: float | None) -> str:
     if value is None:
         return "NA"
     return f"{value:.6g}"
+
+
+def _fmt_avg_error(avg: float | None, err: float | None, err_percent: float | None) -> str:
+    return f"{_fmt(avg)} +/- {_fmt(err)} ({_fmt(err_percent)}%)"
