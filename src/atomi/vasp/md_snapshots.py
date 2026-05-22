@@ -15,6 +15,7 @@ from ase import Atoms
 from ase.io import read, write
 
 from atomi.lammps.elastic import read_lammps_thermo_table
+from atomi.vasp.magmom import expand_magmom_tokens, find_magmom_line, strip_incar_comment
 from atomi.vasp.prefail import (
     choose_reference,
     copy_vasp_template,
@@ -477,7 +478,7 @@ def reduce_large_frame_to_subcells(
     species_order: tuple[str, ...],
     keep_all: bool,
     max_subcells: int,
-) -> tuple[list[tuple[tuple[int, int, int], Atoms, float]], list[str]]:
+) -> tuple[list[tuple[tuple[int, int, int], Atoms, float]], list[str], dict]:
     expected = species_counts(reference_small)
     frac = md_atoms.get_scaled_positions(wrap=True)
     symbols = np.array(md_atoms.get_chemical_symbols())
@@ -519,9 +520,90 @@ def reduce_large_frame_to_subcells(
                 candidates.append(((ix, iy, iz), reordered, local_distortion_score(reordered, reference_small)))
 
     candidates.sort(key=lambda item: item[2], reverse=True)
+    selected = candidates if keep_all else candidates[: max(1, max_subcells)]
+    stats = {
+        "expected_subcell_count": int(replicate[0] * replicate[1] * replicate[2]),
+        "valid_subcell_count": len(candidates),
+        "kept_subcell_count": len(selected),
+        "kept_all_subcells": bool(keep_all),
+    }
     if keep_all:
-        return candidates, warnings
-    return candidates[: max(1, max_subcells)], warnings
+        return selected, warnings, stats
+    return selected, warnings, stats
+
+
+def template_magmom_metadata(template_dir: Path | None, reference: Atoms) -> tuple[dict, list[str]]:
+    if template_dir is None:
+        return (
+            {
+                "magmom_source": None,
+                "magmom_status": "no_vasp_template",
+                "magmom_ready_for_reference_order": False,
+                "magmom_expected_atoms": len(reference),
+                "magmom_count": 0,
+            },
+            ["no VASP template supplied; MAGMOM was not copied"],
+        )
+    incar = template_dir / "INCAR"
+    if not incar.exists():
+        return (
+            {
+                "magmom_source": str(incar.resolve()),
+                "magmom_status": "missing_incar",
+                "magmom_ready_for_reference_order": False,
+                "magmom_expected_atoms": len(reference),
+                "magmom_count": 0,
+            },
+            [f"template INCAR missing; MAGMOM was not copied from {incar}"],
+        )
+
+    line_index, line = find_magmom_line(incar.read_text(encoding="utf-8", errors="replace").splitlines())
+    if line_index is None or line is None:
+        return (
+            {
+                "magmom_source": str(incar.resolve()),
+                "magmom_status": "missing_magmom",
+                "magmom_ready_for_reference_order": False,
+                "magmom_expected_atoms": len(reference),
+                "magmom_count": 0,
+            },
+            ["template INCAR has no MAGMOM line; spin initialization will rely on VASP/default settings"],
+        )
+
+    body = strip_incar_comment(line).split("=", 1)[-1]
+    try:
+        values = expand_magmom_tokens(body.split())
+    except ValueError:
+        return (
+            {
+                "magmom_source": str(incar.resolve()),
+                "magmom_status": "unreadable_magmom",
+                "magmom_ready_for_reference_order": False,
+                "magmom_expected_atoms": len(reference),
+                "magmom_count": 0,
+            },
+            ["template INCAR MAGMOM line could not be parsed"],
+        )
+
+    expected = len(reference)
+    ready = len(values) == expected
+    warnings = []
+    if not ready:
+        warnings.append(
+            f"template MAGMOM has {len(values)} values but reference POSCAR has {expected} atoms; "
+            "copied INCAR may not match the reduced POSCAR spin order"
+        )
+    return (
+        {
+            "magmom_source": str(incar.resolve()),
+            "magmom_status": "ready" if ready else "count_mismatch",
+            "magmom_ready_for_reference_order": ready,
+            "magmom_expected_atoms": expected,
+            "magmom_count": len(values),
+            "magmom_reference_symbols": reference.get_chemical_symbols(),
+        },
+        warnings,
+    )
 
 
 def write_runlist(records: list[SnapshotRecord], runlist: Path) -> None:
@@ -552,6 +634,12 @@ def write_index(records: list[SnapshotRecord], index_path: Path) -> None:
         "strain_amplitude",
         "is_unstrained_reference",
         "subcell_offset",
+        "expected_subcell_count",
+        "valid_subcell_count",
+        "kept_subcell_count",
+        "magmom_status",
+        "magmom_ready_for_reference_order",
+        "magmom_count",
         "expected_labels",
         "warnings",
     ]
@@ -575,6 +663,12 @@ def write_index(records: list[SnapshotRecord], index_path: Path) -> None:
                     "strain_amplitude": metadata.get("strain_amplitude", ""),
                     "is_unstrained_reference": metadata.get("is_unstrained_reference", ""),
                     "subcell_offset": metadata.get("subcell_offset", ""),
+                    "expected_subcell_count": metadata.get("expected_subcell_count", ""),
+                    "valid_subcell_count": metadata.get("valid_subcell_count", ""),
+                    "kept_subcell_count": metadata.get("kept_subcell_count", ""),
+                    "magmom_status": metadata.get("magmom_status", ""),
+                    "magmom_ready_for_reference_order": metadata.get("magmom_ready_for_reference_order", ""),
+                    "magmom_count": metadata.get("magmom_count", ""),
                     "expected_labels": ",".join(metadata.get("expected_labels", [])),
                     "warnings": "; ".join(metadata.get("warnings", [])),
                 }
@@ -596,6 +690,10 @@ def prepare_snapshot_runs(args: argparse.Namespace) -> list[SnapshotRecord]:
     config_path = args.config.expanduser().resolve()
     cfg = read_json(config_path)
     root = args.project_root.expanduser().resolve() if args.project_root else config_path.parent
+    if args.reduce_large_md_to_reference:
+        args.reduce_large_md_to_2x2x2 = True
+    if args.reference_poscar_small is not None and args.reference_poscar_2x2x2 is None:
+        args.reference_poscar_2x2x2 = args.reference_poscar_small
     if args.elasticity_correction and str(args.output_root) == "MD_SNAPSHOT_CANDIDATES":
         args.output_root = Path("UO2_ELASTIC_STRESS_CANDIDATES")
     output_root = ensure_dir(args.output_root.expanduser().resolve())
@@ -620,6 +718,7 @@ def prepare_snapshot_runs(args: argparse.Namespace) -> list[SnapshotRecord]:
         args.poscar is None and "reference_poscar" not in cfg and not args.reduce_large_md_to_2x2x2
     )
     validate_vasp_template(template_dir, atoms=reference, require_poscar=needs_template_poscar)
+    magmom_meta, magmom_warnings = template_magmom_metadata(template_dir, reference)
     explicit_timesteps = parse_timesteps(args.timesteps)
     selected_stage_info = passed_stages_with_dumps(cfg, config_path, root, args)
     if not selected_stage_info:
@@ -638,7 +737,13 @@ def prepare_snapshot_runs(args: argparse.Namespace) -> list[SnapshotRecord]:
         print("DFT labels       : energy, forces, stress (MD stress is metadata only)")
         print("Stress warning   : DFT OUTCAR stress must be preserved during extxyz conversion.")
     if args.reduce_large_md_to_2x2x2:
-        print(f"Reduction        : large MD -> reference subcells using replicate {tuple(args.large_to_small_replicate)}")
+        subcell_count = int(np.prod(np.asarray(args.large_to_small_replicate, dtype=int)))
+        print(
+            "Reduction        : "
+            f"large MD -> {subcell_count} reference subcells using replicate "
+            f"{tuple(args.large_to_small_replicate)}"
+        )
+        print(f"MAGMOM check     : {magmom_meta['magmom_status']} ({magmom_meta['magmom_count']} values)")
 
     records: list[SnapshotRecord] = []
     summary = []
@@ -688,7 +793,7 @@ def prepare_snapshot_runs(args: argparse.Namespace) -> list[SnapshotRecord]:
             candidates: list[tuple[str, Atoms, dict]] = []
             if args.reduce_large_md_to_2x2x2:
                 assert reference_small is not None
-                reduced, reduce_warnings = reduce_large_frame_to_subcells(
+                reduced, reduce_warnings, reduce_stats = reduce_large_frame_to_subcells(
                     reordered,
                     reference_small,
                     tuple(int(value) for value in args.large_to_small_replicate),
@@ -706,6 +811,7 @@ def prepare_snapshot_runs(args: argparse.Namespace) -> list[SnapshotRecord]:
                                 "subcell_offset": list(offset),
                                 "local_distortion_score_A": distortion,
                                 "reduced_cell_matrix": sub_atoms.cell.array.tolist(),
+                                **reduce_stats,
                                 "large_to_small_replicate": list(args.large_to_small_replicate),
                                 "reduction_note": (
                                     "Homogeneous elastic strain is preserved in the reduced subcell lattice. "
@@ -733,7 +839,7 @@ def prepare_snapshot_runs(args: argparse.Namespace) -> list[SnapshotRecord]:
                 write(run_dir / "POSCAR", candidate_atoms, format="vasp", direct=True, vasp5=True, sort=False)
                 copy_vasp_template(template_dir, run_dir, copy_all=args.copy_template_all)
 
-                warnings = [*quality_warnings, *candidate_extra.get("warnings", [])]
+                warnings = [*quality_warnings, *candidate_extra.get("warnings", []), *magmom_warnings]
                 info = {
                     "stage_name": stage_name,
                     "temperature_K": temperature,
@@ -750,6 +856,7 @@ def prepare_snapshot_runs(args: argparse.Namespace) -> list[SnapshotRecord]:
                     "md_stress_used_as_training_label": False,
                     "dft_stress_required": bool(args.elasticity_correction),
                     "warnings": warnings,
+                    **magmom_meta,
                     **(elastic_meta if args.elasticity_correction else {}),
                     **candidate_extra,
                 }
@@ -918,9 +1025,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Split each selected large MD frame into representative 2x2x2 DFT subcells.",
     )
     parser.add_argument(
+        "--reduce-large-md-to-reference",
+        action="store_true",
+        help="Generic alias for reducing each selected large MD frame into reference-POSCAR subcells.",
+    )
+    parser.add_argument(
         "--reference-poscar-2x2x2",
         type=Path,
         help="Reference 2x2x2 POSCAR used to validate/reorder reduced subcells.",
+    )
+    parser.add_argument(
+        "--reference-poscar-small",
+        type=Path,
+        help="Generic alias for --reference-poscar-2x2x2.",
     )
     parser.add_argument(
         "--large-to-small-replicate",

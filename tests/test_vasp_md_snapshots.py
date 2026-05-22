@@ -89,6 +89,13 @@ def write_elastic_config(root: Path, stage: dict) -> Path:
     return config
 
 
+def write_template(path: Path, magmom: str = "MAGMOM = 2 -2") -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "INCAR").write_text(f"SYSTEM = test\n{magmom}\n", encoding="utf-8")
+    (path / "KPOINTS").write_text("Gamma\n1\nGamma\n1 1 1\n0 0 0\n", encoding="utf-8")
+    (path / "POTCAR").write_text("PAW_PBE U\nPAW_PBE O\n", encoding="utf-8")
+
+
 def read_csv(path: Path) -> list[dict[str, str]]:
     with path.open("r", newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
@@ -164,6 +171,8 @@ def test_elasticity_correction_selects_tail_frames_and_writes_stress_metadata(tm
 def test_elasticity_correction_reduces_large_frame_to_representative_subcells(tmp_path: Path) -> None:
     reference = tmp_path / "POSCAR_2x2x2"
     write_small_reference(reference)
+    template = tmp_path / "VASP_TEMPLATE"
+    write_template(template)
     stage = {
         "name": "nvt_stress_900K_shear_xy_p005",
         "temperature": 900,
@@ -209,6 +218,8 @@ def test_elasticity_correction_reduces_large_frame_to_representative_subcells(tm
             str(tmp_path),
             "--output-root",
             str(out),
+            "--vasp-template",
+            str(template),
             "--elasticity-correction",
             "--elastic-frames-per-run",
             "1",
@@ -219,21 +230,36 @@ def test_elasticity_correction_reduces_large_frame_to_representative_subcells(tm
             "2",
             "2",
             "2",
-            "--max-subcells-per-frame",
-            "2",
+            "--keep-all-subcells",
         ]
     )
 
     runlist = [line for line in (out / "runlist.txt").read_text(encoding="utf-8").splitlines() if line]
-    assert len(runlist) == 2
+    assert len(runlist) == 8
     assert all("T900K/shear_xy_p005" in line for line in runlist)
     for entry in runlist:
         run_dir = out / entry
         atoms_out = read(run_dir / "POSCAR")
         assert atoms_out.get_chemical_symbols() == ["U", "O"]
+        assert (run_dir / "INCAR").read_text(encoding="utf-8").splitlines()[-1] == "MAGMOM = 2 -2"
         info = json.loads((run_dir / "case_info.json").read_text(encoding="utf-8"))
-        assert info["subcell_offset"] in ([1, 1, 1], [0, 1, 1], [1, 0, 1], [1, 1, 0])
+        assert info["subcell_offset"] in (
+            [0, 0, 0],
+            [0, 0, 1],
+            [0, 1, 0],
+            [0, 1, 1],
+            [1, 0, 0],
+            [1, 0, 1],
+            [1, 1, 0],
+            [1, 1, 1],
+        )
+        assert info["expected_subcell_count"] == 8
+        assert info["valid_subcell_count"] == 8
+        assert info["kept_subcell_count"] == 8
         assert info["large_to_small_replicate"] == [2, 2, 2]
+        assert info["magmom_status"] == "ready"
+        assert info["magmom_ready_for_reference_order"] is True
+        assert info["magmom_count"] == 2
         assert info["md_stress_used_as_training_label"] is False
         assert info["dft_stress_required"] is True
         assert "Long-wavelength correlations" in info["reduction_note"]
