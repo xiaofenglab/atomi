@@ -33,7 +33,7 @@ def test_derived_debye_temperature_from_formula_volume() -> None:
     assert derived["k_min_clarke_W_mK"] > 0.0
 
 
-def test_elastic_viz_reads_lammps_tensor_payload(tmp_path: Path) -> None:
+def test_elastic_viz_reads_lammps_tensor_payload(tmp_path: Path, capsys) -> None:
     c = cubic_tensor()
     moduli = voigt_reuss_hill(c)
     elastic_dir = tmp_path / "fit"
@@ -94,6 +94,12 @@ def test_elastic_viz_reads_lammps_tensor_payload(tmp_path: Path) -> None:
     assert (outdir / "elate_inputs" / "T300K_tensor_GPa.txt").exists()
     assert (outdir / "elate_surfaces" / "T300K_young_3d.html").exists()
     assert (outdir / "debye_thermal_functions.csv").exists()
+    captured = capsys.readouterr().out
+    assert "Elastic tensor summary" in captured
+    assert "C_ij tensor : GPa, Voigt order xx yy zz yz xz xy" in captured
+    assert "Bulk modulus K (GPa): Voigt upper=" in captured
+    assert "Shear modulus G (GPa): Voigt upper=" in captured
+    assert "Elastic moduli vs temperature" in captured
 
 
 def test_elastic_viz_reads_vasp_tensor_payload(tmp_path: Path) -> None:

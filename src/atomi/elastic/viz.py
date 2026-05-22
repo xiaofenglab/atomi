@@ -141,6 +141,7 @@ def load_elastic_records(tensors_path: Path, table_path: Path | None = None) -> 
                 moduli=item.get("moduli", {}),
                 table_rows=table_rows,
             )
+            row.setdefault("symmetry", item.get("symmetry", ""))
             records.append(ElasticRecord(label, temperature, tensor, row, row["source"]))
         return records
     if isinstance(payload, dict):
@@ -161,6 +162,8 @@ def load_elastic_records(tensors_path: Path, table_path: Path | None = None) -> 
                 moduli=item.get("moduli", {}),
                 table_rows=table_rows,
             )
+            row.setdefault("symmetry", item.get("symmetry", ""))
+            row.setdefault("inferred_symmetry", item.get("inferred_symmetry", ""))
             if item.get("md_box"):
                 row.update(
                     {
@@ -188,9 +191,9 @@ class DirectionalElastic:
             for j in range(3):
                 p = VOIGT_MAT[i][j]
                 for k in range(3):
-                    for l in range(3):
-                        q = VOIGT_MAT[k][l]
-                        out[i, j, k, l] = self.S[p, q] / ((1 + p // 3) * (1 + q // 3))
+                    for ell in range(3):
+                        q = VOIGT_MAT[k][ell]
+                        out[i, j, k, ell] = self.S[p, q] / ((1 + p // 3) * (1 + q // 3))
         return out
 
     @staticmethod
@@ -330,6 +333,79 @@ def write_elate_input(path: Path, tensor: np.ndarray) -> None:
             handle.write(" ".join(f"{value:16.8f}" for value in row) + "\n")
 
 
+def fmt_float(value: Any, digits: int = 3) -> str:
+    number = float_or_none(value)
+    if number is None:
+        return "NA"
+    return f"{number:.{digits}f}"
+
+
+def format_tensor_matrix(tensor: np.ndarray) -> str:
+    c = np.asarray(tensor, dtype=float)
+    labels = ["xx", "yy", "zz", "yz", "xz", "xy"]
+    lines = ["             " + " ".join(f"{label:>10}" for label in labels)]
+    for label, row in zip(labels, c):
+        lines.append(f"    {label:>3}      " + " ".join(f"{value:10.3f}" for value in row))
+    return "\n".join(lines)
+
+
+def print_terminal_record_report(record: ElasticRecord, row: dict[str, Any]) -> None:
+    temperature = fmt_float(record.temperature_K, digits=1) if record.temperature_K is not None else "NA"
+    symmetry = row.get("symmetry") or row.get("inferred_symmetry") or "unknown"
+    print("")
+    print("Elastic tensor summary")
+    print("----------------------")
+    print(f"Label       : {record.label}")
+    print(f"Source      : {record.source}")
+    print(f"Temperature : {temperature} K")
+    print(f"Symmetry    : {symmetry}")
+    print("C_ij tensor : GPa, Voigt order xx yy zz yz xz xy")
+    print(format_tensor_matrix(record.tensor_GPa))
+    print(
+        "Bulk modulus K (GPa): "
+        f"Voigt upper={fmt_float(row.get('K_V_GPa'))}, "
+        f"Reuss lower={fmt_float(row.get('K_R_GPa'))}, "
+        f"Hill={fmt_float(row.get('K_H_GPa'))}"
+    )
+    print(
+        "Shear modulus G (GPa): "
+        f"Voigt upper={fmt_float(row.get('G_V_GPa'))}, "
+        f"Reuss lower={fmt_float(row.get('G_R_GPa'))}, "
+        f"Hill={fmt_float(row.get('G_H_GPa'))}"
+    )
+    print(
+        f"Young/Poisson: E_H={fmt_float(row.get('E_H_GPa'))} GPa, "
+        f"nu_H={fmt_float(row.get('nu_H'), digits=4)}"
+    )
+    print(f"Stability    : positive definite={row.get('mechanically_stable_positive_definite', 'NA')}")
+
+
+def print_terminal_moduli_table(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    print("")
+    print("Elastic moduli vs temperature")
+    print("-----------------------------")
+    print(
+        " T(K)  symmetry    K_V    K_R    K_H    G_V    G_R    G_H    "
+        "E_H     nu_H    stable"
+    )
+    for row in rows:
+        print(
+            f"{fmt_float(row.get('temperature_K'), 1):>6} "
+            f"{str(row.get('symmetry') or row.get('inferred_symmetry') or 'unknown')[:10]:>10} "
+            f"{fmt_float(row.get('K_V_GPa')):>6} "
+            f"{fmt_float(row.get('K_R_GPa')):>6} "
+            f"{fmt_float(row.get('K_H_GPa')):>6} "
+            f"{fmt_float(row.get('G_V_GPa')):>6} "
+            f"{fmt_float(row.get('G_R_GPa')):>6} "
+            f"{fmt_float(row.get('G_H_GPa')):>6} "
+            f"{fmt_float(row.get('E_H_GPa')):>7} "
+            f"{fmt_float(row.get('nu_H'), 4):>7} "
+            f"{row.get('mechanically_stable_positive_definite', 'NA')}"
+        )
+
+
 def maybe_plot_lines(outdir: Path, rows: list[dict[str, Any]]) -> list[str]:
     try:
         import matplotlib
@@ -443,6 +519,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not write ELATE-compatible tensor text files.",
     )
     parser.add_argument(
+        "--no-terminal-report",
+        action="store_true",
+        help="Do not print tensor matrices and Voigt/Reuss/Hill moduli to the terminal.",
+    )
+    parser.add_argument(
         "--write-debye-thermal",
         action="store_true",
         help="Write Debye Cv/H/S/F tables using derived theta_D.",
@@ -525,6 +606,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     plane_strain=not args.fracture_plane_stress,
                 )
         summary_rows.append(row)
+        if not args.no_terminal_report:
+            print_terminal_record_report(record, row)
         name = safe_label(record.label)
         if not args.no_elate_inputs:
             target = outdir / "elate_inputs" / f"{name}_tensor_GPa.txt"
@@ -571,6 +654,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 ),
             )
             surface_outputs.append(str(lc_html))
+    if not args.no_terminal_report:
+        print_terminal_moduli_table(summary_rows)
     summary_csv = outdir / "elastic_thermophysical_summary.csv"
     write_csv(summary_csv, summary_rows)
     debye_csv = ""
