@@ -73,6 +73,10 @@ if command -v module >/dev/null 2>&1; then
     fi
 fi
 
+if [ -n "${ATOMI_LAMMPS_ENV:-}" ] && [ -f "$ATOMI_LAMMPS_ENV/bin/activate" ]; then
+    source "$ATOMI_LAMMPS_ENV/bin/activate"
+fi
+
 # ---- optional env ----
 unset PYTHONPATH
 
@@ -139,7 +143,8 @@ for atomi_py_path in \
     "$ATOMI_LMP_INSTALL_DIR"/lib/python*/site-packages \
     "$ATOMI_LMP_INSTALL_DIR"/lib64/python*/site-packages \
     "${ATOMI_LAMMPS_PREFIX:-}"/src/lammps/python \
-    "${ATOMI_LAMMPS_PREFIX:-}"/build_mliap/python
+    "${ATOMI_LAMMPS_PREFIX:-}"/build_mliap/python \
+    "${ATOMI_LAMMPS_PREFIX:-}"/build_mliap/cython
 do
     atomi_add_pythonpath "$atomi_py_path"
 done
@@ -174,6 +179,7 @@ echo "CUDA_VISIBLE_DEVICES = ${CUDA_VISIBLE_DEVICES}"
 echo "LMP_EXE           = ${ATOMI_LMP_EXE}"
 echo "LMP_INSTALL_DIR   = ${ATOMI_LMP_INSTALL_DIR}"
 echo "LAMMPS_PROFILE    = ${LAMMPS_PROFILE}"
+echo "PYTHON_EXE        = $(command -v python || true)"
 echo "LAMMPS_PYTHONPATH = ${PYTHONPATH:-}"
 echo "========================================"
 
@@ -181,6 +187,15 @@ echo "----- TOOLCHAIN -----"
 which mpicxx || true
 which nvcc || true
 nvidia-smi || true
+if [ "${LAMMPS_PROFILE}" = "gk_mliap" ]; then
+    python - <<'PY' || true
+import importlib.util
+for name in ("lammps", "mliap_unified_couple", "torch", "mace"):
+    spec = importlib.util.find_spec(name)
+    origin = spec.origin if spec is not None else "missing"
+    print(f"python module {name}: {origin}")
+PY
+fi
 echo "---------------------"
 
 LMP_EXE="${ATOMI_LMP_EXE}"
