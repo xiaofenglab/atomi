@@ -90,9 +90,13 @@ def copy_gk_base_config(template: dict[str, Any], args: argparse.Namespace) -> d
         "correlation_time_ps": float(args.correlation_time_ps),
         "plateau_window_ps": float(args.plateau_window_ps),
         "seed_count": len(seed_values(args)),
+        "disable_accelerated_suffix_for_heat_flux": not args.keep_accelerated_suffix_for_heat_flux,
+        "heat_flux_preflight": not args.no_heat_flux_preflight,
         "notes": [
             "NVT_stress elasticity runs are not reused for GK because GK should be collected during NVE.",
             "LAMMPS heat/flux requires the pair style to provide per-atom energy and virial consistently.",
+            "Atomi disables accelerated LAMMPS suffixes for heat-flux jobs by default because some GPU/Kokkos pair styles do not expose per-atom energy/virial.",
+            "A run 0 heat-flux preflight is written before NVT pre-equilibration so unsupported pair styles fail immediately.",
         ],
     }
     return cfg
@@ -107,6 +111,7 @@ def build_gk_stages(records: list[dict[str, Any]], root: Path, args: argparse.Na
         temp = float(rec["temperature"])
         t_label = temperature_label(temp)
         restart, data = find_restart_or_data(rec)
+        input_structure = data if data is not None and not args.prefer_restart else restart
         for seed_index, seed in enumerate(seed_values(args), start=1):
             name = f"gk_T{t_label}K_s{seed_index:02d}"
             stage = {
@@ -114,7 +119,7 @@ def build_gk_stages(records: list[dict[str, Any]], root: Path, args: argparse.Na
                 "type": "nve",
                 "large_cell": bool(rec.get("stage", {}).get("large_cell", False)),
                 "temperature": temp,
-                "input_structure": relative_to_root(restart, root),
+                "input_structure": relative_to_root(input_structure, root),
                 "chunk_name": "chunk_gk",
                 "fixed_steps": run_steps,
                 "max_chunks": 1,
@@ -130,10 +135,14 @@ def build_gk_stages(records: list[dict[str, Any]], root: Path, args: argparse.Na
                     "nvt_preequilibration_ps": float(args.nvt_preequilibration_ps),
                     "hcacf_file": "heatflux_hcacf.dat",
                     "timeseries_file": "heatflux_timeseries.dat",
+                    "disable_accelerated_suffix_for_heat_flux": not args.keep_accelerated_suffix_for_heat_flux,
+                    "heat_flux_preflight": not args.no_heat_flux_preflight,
                 },
             }
-            if data is not None:
+            if data is not None and input_structure != data:
                 stage["input_data_fallback"] = relative_to_root(data, root)
+            if input_structure != restart:
+                stage["input_restart_fallback"] = relative_to_root(restart, root)
             if args.walltime_hours is not None:
                 stage["walltime_hours"] = float(args.walltime_hours)
             stages.append(stage)
@@ -144,6 +153,7 @@ def build_gk_stages(records: list[dict[str, Any]], root: Path, args: argparse.Na
                     "seed": int(seed),
                     "source_npt_stage": rec["stage_name"],
                     "input_structure": stage["input_structure"],
+                    "input_kind": "data" if input_structure == data else "restart",
                     "nve_time_ps": float(args.nve_time_ps),
                     "sample_interval_ps": float(args.sample_interval_ps),
                     "correlation_time_ps": float(args.correlation_time_ps),
@@ -160,6 +170,7 @@ def write_manifest(path: Path, rows: list[dict]) -> None:
         "seed",
         "source_npt_stage",
         "input_structure",
+        "input_kind",
         "nve_time_ps",
         "sample_interval_ps",
         "correlation_time_ps",
@@ -513,6 +524,29 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument("--timestep-ps", type=float, help="Override timestep in ps. Defaults to template config timestep.")
     prep.add_argument("--array-limit", type=int, default=10, help="Suggested md-engine-array concurrency. Default: 10.")
     prep.add_argument("--walltime-hours", type=float, help="Optional walltime override for every GK seed stage.")
+    prep.add_argument(
+        "--prefer-restart",
+        action="store_true",
+        help=(
+            "Use NPT restart files as GK inputs even when matching data files exist. "
+            "Default prefers data files because GK recreates velocities and data "
+            "inputs avoid carrying accelerated pair-style restart metadata."
+        ),
+    )
+    prep.add_argument(
+        "--keep-accelerated-suffix-for-heat-flux",
+        action="store_true",
+        help=(
+            "Do not write 'suffix off' for GK heat-flux stages. By default Atomi "
+            "disables accelerated suffixes because some /kk pair styles do not "
+            "provide per-atom energy/virial needed by compute heat/flux."
+        ),
+    )
+    prep.add_argument(
+        "--no-heat-flux-preflight",
+        action="store_true",
+        help="Skip the run 0 heat-flux compatibility preflight before NVT pre-equilibration.",
+    )
 
     ana = sub.add_parser("analyze", help="Integrate completed GK HCACF files into k(T).")
     ana.add_argument("--gk-config", type=Path, default=Path("config_gk.json"))

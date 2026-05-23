@@ -45,12 +45,16 @@ def test_green_kubo_stage_generates_nve_heat_flux_input(tmp_path):
 
     assert steps == 1000
     assert "velocity        all create 300 9001" in text
+    assert "suffix          off" in text
+    assert "Atomi GK phase: heat-flux compatibility preflight" in text
+    assert "run             0" in text
     assert "Atomi GK phase: short NVT pre-equilibration" in text
     assert "thermo_modify   flush yes" in text
     assert "Atomi GK phase: NVE heat-current production" in text
     assert "fix             pre all nvt" in text
     assert "fix             1 all nve" in text
     assert "compute         atomi_flux all heat/flux" in text
+    assert text.index("compute         atomi_flux all heat/flux") < text.index("fix             pre all nvt")
     assert "fix             JJ all ave/correlate 10 5 50" in text
     assert "heatflux_hcacf.dat" in text
     assert "v_atomi_Jx v_atomi_Jy v_atomi_Jz" in text
@@ -86,6 +90,7 @@ def test_green_kubo_prepare_writes_multi_seed_config(tmp_path):
     chunk.mkdir(parents=True)
     (chunk / "log.in.npt_prod_300K_production").write_text("LAMMPS log\n", encoding="utf-8")
     (stage_dir / "npt_prod_300K.restart").write_text("restart\n", encoding="utf-8")
+    (stage_dir / "npt_prod_300K.data").write_text("data\n", encoding="utf-8")
     set_project_root(tmp_path)
 
     green_kubo.main(
@@ -112,7 +117,14 @@ def test_green_kubo_prepare_writes_multi_seed_config(tmp_path):
     assert [stage["velocity_seed"] for stage in out["stages"]] == [100, 105]
     assert all(stage["type"] == "nve" for stage in out["stages"])
     assert all(stage["green_kubo_run"] for stage in out["stages"])
+    assert all(stage["green_kubo_settings"]["disable_accelerated_suffix_for_heat_flux"] for stage in out["stages"])
+    assert all(stage["green_kubo_settings"]["heat_flux_preflight"] for stage in out["stages"])
+    assert all(stage["input_structure"].endswith("npt_prod_300K.data") for stage in out["stages"])
+    assert all(stage["input_restart_fallback"].endswith("npt_prod_300K.restart") for stage in out["stages"])
     assert (tmp_path / "analysis" / "gk" / "gk_manifest.csv").exists()
+    manifest = (tmp_path / "analysis" / "gk" / "gk_manifest.csv").read_text(encoding="utf-8")
+    assert "input_kind" in manifest
+    assert "data" in manifest
 
 
 def test_green_kubo_analyze_integrates_lammps_hcacf(tmp_path):

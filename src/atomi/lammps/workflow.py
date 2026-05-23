@@ -917,6 +917,8 @@ def green_kubo_settings(cfg, stage, timestep):
         "hcacf_file": settings.get("hcacf_file", "heatflux_hcacf.dat"),
         "timeseries_file": settings.get("timeseries_file", "heatflux_timeseries.dat"),
         "dump_heat_current": bool(settings.get("dump_heat_current", True)),
+        "disable_accelerated_suffix_for_heat_flux": bool(settings.get("disable_accelerated_suffix_for_heat_flux", True)),
+        "heat_flux_preflight": bool(settings.get("heat_flux_preflight", True)),
     }
 
 
@@ -925,7 +927,27 @@ def green_kubo_fix_text(cfg, stage, temperature, timestep):
     lines = [
         "# Atomi Green-Kubo NVE heat-current collection.",
         "# The HCACF is written in LAMMPS metal-unit heat-flux units and scaled in postprocessing.",
+        "# Heat-flux computes are declared before GK dynamics so unsupported pair styles fail fast.",
+        "compute         atomi_ke all ke/atom",
+        "compute         atomi_pe all pe/atom",
+        "compute         atomi_stress all stress/atom NULL virial",
+        "compute         atomi_flux all heat/flux atomi_ke atomi_pe atomi_stress",
+        "variable        atomi_Jx equal c_atomi_flux[1]/vol",
+        "variable        atomi_Jy equal c_atomi_flux[2]/vol",
+        "variable        atomi_Jz equal c_atomi_flux[3]/vol",
+        "variable        atomi_step equal step",
     ]
+    if settings["heat_flux_preflight"]:
+        lines.extend(
+            [
+                'print           "Atomi GK phase: heat-flux compatibility preflight"',
+                "thermo          1",
+                "thermo_style    custom step temp pe etotal press vol v_atomi_Jx v_atomi_Jy v_atomi_Jz",
+                "thermo_modify   flush yes",
+                "run             0",
+                "",
+            ]
+        )
     if settings["pre_steps"] > 0:
         tdamp = get_tdamp(cfg, stage)
         lines.extend(
@@ -945,14 +967,6 @@ def green_kubo_fix_text(cfg, stage, temperature, timestep):
         [
             'print           "Atomi GK phase: NVE heat-current production and HCACF accumulation"',
             "fix             1 all nve",
-            "compute         atomi_ke all ke/atom",
-            "compute         atomi_pe all pe/atom",
-            "compute         atomi_stress all stress/atom NULL virial",
-            "compute         atomi_flux all heat/flux atomi_ke atomi_pe atomi_stress",
-            "variable        atomi_Jx equal c_atomi_flux[1]/vol",
-            "variable        atomi_Jy equal c_atomi_flux[2]/vol",
-            "variable        atomi_Jz equal c_atomi_flux[3]/vol",
-            "variable        atomi_step equal step",
             (
                 "fix             JJ all ave/correlate "
                 f"{settings['nevery']} {settings['nrepeat']} {settings['nfreq']} "
@@ -1014,6 +1028,15 @@ def generate_production_input(cfg, stage, structure_path, chunk_tag):
         thermo_style += " pxx pyy pzz pyz pxz pxy xy xz yz"
     if stage.get("green_kubo_run", False):
         thermo_style += " v_atomi_Jx v_atomi_Jy v_atomi_Jz"
+    suffix_text = ""
+    if stage.get("green_kubo_run", False):
+        settings = green_kubo_settings(cfg, stage, timestep)
+        if settings["disable_accelerated_suffix_for_heat_flux"]:
+            suffix_text = (
+                "# LAMMPS heat/flux needs per-atom energy/virial. Some accelerated pair styles\n"
+                "# such as mace/kk do not expose those flags, so disable suffixing by default.\n"
+                "suffix          off\n\n"
+            )
 
     txt = f"""units           metal
 dimension       3
@@ -1027,6 +1050,7 @@ newton          on
 mass            1 {cfg["mass_O"]}
 mass            2 {cfg["mass_U"]}
 
+{suffix_text}\
 pair_style      mace no_domain_decomposition
 pair_coeff      * * {model} O U
 
