@@ -230,6 +230,8 @@ def test_green_kubo_mliap_probe_forces_gk_binary(tmp_path):
     assert "pair_style      mliap unified" in probe_input
     assert "GK_REQUESTED=0" in sbatch_runner
     assert 'confighpc --dir "$ATOMI_HPC_DIR" --no-env-var --shell' in sbatch_runner
+    assert "Atomi GK/ML-IAP preflight: PASS" in sbatch_runner
+    assert "mliap_unified_couple" in sbatch_runner
     assert "export ATOMI_LAMMPS_USE_GK_EXE=1" in submitter
 
 
@@ -300,6 +302,19 @@ def test_green_kubo_probe_writes_heat_flux_preflight(tmp_path, monkeypatch):
     assert report["suffix"] == "kk"
     assert report["sbatch_runner"].endswith("run_probe_sbatch.sh")
     assert not report["executed"]
+    assert "selected GK binary" in report["notes"][0]
+
+
+def test_green_kubo_probe_classifies_common_mliap_failures():
+    assert "ATOMI_LMP_GK_EXE" in green_kubo.classify_probe_log(
+        "ERROR: Atomi LAMMPS preflight failed: selected GK executable does not expose the ML-IAP mliap pair style."
+    )
+    assert "Python coupling" in green_kubo.classify_probe_log(
+        "ERROR: Atomi LAMMPS preflight failed: required ML-IAP Python modules could not be imported."
+    )
+    assert "unified Python module" in green_kubo.classify_probe_log("ERROR: Loading mliappy unified module failure.")
+    assert "CUDA driver" in green_kubo.classify_probe_log("libcuda.so.1: cannot open shared object file")
+    assert "per-atom energy/virial" in green_kubo.classify_probe_log("ERROR: pair_mace does not support vflag_atom.")
 
 
 def test_green_kubo_analyze_integrates_lammps_hcacf(tmp_path):

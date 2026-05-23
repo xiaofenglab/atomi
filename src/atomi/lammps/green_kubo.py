@@ -419,6 +419,30 @@ def write_probe_sbatch_runner(cfg: dict[str, Any], root: Path, outdir: Path, inp
 
 def classify_probe_log(text: str) -> str:
     lowered = text.lower()
+    if "atomi gk/ml-iap preflight: pass" in lowered and "atomi gk probe: pass heat/flux preflight completed" in lowered:
+        return "PASS: GK/ML-IAP environment and compute heat/flux preflight completed."
+    if "atomi lammps preflight failed" in lowered:
+        if "does not expose the ml-iap mliap pair style" in lowered or "unrecognized pair style 'mliap'" in lowered:
+            return "FAIL: selected LAMMPS binary does not provide ML-IAP/mliap; check ATOMI_LMP_GK_EXE."
+        if "lammps executable could not start" in lowered or "libcuda.so.1" in lowered:
+            return "FAIL: selected LAMMPS binary could not start; check GPU allocation, CUDA modules, and LD_LIBRARY_PATH."
+        if "required ml-iap python modules could not be imported" in lowered or "no module named 'lammps'" in lowered:
+            return "FAIL: ML-IAP Python coupling is not importable; check ATOMI_LAMMPS_ENV and ATOMI_LAMMPS_PYTHONPATH."
+        if "ml-iap model file not found" in lowered:
+            return "FAIL: converted ML-IAP model file was not found."
+        if "pair_style mliap unified" in lowered:
+            return "FAIL: GK requested ML-IAP, but the generated input does not use pair_style mliap unified."
+        return "FAIL: wrapper preflight failed before LAMMPS run 0."
+    if "loading mliappy unified module failure" in lowered:
+        return "FAIL: ML-IAP unified Python module failed to load; check lammps/mliap_unified_couple imports and Python path."
+    if "module not founderror" in lowered or "no module named 'lammps'" in lowered:
+        return "FAIL: required Python module for ML-IAP is missing."
+    if "unrecognized pair style 'mliap'" in lowered:
+        return "FAIL: selected LAMMPS binary does not have the ML-IAP package enabled."
+    if "libcuda.so.1" in lowered:
+        return "FAIL: CUDA driver library is not visible; run the probe on a GPU allocation/node."
+    if "model file not found" in lowered or "cannot open" in lowered and "mliap" in lowered:
+        return "FAIL: ML-IAP model file could not be opened."
     if "eflag_atom" in lowered or "vflag_atom" in lowered or "heat/flux" in lowered and "error" in lowered:
         return "FAIL: pair style does not support the per-atom energy/virial needed by compute heat/flux."
     if "atomi gk probe: pass heat/flux preflight completed" in lowered:
@@ -478,9 +502,10 @@ def probe_main(args: argparse.Namespace) -> dict[str, Any]:
         "returncode": returncode,
         "status": status,
         "notes": [
-            "Use --suffix kk to test whether mace/kokkos supports compute heat/flux.",
-            "Use --suffix off to test Atomi's default GK fallback route.",
-            "A PASS here only confirms LAMMPS heat-flux compute compatibility, not statistical convergence of kappa.",
+            "For ML-IAP GK configs, the wrapper checks the selected GK binary, ML-IAP package exposure, model path, and Python coupling modules before LAMMPS run 0.",
+            "The LAMMPS probe input then runs compute heat/flux at run 0 to catch per-atom energy/virial support errors.",
+            "Use --suffix kk to intentionally test accelerated suffix behavior; Atomi's default GK route uses --suffix off.",
+            "A PASS here confirms launch-time GK compatibility, not statistical convergence of kappa.",
         ],
     }
     write_json(report_path, report)

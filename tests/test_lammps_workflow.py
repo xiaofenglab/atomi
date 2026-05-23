@@ -233,6 +233,10 @@ def test_lammps_wrapper_fail_fast_when_gk_exe_missing() -> None:
     assert "/build_mliap/cython" in template
     assert "source \"$ATOMI_LAMMPS_ENV/bin/activate\"" in template
     assert "mliap_unified_couple" in template
+    assert "Atomi GK/ML-IAP preflight: PASS" in template
+    assert "selected GK executable does not expose the ML-IAP mliap pair style" in template
+    assert "ML-IAP model file not found" in template
+    assert "required ML-IAP Python modules could not be imported" in template
 
 
 def test_mliap_config_refreshes_stale_lammps_wrapper(tmp_path) -> None:
@@ -259,6 +263,7 @@ def test_mliap_config_refreshes_stale_lammps_wrapper(tmp_path) -> None:
     assert "ATOMI_LMP_INSTALL_DIR" in text
     assert "ATOMI_LAMMPS_PYTHONPATH" in text
     assert "/build_mliap/cython" in text
+    assert "Atomi GK/ML-IAP preflight: PASS" in text
 
 
 def test_qha_cp_can_generate_thermo_anchor_values(tmp_path) -> None:

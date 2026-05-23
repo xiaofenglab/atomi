@@ -198,6 +198,60 @@ PY
 fi
 echo "---------------------"
 
+atomi_fail_preflight() {
+    echo "ERROR: Atomi LAMMPS preflight failed: $1"
+    echo "This job stopped before requesting the full GK run because the array would fail with the same setup."
+    exit 2
+}
+
+if [ "${LAMMPS_PROFILE}" = "gk_mliap" ]; then
+    echo "----- ATOMI GK/ML-IAP PREFLIGHT -----"
+    LMP_HELP_LOG="atomi_lammps_help.${SLURM_JOB_ID}.txt"
+    if ! "${ATOMI_LMP_EXE}" -h >"${LMP_HELP_LOG}" 2>&1; then
+        cat "${LMP_HELP_LOG}" || true
+        atomi_fail_preflight "LAMMPS executable could not start. Check CUDA, libtorch, and LD_LIBRARY_PATH."
+    fi
+    if ! grep -qi "ML-IAP" "${LMP_HELP_LOG}" || ! grep -Eq '(^|[[:space:]])mliap(/kk)?([[:space:]]|$)' "${LMP_HELP_LOG}"; then
+        grep -iE "mliap|mace|python|kokkos|ml-" "${LMP_HELP_LOG}" || true
+        atomi_fail_preflight "selected GK executable does not expose the ML-IAP mliap pair style."
+    fi
+
+    MLIP_MODEL_PATH="$(awk '$1=="pair_style" && $2=="mliap" && $3=="unified" {print $4; exit}' "${INPUT}")"
+    if [ -z "${MLIP_MODEL_PATH}" ]; then
+        awk '$1=="pair_style" || $1=="pair_coeff" {print "INPUT_PAIR:", $0}' "${INPUT}" || true
+        atomi_fail_preflight "GK/ML-IAP run requested, but input does not contain 'pair_style mliap unified <model> 0'."
+    fi
+    if [ ! -f "${MLIP_MODEL_PATH}" ]; then
+        atomi_fail_preflight "ML-IAP model file not found: ${MLIP_MODEL_PATH}"
+    fi
+
+    python - <<'PY'
+import importlib
+import sys
+
+required = ("lammps", "mliap_unified_couple", "torch")
+optional = ("mace",)
+failed = False
+for name in required + optional:
+    try:
+        module = importlib.import_module(name)
+        origin = getattr(module, "__file__", "built-in")
+        print(f"Atomi preflight python import {name}: OK {origin}")
+    except Exception as exc:
+        level = "ERROR" if name in required else "WARNING"
+        print(f"Atomi preflight python import {name}: {level} {exc.__class__.__name__}: {exc}")
+        if name in required:
+            failed = True
+if failed:
+    sys.exit(1)
+PY
+    if [ "$?" -ne 0 ]; then
+        atomi_fail_preflight "required ML-IAP Python modules could not be imported."
+    fi
+    echo "Atomi GK/ML-IAP preflight: PASS"
+    echo "-------------------------------------"
+fi
+
 LMP_EXE="${ATOMI_LMP_EXE}"
 
 ${LMP_EXE} \
