@@ -121,6 +121,29 @@ else
     export LD_LIBRARY_PATH=$ATOMI_LMP_INSTALL_DIR/lib64:$ATOMI_LMP_INSTALL_DIR/lib:${LD_LIBRARY_PATH:-}
 fi
 
+atomi_add_pythonpath() {
+    if [ -n "${1:-}" ] && [ -d "$1" ]; then
+        if [ -n "${PYTHONPATH:-}" ]; then
+            export PYTHONPATH="${PYTHONPATH}:$1"
+        else
+            export PYTHONPATH="$1"
+        fi
+    fi
+}
+
+if [ -n "${ATOMI_LAMMPS_PYTHONPATH:-}" ]; then
+    export PYTHONPATH="${ATOMI_LAMMPS_PYTHONPATH}"
+fi
+
+for atomi_py_path in \
+    "$ATOMI_LMP_INSTALL_DIR"/lib/python*/site-packages \
+    "$ATOMI_LMP_INSTALL_DIR"/lib64/python*/site-packages \
+    "${ATOMI_LAMMPS_PREFIX:-}"/src/lammps/python \
+    "${ATOMI_LAMMPS_PREFIX:-}"/build_mliap/python
+do
+    atomi_add_pythonpath "$atomi_py_path"
+done
+
 
 cd "${SLURM_SUBMIT_DIR}" || exit 1
 
@@ -151,6 +174,7 @@ echo "CUDA_VISIBLE_DEVICES = ${CUDA_VISIBLE_DEVICES}"
 echo "LMP_EXE           = ${ATOMI_LMP_EXE}"
 echo "LMP_INSTALL_DIR   = ${ATOMI_LMP_INSTALL_DIR}"
 echo "LAMMPS_PROFILE    = ${LAMMPS_PROFILE}"
+echo "LAMMPS_PYTHONPATH = ${PYTHONPATH:-}"
 echo "========================================"
 
 echo "----- TOOLCHAIN -----"

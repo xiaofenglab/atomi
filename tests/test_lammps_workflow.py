@@ -227,6 +227,9 @@ def test_lammps_wrapper_fail_fast_when_gk_exe_missing() -> None:
     assert "atomi_hpc_env.sh" in template
     assert "ATOMI_LMP_INSTALL_DIR" in template
     assert 'ATOMI_LMP_INSTALL_DIR/lib64' in template
+    assert "ATOMI_LAMMPS_PYTHONPATH" in template
+    assert "LAMMPS_PYTHONPATH" in template
+    assert "/src/lammps/python" in template
 
 
 def test_mliap_config_refreshes_stale_lammps_wrapper(tmp_path) -> None:
@@ -251,6 +254,7 @@ def test_mliap_config_refreshes_stale_lammps_wrapper(tmp_path) -> None:
     assert "GK_REQUESTED=0" in text
     assert 'confighpc --dir "$ATOMI_HPC_DIR" --no-env-var --shell' in text
     assert "ATOMI_LMP_INSTALL_DIR" in text
+    assert "ATOMI_LAMMPS_PYTHONPATH" in text
 
 
 def test_qha_cp_can_generate_thermo_anchor_values(tmp_path) -> None:
