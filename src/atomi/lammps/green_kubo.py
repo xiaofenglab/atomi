@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -309,6 +310,44 @@ def write_probe_runner(path: Path, input_name: str, lammps_command: str) -> None
     path.chmod(0o755)
 
 
+def replace_sbatch_option(script: str, option: str, value: str) -> str:
+    pattern = rf"(?m)^#+SBATCH\s+--{re.escape(option)}(?:[=\s].*)?$"
+    replacement = f"#SBATCH --{option}={value}"
+    updated, count = re.subn(pattern, replacement, script)
+    if count:
+        return updated
+    lines = updated.splitlines()
+    insert_at = 0
+    for index, line in enumerate(lines):
+        if re.match(r"^#+SBATCH\b", line):
+            insert_at = index + 1
+    lines.insert(insert_at, replacement)
+    return "\n".join(lines) + ("\n" if updated.endswith("\n") else "")
+
+
+def write_probe_sbatch_runner(cfg: dict[str, Any], root: Path, outdir: Path, input_name: str, walltime: str) -> Path | None:
+    wrapper = cfg.get("wrapper_script")
+    if not wrapper:
+        return None
+    wrapper_path = resolve_root_path(Path(wrapper), root)
+    if not wrapper_path.exists():
+        return None
+    script = wrapper_path.read_text(encoding="utf-8")
+    script = replace_sbatch_option(script, "time", walltime)
+    path = outdir / "run_probe_sbatch.sh"
+    path.write_text(script, encoding="utf-8")
+    path.chmod(0o755)
+    submit_path = outdir / "submit_probe.sh"
+    submit_path.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"sbatch {shlex.quote(path.name)} {shlex.quote(input_name)}\n",
+        encoding="utf-8",
+    )
+    submit_path.chmod(0o755)
+    return path
+
+
 def classify_probe_log(text: str) -> str:
     lowered = text.lower()
     if "eflag_atom" in lowered or "vflag_atom" in lowered or "heat/flux" in lowered and "error" in lowered:
@@ -334,6 +373,7 @@ def probe_main(args: argparse.Namespace) -> dict[str, Any]:
     outdir.mkdir(parents=True, exist_ok=True)
     input_path = outdir / "gk_heatflux_probe.in"
     runner_path = outdir / "run_probe.sh"
+    sbatch_runner_path = outdir / "run_probe_sbatch.sh"
     log_path = outdir / "gk_heatflux_probe.log"
     report_path = outdir / "gk_heatflux_probe_report.json"
     text = build_heat_flux_probe_input(
@@ -345,6 +385,7 @@ def probe_main(args: argparse.Namespace) -> dict[str, Any]:
     )
     input_path.write_text(text, encoding="utf-8")
     write_probe_runner(runner_path, input_path.name, args.lammps_command)
+    wrapper_runner = write_probe_sbatch_runner(cfg, root, outdir, input_path.name, args.sbatch_walltime)
     status = "not_executed"
     returncode = None
     if args.execute:
@@ -361,6 +402,8 @@ def probe_main(args: argparse.Namespace) -> dict[str, Any]:
         "suffix": args.suffix,
         "input": str(input_path),
         "runner": str(runner_path),
+        "sbatch_runner": str(wrapper_runner) if wrapper_runner else None,
+        "sbatch_submit": str(outdir / "submit_probe.sh") if wrapper_runner else None,
         "log": str(log_path) if args.execute else None,
         "executed": bool(args.execute),
         "returncode": returncode,
@@ -374,6 +417,9 @@ def probe_main(args: argparse.Namespace) -> dict[str, Any]:
     write_json(report_path, report)
     print(f"Wrote GK heat-flux probe input : {input_path}")
     print(f"Wrote GK heat-flux probe runner: {runner_path}")
+    if wrapper_runner:
+        print(f"Wrote wrapper-based Slurm probe: {sbatch_runner_path}")
+        print(f"Wrote wrapper-based submitter  : {outdir / 'submit_probe.sh'}")
     print(f"Wrote GK heat-flux probe report: {report_path}")
     if args.execute:
         print(f"Probe status                  : {status}")
@@ -381,8 +427,11 @@ def probe_main(args: argparse.Namespace) -> dict[str, Any]:
     else:
         print("Run on HPC with:")
         print(f"  cd {outdir}")
+        if wrapper_runner:
+            print("  ./submit_probe.sh")
+            print("or direct, if the LAMMPS command is already on PATH:")
         print("  ./run_probe.sh")
-        print("or:")
+        print("or with an explicit command:")
         print("  LMP_CMD='srun lmp' ./run_probe.sh")
     return report
 
@@ -729,6 +778,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="LAMMPS suffix command for the probe. Use kk to test mace/kokkos; off tests Atomi's default fallback.",
     )
     probe.add_argument("--lammps-command", default="lmp", help="Command used with --execute and written into run_probe.sh.")
+    probe.add_argument(
+        "--sbatch-walltime",
+        default="00:05:00",
+        help="Walltime written into the wrapper-based Slurm probe script. Default: 00:05:00.",
+    )
     probe.add_argument("--execute", action="store_true", help="Run the probe immediately on this machine/session.")
 
     ana = sub.add_parser("analyze", help="Integrate completed GK HCACF files into k(T).")
@@ -754,11 +808,14 @@ def main(argv: list[str] | None = None) -> Any:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "prepare":
-        return prepare_main(args)
+        prepare_main(args)
+        return None
     if args.command == "probe":
-        return probe_main(args)
+        probe_main(args)
+        return None
     if args.command == "analyze":
-        return analyze_main(args)
+        analyze_main(args)
+        return None
     parser.error(f"unknown command {args.command}")
 
 
