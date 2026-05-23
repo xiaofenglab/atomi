@@ -185,6 +185,47 @@ def test_green_kubo_prepare_can_write_mliap_backend(tmp_path):
     assert "pair_coeff      * * O U" in text
 
 
+def test_green_kubo_mliap_probe_forces_gk_binary(tmp_path):
+    cfg = base_cfg(tmp_path)
+    data = tmp_path / "start.data"
+    data.write_text("data\n", encoding="utf-8")
+    cfg.update(
+        {
+            "pair_style_backend": "mliap",
+            "runtime_profile": "lammps_gk_mliap",
+            "model_elements": ["O", "U"],
+            "stages": [
+                {
+                    "name": "gk_T300K_s01",
+                    "type": "nve",
+                    "temperature": 300,
+                    "input_structure": "start.data",
+                    "green_kubo_run": True,
+                }
+            ],
+        }
+    )
+    config = tmp_path / "config_gk_mliap.json"
+    config.write_text(json.dumps(cfg), encoding="utf-8")
+
+    green_kubo.main(
+        [
+            "probe",
+            "--config",
+            str(config),
+            "--stage",
+            "gk_T300K_s01",
+            "--outdir",
+            str(tmp_path / "probe_mliap"),
+        ]
+    )
+
+    probe_input = (tmp_path / "probe_mliap" / "gk_heatflux_probe.in").read_text(encoding="utf-8")
+    submitter = (tmp_path / "probe_mliap" / "submit_probe.sh").read_text(encoding="utf-8")
+    assert "pair_style      mliap unified" in probe_input
+    assert "export ATOMI_LAMMPS_USE_GK_EXE=1" in submitter
+
+
 def test_green_kubo_probe_writes_heat_flux_preflight(tmp_path):
     cfg = base_cfg(tmp_path)
     data = tmp_path / "start.data"

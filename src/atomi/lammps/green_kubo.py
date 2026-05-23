@@ -358,9 +358,13 @@ def write_probe_sbatch_runner(cfg: dict[str, Any], root: Path, outdir: Path, inp
     path.write_text(script, encoding="utf-8")
     path.chmod(0o755)
     submit_path = outdir / "submit_probe.sh"
+    exports = ""
+    if cfg.get("pair_style_backend") == "mliap" or cfg.get("runtime_profile") == "lammps_gk_mliap":
+        exports = "export ATOMI_LAMMPS_USE_GK_EXE=1\n"
     submit_path.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
+        f"{exports}"
         f"sbatch {shlex.quote(path.name)} {shlex.quote(input_name)}\n",
         encoding="utf-8",
     )
