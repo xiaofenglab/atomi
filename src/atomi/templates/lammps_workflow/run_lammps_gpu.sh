@@ -229,8 +229,11 @@ if [ "${LAMMPS_PROFILE}" = "gk_mliap" ]; then
 import importlib
 import sys
 
-required = ("lammps", "mliap_unified_couple", "torch")
-optional = ("mace",)
+required = ("lammps", "torch")
+# Some CMake ML-IAP builds compile the Cython mliap_unified_couple module into
+# liblammps instead of installing it as a standalone Python extension. Treat it
+# as diagnostic here; the LAMMPS run-0 probe below is the authoritative check.
+optional = ("mliap_unified_couple", "mace")
 failed = False
 for name in required + optional:
     try:
