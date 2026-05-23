@@ -554,6 +554,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         spin_report.add_argument("spin_report_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("vasp-compare-runs", "vasp-run-compare", "vaspcompare", "comparevasp"):
+        vasp_compare_runs = subparsers.add_parser(
+            command_name,
+            help="Compare two VASP runs side by side.",
+        )
+        vasp_compare_runs.add_argument("compare_args", nargs=argparse.REMAINDER)
+
     for command_name in ("vasp-branch-screen", "screen-vasp-branches", "vasp-stage1-screen", "spinscreen"):
         branch_screen = subparsers.add_parser(
             command_name,
@@ -1063,6 +1070,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.spin_report import main as vasp_spin_report_main
 
         vasp_spin_report_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in ("vasp-compare-runs", "vasp-run-compare", "vaspcompare", "comparevasp"):
+        from atomi.vasp.compare_runs import main as vasp_compare_runs_main
+
+        vasp_compare_runs_main(raw_args[1:])
         return
     if raw_args and raw_args[0] in ("vasp-branch-screen", "screen-vasp-branches", "vasp-stage1-screen", "spinscreen"):
         from atomi.vasp.branch_screen import main as vasp_branch_screen_main
@@ -1606,6 +1618,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.spin_report import main as vasp_spin_report_main
 
         vasp_spin_report_main(args.spin_report_args)
+        return
+
+    if args.subcommand in ("vasp-compare-runs", "vasp-run-compare", "vaspcompare", "comparevasp"):
+        from atomi.vasp.compare_runs import main as vasp_compare_runs_main
+
+        vasp_compare_runs_main(args.compare_args)
         return
 
     if args.subcommand in ("vasp-branch-screen", "screen-vasp-branches", "vasp-stage1-screen", "spinscreen"):
