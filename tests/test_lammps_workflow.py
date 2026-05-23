@@ -1,6 +1,7 @@
 import csv
 import json
 import tarfile
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -205,6 +206,21 @@ def test_stage_wrapper_rewrites_sbatch_resources_from_environment(tmp_path, monk
     assert "#SBATCH --gres=gpu:1" in text
     assert "#SBATCH --cpus-per-task=4" in text
     assert "#SBATCH --time=05:36:00" in text
+
+
+def test_lammps_wrapper_fail_fast_when_gk_exe_missing() -> None:
+    template = (
+        Path("src")
+        / "atomi"
+        / "templates"
+        / "lammps_workflow"
+        / "run_lammps_gpu.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "GK_REQUESTED=0" in template
+    assert "ATOMI_LMP_GK_EXE is not set" in template
+    assert 'ATOMI_LMP_EXE="${ATOMI_LMP_GK_EXE}"' in template
+    assert "atomi_hpc_env.sh" in template
 
 
 def test_qha_cp_can_generate_thermo_anchor_values(tmp_path) -> None:

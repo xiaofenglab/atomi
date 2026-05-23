@@ -52,11 +52,26 @@ fi
 unset PYTHONPATH
 
 INPUT="$1"
+INPUT_BASE="$(basename "${INPUT:-}")"
+GK_REQUESTED=0
+if [ "${ATOMI_LAMMPS_USE_GK_EXE:-0}" = "1" ] || [[ "${INPUT_BASE}" == in.gk_* ]]; then
+    GK_REQUESTED=1
+fi
+
+if [ -f "$HOME/atomi_hpc/atomi_hpc_env.sh" ]; then
+    if [ -z "${ATOMI_LMP_EXE:-}" ] || { [ "${GK_REQUESTED}" = "1" ] && [ -z "${ATOMI_LMP_GK_EXE:-}" ]; }; then
+        source "$HOME/atomi_hpc/atomi_hpc_env.sh"
+    fi
+fi
 
 # ---- runtime libraries ----
 LAMMPS_PROFILE="production"
-INPUT_BASE="$(basename "${INPUT:-}")"
-if { [ "${ATOMI_LAMMPS_USE_GK_EXE:-0}" = "1" ] || [[ "${INPUT_BASE}" == in.gk_* ]]; } && [ -n "${ATOMI_LMP_GK_EXE:-}" ]; then
+if [ "${GK_REQUESTED}" = "1" ] && [ -z "${ATOMI_LMP_GK_EXE:-}" ]; then
+    echo "ERROR: GK/ML-IAP LAMMPS was requested, but ATOMI_LMP_GK_EXE is not set."
+    echo "Run confighpc or update $HOME/atomi_hpc/atomi_hpc_env.sh so the Slurm job can see profiles.lammps_gk_mliap."
+    exit 2
+fi
+if [ "${GK_REQUESTED}" = "1" ] && [ -n "${ATOMI_LMP_GK_EXE:-}" ]; then
     ATOMI_LMP_EXE="${ATOMI_LMP_GK_EXE}"
     if [ -n "${ATOMI_LAMMPS_GK_PREFIX:-}" ]; then
         ATOMI_LAMMPS_PREFIX="${ATOMI_LAMMPS_GK_PREFIX}"
