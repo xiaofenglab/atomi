@@ -18,8 +18,10 @@ def build_slurm_script(
     partition: str,
     gres: str,
     time_limit: str,
+    model_format: str | None = None,
 ) -> str:
     """Build a Slurm script that converts a MACE model for LAMMPS."""
+    format_arg = f" --format={model_format}" if model_format else ""
     return f"""#!/bin/bash
 #SBATCH --job-name=mace_convert
 #SBATCH --output=mace_convert.%j.out
@@ -39,16 +41,20 @@ echo "Running in directory:"
 pwd
 
 echo "Model file: {model}"
+echo "Format    : {model_format or 'default'}"
 
-python -m mace.cli.create_lammps_model "{model}"
+python -m mace.cli.create_lammps_model "{model}"{format_arg}
 
 echo "Conversion finished"
 """
 
 
-def convert_mace_model_local(model: Path) -> None:
+def convert_mace_model_local(model: Path, model_format: str | None = None) -> None:
     """Run MACE's LAMMPS model converter in the active environment."""
-    subprocess.run(["python", "-m", "mace.cli.create_lammps_model", str(model)], check=True)
+    command = ["python", "-m", "mace.cli.create_lammps_model", str(model)]
+    if model_format:
+        command.append(f"--format={model_format}")
+    subprocess.run(command, check=True)
 
 
 def submit_mace_conversion(
@@ -57,6 +63,7 @@ def submit_mace_conversion(
     partition: str,
     gres: str,
     time_limit: str = "00:15:00",
+    model_format: str | None = None,
     dry_run: bool = False,
 ) -> None:
     """Submit a Slurm job for MACE to LAMMPS model conversion."""
@@ -69,6 +76,7 @@ def submit_mace_conversion(
         partition=partition,
         gres=gres,
         time_limit=time_limit,
+        model_format=model_format,
     )
     if dry_run:
         print(script)
@@ -96,6 +104,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--partition")
     parser.add_argument("--gres")
     parser.add_argument("--time")
+    parser.add_argument(
+        "--format",
+        dest="model_format",
+        choices=("mliap",),
+        help="Pass a MACE converter output format, e.g. mliap for pair_style mliap unified.",
+    )
     parser.add_argument("--local", action="store_true", help="Run conversion in the active environment.")
     parser.add_argument("--dry-run", action="store_true", help="Print the Slurm script without submitting.")
     args = parser.parse_args(argv)
@@ -112,7 +126,7 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("No .model file found in this directory. Usage: convertmace modelname.model")
 
     if args.local:
-        convert_mace_model_local(model)
+        convert_mace_model_local(model, model_format=args.model_format)
         return
 
     missing = []
@@ -135,6 +149,7 @@ def main(argv: list[str] | None = None) -> None:
         partition=partition,
         gres=gres,
         time_limit=time_limit,
+        model_format=args.model_format,
         dry_run=args.dry_run,
     )
 
