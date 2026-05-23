@@ -21,9 +21,34 @@
 unset LANG
 export LC_ALL="C"
 
-if [ -z "${ATOMI_HPC_CONFIG:-}" ] && [ -f "$HOME/atomi_hpc/atomi_hpc_env.sh" ]; then
-    source "$HOME/atomi_hpc/atomi_hpc_env.sh"
-fi
+ATOMI_HPC_DIR="${ATOMI_HPC_DIR:-$HOME/atomi_hpc}"
+ATOMI_HPC_ENV="${ATOMI_HPC_ENV:-$ATOMI_HPC_DIR/atomi_hpc_env.sh}"
+
+atomi_local_hpc_json_exists() {
+    [ -d "$ATOMI_HPC_DIR" ] && find "$ATOMI_HPC_DIR" -maxdepth 1 -type f -name "*.local.json" -print -quit | grep -q .
+}
+
+apply_atomi_hpc_environment() {
+    if command -v confighpc >/dev/null 2>&1; then
+        if [ -n "${ATOMI_HPC_CONFIG:-}" ] && [ -f "$ATOMI_HPC_CONFIG" ]; then
+            eval "$(confighpc --config "$ATOMI_HPC_CONFIG" --shell)"
+            return
+        fi
+        if atomi_local_hpc_json_exists; then
+            eval "$(confighpc --dir "$ATOMI_HPC_DIR" --no-env-var --shell)"
+            return
+        fi
+    elif atomi_local_hpc_json_exists; then
+        echo "WARNING: local Atomi HPC JSON exists in $ATOMI_HPC_DIR, but confighpc is not on PATH; not sourcing stale env file."
+        return
+    fi
+
+    if [ -z "${ATOMI_HPC_CONFIG:-}" ] && [ -f "$ATOMI_HPC_ENV" ]; then
+        source "$ATOMI_HPC_ENV"
+    fi
+}
+
+apply_atomi_hpc_environment
 
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -58,9 +83,9 @@ if [ "${ATOMI_LAMMPS_USE_GK_EXE:-0}" = "1" ] || [[ "${INPUT_BASE}" == in.gk_* ]]
     GK_REQUESTED=1
 fi
 
-if [ -f "$HOME/atomi_hpc/atomi_hpc_env.sh" ]; then
+if [ -d "$ATOMI_HPC_DIR" ]; then
     if [ -z "${ATOMI_LMP_EXE:-}" ] || { [ "${GK_REQUESTED}" = "1" ] && [ -z "${ATOMI_LMP_GK_EXE:-}" ]; }; then
-        source "$HOME/atomi_hpc/atomi_hpc_env.sh"
+        apply_atomi_hpc_environment
     fi
 fi
 
@@ -68,7 +93,7 @@ fi
 LAMMPS_PROFILE="production"
 if [ "${GK_REQUESTED}" = "1" ] && [ -z "${ATOMI_LMP_GK_EXE:-}" ]; then
     echo "ERROR: GK/ML-IAP LAMMPS was requested, but ATOMI_LMP_GK_EXE is not set."
-    echo "Run confighpc or update $HOME/atomi_hpc/atomi_hpc_env.sh so the Slurm job can see profiles.lammps_gk_mliap."
+    echo "Run confighpc or update the local JSON in $ATOMI_HPC_DIR so the Slurm job can see profiles.lammps_gk_mliap."
     exit 2
 fi
 if [ "${GK_REQUESTED}" = "1" ] && [ -n "${ATOMI_LMP_GK_EXE:-}" ]; then

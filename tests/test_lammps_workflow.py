@@ -220,6 +220,9 @@ def test_lammps_wrapper_fail_fast_when_gk_exe_missing() -> None:
     assert "GK_REQUESTED=0" in template
     assert "ATOMI_LMP_GK_EXE is not set" in template
     assert 'ATOMI_LMP_EXE="${ATOMI_LMP_GK_EXE}"' in template
+    assert 'confighpc --dir "$ATOMI_HPC_DIR" --no-env-var --shell' in template
+    assert 'confighpc --config "$ATOMI_HPC_CONFIG" --shell' in template
+    assert "*.local.json" in template
     assert "atomi_hpc_env.sh" in template
 
 
