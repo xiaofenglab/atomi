@@ -24,6 +24,7 @@ from atomi.lammps.elastic import (
     temperature_label,
 )
 from atomi.lammps.thermal_conductivity import green_kubo_rows, write_csv, write_json
+from atomi.lammps.workflow import lammps_pair_lines
 
 
 EV_TO_J = 1.602176634e-19
@@ -55,6 +56,10 @@ def copy_gk_base_config(template: dict[str, Any], args: argparse.Namespace) -> d
     keys = [
         "wrapper_script",
         "model_file",
+        "pair_style_backend",
+        "model_elements",
+        "lammps_pair_style",
+        "lammps_pair_coeff",
         "timestep",
         "timestep_ps",
         "mass_O",
@@ -194,6 +199,20 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
     outdir = resolve_root_path(args.outdir, root)
     config_out = resolve_root_path(args.config_out, root)
     cfg = copy_gk_base_config(template, args)
+    if args.model_file is not None:
+        cfg["model_file"] = relative_to_root(resolve_root_path(args.model_file, root), root)
+    if args.pair_style_backend is not None:
+        cfg["pair_style_backend"] = args.pair_style_backend
+    if args.model_elements:
+        elements: list[str] = []
+        for item in args.model_elements:
+            elements.extend(part.strip() for part in str(item).replace(",", " ").split() if part.strip())
+        cfg["model_elements"] = elements
+    if cfg.get("pair_style_backend") == "mliap":
+        cfg["runtime_profile"] = "lammps_gk_mliap"
+        cfg["green_kubo_settings"]["notes"].append(
+            "This config requests pair_style_backend=mliap; use the private lammps_gk_mliap profile/install_mliap binary."
+        )
     stages, manifest = build_gk_stages(records, root, args)
     cfg["stages"] = stages
     write_json(config_out, cfg)
@@ -258,7 +277,9 @@ def build_heat_flux_probe_input(
     temperature: float,
     suffix: str,
 ) -> str:
-    model = resolve_root_path(Path(cfg["model_file"]), root)
+    cfg_for_pair = dict(cfg)
+    cfg_for_pair["model_file"] = str(resolve_root_path(Path(cfg["model_file"]), root))
+    pair_text = lammps_pair_lines(cfg_for_pair)
     timestep = float(cfg.get("timestep_ps", cfg.get("timestep", 0.001)))
     return f"""units           metal
 dimension       3
@@ -272,8 +293,7 @@ newton          on
 mass            1 {cfg["mass_O"]}
 mass            2 {cfg["mass_U"]}
 
-{probe_suffix_command(suffix)}pair_style      mace no_domain_decomposition
-pair_coeff      * * {model.resolve()} O U
+{probe_suffix_command(suffix)}{pair_text}
 
 neighbor        2.0 bin
 neigh_modify    every 1 delay 0 check yes
@@ -739,6 +759,9 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument("--correlation-time-ps", type=float, default=50.0)
     prep.add_argument("--plateau-window-ps", type=float, default=5.0)
     prep.add_argument("--timestep-ps", type=float, help="Override timestep in ps. Defaults to template config timestep.")
+    prep.add_argument("--model-file", type=Path, help="Override model file for GK stages, e.g. a converted MACE ML-IAP model.")
+    prep.add_argument("--pair-style-backend", choices=("mace", "mliap"), help="Pair-style backend written to GK inputs.")
+    prep.add_argument("--model-elements", nargs="+", help="Element/type order for pair_coeff, e.g. O U. Commas are accepted.")
     prep.add_argument("--array-limit", type=int, default=10, help="Suggested md-engine-array concurrency. Default: 10.")
     prep.add_argument("--walltime-hours", type=float, help="Optional walltime override for every GK seed stage.")
     prep.add_argument(

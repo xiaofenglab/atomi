@@ -642,6 +642,21 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
         if isinstance(modules, list) and modules:
             exports.setdefault("ATOMI_LAMMPS_MODULES", " ".join(str(item) for item in modules if _nonempty(item)))
 
+    lammps_gk = profiles.get("lammps_gk_mliap", {})
+    if isinstance(lammps_gk, dict):
+        env = lammps_gk.get("environment", {})
+        if isinstance(env, dict):
+            for key, value in env.items():
+                if _nonempty(value) and (str(key).startswith("ATOMI_") or str(key) == "PSM2_CUDA"):
+                    exports.setdefault(str(key), str(value))
+        gk_mappings = {
+            "lammps_executable": "ATOMI_LMP_GK_EXE",
+            "lammps_prefix": "ATOMI_LAMMPS_GK_PREFIX",
+        }
+        for field, env_key in gk_mappings.items():
+            if _nonempty(lammps_gk.get(field)):
+                exports.setdefault(env_key, str(lammps_gk[field]))
+
     cp2k = profiles.get("cp2k", {})
     if isinstance(cp2k, dict):
         env = cp2k.get("environment", {})

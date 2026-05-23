@@ -73,6 +73,29 @@ def path_for_lammps(p):
     return str(Path(p).resolve())
 
 
+def model_elements(cfg):
+    elements = cfg.get("model_elements", ["O", "U"])
+    if isinstance(elements, str):
+        elements = [part.strip() for part in re.split(r"[,\s]+", elements) if part.strip()]
+    return [str(item) for item in elements]
+
+
+def lammps_pair_lines(cfg):
+    model = path_for_lammps(cfg["model_file"])
+    if cfg.get("lammps_pair_style") and cfg.get("lammps_pair_coeff"):
+        style = str(cfg["lammps_pair_style"]).format(model=model)
+        coeff = str(cfg["lammps_pair_coeff"]).format(model=model)
+        return f"pair_style      {style}\npair_coeff      {coeff}"
+
+    elements = " ".join(model_elements(cfg))
+    backend = str(cfg.get("pair_style_backend", "mace")).lower()
+    if backend == "mliap":
+        return f"pair_style      mliap unified {model} 0\npair_coeff      * * {elements}"
+    if backend != "mace":
+        raise ValueError(f"Unsupported LAMMPS pair_style_backend {backend!r}; expected 'mace' or 'mliap'.")
+    return f"pair_style      mace no_domain_decomposition\npair_coeff      * * {model} {elements}"
+
+
 def make_read_command(structure_path):
     p = Path(structure_path).resolve()
     name = p.name.lower()
@@ -769,8 +792,8 @@ def generate_input(
     resume_mode=False,
     temperature_start_override=None,
 ):
-    model = path_for_lammps(cfg["model_file"])
     read_cmd = make_read_command(structure_path)
+    pair_text = lammps_pair_lines(cfg)
 
     chunk_tag = f"{stage_name}_c{chunk_idx:02d}"
     dump_name = f"dump.{chunk_tag}.lammpstrj"
@@ -790,8 +813,7 @@ newton          on
 mass            1 {cfg["mass_O"]}
 mass            2 {cfg["mass_U"]}
 
-pair_style      mace no_domain_decomposition
-pair_coeff      * * {model} O U
+{pair_text}
 
 neighbor        2.0 bin
 neigh_modify    every 1 delay 0 check yes
@@ -987,8 +1009,8 @@ def green_kubo_fix_text(cfg, stage, temperature, timestep):
 
 
 def generate_production_input(cfg, stage, structure_path, chunk_tag):
-    model = path_for_lammps(cfg["model_file"])
     read_cmd = make_read_command(structure_path)
+    pair_text = lammps_pair_lines(cfg)
 
     temperature = stage_temperature(stage)
     tdamp = get_tdamp(cfg, stage)
@@ -1051,8 +1073,7 @@ mass            1 {cfg["mass_O"]}
 mass            2 {cfg["mass_U"]}
 
 {suffix_text}\
-pair_style      mace no_domain_decomposition
-pair_coeff      * * {model} O U
+{pair_text}
 
 neighbor        2.0 bin
 neigh_modify    every 1 delay 0 check yes
@@ -1417,6 +1438,8 @@ def write_production_config_from_equilibration(
         ),
         "wrapper_script": _relative_to_root(Path(cfg["wrapper_script"])),
         "model_file": _relative_to_root(Path(cfg["model_file"])),
+        "pair_style_backend": cfg.get("pair_style_backend", "mace"),
+        "model_elements": cfg.get("model_elements", ["O", "U"]),
         "timestep": cfg.get("timestep", timestep_ps),
         "mass_O": cfg["mass_O"],
         "mass_U": cfg["mass_U"],

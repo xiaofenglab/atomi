@@ -256,6 +256,39 @@ def test_confighpc_applies_default_local_config(tmp_path: Path) -> None:
     assert f"export ATOMI_HPC_CONFIG={config_path}" in env_text
 
 
+def test_confighpc_exports_separate_gk_lammps_profile(tmp_path: Path) -> None:
+    config_path = tmp_path / "atomi_hpc_config.kit.local.json"
+    env_path = tmp_path / "atomi_hpc_env.sh"
+    config_path.write_text(
+        json.dumps(
+            {
+                "site": "KIT",
+                "profiles": {
+                    "lammps_md_engine": {
+                        "lammps_executable": "/private/prod/lmp",
+                        "lammps_prefix": "/private/prod",
+                    },
+                    "lammps_gk_mliap": {
+                        "lammps_executable": "/private/mliap/lmp",
+                        "lammps_prefix": "/private/mliap",
+                        "environment": {"ATOMI_LAMMPS_GK_BACKEND": "mliap"},
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    doctor.configure_hpc_environment(directory=tmp_path, env_path=env_path)
+    env_text = env_path.read_text(encoding="utf-8")
+
+    assert "export ATOMI_LMP_EXE=/private/prod/lmp" in env_text
+    assert "export ATOMI_LAMMPS_PREFIX=/private/prod" in env_text
+    assert "export ATOMI_LMP_GK_EXE=/private/mliap/lmp" in env_text
+    assert "export ATOMI_LAMMPS_GK_PREFIX=/private/mliap" in env_text
+    assert "export ATOMI_LAMMPS_GK_BACKEND=mliap" in env_text
+
+
 def test_confighpc_prefers_named_local_config_and_warns_on_multiple(tmp_path: Path) -> None:
     less_preferred = tmp_path / "other.local.json"
     preferred = tmp_path / "atomi_hpc_config.kit.local.json"

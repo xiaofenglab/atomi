@@ -127,6 +127,64 @@ def test_green_kubo_prepare_writes_multi_seed_config(tmp_path):
     assert "data" in manifest
 
 
+def test_green_kubo_prepare_can_write_mliap_backend(tmp_path):
+    cfg = base_cfg(tmp_path)
+    cfg["stages"] = [
+        {
+            "name": "npt_prod_300K",
+            "type": "npt",
+            "temperature": 300,
+            "production_run": True,
+            "chunk_name": "chunk_production",
+        }
+    ]
+    config = tmp_path / "config_production.json"
+    config.write_text(json.dumps(cfg), encoding="utf-8")
+    stage_dir = tmp_path / "stages" / "npt_prod_300K"
+    chunk = stage_dir / "chunk_production"
+    chunk.mkdir(parents=True)
+    (chunk / "log.in.npt_prod_300K_production").write_text("LAMMPS log\n", encoding="utf-8")
+    (stage_dir / "npt_prod_300K.data").write_text("data\n", encoding="utf-8")
+    model = tmp_path / "model-mliap_lammps.pt"
+    model.write_text("model\n", encoding="utf-8")
+    set_project_root(tmp_path)
+
+    green_kubo.main(
+        [
+            "prepare",
+            "--config",
+            str(config),
+            "--config-out",
+            "config_gk_mliap.json",
+            "--model-file",
+            str(model),
+            "--pair-style-backend",
+            "mliap",
+            "--model-elements",
+            "O",
+            "U",
+            "--n-seeds",
+            "1",
+            "--nve-time-ps",
+            "1",
+        ]
+    )
+
+    out = json.loads((tmp_path / "config_gk_mliap.json").read_text(encoding="utf-8"))
+    assert out["runtime_profile"] == "lammps_gk_mliap"
+    assert out["pair_style_backend"] == "mliap"
+    assert out["model_file"].endswith("model-mliap_lammps.pt")
+    assert out["model_elements"] == ["O", "U"]
+    text, _data, _restart, _steps = generate_production_input(
+        out,
+        out["stages"][0],
+        tmp_path / out["stages"][0]["input_structure"],
+        "gk_mliap",
+    )
+    assert "pair_style      mliap unified" in text
+    assert "pair_coeff      * * O U" in text
+
+
 def test_green_kubo_probe_writes_heat_flux_preflight(tmp_path):
     cfg = base_cfg(tmp_path)
     data = tmp_path / "start.data"

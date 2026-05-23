@@ -51,7 +51,19 @@ fi
 # ---- optional env ----
 unset PYTHONPATH
 
+INPUT="$1"
+
 # ---- runtime libraries ----
+LAMMPS_PROFILE="production"
+INPUT_BASE="$(basename "${INPUT:-}")"
+if { [ "${ATOMI_LAMMPS_USE_GK_EXE:-0}" = "1" ] || [[ "${INPUT_BASE}" == in.gk_* ]]; } && [ -n "${ATOMI_LMP_GK_EXE:-}" ]; then
+    ATOMI_LMP_EXE="${ATOMI_LMP_GK_EXE}"
+    if [ -n "${ATOMI_LAMMPS_GK_PREFIX:-}" ]; then
+        ATOMI_LAMMPS_PREFIX="${ATOMI_LAMMPS_GK_PREFIX}"
+    fi
+    LAMMPS_PROFILE="gk_mliap"
+fi
+
 if [ -z "${ATOMI_LMP_EXE:-}" ]; then
     echo "ERROR: set ATOMI_LMP_EXE to the private path of your LAMMPS executable."
     exit 2
@@ -63,8 +75,6 @@ fi
 
 
 cd "${SLURM_SUBMIT_DIR}" || exit 1
-
-INPUT="$1"
 
 if [ -z "$INPUT" ]; then
     echo "Usage: sbatch run_lammps.sh input_file"
@@ -91,6 +101,7 @@ echo "OMP_NUM_THREADS   = ${OMP_NUM_THREADS}"
 echo "INPUT_FILE        = ${INPUT}"
 echo "CUDA_VISIBLE_DEVICES = ${CUDA_VISIBLE_DEVICES}"
 echo "LMP_EXE           = ${ATOMI_LMP_EXE}"
+echo "LAMMPS_PROFILE    = ${LAMMPS_PROFILE}"
 echo "========================================"
 
 echo "----- TOOLCHAIN -----"
