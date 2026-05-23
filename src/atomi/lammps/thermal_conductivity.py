@@ -220,6 +220,188 @@ def green_kubo_rows(
     return [result], metadata
 
 
+def first_finite(row: dict[str, str], names: tuple[str, ...]) -> float | None:
+    for name in names:
+        value = finite_float(row.get(name))
+        if value is not None:
+            return value
+    return None
+
+
+def mode_family(row: dict[str, str], frequency_thz: float | None, optical_cutoff_thz: float | None) -> str:
+    text = str(row.get("branch") or row.get("mode_family") or row.get("polarization") or "").strip().lower()
+    if text in {"la", "ta", "ta1", "ta2", "acoustic"} or "acoustic" in text:
+        return "acoustic"
+    if text in {"optical", "op"} or "opt" in text:
+        return "optical"
+    if optical_cutoff_thz is not None and frequency_thz is not None:
+        return "optical" if frequency_thz >= optical_cutoff_thz else "acoustic"
+    return "unknown"
+
+
+def nma_rows(
+    path: Path,
+    *,
+    label: str | None,
+    meta: dict[str, Any],
+    optical_cutoff_thz: float | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rows = read_csv(path)
+    source = label or "nma"
+    if not rows:
+        return [], {"source_file": str(path), "error": "empty CSV"}
+    if any("k_W_mK" in row and row["k_W_mK"] for row in rows):
+        table_rows = conductivity_table_rows(path, label=source, meta=meta)
+        return table_rows, {"source_file": str(path), "mode": "pre_integrated_nma", "rows": len(table_rows)}
+
+    grouped: dict[float, list[dict[str, Any]]] = {}
+    skipped = 0
+    for row in rows:
+        temp = first_finite(row, ("T_K", "temperature_K", "temperature"))
+        if temp is None:
+            skipped += 1
+            continue
+        tau_ps = first_finite(row, ("lifetime_ps", "tau_ps", "relaxation_time_ps"))
+        heat_capacity = first_finite(
+            row,
+            (
+                "mode_heat_capacity_J_m3K",
+                "heat_capacity_J_m3K",
+                "c_J_m3K",
+                "Cv_J_m3K",
+            ),
+        )
+        kx = first_finite(row, ("k_x_W_mK", "kappa_x_W_mK", "kx_W_mK"))
+        ky = first_finite(row, ("k_y_W_mK", "kappa_y_W_mK", "ky_W_mK"))
+        kz = first_finite(row, ("k_z_W_mK", "kappa_z_W_mK", "kz_W_mK"))
+        if kx is None or ky is None or kz is None:
+            vx = first_finite(row, ("vg_x_m_s", "group_velocity_x_m_s", "vx_m_s"))
+            vy = first_finite(row, ("vg_y_m_s", "group_velocity_y_m_s", "vy_m_s"))
+            vz = first_finite(row, ("vg_z_m_s", "group_velocity_z_m_s", "vz_m_s"))
+            if tau_ps is None or heat_capacity is None or vx is None or vy is None or vz is None:
+                skipped += 1
+                continue
+            tau_s = tau_ps * 1.0e-12
+            kx = heat_capacity * vx * vx * tau_s
+            ky = heat_capacity * vy * vy * tau_s
+            kz = heat_capacity * vz * vz * tau_s
+        frequency = first_finite(row, ("frequency_THz", "freq_THz", "omega_THz"))
+        item = {
+            "k_x_W_mK": kx,
+            "k_y_W_mK": ky,
+            "k_z_W_mK": kz,
+            "frequency_THz": frequency,
+            "family": mode_family(row, frequency, optical_cutoff_thz),
+            "lifetime_ps": tau_ps,
+        }
+        grouped.setdefault(float(temp), []).append(item)
+
+    out: list[dict[str, Any]] = []
+    for temp, items in sorted(grouped.items()):
+        kx = float(sum(float(item["k_x_W_mK"]) for item in items))
+        ky = float(sum(float(item["k_y_W_mK"]) for item in items))
+        kz = float(sum(float(item["k_z_W_mK"]) for item in items))
+        values = [kx, ky, kz]
+        family_k: dict[str, float] = {"acoustic": 0.0, "optical": 0.0, "unknown": 0.0}
+        for item in items:
+            contribution = float(item["k_x_W_mK"] + item["k_y_W_mK"] + item["k_z_W_mK"]) / 3.0
+            family_k[item["family"]] = family_k.get(item["family"], 0.0) + contribution
+        lifetimes = [float(item["lifetime_ps"]) for item in items if item.get("lifetime_ps") is not None]
+        out.append(
+            attach_cell_columns(
+                {
+                    "T_K": temp,
+                    "k_W_mK": float(sum(values) / 3.0),
+                    "k_std_W_mK": float(np.std(values, ddof=1)) if len(values) > 1 else 0.0,
+                    "k_x_W_mK": kx,
+                    "k_y_W_mK": ky,
+                    "k_z_W_mK": kz,
+                    "nma_acoustic_k_W_mK": family_k.get("acoustic", 0.0),
+                    "nma_optical_k_W_mK": family_k.get("optical", 0.0),
+                    "nma_unknown_branch_k_W_mK": family_k.get("unknown", 0.0),
+                    "nma_mode_count": len(items),
+                    "nma_lifetime_mean_ps": float(np.mean(lifetimes)) if lifetimes else None,
+                    "nma_lifetime_min_ps": float(np.min(lifetimes)) if lifetimes else None,
+                    "nma_lifetime_max_ps": float(np.max(lifetimes)) if lifetimes else None,
+                    "source": source,
+                    "source_file": str(path),
+                },
+                meta,
+            )
+        )
+    return out, {
+        "source_file": str(path),
+        "mode": "mode_resolved_nma_summary",
+        "rows": len(out),
+        "skipped_mode_rows": skipped,
+        "optical_cutoff_THz": optical_cutoff_thz,
+        "note": (
+            "Atomi aggregated NMA mode tables; full trajectory projection onto harmonic "
+            "eigenvectors must be generated upstream."
+        ),
+    }
+
+
+def is_gk_source(source: Any) -> bool:
+    text = str(source or "").lower()
+    return "green" in text or "gk" in text
+
+
+def is_nma_source(source: Any) -> bool:
+    return "nma" in str(source or "").lower()
+
+
+def compare_gk_nma(
+    rows: list[dict[str, Any]],
+    *,
+    temp_tolerance: float,
+    warning_fraction: float,
+    large_gap_fraction: float,
+) -> list[dict[str, Any]]:
+    gk_rows = [row for row in rows if is_gk_source(row.get("source"))]
+    nma_rows_in = [row for row in rows if is_nma_source(row.get("source"))]
+    comparisons: list[dict[str, Any]] = []
+    for gk in gk_rows:
+        gk_temp = finite_float(gk.get("T_K"))
+        gk_k = finite_float(gk.get("k_W_mK"))
+        if gk_temp is None or gk_k is None:
+            continue
+        matches = []
+        for nma in nma_rows_in:
+            nma_temp = finite_float(nma.get("T_K"))
+            nma_k = finite_float(nma.get("k_W_mK"))
+            if nma_temp is None or nma_k is None:
+                continue
+            if abs(nma_temp - gk_temp) <= temp_tolerance:
+                matches.append((abs(nma_temp - gk_temp), nma, nma_k))
+        if not matches:
+            continue
+        _delta_t, nma, nma_k = min(matches, key=lambda item: item[0])
+        diff = gk_k - nma_k
+        rel = abs(diff) / abs(gk_k) if abs(gk_k) > 1.0e-12 else None
+        if rel is None:
+            diagnostic = "undefined"
+        elif rel <= warning_fraction:
+            diagnostic = "phonon_like_consistent"
+        elif rel <= large_gap_fraction:
+            diagnostic = "moderate_gk_nma_gap"
+        else:
+            diagnostic = "large_gap_nonphonon_or_disorder_transport"
+        comparisons.append(
+            {
+                "T_K": gk_temp,
+                "gk_source": gk.get("source"),
+                "nma_source": nma.get("source"),
+                "k_gk_W_mK": gk_k,
+                "k_nma_W_mK": nma_k,
+                "delta_gk_minus_nma_W_mK": diff,
+                "relative_abs_difference": rel,
+                "diagnostic": diagnostic,
+            }
+        )
+    return comparisons
+
+
 def maybe_plot(path: Path, rows: list[dict[str, Any]]) -> str:
     try:
         import matplotlib
@@ -257,7 +439,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="thermal_k_lammps",
         description=(
             "Collect thermal conductivity from elastic lower-bound estimates, "
-            "pre-integrated MD tables, or scaled Green-Kubo HCACF integrals."
+            "pre-integrated MD tables, scaled Green-Kubo HCACF integrals, "
+            "or NMA mode/summary tables."
         ),
     )
     parser.add_argument("--elastic-dir", type=Path, help="Directory containing elastic_thermophysical_summary.csv.")
@@ -286,6 +469,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--plateau-start-ps", type=float, help="Average cumulative Green-Kubo integral after this time.")
     parser.add_argument("--plateau-fraction", type=float, default=0.2, help="Tail fraction used when --plateau-start-ps is absent.")
+    parser.add_argument(
+        "--nma-csv",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "NMA summary CSV with T_K,k_W_mK, or mode table with T_K,lifetime_ps,"
+            "mode_heat_capacity_J_m3K,vg_x/y/z_m_s."
+        ),
+    )
+    parser.add_argument("--nma-label", action="append", default=[], help="Label for each --nma-csv table.")
+    parser.add_argument(
+        "--nma-optical-cutoff-THz",
+        type=float,
+        help="Optional frequency threshold for acoustic/optical NMA contribution split.",
+    )
+    parser.add_argument(
+        "--compare-gk-nma",
+        action="store_true",
+        help="Write a GK-vs-NMA diagnostic table when both sources are present.",
+    )
+    parser.add_argument(
+        "--gk-nma-temperature-tolerance",
+        type=float,
+        default=1.0,
+        help="Temperature tolerance in K for matching GK and NMA rows. Default: 1 K.",
+    )
+    parser.add_argument(
+        "--gk-nma-warning-fraction",
+        type=float,
+        default=0.25,
+        help="Relative GK/NMA difference below this is labeled phonon-like consistent.",
+    )
+    parser.add_argument(
+        "--gk-nma-large-gap-fraction",
+        type=float,
+        default=0.50,
+        help="Relative GK/NMA difference above this is labeled a large nonphonon/disorder gap.",
+    )
     parser.add_argument("--outdir", type=Path, default=Path("analysis/thermal_k_lammps"))
     parser.add_argument("--no-plot", action="store_true")
     return parser
@@ -337,6 +559,16 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         )
         rows.extend(gk_rows)
         sources.append({"kind": "green_kubo", "path": str(path.resolve()), "rows": len(gk_rows), **gk_meta})
+    for idx, path in enumerate(args.nma_csv):
+        label = args.nma_label[idx] if idx < len(args.nma_label) else f"nma_{idx + 1}"
+        mode_rows, nma_meta = nma_rows(
+            path.resolve(),
+            label=label,
+            meta=meta,
+            optical_cutoff_thz=args.nma_optical_cutoff_THz,
+        )
+        rows.extend(mode_rows)
+        sources.append({"kind": "nma", "path": str(path.resolve()), "rows": len(mode_rows), **nma_meta})
     rows = sorted(rows, key=lambda row: (float(row["T_K"]), str(row.get("source") or "")))
     fields = [
         "T_K",
@@ -347,6 +579,13 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "k_x_W_mK",
         "k_y_W_mK",
         "k_z_W_mK",
+        "nma_acoustic_k_W_mK",
+        "nma_optical_k_W_mK",
+        "nma_unknown_branch_k_W_mK",
+        "nma_mode_count",
+        "nma_lifetime_mean_ps",
+        "nma_lifetime_min_ps",
+        "nma_lifetime_max_ps",
         "source",
         "source_file",
         "formula",
@@ -359,20 +598,59 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     ]
     csv_path = outdir / "thermal_conductivity_T.csv"
     write_csv(csv_path, rows, fields)
+    comparisons = []
+    comparison_path = ""
+    should_compare = args.compare_gk_nma or (
+        any(source.get("kind") == "green_kubo" for source in sources)
+        and any(source.get("kind") == "nma" for source in sources)
+    )
+    if should_compare:
+        comparisons = compare_gk_nma(
+            rows,
+            temp_tolerance=args.gk_nma_temperature_tolerance,
+            warning_fraction=args.gk_nma_warning_fraction,
+            large_gap_fraction=args.gk_nma_large_gap_fraction,
+        )
+        if comparisons:
+            comparison_path = str(outdir / "gk_nma_comparison.csv")
+            write_csv(
+                Path(comparison_path),
+                comparisons,
+                [
+                    "T_K",
+                    "gk_source",
+                    "nma_source",
+                    "k_gk_W_mK",
+                    "k_nma_W_mK",
+                    "delta_gk_minus_nma_W_mK",
+                    "relative_abs_difference",
+                    "diagnostic",
+                ],
+            )
     plot = "" if args.no_plot else maybe_plot(outdir, rows)
     metadata = {
         "schema": "atomi.lammps.thermal_conductivity.v1",
-        "outputs": {"csv": str(csv_path), "plot": plot},
+        "outputs": {"csv": str(csv_path), "plot": plot, "gk_nma_comparison_csv": comparison_path},
         "cell_metadata": meta,
         "n_rows": len(rows),
         "sources": sources,
+        "gk_nma_comparison": {
+            "n_rows": len(comparisons),
+            "temperature_tolerance_K": args.gk_nma_temperature_tolerance,
+            "warning_fraction": args.gk_nma_warning_fraction,
+            "large_gap_fraction": args.gk_nma_large_gap_fraction,
+        },
         "notes": [
             "Elastic lower-bound estimates are DFT/elasticity screening values, not anharmonic transport.",
             "Green-Kubo raw HCACF integration requires a user-supplied unit scale unless the input is already in W/m/K units.",
+            "NMA mode tables diagnose phonon quasiparticle lifetimes; full MD-to-mode projection is generated upstream.",
+            "Large GK-NMA gaps can indicate mobile defects, coherent/off-diagonal transport, strong disorder, or an MLIP dynamics issue.",
         ],
     }
     write_json(outdir / "thermal_conductivity_metadata.json", metadata)
     print(f"Wrote thermal conductivity table: {csv_path}")
+    if comparison_path:
+        print(f"Wrote GK/NMA comparison: {comparison_path}")
     return metadata
 
 
