@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -24,7 +25,11 @@ from atomi.lammps.elastic import (
     temperature_label,
 )
 from atomi.lammps.thermal_conductivity import green_kubo_rows, write_csv, write_json
-from atomi.lammps.workflow import lammps_pair_lines
+from atomi.lammps.workflow import (
+    SBATCH_RESOURCE_ENV,
+    _apply_sbatch_resource_overrides,
+    lammps_pair_lines,
+)
 
 
 EV_TO_J = 1.602176634e-19
@@ -70,6 +75,7 @@ def copy_gk_base_config(template: dict[str, Any], args: argparse.Namespace) -> d
         "barostat",
         "relax",
         "performance",
+        "slurm_resources",
         "equilibrium_rules",
         "instability_rules",
     ]
@@ -108,6 +114,42 @@ def copy_gk_base_config(template: dict[str, Any], args: argparse.Namespace) -> d
         ],
     }
     return cfg
+
+
+def scheduler_resource_key(option: str) -> str:
+    return option.replace("-", "_")
+
+
+def inherit_scheduler_resources(cfg: dict[str, Any], template: dict[str, Any]) -> None:
+    """Carry private scheduler resources into generated GK configs.
+
+    md-engine wrappers already know how to read ``slurm_resources`` plus
+    ATOMI_LAMMPS_* environment variables. The GK prepare path writes a new
+    config, so we snapshot the active private environment into that config too.
+    """
+    resources: dict[str, Any] = {}
+    template_resources = template.get("slurm_resources", {})
+    if isinstance(template_resources, dict):
+        resources.update(
+            {
+                scheduler_resource_key(str(k)): v
+                for k, v in template_resources.items()
+                if v not in (None, "")
+            }
+        )
+
+    for option, env_key in SBATCH_RESOURCE_ENV.items():
+        key = scheduler_resource_key(option)
+        for source_key in (key, option):
+            value = template.get(source_key)
+            if value not in (None, ""):
+                resources.setdefault(key, value)
+        value = os.environ.get(env_key)
+        if value not in (None, ""):
+            resources[key] = value
+
+    if resources:
+        cfg["slurm_resources"] = resources
 
 
 def build_gk_stages(records: list[dict[str, Any]], root: Path, args: argparse.Namespace) -> tuple[list[dict], list[dict]]:
@@ -199,6 +241,7 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
     outdir = resolve_root_path(args.outdir, root)
     config_out = resolve_root_path(args.config_out, root)
     cfg = copy_gk_base_config(template, args)
+    inherit_scheduler_resources(cfg, template)
     if args.model_file is not None:
         cfg["model_file"] = relative_to_root(resolve_root_path(args.model_file, root), root)
     if args.pair_style_backend is not None:
@@ -353,6 +396,7 @@ def write_probe_sbatch_runner(cfg: dict[str, Any], root: Path, outdir: Path, inp
     if not wrapper_path.exists():
         return None
     script = wrapper_path.read_text(encoding="utf-8")
+    script = _apply_sbatch_resource_overrides(script, cfg)
     script = replace_sbatch_option(script, "time", walltime)
     path = outdir / "run_probe_sbatch.sh"
     path.write_text(script, encoding="utf-8")

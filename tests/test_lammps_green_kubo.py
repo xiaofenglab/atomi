@@ -127,7 +127,7 @@ def test_green_kubo_prepare_writes_multi_seed_config(tmp_path):
     assert "data" in manifest
 
 
-def test_green_kubo_prepare_can_write_mliap_backend(tmp_path):
+def test_green_kubo_prepare_can_write_mliap_backend(tmp_path, monkeypatch):
     cfg = base_cfg(tmp_path)
     cfg["stages"] = [
         {
@@ -147,6 +147,8 @@ def test_green_kubo_prepare_can_write_mliap_backend(tmp_path):
     (stage_dir / "npt_prod_300K.data").write_text("data\n", encoding="utf-8")
     model = tmp_path / "model-mliap_lammps.pt"
     model.write_text("model\n", encoding="utf-8")
+    monkeypatch.setenv("ATOMI_LAMMPS_PARTITION", "gpu")
+    monkeypatch.setenv("ATOMI_LAMMPS_GRES", "gpu:1")
     set_project_root(tmp_path)
 
     green_kubo.main(
@@ -175,6 +177,8 @@ def test_green_kubo_prepare_can_write_mliap_backend(tmp_path):
     assert out["pair_style_backend"] == "mliap"
     assert out["model_file"].endswith("model-mliap_lammps.pt")
     assert out["model_elements"] == ["O", "U"]
+    assert out["slurm_resources"]["partition"] == "gpu"
+    assert out["slurm_resources"]["gres"] == "gpu:1"
     text, _data, _restart, _steps = generate_production_input(
         out,
         out["stages"][0],
@@ -226,8 +230,27 @@ def test_green_kubo_mliap_probe_forces_gk_binary(tmp_path):
     assert "export ATOMI_LAMMPS_USE_GK_EXE=1" in submitter
 
 
-def test_green_kubo_probe_writes_heat_flux_preflight(tmp_path):
+def test_green_kubo_probe_writes_heat_flux_preflight(tmp_path, monkeypatch):
     cfg = base_cfg(tmp_path)
+    wrapper = tmp_path / "run_lammps_gpu.sh"
+    wrapper.write_text(
+        "\n".join(
+            [
+                "#!/bin/bash",
+                "##SBATCH --partition=your_gpu_partition",
+                "#SBATCH --nodes=1",
+                "#SBATCH --ntasks=1",
+                "##SBATCH --gres=gpu:1",
+                "#SBATCH --cpus-per-task=1",
+                "#SBATCH --time=01:00:00",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg["wrapper_script"] = str(wrapper)
+    monkeypatch.setenv("ATOMI_LAMMPS_PARTITION", "gpu")
+    monkeypatch.setenv("ATOMI_LAMMPS_GRES", "gpu:1")
     data = tmp_path / "start.data"
     data.write_text("data\n", encoding="utf-8")
     cfg["stages"] = [
@@ -266,6 +289,8 @@ def test_green_kubo_probe_writes_heat_flux_preflight(tmp_path):
     assert "run             0" in probe_input
     assert "Atomi GK probe: PASS heat/flux preflight completed" in probe_input
     assert "eval \"$LMP_CMD -in gk_heatflux_probe.in\"" in runner
+    assert "#SBATCH --partition=gpu" in sbatch_runner
+    assert "#SBATCH --gres=gpu:1" in sbatch_runner
     assert "#SBATCH --time=00:05:00" in sbatch_runner
     assert "sbatch run_probe_sbatch.sh gk_heatflux_probe.in" in submitter
     assert report["stage"] == "gk_T300K_s01"
