@@ -889,7 +889,82 @@ def stage_temperature(stage):
 def production_stage_selected(stage):
     if stage.get("production_run", False):
         return True
+    if stage.get("green_kubo_run", False):
+        return True
     return stage.get("name", "").startswith("npt_prod")
+
+
+def green_kubo_settings(cfg, stage, timestep):
+    settings = dict(cfg.get("green_kubo_settings", {}))
+    settings.update(stage.get("green_kubo_settings", {}))
+    sample_interval_ps = float(settings.get("sample_interval_ps", 0.01))
+    correlation_time_ps = float(settings.get("correlation_time_ps", 50.0))
+    nvt_preequilibration_ps = float(settings.get("nvt_preequilibration_ps", 20.0))
+    nevery = max(1, int(round(sample_interval_ps / float(timestep))))
+    effective_sample_ps = nevery * float(timestep)
+    nrepeat = max(1, int(round(correlation_time_ps / effective_sample_ps)))
+    nfreq = max(nevery, nevery * nrepeat)
+    pre_steps = max(0, int(round(nvt_preequilibration_ps / float(timestep))))
+    return {
+        "sample_interval_ps": sample_interval_ps,
+        "effective_sample_interval_ps": effective_sample_ps,
+        "correlation_time_ps": correlation_time_ps,
+        "nvt_preequilibration_ps": nvt_preequilibration_ps,
+        "nevery": nevery,
+        "nrepeat": nrepeat,
+        "nfreq": nfreq,
+        "pre_steps": pre_steps,
+        "hcacf_file": settings.get("hcacf_file", "heatflux_hcacf.dat"),
+        "timeseries_file": settings.get("timeseries_file", "heatflux_timeseries.dat"),
+        "dump_heat_current": bool(settings.get("dump_heat_current", True)),
+    }
+
+
+def green_kubo_fix_text(cfg, stage, temperature, timestep):
+    settings = green_kubo_settings(cfg, stage, timestep)
+    lines = [
+        "# Atomi Green-Kubo NVE heat-current collection.",
+        "# The HCACF is written in LAMMPS metal-unit heat-flux units and scaled in postprocessing.",
+    ]
+    if settings["pre_steps"] > 0:
+        tdamp = get_tdamp(cfg, stage)
+        lines.extend(
+            [
+                f"fix             pre all nvt temp {temperature} {temperature} {tdamp}",
+                f"run             {settings['pre_steps']}",
+                "unfix           pre",
+                "reset_timestep  0",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "fix             1 all nve",
+            "compute         atomi_ke all ke/atom",
+            "compute         atomi_pe all pe/atom",
+            "compute         atomi_stress all stress/atom NULL virial",
+            "compute         atomi_flux all heat/flux atomi_ke atomi_pe atomi_stress",
+            "variable        atomi_Jx equal c_atomi_flux[1]/vol",
+            "variable        atomi_Jy equal c_atomi_flux[2]/vol",
+            "variable        atomi_Jz equal c_atomi_flux[3]/vol",
+            "variable        atomi_step equal step",
+            (
+                "fix             JJ all ave/correlate "
+                f"{settings['nevery']} {settings['nrepeat']} {settings['nfreq']} "
+                "c_atomi_flux[1] c_atomi_flux[2] c_atomi_flux[3] "
+                f"type auto file {settings['hcacf_file']} ave running"
+            ),
+        ]
+    )
+    if settings["dump_heat_current"]:
+        lines.append(
+            "fix             Jprint all print "
+            f"{settings['nevery']} "
+            '"${atomi_step} ${atomi_Jx} ${atomi_Jy} ${atomi_Jz}" '
+            f"file {settings['timeseries_file']} screen no "
+            'title "step Jx_per_volume Jy_per_volume Jz_per_volume"'
+        )
+    return "\n".join(lines)
 
 
 def generate_production_input(cfg, stage, structure_path, chunk_tag):
@@ -913,7 +988,7 @@ def generate_production_input(cfg, stage, structure_path, chunk_tag):
     is_restart = (p.suffix.lower() == ".restart") or name.startswith("restart.")
     velocity_text = ""
     if not is_restart or stage.get("recreate_velocity", False):
-        seed = cfg.get("velocity_seed", 12345)
+        seed = stage.get("velocity_seed", cfg.get("velocity_seed", 12345))
         velocity_text = (
             f"velocity        all create {temperature} {seed} mom yes rot yes dist gaussian\n"
         )
@@ -922,11 +997,18 @@ def generate_production_input(cfg, stage, structure_path, chunk_tag):
         fix_text = f"fix             1 all nvt temp {temperature} {temperature} {tdamp}"
     elif stage["type"] == "npt":
         fix_text = f"fix             1 all npt temp {temperature} {temperature} {tdamp} iso {pressure} {pressure} {pdamp}"
+    elif stage["type"] == "nve":
+        if stage.get("green_kubo_run", False):
+            fix_text = green_kubo_fix_text(cfg, stage, temperature, timestep)
+        else:
+            fix_text = "fix             1 all nve"
     else:
-        raise ValueError(f"Production stage {stage['name']} has unsupported type {stage['type']!r}; expected npt or nvt")
+        raise ValueError(f"Production stage {stage['name']} has unsupported type {stage['type']!r}; expected npt, nvt, or nve")
     thermo_style = "custom step temp pe etotal press vol lx ly lz"
     if stage.get("elastic_run", False) or stage.get("thermo_stress", False):
         thermo_style += " pxx pyy pzz pyz pxz pxy xy xz yz"
+    if stage.get("green_kubo_run", False):
+        thermo_style += " v_atomi_Jx v_atomi_Jy v_atomi_Jz"
 
     txt = f"""units           metal
 dimension       3
