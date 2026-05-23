@@ -108,9 +108,17 @@ if [ -z "${ATOMI_LMP_EXE:-}" ]; then
     echo "ERROR: set ATOMI_LMP_EXE to the private path of your LAMMPS executable."
     exit 2
 fi
-if [ -n "${ATOMI_LAMMPS_PREFIX:-}" ]; then
-    ATOMI_LIBTORCH_LIB="${ATOMI_LIBTORCH_LIB:-$ATOMI_LAMMPS_PREFIX/src/libtorch-gpu/lib}"
-    export LD_LIBRARY_PATH=$ATOMI_LAMMPS_PREFIX/install/lib64:$ATOMI_LAMMPS_PREFIX/install/lib:$ATOMI_LIBTORCH_LIB:$LD_LIBRARY_PATH
+
+ATOMI_LMP_BIN_DIR="$(cd "$(dirname "${ATOMI_LMP_EXE}")" && pwd)"
+ATOMI_LMP_INSTALL_DIR="$(cd "${ATOMI_LMP_BIN_DIR}/.." && pwd)"
+ATOMI_LIBTORCH_LIB="${ATOMI_LIBTORCH_LIB:-}"
+if [ -z "${ATOMI_LIBTORCH_LIB}" ] && [ -n "${ATOMI_LAMMPS_PREFIX:-}" ]; then
+    ATOMI_LIBTORCH_LIB="$ATOMI_LAMMPS_PREFIX/src/libtorch-gpu/lib"
+fi
+if [ -n "${ATOMI_LIBTORCH_LIB}" ]; then
+    export LD_LIBRARY_PATH=$ATOMI_LMP_INSTALL_DIR/lib64:$ATOMI_LMP_INSTALL_DIR/lib:$ATOMI_LIBTORCH_LIB:${LD_LIBRARY_PATH:-}
+else
+    export LD_LIBRARY_PATH=$ATOMI_LMP_INSTALL_DIR/lib64:$ATOMI_LMP_INSTALL_DIR/lib:${LD_LIBRARY_PATH:-}
 fi
 
 
@@ -141,6 +149,7 @@ echo "OMP_NUM_THREADS   = ${OMP_NUM_THREADS}"
 echo "INPUT_FILE        = ${INPUT}"
 echo "CUDA_VISIBLE_DEVICES = ${CUDA_VISIBLE_DEVICES}"
 echo "LMP_EXE           = ${ATOMI_LMP_EXE}"
+echo "LMP_INSTALL_DIR   = ${ATOMI_LMP_INSTALL_DIR}"
 echo "LAMMPS_PROFILE    = ${LAMMPS_PROFILE}"
 echo "========================================"
 
