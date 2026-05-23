@@ -139,6 +139,26 @@ else
 fi
 
 if [ "${LAMMPS_PROFILE}" = "gk_mliap" ]; then
+    if [ -n "${ATOMI_TORCH_LIBDIRS:-}" ]; then
+        for atomi_torch_libdir in ${ATOMI_TORCH_LIBDIRS}; do
+            atomi_add_ld_library_path "$atomi_torch_libdir"
+        done
+    fi
+    ATOMI_DETECTED_TORCH_LIBDIRS="$(python - <<'PY' 2>/dev/null || true
+import importlib.util
+import pathlib
+
+spec = importlib.util.find_spec("torch")
+if spec and spec.origin:
+    libdir = pathlib.Path(spec.origin).resolve().parent / "lib"
+    if libdir.is_dir():
+        print(libdir)
+PY
+)"
+    for atomi_torch_libdir in ${ATOMI_DETECTED_TORCH_LIBDIRS}; do
+        atomi_add_ld_library_path "$atomi_torch_libdir"
+    done
+
     if [ -n "${ATOMI_PYTHON_LIBDIRS:-}" ]; then
         for atomi_python_libdir in ${ATOMI_PYTHON_LIBDIRS}; do
             atomi_add_ld_library_path "$atomi_python_libdir"
@@ -235,6 +255,7 @@ echo "LMP_INSTALL_DIR   = ${ATOMI_LMP_INSTALL_DIR}"
 echo "LAMMPS_PROFILE    = ${LAMMPS_PROFILE}"
 echo "PYTHON_EXE        = $(command -v python || true)"
 echo "PYTHON_LIBDIRS    = ${ATOMI_DETECTED_PYTHON_LIBDIRS:-}"
+echo "TORCH_LIBDIRS     = ${ATOMI_DETECTED_TORCH_LIBDIRS:-}"
 echo "LAMMPS_PYTHONPATH = ${PYTHONPATH:-}"
 echo "========================================"
 

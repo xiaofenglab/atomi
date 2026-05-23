@@ -450,6 +450,8 @@ def classify_probe_log(text: str) -> str:
         return "FAIL: CUDA driver library is not visible; run the probe on a GPU allocation/node."
     if "libpython" in lowered or "unable to locate python shared library" in lowered:
         return "FAIL: ML-IAP cannot find libpython; check active Python module/env and LD_LIBRARY_PATH."
+    if "undefined symbol" in lowered and ("torch" in lowered or "libshm" in lowered or "c10" in lowered):
+        return "FAIL: Python torch is loading incompatible Torch/C10 shared libraries; prioritize the active torch/lib in LD_LIBRARY_PATH."
     if "model file not found" in lowered or "cannot open" in lowered and "mliap" in lowered:
         return "FAIL: ML-IAP model file could not be opened."
     if "eflag_atom" in lowered or "vflag_atom" in lowered or "heat/flux" in lowered and "error" in lowered:
