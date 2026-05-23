@@ -127,6 +127,49 @@ def test_green_kubo_prepare_writes_multi_seed_config(tmp_path):
     assert "data" in manifest
 
 
+def test_green_kubo_probe_writes_heat_flux_preflight(tmp_path):
+    cfg = base_cfg(tmp_path)
+    data = tmp_path / "start.data"
+    data.write_text("data\n", encoding="utf-8")
+    cfg["stages"] = [
+        {
+            "name": "gk_T300K_s01",
+            "type": "nve",
+            "temperature": 300,
+            "input_structure": "start.data",
+            "green_kubo_run": True,
+        }
+    ]
+    config = tmp_path / "config_gk.json"
+    config.write_text(json.dumps(cfg), encoding="utf-8")
+
+    green_kubo.main(
+        [
+            "probe",
+            "--config",
+            str(config),
+            "--stage",
+            "gk_T300K_s01",
+            "--outdir",
+            str(tmp_path / "probe"),
+            "--suffix",
+            "kk",
+        ]
+    )
+
+    probe_input = (tmp_path / "probe" / "gk_heatflux_probe.in").read_text(encoding="utf-8")
+    runner = (tmp_path / "probe" / "run_probe.sh").read_text(encoding="utf-8")
+    report = json.loads((tmp_path / "probe" / "gk_heatflux_probe_report.json").read_text(encoding="utf-8"))
+    assert "suffix          kk" in probe_input
+    assert "compute         atomi_flux all heat/flux" in probe_input
+    assert "run             0" in probe_input
+    assert "Atomi GK probe: PASS heat/flux preflight completed" in probe_input
+    assert "eval \"$LMP_CMD -in gk_heatflux_probe.in\"" in runner
+    assert report["stage"] == "gk_T300K_s01"
+    assert report["suffix"] == "kk"
+    assert not report["executed"]
+
+
 def test_green_kubo_analyze_integrates_lammps_hcacf(tmp_path):
     cfg = base_cfg(tmp_path)
     cfg["stages"] = [

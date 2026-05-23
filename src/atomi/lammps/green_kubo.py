@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import shlex
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -217,6 +219,172 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
     print("Analyze after jobs finish with:")
     print(f"  {plan['analyze_command']}")
     return plan
+
+
+def first_green_kubo_stage(cfg: dict[str, Any], stage_name: str | None = None) -> dict[str, Any]:
+    stages = list(cfg.get("stages", []))
+    if stage_name:
+        for stage in stages:
+            if stage.get("name") == stage_name:
+                return stage
+        raise ValueError(f"No stage named {stage_name!r} was found in the Green-Kubo config.")
+    for stage in stages:
+        if stage.get("green_kubo_run", False):
+            return stage
+    if stages:
+        return stages[0]
+    raise ValueError("The config has no stages to probe.")
+
+
+def probe_read_command(path: Path) -> str:
+    name = path.name.lower()
+    if path.suffix.lower() == ".restart" or name.startswith("restart."):
+        return f"read_restart    {path.resolve()}"
+    return f"read_data       {path.resolve()}"
+
+
+def probe_suffix_command(suffix: str) -> str:
+    if suffix == "none":
+        return ""
+    return f"suffix          {suffix}\n\n"
+
+
+def build_heat_flux_probe_input(
+    cfg: dict[str, Any],
+    *,
+    root: Path,
+    input_structure: Path,
+    temperature: float,
+    suffix: str,
+) -> str:
+    model = resolve_root_path(Path(cfg["model_file"]), root)
+    timestep = float(cfg.get("timestep_ps", cfg.get("timestep", 0.001)))
+    return f"""units           metal
+dimension       3
+boundary        p p p
+atom_style      atomic
+atom_modify     map yes
+newton          on
+
+{probe_read_command(input_structure)}
+
+mass            1 {cfg["mass_O"]}
+mass            2 {cfg["mass_U"]}
+
+{probe_suffix_command(suffix)}pair_style      mace no_domain_decomposition
+pair_coeff      * * {model.resolve()} O U
+
+neighbor        2.0 bin
+neigh_modify    every 1 delay 0 check yes
+timestep        {timestep}
+
+velocity        all create {temperature} 987654 mom yes rot yes dist gaussian
+
+compute         atomi_ke all ke/atom
+compute         atomi_pe all pe/atom
+compute         atomi_stress all stress/atom NULL virial
+compute         atomi_flux all heat/flux atomi_ke atomi_pe atomi_stress
+variable        atomi_Jx equal c_atomi_flux[1]/vol
+variable        atomi_Jy equal c_atomi_flux[2]/vol
+variable        atomi_Jz equal c_atomi_flux[3]/vol
+
+thermo          1
+thermo_style    custom step temp pe etotal press vol v_atomi_Jx v_atomi_Jy v_atomi_Jz
+thermo_modify   flush yes
+
+print           "Atomi GK probe: testing compute heat/flux compatibility"
+run             0
+print           "Atomi GK probe: PASS heat/flux preflight completed"
+"""
+
+
+def write_probe_runner(path: Path, input_name: str, lammps_command: str) -> None:
+    path.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f": \"${{LMP_CMD:={lammps_command}}}\"\n"
+        f"eval \"$LMP_CMD -in {shlex.quote(input_name)}\"\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def classify_probe_log(text: str) -> str:
+    lowered = text.lower()
+    if "eflag_atom" in lowered or "vflag_atom" in lowered or "heat/flux" in lowered and "error" in lowered:
+        return "FAIL: pair style does not support the per-atom energy/virial needed by compute heat/flux."
+    if "atomi gk probe: pass heat/flux preflight completed" in lowered:
+        return "PASS: compute heat/flux preflight completed."
+    if "error" in lowered:
+        return "FAIL: LAMMPS reported an error; inspect gk_heatflux_probe.log."
+    return "UNKNOWN: probe finished without a recognizable PASS/FAIL marker."
+
+
+def probe_main(args: argparse.Namespace) -> dict[str, Any]:
+    cfg_path = args.config.resolve()
+    cfg = load_json(cfg_path)
+    root = cfg_path.parent.resolve()
+    stage = first_green_kubo_stage(cfg, args.stage)
+    input_value = args.input_structure or stage.get("input_structure")
+    if not input_value:
+        raise ValueError("No input structure found. Pass --input-structure or use a config_gk.json stage with input_structure.")
+    input_structure = resolve_root_path(Path(input_value), root)
+    temperature = float(args.temperature if args.temperature is not None else stage.get("temperature", 300.0))
+    outdir = resolve_root_path(args.outdir, root)
+    outdir.mkdir(parents=True, exist_ok=True)
+    input_path = outdir / "gk_heatflux_probe.in"
+    runner_path = outdir / "run_probe.sh"
+    log_path = outdir / "gk_heatflux_probe.log"
+    report_path = outdir / "gk_heatflux_probe_report.json"
+    text = build_heat_flux_probe_input(
+        cfg,
+        root=root,
+        input_structure=input_structure,
+        temperature=temperature,
+        suffix=args.suffix,
+    )
+    input_path.write_text(text, encoding="utf-8")
+    write_probe_runner(runner_path, input_path.name, args.lammps_command)
+    status = "not_executed"
+    returncode = None
+    if args.execute:
+        command = shlex.split(args.lammps_command) + ["-in", input_path.name]
+        result = subprocess.run(command, cwd=outdir, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        returncode = result.returncode
+        log_path.write_text(result.stdout, encoding="utf-8")
+        status = classify_probe_log(result.stdout)
+    report = {
+        "config": str(cfg_path),
+        "stage": stage.get("name"),
+        "input_structure": str(input_structure),
+        "temperature_K": temperature,
+        "suffix": args.suffix,
+        "input": str(input_path),
+        "runner": str(runner_path),
+        "log": str(log_path) if args.execute else None,
+        "executed": bool(args.execute),
+        "returncode": returncode,
+        "status": status,
+        "notes": [
+            "Use --suffix kk to test whether mace/kokkos supports compute heat/flux.",
+            "Use --suffix off to test Atomi's default GK fallback route.",
+            "A PASS here only confirms LAMMPS heat-flux compute compatibility, not statistical convergence of kappa.",
+        ],
+    }
+    write_json(report_path, report)
+    print(f"Wrote GK heat-flux probe input : {input_path}")
+    print(f"Wrote GK heat-flux probe runner: {runner_path}")
+    print(f"Wrote GK heat-flux probe report: {report_path}")
+    if args.execute:
+        print(f"Probe status                  : {status}")
+        print(f"Probe log                     : {log_path}")
+    else:
+        print("Run on HPC with:")
+        print(f"  cd {outdir}")
+        print("  ./run_probe.sh")
+        print("or:")
+        print("  LMP_CMD='srun lmp' ./run_probe.sh")
+    return report
 
 
 def latest_gk_log(root: Path, stage: dict[str, Any]) -> Path | None:
@@ -548,6 +716,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the run 0 heat-flux compatibility preflight before NVT pre-equilibration.",
     )
 
+    probe = sub.add_parser("probe", help="Write or run a tiny run-0 LAMMPS heat-flux compatibility probe.")
+    probe.add_argument("--config", type=Path, default=Path("config_gk.json"))
+    probe.add_argument("--stage", help="Green-Kubo stage name to probe. Default: first green_kubo_run stage.")
+    probe.add_argument("--input-structure", type=Path, help="Override structure/data/restart used by the probe.")
+    probe.add_argument("--temperature", type=float, help="Override probe temperature. Default: stage temperature.")
+    probe.add_argument("--outdir", type=Path, default=Path("analysis/gk_lammps/probe"))
+    probe.add_argument(
+        "--suffix",
+        choices=("off", "kk", "on", "none"),
+        default="off",
+        help="LAMMPS suffix command for the probe. Use kk to test mace/kokkos; off tests Atomi's default fallback.",
+    )
+    probe.add_argument("--lammps-command", default="lmp", help="Command used with --execute and written into run_probe.sh.")
+    probe.add_argument("--execute", action="store_true", help="Run the probe immediately on this machine/session.")
+
     ana = sub.add_parser("analyze", help="Integrate completed GK HCACF files into k(T).")
     ana.add_argument("--gk-config", type=Path, default=Path("config_gk.json"))
     ana.add_argument("--outdir", type=Path, default=Path("analysis/gk_lammps/fit"))
@@ -572,6 +755,8 @@ def main(argv: list[str] | None = None) -> Any:
     args = parser.parse_args(argv)
     if args.command == "prepare":
         return prepare_main(args)
+    if args.command == "probe":
+        return probe_main(args)
     if args.command == "analyze":
         return analyze_main(args)
     parser.error(f"unknown command {args.command}")
