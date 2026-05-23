@@ -45,6 +45,9 @@ def test_green_kubo_stage_generates_nve_heat_flux_input(tmp_path):
 
     assert steps == 1000
     assert "velocity        all create 300 9001" in text
+    assert "Atomi GK phase: short NVT pre-equilibration" in text
+    assert "thermo_modify   flush yes" in text
+    assert "Atomi GK phase: NVE heat-current production" in text
     assert "fix             pre all nvt" in text
     assert "fix             1 all nve" in text
     assert "compute         atomi_flux all heat/flux" in text

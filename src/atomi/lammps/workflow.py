@@ -930,6 +930,10 @@ def green_kubo_fix_text(cfg, stage, temperature, timestep):
         tdamp = get_tdamp(cfg, stage)
         lines.extend(
             [
+                'print           "Atomi GK phase: short NVT pre-equilibration before NVE heat-current production"',
+                "thermo          100",
+                "thermo_style    custom step temp pe etotal press vol lx ly lz",
+                "thermo_modify   flush yes",
                 f"fix             pre all nvt temp {temperature} {temperature} {tdamp}",
                 f"run             {settings['pre_steps']}",
                 "unfix           pre",
@@ -939,6 +943,7 @@ def green_kubo_fix_text(cfg, stage, temperature, timestep):
         )
     lines.extend(
         [
+            'print           "Atomi GK phase: NVE heat-current production and HCACF accumulation"',
             "fix             1 all nve",
             "compute         atomi_ke all ke/atom",
             "compute         atomi_pe all pe/atom",
