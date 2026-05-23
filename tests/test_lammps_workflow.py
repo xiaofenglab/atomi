@@ -12,6 +12,7 @@ from atomi.lammps.workflow import (
     create_stage_wrapper,
     check_not_exploded_for_max_chunk,
     effective_max_chunks,
+    lammps_wrapper_text,
     is_npt_equilibration_stage,
     is_nvt_ramp_stage,
     warn_if_ramp_max_chunks_ignored,
@@ -224,6 +225,29 @@ def test_lammps_wrapper_fail_fast_when_gk_exe_missing() -> None:
     assert 'confighpc --config "$ATOMI_HPC_CONFIG" --shell' in template
     assert "*.local.json" in template
     assert "atomi_hpc_env.sh" in template
+
+
+def test_mliap_config_refreshes_stale_lammps_wrapper(tmp_path) -> None:
+    stale = tmp_path / "run_lammps_gpu.sh"
+    stale.write_text(
+        "#!/bin/bash\n"
+        "#SBATCH --time=01:00:00\n"
+        'if [ -n "${ATOMI_LMP_GK_EXE:-}" ]; then\n'
+        '  ATOMI_LMP_EXE="${ATOMI_LMP_GK_EXE}"\n'
+        "fi\n",
+        encoding="utf-8",
+    )
+
+    text = lammps_wrapper_text(
+        {
+            "wrapper_script": str(stale),
+            "pair_style_backend": "mliap",
+            "runtime_profile": "lammps_gk_mliap",
+        }
+    )
+
+    assert "GK_REQUESTED=0" in text
+    assert 'confighpc --dir "$ATOMI_HPC_DIR" --no-env-var --shell' in text
 
 
 def test_qha_cp_can_generate_thermo_anchor_values(tmp_path) -> None:

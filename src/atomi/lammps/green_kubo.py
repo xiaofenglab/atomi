@@ -29,6 +29,7 @@ from atomi.lammps.workflow import (
     SBATCH_RESOURCE_ENV,
     _apply_sbatch_resource_overrides,
     lammps_pair_lines,
+    lammps_wrapper_text,
 )
 
 
@@ -395,7 +396,7 @@ def write_probe_sbatch_runner(cfg: dict[str, Any], root: Path, outdir: Path, inp
     wrapper_path = resolve_root_path(Path(wrapper), root)
     if not wrapper_path.exists():
         return None
-    script = wrapper_path.read_text(encoding="utf-8")
+    script = lammps_wrapper_text(cfg)
     script = _apply_sbatch_resource_overrides(script, cfg)
     script = replace_sbatch_option(script, "time", walltime)
     path = outdir / "run_probe_sbatch.sh"

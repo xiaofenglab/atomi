@@ -22,6 +22,7 @@ from statistics import mean
 import argparse
 import os
 import shutil
+from importlib.resources import files
 
 from atomi.lammps.box import format_box_summary, summarize_lammps_box_arrays
 
@@ -375,8 +376,24 @@ def _apply_sbatch_resource_overrides(script, cfg):
     return script
 
 
+def _packaged_lammps_wrapper_text():
+    template = files("atomi").joinpath("templates", "lammps_workflow", "run_lammps_gpu.sh")
+    return Path(str(template)).read_text()
+
+
+def _gk_mliap_wrapper_requested(cfg):
+    return cfg.get("runtime_profile") == "lammps_gk_mliap" or cfg.get("pair_style_backend") == "mliap"
+
+
+def lammps_wrapper_text(cfg):
+    text = Path(cfg["wrapper_script"]).read_text()
+    if _gk_mliap_wrapper_requested(cfg) and "GK_REQUESTED=0" not in text:
+        text = _packaged_lammps_wrapper_text()
+    return text
+
+
 def create_stage_wrapper(cfg, chunk_dir, walltime):
-    template = Path(cfg["wrapper_script"]).read_text()
+    template = lammps_wrapper_text(cfg)
     template = _apply_sbatch_resource_overrides(template, cfg)
 
     new_script, nsubs = re.subn(

@@ -225,8 +225,11 @@ def test_green_kubo_mliap_probe_forces_gk_binary(tmp_path):
     )
 
     probe_input = (tmp_path / "probe_mliap" / "gk_heatflux_probe.in").read_text(encoding="utf-8")
+    sbatch_runner = (tmp_path / "probe_mliap" / "run_probe_sbatch.sh").read_text(encoding="utf-8")
     submitter = (tmp_path / "probe_mliap" / "submit_probe.sh").read_text(encoding="utf-8")
     assert "pair_style      mliap unified" in probe_input
+    assert "GK_REQUESTED=0" in sbatch_runner
+    assert 'confighpc --dir "$ATOMI_HPC_DIR" --no-env-var --shell' in sbatch_runner
     assert "export ATOMI_LAMMPS_USE_GK_EXE=1" in submitter
 
 

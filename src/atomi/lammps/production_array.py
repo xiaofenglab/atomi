@@ -13,6 +13,7 @@ from atomi.lammps.workflow import (
     estimate_walltime,
     hours_to_slurm,
     load_config,
+    lammps_wrapper_text,
     production_stage_selected,
     resolve_run_steps,
     run_production_stage,
@@ -165,7 +166,7 @@ def write_array_script(
     walltime: str | None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    wrapper_text = Path(cfg["wrapper_script"]).read_text(encoding="utf-8")
+    wrapper_text = lammps_wrapper_text(cfg)
     wrapper_text = _apply_sbatch_resource_overrides(wrapper_text, cfg)
     active_lines = _active_sbatch_lines(wrapper_text)
     task_count = len(rows)
