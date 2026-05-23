@@ -54,6 +54,8 @@ export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export PSM2_CUDA=1
+export PYTHONUNBUFFERED=1
+export TORCH_SHOW_CPP_STACKTRACES="${TORCH_SHOW_CPP_STACKTRACES:-1}"
 
 export USER="${USER:=`logname`}"
 export SLURM_JOB_ID="${SLURM_JOB_ID:=`date +%s`}"
@@ -277,9 +279,11 @@ if [ "${LAMMPS_PROFILE}" = "gk_mliap" ]; then
     if [ ! -f "${MLIP_MODEL_PATH}" ]; then
         atomi_fail_preflight "ML-IAP model file not found: ${MLIP_MODEL_PATH}"
     fi
+    export ATOMI_MLIP_MODEL_PATH="${MLIP_MODEL_PATH}"
 
     python - <<'PY'
 import importlib
+import os
 import sys
 
 required = ("lammps", "lammps.mliap", "torch")
@@ -300,6 +304,20 @@ for name in required + optional:
             failed = True
 if failed:
     sys.exit(1)
+
+try:
+    import torch
+
+    model_path = os.environ.get("ATOMI_MLIP_MODEL_PATH", "")
+    print(f"Atomi preflight torch cuda available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"Atomi preflight torch cuda device: {torch.cuda.get_device_name(0)}")
+    if model_path:
+        model = torch.jit.load(model_path, map_location="cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Atomi preflight torch.jit.load model: OK {model_path}")
+        del model
+except Exception as exc:
+    print(f"Atomi preflight torch.jit.load model: WARNING {exc.__class__.__name__}: {exc}")
 PY
     if [ "$?" -ne 0 ]; then
         atomi_fail_preflight "required ML-IAP Python modules could not be imported."

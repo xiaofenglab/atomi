@@ -437,6 +437,11 @@ def classify_probe_log(text: str) -> str:
         return "FAIL: wrapper preflight failed before LAMMPS run 0."
     if "loading mliappy unified module failure" in lowered:
         return "FAIL: ML-IAP unified Python module failed to load; check lammps/mliap_unified_couple imports and Python path."
+    if "running mliappy unified module failure" in lowered:
+        return (
+            "FAIL: ML-IAP unified module loaded but failed while running the model; "
+            "inspect the Python traceback in the Slurm .err file for model/device/dtype details."
+        )
     if "module not founderror" in lowered or "no module named 'lammps'" in lowered:
         return "FAIL: required Python module for ML-IAP is missing."
     if "unrecognized pair style 'mliap'" in lowered:
