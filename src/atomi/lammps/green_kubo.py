@@ -426,6 +426,8 @@ def classify_probe_log(text: str) -> str:
             return "FAIL: selected LAMMPS binary does not provide ML-IAP/mliap; check ATOMI_LMP_GK_EXE."
         if "lammps executable could not start" in lowered or "libcuda.so.1" in lowered:
             return "FAIL: selected LAMMPS binary could not start; check GPU allocation, CUDA modules, and LD_LIBRARY_PATH."
+        if "libpython" in lowered or "unable to locate python shared library" in lowered:
+            return "FAIL: ML-IAP cannot find libpython; add the active Python lib directory to LD_LIBRARY_PATH."
         if "required ml-iap python modules could not be imported" in lowered or "no module named 'lammps'" in lowered:
             return "FAIL: ML-IAP Python coupling is not importable; check ATOMI_LAMMPS_ENV and ATOMI_LAMMPS_PYTHONPATH."
         if "ml-iap model file not found" in lowered:
@@ -441,6 +443,8 @@ def classify_probe_log(text: str) -> str:
         return "FAIL: selected LAMMPS binary does not have the ML-IAP package enabled."
     if "libcuda.so.1" in lowered:
         return "FAIL: CUDA driver library is not visible; run the probe on a GPU allocation/node."
+    if "libpython" in lowered or "unable to locate python shared library" in lowered:
+        return "FAIL: ML-IAP cannot find libpython; check active Python module/env and LD_LIBRARY_PATH."
     if "model file not found" in lowered or "cannot open" in lowered and "mliap" in lowered:
         return "FAIL: ML-IAP model file could not be opened."
     if "eflag_atom" in lowered or "vflag_atom" in lowered or "heat/flux" in lowered and "error" in lowered:

@@ -229,6 +229,10 @@ def test_lammps_wrapper_fail_fast_when_gk_exe_missing() -> None:
     assert 'ATOMI_LMP_INSTALL_DIR/lib64' in template
     assert "ATOMI_LAMMPS_PYTHONPATH" in template
     assert "LAMMPS_PYTHONPATH" in template
+    assert "PYTHON_LIBDIRS" in template
+    assert "ATOMI_DETECTED_PYTHON_LIBDIRS" in template
+    assert "ATOMI_PYTHON_LIBDIRS" in template
+    assert "LDLIBRARY" in template
     assert "/src/lammps/python" in template
     assert "/build_mliap/cython" in template
     assert "source \"$ATOMI_LAMMPS_ENV/bin/activate\"" in template
@@ -237,7 +241,7 @@ def test_lammps_wrapper_fail_fast_when_gk_exe_missing() -> None:
     assert "selected GK executable does not expose the ML-IAP mliap pair style" in template
     assert "ML-IAP model file not found" in template
     assert "required ML-IAP Python modules could not be imported" in template
-    assert 'required = ("lammps", "torch")' in template
+    assert 'required = ("lammps", "lammps.mliap", "torch")' in template
     assert 'optional = ("mliap_unified_couple", "mace")' in template
 
 

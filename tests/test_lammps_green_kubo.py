@@ -314,6 +314,7 @@ def test_green_kubo_probe_classifies_common_mliap_failures():
     )
     assert "unified Python module" in green_kubo.classify_probe_log("ERROR: Loading mliappy unified module failure.")
     assert "CUDA driver" in green_kubo.classify_probe_log("libcuda.so.1: cannot open shared object file")
+    assert "libpython" in green_kubo.classify_probe_log("OSError: Unable to locate python shared library")
     assert "per-atom energy/virial" in green_kubo.classify_probe_log("ERROR: pair_mace does not support vflag_atom.")
 
 

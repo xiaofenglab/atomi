@@ -119,10 +119,62 @@ ATOMI_LIBTORCH_LIB="${ATOMI_LIBTORCH_LIB:-}"
 if [ -z "${ATOMI_LIBTORCH_LIB}" ] && [ -n "${ATOMI_LAMMPS_PREFIX:-}" ]; then
     ATOMI_LIBTORCH_LIB="$ATOMI_LAMMPS_PREFIX/src/libtorch-gpu/lib"
 fi
+
+atomi_add_ld_library_path() {
+    if [ -n "${1:-}" ] && [ -d "$1" ]; then
+        if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+            export LD_LIBRARY_PATH="$1:${LD_LIBRARY_PATH}"
+        else
+            export LD_LIBRARY_PATH="$1"
+        fi
+    fi
+}
+
 if [ -n "${ATOMI_LIBTORCH_LIB}" ]; then
     export LD_LIBRARY_PATH=$ATOMI_LMP_INSTALL_DIR/lib64:$ATOMI_LMP_INSTALL_DIR/lib:$ATOMI_LIBTORCH_LIB:${LD_LIBRARY_PATH:-}
 else
     export LD_LIBRARY_PATH=$ATOMI_LMP_INSTALL_DIR/lib64:$ATOMI_LMP_INSTALL_DIR/lib:${LD_LIBRARY_PATH:-}
+fi
+
+if [ "${LAMMPS_PROFILE}" = "gk_mliap" ]; then
+    if [ -n "${ATOMI_PYTHON_LIBDIRS:-}" ]; then
+        for atomi_python_libdir in ${ATOMI_PYTHON_LIBDIRS}; do
+            atomi_add_ld_library_path "$atomi_python_libdir"
+        done
+    fi
+    ATOMI_DETECTED_PYTHON_LIBDIRS="$(python - <<'PY' 2>/dev/null || true
+import pathlib
+import sys
+import sysconfig
+
+names = {
+    sysconfig.get_config_var("LDLIBRARY"),
+    sysconfig.get_config_var("LIBRARY"),
+    f"libpython{sys.version_info.major}.{sys.version_info.minor}.so",
+}
+roots = {
+    sysconfig.get_config_var("LIBDIR"),
+    sysconfig.get_config_var("LIBPL"),
+    str(pathlib.Path(sys.executable).resolve().parents[1] / "lib"),
+    str(pathlib.Path(sys.base_prefix) / "lib"),
+    str(pathlib.Path(sys.exec_prefix) / "lib"),
+}
+out = []
+for root in roots:
+    if not root:
+        continue
+    path = pathlib.Path(root)
+    if not path.is_dir():
+        continue
+    if any((path / name).exists() for name in names if name):
+        out.append(str(path))
+for item in dict.fromkeys(out):
+    print(item)
+PY
+)"
+    for atomi_python_libdir in ${ATOMI_DETECTED_PYTHON_LIBDIRS}; do
+        atomi_add_ld_library_path "$atomi_python_libdir"
+    done
 fi
 
 atomi_add_pythonpath() {
@@ -180,6 +232,7 @@ echo "LMP_EXE           = ${ATOMI_LMP_EXE}"
 echo "LMP_INSTALL_DIR   = ${ATOMI_LMP_INSTALL_DIR}"
 echo "LAMMPS_PROFILE    = ${LAMMPS_PROFILE}"
 echo "PYTHON_EXE        = $(command -v python || true)"
+echo "PYTHON_LIBDIRS    = ${ATOMI_DETECTED_PYTHON_LIBDIRS:-}"
 echo "LAMMPS_PYTHONPATH = ${PYTHONPATH:-}"
 echo "========================================"
 
@@ -229,7 +282,7 @@ if [ "${LAMMPS_PROFILE}" = "gk_mliap" ]; then
 import importlib
 import sys
 
-required = ("lammps", "torch")
+required = ("lammps", "lammps.mliap", "torch")
 # Some CMake ML-IAP builds compile the Cython mliap_unified_couple module into
 # liblammps instead of installing it as a standalone Python extension. Treat it
 # as diagnostic here; the LAMMPS run-0 probe below is the authoritative check.
