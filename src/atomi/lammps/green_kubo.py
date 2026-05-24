@@ -463,6 +463,11 @@ def classify_probe_log(text: str) -> str:
                 "FAIL: cuequivariance_torch expects torch.compiler.is_compiling, but this Torch build does not expose it; "
                 "use a cuequivariance_torch version compatible with torch 2.2 or add a torch._dynamo.is_compiling shim."
             )
+        if "torch.fx._symbolic_trace" in lowered and "is_fx_symbolic_tracing" in lowered:
+            return (
+                "FAIL: cuequivariance_torch expects torch.fx._symbolic_trace.is_fx_symbolic_tracing, "
+                "but this Torch build does not expose it; use a compatible cuequivariance_torch version or add a shim."
+            )
         return (
             "FAIL: ML-IAP unified module loaded but failed while running the model; "
             "inspect the Python traceback in the Slurm .err file for model/device/dtype details."
@@ -495,6 +500,11 @@ def classify_probe_log(text: str) -> str:
         return (
             "FAIL: cuequivariance_torch expects torch.compiler.is_compiling, but this Torch build does not expose it; "
             "use a cuequivariance_torch version compatible with torch 2.2 or add a torch._dynamo.is_compiling shim."
+        )
+    if "torch.fx._symbolic_trace" in lowered and "is_fx_symbolic_tracing" in lowered:
+        return (
+            "FAIL: cuequivariance_torch expects torch.fx._symbolic_trace.is_fx_symbolic_tracing, "
+            "but this Torch build does not expose it; use a compatible cuequivariance_torch version or add a shim."
         )
     if "model file not found" in lowered or "cannot open" in lowered and "mliap" in lowered:
         return "FAIL: ML-IAP model file could not be opened."

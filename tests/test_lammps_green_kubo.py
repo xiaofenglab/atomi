@@ -332,6 +332,9 @@ def test_green_kubo_probe_classifies_common_mliap_failures():
     assert "cuequivariance_torch" in green_kubo.classify_probe_log(
         "AttributeError: module 'torch.compiler' has no attribute 'is_compiling'"
     )
+    assert "cuequivariance_torch" in green_kubo.classify_probe_log(
+        "AttributeError: module 'torch.fx._symbolic_trace' has no attribute 'is_fx_symbolic_tracing'"
+    )
     assert "MPI_Init" in green_kubo.classify_probe_log("WARNING: Atomi LAMMPS -h preflight failed before input execution. MPI_Init")
     assert "per-atom energy/virial" in green_kubo.classify_probe_log("ERROR: pair_mace does not support vflag_atom.")
 
