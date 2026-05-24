@@ -323,6 +323,9 @@ def test_green_kubo_probe_classifies_common_mliap_failures():
     assert "API mismatch" in green_kubo.classify_probe_log(
         "ERROR: Running mliappy unified compute_forces failure. AttributeError: MLIAPDataPy object has no attribute forward_exchange"
     )
+    assert "align Python torch" in green_kubo.classify_probe_log(
+        "ERROR: Running mliappy unified module failure. AttributeError: partially initialized module 'torch' has no attribute 'fx'"
+    )
     assert "per-atom energy/virial" in green_kubo.classify_probe_log("ERROR: pair_mace does not support vflag_atom.")
 
 

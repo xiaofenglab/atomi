@@ -447,6 +447,11 @@ def classify_probe_log(text: str) -> str:
                 "FAIL: MACE/ML-IAP API mismatch: installed MACE expects MLIAPDataPy.forward_exchange, "
                 "but the configured LAMMPS ML-IAP build does not provide it."
             )
+        if "partially initialized module 'torch'" in lowered or "torch' has no attribute 'fx'" in lowered:
+            return (
+                "FAIL: embedded Python torch import failed inside ML-IAP; align Python torch with the libtorch "
+                "used to build LAMMPS, or rebuild LAMMPS against the active Python torch/libtorch."
+            )
         return (
             "FAIL: ML-IAP unified module loaded but failed while running the model; "
             "inspect the Python traceback in the Slurm .err file for model/device/dtype details."
@@ -461,6 +466,11 @@ def classify_probe_log(text: str) -> str:
         return "FAIL: ML-IAP cannot find libpython; check active Python module/env and LD_LIBRARY_PATH."
     if "undefined symbol" in lowered and ("torch" in lowered or "libshm" in lowered or "c10" in lowered):
         return "FAIL: Python torch is loading incompatible Torch/C10 shared libraries; prioritize the active torch/lib in LD_LIBRARY_PATH."
+    if "partially initialized module 'torch'" in lowered or "torch' has no attribute 'fx'" in lowered:
+        return (
+            "FAIL: embedded Python torch import failed inside ML-IAP; align Python torch with the libtorch "
+            "used to build LAMMPS, or rebuild LAMMPS against the active Python torch/libtorch."
+        )
     if "forward_exchange" in lowered:
         return (
             "FAIL: MACE/ML-IAP API mismatch: installed MACE expects MLIAPDataPy.forward_exchange, "
