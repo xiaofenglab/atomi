@@ -256,8 +256,9 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
         cfg["runtime_profile"] = "lammps_gk_mliap"
         args.keep_accelerated_suffix_for_heat_flux = True
         cfg["green_kubo_settings"]["notes"].append(
-            "This config requests pair_style_backend=mliap; use the private lammps_gk_mliap profile/install_mliap binary."
+            "This config requests pair_style_backend=mliap; use the private lammps_gk_mliap profile/GK ML-IAP LAMMPS binary."
         )
+        cfg["green_kubo_settings"]["heat_flux_suffix"] = os.environ.get("ATOMI_LAMMPS_GK_SUFFIX", "kk")
         cfg["green_kubo_settings"]["notes"].append(
             "For MACE ML-IAP, Atomi keeps the KOKKOS suffix enabled so LAMMPS uses mliap/kk and the KOKKOS forward_exchange path."
         )

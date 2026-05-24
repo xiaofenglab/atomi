@@ -1076,6 +1076,13 @@ def generate_production_input(cfg, stage, structure_path, chunk_tag):
                 "# such as mace/kk do not expose those flags, so disable suffixing by default.\n"
                 "suffix          off\n\n"
             )
+        elif cfg.get("pair_style_backend") == "mliap" or cfg.get("runtime_profile") == "lammps_gk_mliap":
+            suffix = str(settings.get("heat_flux_suffix") or cfg.get("green_kubo_settings", {}).get("heat_flux_suffix") or "kk")
+            if suffix and suffix != "none":
+                suffix_text = (
+                    "# MACE ML-IAP GK needs the KOKKOS bridge so forward_exchange is available.\n"
+                    f"suffix          {suffix}\n\n"
+                )
 
     txt = f"""units           metal
 dimension       3

@@ -655,6 +655,7 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
             "env_path": "ATOMI_LAMMPS_GK_ENV",
             "lammps_executable": "ATOMI_LMP_GK_EXE",
             "lammps_prefix": "ATOMI_LAMMPS_GK_PREFIX",
+            "python_shared_lib": "ATOMI_LAMMPS_GK_EXTRA_LD_LIBRARY_PATH",
         }
         for field, env_key in gk_mappings.items():
             if _nonempty(lammps_gk.get(field)):

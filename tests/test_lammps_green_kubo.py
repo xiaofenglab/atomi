@@ -187,7 +187,9 @@ def test_green_kubo_prepare_can_write_mliap_backend(tmp_path, monkeypatch):
     )
     assert "pair_style      mliap unified" in text
     assert "pair_coeff      * * O U" in text
+    assert "suffix          kk" in text
     assert "suffix          off" not in text
+    assert out["green_kubo_settings"]["heat_flux_suffix"] == "kk"
     assert not out["stages"][0]["green_kubo_settings"]["disable_accelerated_suffix_for_heat_flux"]
 
 

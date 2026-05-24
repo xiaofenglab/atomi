@@ -175,6 +175,27 @@ def write_array_script(
     if array_limit and array_limit > 0:
         array_spec += f"%{array_limit}"
 
+    gk_mliap = cfg.get("runtime_profile") == "lammps_gk_mliap" or cfg.get("pair_style_backend") == "mliap"
+    gk_environment_lines: list[str] = []
+    if gk_mliap:
+        gk_environment_lines = [
+            'if command -v confighpc >/dev/null 2>&1; then',
+            '  if [ -n "${ATOMI_HPC_CONFIG:-}" ]; then',
+            '    eval "$(confighpc --config "$ATOMI_HPC_CONFIG" --shell)"',
+            '  elif [ -f "$HOME/atomi_hpc/atomi_hpc_config.kit.local.json" ]; then',
+            '    eval "$(confighpc --config "$HOME/atomi_hpc/atomi_hpc_config.kit.local.json" --shell)"',
+            '  fi',
+            'fi',
+            'export TORCH_DISABLE_ADDR2LINE="${TORCH_DISABLE_ADDR2LINE:-1}"',
+            'if [ -n "${ATOMI_LAMMPS_GK_EXTRA_LD_LIBRARY_PATH:-}" ]; then',
+            '  export LD_LIBRARY_PATH="${ATOMI_LAMMPS_GK_EXTRA_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH:-}"',
+            'fi',
+            'echo "ATOMI_LMP_GK_EXE=${ATOMI_LMP_GK_EXE:-}"',
+            'echo "ATOMI_LAMMPS_GK_ENV=${ATOMI_LAMMPS_GK_ENV:-}"',
+            'echo "ATOMI_LAMMPS_GK_EXTRA_LD_LIBRARY_PATH=${ATOMI_LAMMPS_GK_EXTRA_LD_LIBRARY_PATH:-}"',
+            '',
+        ]
+
     script_lines = [
         "#!/bin/bash",
         f"#SBATCH --job-name={job_name}",
@@ -191,6 +212,7 @@ def write_array_script(
         f"CONFIG={shlex.quote(str(config))}",
         f"MANIFEST={shlex.quote(str(manifest))}",
         "",
+        *gk_environment_lines,
         'echo "Running md-engine production array task ${TASK_ID}"',
         '"${PYTHON_EXE}" -m atomi.lammps.production_array \\',
         '  --run-task \\',

@@ -209,6 +209,76 @@ def test_stage_wrapper_rewrites_sbatch_resources_from_environment(tmp_path, monk
     assert "#SBATCH --time=05:36:00" in text
 
 
+def test_md_engine_array_injects_gk_mliap_runtime_environment(tmp_path) -> None:
+    wrapper = tmp_path / "legacy_wrapper.sh"
+    wrapper.write_text(
+        "#!/bin/bash\n"
+        "#SBATCH --job-name=md-engine\n"
+        "#SBATCH --nodes=1\n"
+        "#SBATCH --ntasks=1\n"
+        "#SBATCH --time=01:00:00\n"
+        'echo "$1"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    data = tmp_path / "start.data"
+    data.write_text("data\n", encoding="utf-8")
+    model = tmp_path / "model-mliap_lammps.pt"
+    model.write_text("model\n", encoding="utf-8")
+    config = tmp_path / "config_gk.json"
+    config.write_text(
+        json.dumps(
+            {
+                "wrapper_script": str(wrapper),
+                "runtime_profile": "lammps_gk_mliap",
+                "pair_style_backend": "mliap",
+                "model_file": str(model),
+                "model_elements": ["O", "U"],
+                "timestep": 0.001,
+                "mass_O": 15.999,
+                "mass_U": 238.0289,
+                "performance": {
+                    "reference_atoms": 96,
+                    "reference_steps": 100000,
+                    "reference_hours": 0.75,
+                    "safety_factor": 1.0,
+                },
+                "stages": [
+                    {
+                        "name": "gk_T300K_s01",
+                        "type": "nve",
+                        "temperature": 300,
+                        "input_structure": str(data),
+                        "fixed_steps": 1000,
+                        "production_run": True,
+                        "green_kubo_run": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    production_array.main(
+        [
+            "--root",
+            str(tmp_path),
+            "--config",
+            str(config),
+            "--array-limit",
+            "7",
+        ]
+    )
+
+    script = tmp_path / "analysis" / "md_engine_array" / "run_md_production_array.sh"
+    script_text = script.read_text(encoding="utf-8")
+    assert "confighpc --config" in script_text
+    assert "ATOMI_LAMMPS_GK_EXTRA_LD_LIBRARY_PATH" in script_text
+    assert "TORCH_DISABLE_ADDR2LINE" in script_text
+    assert "ATOMI_LMP_GK_EXE" in script_text
+    assert "#SBATCH --array=1-1%7" in script_text
+
+
 def test_lammps_wrapper_fail_fast_when_gk_exe_missing() -> None:
     template = (
         Path("src")
@@ -234,6 +304,9 @@ def test_lammps_wrapper_fail_fast_when_gk_exe_missing() -> None:
     assert "ATOMI_PYTHON_LIBDIRS" in template
     assert "ATOMI_TORCH_LIBDIRS" in template
     assert "ATOMI_DETECTED_TORCH_LIBDIRS" in template
+    assert "ATOMI_LAMMPS_GK_EXTRA_LD_LIBRARY_PATH" in template
+    assert "ATOMI_LAMMPS_GK_PYTHON_LIB" in template
+    assert "TORCH_DISABLE_ADDR2LINE" in template
     assert "TORCH_LIBDIRS" in template
     assert "MACE_ALLOW_CPU" in template
     assert "ATOMI_LAMMPS_SKIP_HELP_PREFLIGHT" in template

@@ -122,7 +122,7 @@ fi
 ATOMI_LMP_BIN_DIR="$(cd "$(dirname "${ATOMI_LMP_EXE}")" && pwd)"
 ATOMI_LMP_INSTALL_DIR="$(cd "${ATOMI_LMP_BIN_DIR}/.." && pwd)"
 ATOMI_LIBTORCH_LIB="${ATOMI_LIBTORCH_LIB:-}"
-if [ -z "${ATOMI_LIBTORCH_LIB}" ] && [ -n "${ATOMI_LAMMPS_PREFIX:-}" ]; then
+if [ -z "${ATOMI_LIBTORCH_LIB}" ] && [ -n "${ATOMI_LAMMPS_PREFIX:-}" ] && [ "${LAMMPS_PROFILE}" != "gk_mliap" ]; then
     ATOMI_LIBTORCH_LIB="$ATOMI_LAMMPS_PREFIX/src/libtorch-gpu/lib"
 fi
 
@@ -143,6 +143,15 @@ else
 fi
 
 if [ "${LAMMPS_PROFILE}" = "gk_mliap" ]; then
+    export TORCH_DISABLE_ADDR2LINE="${TORCH_DISABLE_ADDR2LINE:-1}"
+    if [ -n "${ATOMI_LAMMPS_GK_EXTRA_LD_LIBRARY_PATH:-}" ]; then
+        for atomi_gk_extra_libdir in ${ATOMI_LAMMPS_GK_EXTRA_LD_LIBRARY_PATH}; do
+            atomi_add_ld_library_path "$atomi_gk_extra_libdir"
+        done
+    fi
+    if [ -n "${ATOMI_LAMMPS_GK_PYTHON_LIB:-}" ]; then
+        atomi_add_ld_library_path "$ATOMI_LAMMPS_GK_PYTHON_LIB"
+    fi
     if [ -n "${ATOMI_TORCH_LIBDIRS:-}" ]; then
         for atomi_torch_libdir in ${ATOMI_TORCH_LIBDIRS}; do
             atomi_add_ld_library_path "$atomi_torch_libdir"
@@ -261,7 +270,10 @@ echo "LAMMPS_ENV        = ${ATOMI_LAMMPS_ENV:-}"
 echo "LAMMPS_GK_ENV     = ${ATOMI_LAMMPS_GK_ENV:-}"
 echo "PYTHON_EXE        = $(command -v python || true)"
 echo "PYTHON_LIBDIRS    = ${ATOMI_DETECTED_PYTHON_LIBDIRS:-}"
+echo "GK_EXTRA_LD_PATH  = ${ATOMI_LAMMPS_GK_EXTRA_LD_LIBRARY_PATH:-}"
+echo "GK_PYTHON_LIB     = ${ATOMI_LAMMPS_GK_PYTHON_LIB:-}"
 echo "TORCH_LIBDIRS     = ${ATOMI_DETECTED_TORCH_LIBDIRS:-}"
+echo "TORCH_DISABLE_ADDR2LINE = ${TORCH_DISABLE_ADDR2LINE:-}"
 echo "LAMMPS_PYTHONPATH = ${PYTHONPATH:-}"
 echo "MACE_ALLOW_CPU    = ${MACE_ALLOW_CPU:-}"
 echo "========================================"
