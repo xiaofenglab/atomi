@@ -239,6 +239,7 @@ def test_lammps_wrapper_fail_fast_when_gk_exe_missing() -> None:
     assert "TORCH_SHOW_CPP_STACKTRACES" in template
     assert "ATOMI_MLIP_MODEL_PATH" in template
     assert "torch.jit.load model" in template
+    assert "forward_exchange API" in template
     assert "/src/lammps/python" in template
     assert "/build_mliap/cython" in template
     assert "source \"$ATOMI_LAMMPS_ENV/bin/activate\"" in template

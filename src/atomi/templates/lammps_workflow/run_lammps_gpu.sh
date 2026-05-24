@@ -339,6 +339,48 @@ try:
         del model
 except Exception as exc:
     print(f"Atomi preflight torch.jit.load model: WARNING {exc.__class__.__name__}: {exc}")
+
+try:
+    import inspect
+    import pathlib
+    import mace.tools.utils as mace_utils
+
+    mace_needs_forward_exchange = "forward_exchange" in inspect.getsource(mace_utils)
+    lammps_prefix = os.environ.get("ATOMI_LAMMPS_PREFIX", "")
+    search_roots = []
+    if lammps_prefix:
+        prefix = pathlib.Path(lammps_prefix)
+        search_roots = [
+            prefix / "build_mliap" / "cython",
+            prefix / "src" / "lammps" / "src",
+            prefix / "src" / "lammps" / "python",
+        ]
+    lammps_has_forward_exchange = False
+    for root in search_roots:
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file() or path.suffix not in {".py", ".pyx", ".cpp", ".h", ".hpp"}:
+                continue
+            try:
+                if "forward_exchange" in path.read_text(errors="ignore"):
+                    lammps_has_forward_exchange = True
+                    break
+            except Exception:
+                continue
+        if lammps_has_forward_exchange:
+            break
+    print(
+        "Atomi preflight MACE/LAMMPS forward_exchange API: "
+        f"mace_needs={mace_needs_forward_exchange} lammps_sources_have={lammps_has_forward_exchange}"
+    )
+    if mace_needs_forward_exchange and search_roots and not lammps_has_forward_exchange:
+        print(
+            "Atomi preflight MACE/LAMMPS forward_exchange API: WARNING installed MACE "
+            "expects forward_exchange, but the configured LAMMPS source/build does not expose it."
+        )
+except Exception as exc:
+    print(f"Atomi preflight MACE/LAMMPS forward_exchange API: WARNING {exc.__class__.__name__}: {exc}")
 PY
     if [ "$?" -ne 0 ]; then
         atomi_fail_preflight "required ML-IAP Python modules could not be imported."

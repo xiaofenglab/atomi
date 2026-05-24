@@ -317,6 +317,9 @@ def test_green_kubo_probe_classifies_common_mliap_failures():
     assert "libpython" in green_kubo.classify_probe_log("OSError: Unable to locate python shared library")
     assert "incompatible Torch/C10" in green_kubo.classify_probe_log("ImportError: torch/lib/libshm.so: undefined symbol: c10")
     assert "loaded but failed" in green_kubo.classify_probe_log("ERROR: Running mliappy unified module failure.")
+    assert "API mismatch" in green_kubo.classify_probe_log(
+        "ERROR: Running mliappy unified compute_forces failure. AttributeError: MLIAPDataPy object has no attribute forward_exchange"
+    )
     assert "per-atom energy/virial" in green_kubo.classify_probe_log("ERROR: pair_mace does not support vflag_atom.")
 
 
