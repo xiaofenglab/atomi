@@ -650,6 +650,7 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
                 if _nonempty(value) and (str(key).startswith("ATOMI_") or str(key) == "PSM2_CUDA"):
                     exports.setdefault(str(key), str(value))
         gk_mappings = {
+            "env_path": "ATOMI_LAMMPS_GK_ENV",
             "lammps_executable": "ATOMI_LMP_GK_EXE",
             "lammps_prefix": "ATOMI_LAMMPS_GK_PREFIX",
         }

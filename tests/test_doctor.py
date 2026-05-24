@@ -265,10 +265,12 @@ def test_confighpc_exports_separate_gk_lammps_profile(tmp_path: Path) -> None:
                 "site": "KIT",
                 "profiles": {
                     "lammps_md_engine": {
+                        "env_path": "/private/prod/env",
                         "lammps_executable": "/private/prod/lmp",
                         "lammps_prefix": "/private/prod",
                     },
                     "lammps_gk_mliap": {
+                        "env_path": "/private/mliap/env",
                         "lammps_executable": "/private/mliap/lmp",
                         "lammps_prefix": "/private/mliap",
                         "environment": {"ATOMI_LAMMPS_GK_BACKEND": "mliap"},
@@ -283,7 +285,9 @@ def test_confighpc_exports_separate_gk_lammps_profile(tmp_path: Path) -> None:
     env_text = env_path.read_text(encoding="utf-8")
 
     assert "export ATOMI_LMP_EXE=/private/prod/lmp" in env_text
+    assert "export ATOMI_LAMMPS_ENV=/private/prod/env" in env_text
     assert "export ATOMI_LAMMPS_PREFIX=/private/prod" in env_text
+    assert "export ATOMI_LAMMPS_GK_ENV=/private/mliap/env" in env_text
     assert "export ATOMI_LMP_GK_EXE=/private/mliap/lmp" in env_text
     assert "export ATOMI_LAMMPS_GK_PREFIX=/private/mliap" in env_text
     assert "export ATOMI_LAMMPS_GK_BACKEND=mliap" in env_text

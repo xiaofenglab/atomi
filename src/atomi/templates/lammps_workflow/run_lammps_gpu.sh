@@ -110,6 +110,10 @@ if [ "${GK_REQUESTED}" = "1" ] && [ -n "${ATOMI_LMP_GK_EXE:-}" ]; then
     LAMMPS_PROFILE="gk_mliap"
 fi
 
+if [ "${LAMMPS_PROFILE}" = "gk_mliap" ] && [ -n "${ATOMI_LAMMPS_GK_ENV:-}" ] && [ -f "$ATOMI_LAMMPS_GK_ENV/bin/activate" ]; then
+    source "$ATOMI_LAMMPS_GK_ENV/bin/activate"
+fi
+
 if [ -z "${ATOMI_LMP_EXE:-}" ]; then
     echo "ERROR: set ATOMI_LMP_EXE to the private path of your LAMMPS executable."
     exit 2
@@ -253,6 +257,8 @@ echo "CUDA_VISIBLE_DEVICES = ${CUDA_VISIBLE_DEVICES}"
 echo "LMP_EXE           = ${ATOMI_LMP_EXE}"
 echo "LMP_INSTALL_DIR   = ${ATOMI_LMP_INSTALL_DIR}"
 echo "LAMMPS_PROFILE    = ${LAMMPS_PROFILE}"
+echo "LAMMPS_ENV        = ${ATOMI_LAMMPS_ENV:-}"
+echo "LAMMPS_GK_ENV     = ${ATOMI_LAMMPS_GK_ENV:-}"
 echo "PYTHON_EXE        = $(command -v python || true)"
 echo "PYTHON_LIBDIRS    = ${ATOMI_DETECTED_PYTHON_LIBDIRS:-}"
 echo "TORCH_LIBDIRS     = ${ATOMI_DETECTED_TORCH_LIBDIRS:-}"

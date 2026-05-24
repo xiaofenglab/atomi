@@ -243,6 +243,8 @@ def test_lammps_wrapper_fail_fast_when_gk_exe_missing() -> None:
     assert "/src/lammps/python" in template
     assert "/build_mliap/cython" in template
     assert "source \"$ATOMI_LAMMPS_ENV/bin/activate\"" in template
+    assert "source \"$ATOMI_LAMMPS_GK_ENV/bin/activate\"" in template
+    assert "LAMMPS_GK_ENV" in template
     assert "mliap_unified_couple" in template
     assert "Atomi GK/ML-IAP preflight: PASS" in template
     assert "selected GK executable does not expose the ML-IAP mliap pair style" in template
