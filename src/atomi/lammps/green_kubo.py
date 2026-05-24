@@ -254,8 +254,12 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
         cfg["model_elements"] = elements
     if cfg.get("pair_style_backend") == "mliap":
         cfg["runtime_profile"] = "lammps_gk_mliap"
+        args.keep_accelerated_suffix_for_heat_flux = True
         cfg["green_kubo_settings"]["notes"].append(
             "This config requests pair_style_backend=mliap; use the private lammps_gk_mliap profile/install_mliap binary."
+        )
+        cfg["green_kubo_settings"]["notes"].append(
+            "For MACE ML-IAP, Atomi keeps the KOKKOS suffix enabled so LAMMPS uses mliap/kk and the KOKKOS forward_exchange path."
         )
     stages, manifest = build_gk_stages(records, root, args)
     cfg["stages"] = stages
@@ -483,6 +487,13 @@ def probe_main(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("No input structure found. Pass --input-structure or use a config_gk.json stage with input_structure.")
     input_structure = resolve_root_path(Path(input_value), root)
     temperature = float(args.temperature if args.temperature is not None else stage.get("temperature", 300.0))
+    suffix = args.suffix
+    if suffix == "auto":
+        env_suffix = os.environ.get("ATOMI_LAMMPS_GK_SUFFIX", "").strip()
+        if env_suffix:
+            suffix = env_suffix
+        else:
+            suffix = "kk" if cfg.get("pair_style_backend") == "mliap" or cfg.get("runtime_profile") == "lammps_gk_mliap" else "off"
     outdir = resolve_root_path(args.outdir, root)
     outdir.mkdir(parents=True, exist_ok=True)
     input_path = outdir / "gk_heatflux_probe.in"
@@ -495,7 +506,7 @@ def probe_main(args: argparse.Namespace) -> dict[str, Any]:
         root=root,
         input_structure=input_structure,
         temperature=temperature,
-        suffix=args.suffix,
+        suffix=suffix,
     )
     input_path.write_text(text, encoding="utf-8")
     write_probe_runner(runner_path, input_path.name, args.lammps_command)
@@ -513,7 +524,7 @@ def probe_main(args: argparse.Namespace) -> dict[str, Any]:
         "stage": stage.get("name"),
         "input_structure": str(input_structure),
         "temperature_K": temperature,
-        "suffix": args.suffix,
+        "suffix": suffix,
         "input": str(input_path),
         "runner": str(runner_path),
         "sbatch_runner": str(wrapper_runner) if wrapper_runner else None,
@@ -525,7 +536,8 @@ def probe_main(args: argparse.Namespace) -> dict[str, Any]:
         "notes": [
             "For ML-IAP GK configs, the wrapper checks the selected GK binary, ML-IAP package exposure, model path, and Python coupling modules before LAMMPS run 0.",
             "The LAMMPS probe input then runs compute heat/flux at run 0 to catch per-atom energy/virial support errors.",
-            "Use --suffix kk to intentionally test accelerated suffix behavior; Atomi's default GK route uses --suffix off.",
+            "For ML-IAP configs, the default probe suffix is kk so LAMMPS uses the KOKKOS forward_exchange path.",
+            "For non-ML-IAP configs, the default probe suffix is off because some accelerated pair styles do not expose heat-flux per-atom virials.",
             "A PASS here confirms launch-time GK compatibility, not statistical convergence of kappa.",
         ],
     }
@@ -891,9 +903,9 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--outdir", type=Path, default=Path("analysis/gk_lammps/probe"))
     probe.add_argument(
         "--suffix",
-        choices=("off", "kk", "on", "none"),
-        default="off",
-        help="LAMMPS suffix command for the probe. Use kk to test mace/kokkos; off tests Atomi's default fallback.",
+        choices=("auto", "off", "kk", "on", "none"),
+        default="auto",
+        help="LAMMPS suffix command for the probe. Default auto uses kk for ML-IAP and off otherwise.",
     )
     probe.add_argument("--lammps-command", default="lmp", help="Command used with --execute and written into run_probe.sh.")
     probe.add_argument(

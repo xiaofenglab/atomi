@@ -187,6 +187,8 @@ def test_green_kubo_prepare_can_write_mliap_backend(tmp_path, monkeypatch):
     )
     assert "pair_style      mliap unified" in text
     assert "pair_coeff      * * O U" in text
+    assert "suffix          off" not in text
+    assert not out["stages"][0]["green_kubo_settings"]["disable_accelerated_suffix_for_heat_flux"]
 
 
 def test_green_kubo_mliap_probe_forces_gk_binary(tmp_path):
@@ -227,6 +229,7 @@ def test_green_kubo_mliap_probe_forces_gk_binary(tmp_path):
     probe_input = (tmp_path / "probe_mliap" / "gk_heatflux_probe.in").read_text(encoding="utf-8")
     sbatch_runner = (tmp_path / "probe_mliap" / "run_probe_sbatch.sh").read_text(encoding="utf-8")
     submitter = (tmp_path / "probe_mliap" / "submit_probe.sh").read_text(encoding="utf-8")
+    assert "suffix          kk" in probe_input
     assert "pair_style      mliap unified" in probe_input
     assert "GK_REQUESTED=0" in sbatch_runner
     assert 'confighpc --dir "$ATOMI_HPC_DIR" --no-env-var --shell' in sbatch_runner
