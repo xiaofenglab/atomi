@@ -235,6 +235,7 @@ def test_lammps_wrapper_fail_fast_when_gk_exe_missing() -> None:
     assert "ATOMI_TORCH_LIBDIRS" in template
     assert "ATOMI_DETECTED_TORCH_LIBDIRS" in template
     assert "TORCH_LIBDIRS" in template
+    assert "MACE_ALLOW_CPU" in template
     assert "LDLIBRARY" in template
     assert "TORCH_SHOW_CPP_STACKTRACES" in template
     assert "ATOMI_MLIP_MODEL_PATH" in template

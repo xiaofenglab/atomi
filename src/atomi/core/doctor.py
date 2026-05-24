@@ -647,7 +647,9 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
         env = lammps_gk.get("environment", {})
         if isinstance(env, dict):
             for key, value in env.items():
-                if _nonempty(value) and (str(key).startswith("ATOMI_") or str(key) == "PSM2_CUDA"):
+                if _nonempty(value) and (
+                    str(key).startswith("ATOMI_") or str(key).startswith("MACE_") or str(key) == "PSM2_CUDA"
+                ):
                     exports.setdefault(str(key), str(value))
         gk_mappings = {
             "env_path": "ATOMI_LAMMPS_GK_ENV",

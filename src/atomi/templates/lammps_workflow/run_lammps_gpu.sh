@@ -263,6 +263,7 @@ echo "PYTHON_EXE        = $(command -v python || true)"
 echo "PYTHON_LIBDIRS    = ${ATOMI_DETECTED_PYTHON_LIBDIRS:-}"
 echo "TORCH_LIBDIRS     = ${ATOMI_DETECTED_TORCH_LIBDIRS:-}"
 echo "LAMMPS_PYTHONPATH = ${PYTHONPATH:-}"
+echo "MACE_ALLOW_CPU    = ${MACE_ALLOW_CPU:-}"
 echo "========================================"
 
 echo "----- TOOLCHAIN -----"

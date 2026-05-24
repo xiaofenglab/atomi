@@ -454,6 +454,8 @@ def classify_probe_log(text: str) -> str:
                 "FAIL: embedded Python torch import failed inside ML-IAP; align Python torch with the libtorch "
                 "used to build LAMMPS, or rebuild LAMMPS against the active Python torch/libtorch."
             )
+        if "gpu requested but tensor is on cpu" in lowered:
+            return "FAIL: MACE ML-IAP received CPU tensors; set/export MACE_ALLOW_CPU=true for a CPU-fallback diagnostic probe."
         return (
             "FAIL: ML-IAP unified module loaded but failed while running the model; "
             "inspect the Python traceback in the Slurm .err file for model/device/dtype details."
@@ -480,6 +482,8 @@ def classify_probe_log(text: str) -> str:
             "FAIL: MACE/ML-IAP API mismatch: installed MACE expects MLIAPDataPy.forward_exchange, "
             "but the configured LAMMPS ML-IAP build does not provide it."
         )
+    if "gpu requested but tensor is on cpu" in lowered:
+        return "FAIL: MACE ML-IAP received CPU tensors; set/export MACE_ALLOW_CPU=true for a CPU-fallback diagnostic probe."
     if "model file not found" in lowered or "cannot open" in lowered and "mliap" in lowered:
         return "FAIL: ML-IAP model file could not be opened."
     if "eflag_atom" in lowered or "vflag_atom" in lowered or "heat/flux" in lowered and "error" in lowered:

@@ -328,6 +328,7 @@ def test_green_kubo_probe_classifies_common_mliap_failures():
     )
     assert "CuPy" in green_kubo.classify_probe_log("NameError: name 'cupy' is not defined")
     assert "CuPy" in green_kubo.classify_probe_log("ModuleNotFoundError: No module named 'cupy'")
+    assert "MACE_ALLOW_CPU" in green_kubo.classify_probe_log("ValueError: GPU requested but tensor is on CPU")
     assert "per-atom energy/virial" in green_kubo.classify_probe_log("ERROR: pair_mace does not support vflag_atom.")
 
 

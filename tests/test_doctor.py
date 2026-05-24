@@ -273,7 +273,7 @@ def test_confighpc_exports_separate_gk_lammps_profile(tmp_path: Path) -> None:
                         "env_path": "/private/mliap/env",
                         "lammps_executable": "/private/mliap/lmp",
                         "lammps_prefix": "/private/mliap",
-                        "environment": {"ATOMI_LAMMPS_GK_BACKEND": "mliap"},
+                        "environment": {"ATOMI_LAMMPS_GK_BACKEND": "mliap", "MACE_ALLOW_CPU": "true"},
                     },
                 },
             }
@@ -291,6 +291,7 @@ def test_confighpc_exports_separate_gk_lammps_profile(tmp_path: Path) -> None:
     assert "export ATOMI_LMP_GK_EXE=/private/mliap/lmp" in env_text
     assert "export ATOMI_LAMMPS_GK_PREFIX=/private/mliap" in env_text
     assert "export ATOMI_LAMMPS_GK_BACKEND=mliap" in env_text
+    assert "export MACE_ALLOW_CPU=true" in env_text
 
 
 def test_confighpc_prefers_named_local_config_and_warns_on_multiple(tmp_path: Path) -> None:
