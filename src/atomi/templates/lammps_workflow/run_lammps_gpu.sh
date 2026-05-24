@@ -290,13 +290,17 @@ atomi_fail_preflight() {
 if [ "${LAMMPS_PROFILE}" = "gk_mliap" ]; then
     echo "----- ATOMI GK/ML-IAP PREFLIGHT -----"
     LMP_HELP_LOG="atomi_lammps_help.${SLURM_JOB_ID}.txt"
-    if ! "${ATOMI_LMP_EXE}" -h >"${LMP_HELP_LOG}" 2>&1; then
-        cat "${LMP_HELP_LOG}" || true
-        atomi_fail_preflight "LAMMPS executable could not start. Check CUDA, libtorch, and LD_LIBRARY_PATH."
-    fi
-    if ! grep -qi "ML-IAP" "${LMP_HELP_LOG}" || ! grep -Eq '(^|[[:space:]])mliap(/kk)?([[:space:]]|$)' "${LMP_HELP_LOG}"; then
-        grep -iE "mliap|mace|python|kokkos|ml-" "${LMP_HELP_LOG}" || true
-        atomi_fail_preflight "selected GK executable does not expose the ML-IAP mliap pair style."
+    if [ "${ATOMI_LAMMPS_SKIP_HELP_PREFLIGHT:-0}" = "1" ]; then
+        echo "Atomi preflight LAMMPS -h check: SKIP (ATOMI_LAMMPS_SKIP_HELP_PREFLIGHT=1)"
+    else
+        if ! "${ATOMI_LMP_EXE}" -h >"${LMP_HELP_LOG}" 2>&1; then
+            cat "${LMP_HELP_LOG}" || true
+            echo "WARNING: Atomi LAMMPS -h preflight failed before input execution."
+            echo "WARNING: continuing because some MPI builds fail help-mode MPI_Init under Slurm while real input execution still works."
+        elif ! grep -qi "ML-IAP" "${LMP_HELP_LOG}" || ! grep -Eq '(^|[[:space:]])mliap(/kk)?([[:space:]]|$)' "${LMP_HELP_LOG}"; then
+            grep -iE "mliap|mace|python|kokkos|ml-" "${LMP_HELP_LOG}" || true
+            atomi_fail_preflight "selected GK executable does not expose the ML-IAP mliap pair style."
+        fi
     fi
 
     MLIP_MODEL_PATH="$(awk '$1=="pair_style" && $2=="mliap" && $3=="unified" {print $4; exit}' "${INPUT}")"

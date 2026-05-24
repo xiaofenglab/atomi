@@ -441,6 +441,8 @@ def classify_probe_log(text: str) -> str:
         if "pair_style mliap unified" in lowered:
             return "FAIL: GK requested ML-IAP, but the generated input does not use pair_style mliap unified."
         return "FAIL: wrapper preflight failed before LAMMPS run 0."
+    if "lammps -h preflight failed" in lowered and "mpi_init" in lowered:
+        return "WARNING: LAMMPS help-mode preflight hit MPI_Init; rerun with ATOMI_LAMMPS_SKIP_HELP_PREFLIGHT=1 or continue to input run."
     if "loading mliappy unified module failure" in lowered:
         return "FAIL: ML-IAP unified Python module failed to load; check lammps/mliap_unified_couple imports and Python path."
     if "running mliappy unified module failure" in lowered:
@@ -456,6 +458,11 @@ def classify_probe_log(text: str) -> str:
             )
         if "gpu requested but tensor is on cpu" in lowered:
             return "FAIL: MACE ML-IAP received CPU tensors; set/export MACE_ALLOW_CPU=true for a CPU-fallback diagnostic probe."
+        if "torch.compiler" in lowered and "is_compiling" in lowered:
+            return (
+                "FAIL: cuequivariance_torch expects torch.compiler.is_compiling, but this Torch build does not expose it; "
+                "use a cuequivariance_torch version compatible with torch 2.2 or add a torch._dynamo.is_compiling shim."
+            )
         return (
             "FAIL: ML-IAP unified module loaded but failed while running the model; "
             "inspect the Python traceback in the Slurm .err file for model/device/dtype details."
@@ -484,6 +491,11 @@ def classify_probe_log(text: str) -> str:
         )
     if "gpu requested but tensor is on cpu" in lowered:
         return "FAIL: MACE ML-IAP received CPU tensors; set/export MACE_ALLOW_CPU=true for a CPU-fallback diagnostic probe."
+    if "torch.compiler" in lowered and "is_compiling" in lowered:
+        return (
+            "FAIL: cuequivariance_torch expects torch.compiler.is_compiling, but this Torch build does not expose it; "
+            "use a cuequivariance_torch version compatible with torch 2.2 or add a torch._dynamo.is_compiling shim."
+        )
     if "model file not found" in lowered or "cannot open" in lowered and "mliap" in lowered:
         return "FAIL: ML-IAP model file could not be opened."
     if "eflag_atom" in lowered or "vflag_atom" in lowered or "heat/flux" in lowered and "error" in lowered:
