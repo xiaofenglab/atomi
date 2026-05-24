@@ -250,7 +250,7 @@ def test_lammps_wrapper_fail_fast_when_gk_exe_missing() -> None:
     assert "selected GK executable does not expose the ML-IAP mliap pair style" in template
     assert "ML-IAP model file not found" in template
     assert "required ML-IAP Python modules could not be imported" in template
-    assert 'required = ("lammps", "lammps.mliap", "torch")' in template
+    assert 'required = ("lammps", "lammps.mliap", "torch", "cupy")' in template
     assert 'optional = ("mliap_unified_couple", "mace")' in template
 
 

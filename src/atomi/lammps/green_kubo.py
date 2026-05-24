@@ -434,6 +434,8 @@ def classify_probe_log(text: str) -> str:
             return "FAIL: ML-IAP cannot find libpython; add the active Python lib directory to LD_LIBRARY_PATH."
         if "required ml-iap python modules could not be imported" in lowered or "no module named 'lammps'" in lowered:
             return "FAIL: ML-IAP Python coupling is not importable; check ATOMI_LAMMPS_ENV and ATOMI_LAMMPS_PYTHONPATH."
+        if "no module named 'cupy'" in lowered or "python import cupy" in lowered:
+            return "FAIL: KOKKOS ML-IAP needs CuPy to wrap GPU device arrays; install cupy-cuda12x in the GK env."
         if "ml-iap model file not found" in lowered:
             return "FAIL: converted ML-IAP model file was not found."
         if "pair_style mliap unified" in lowered:
@@ -458,6 +460,8 @@ def classify_probe_log(text: str) -> str:
         )
     if "module not founderror" in lowered or "no module named 'lammps'" in lowered:
         return "FAIL: required Python module for ML-IAP is missing."
+    if "no module named 'cupy'" in lowered or "name 'cupy' is not defined" in lowered:
+        return "FAIL: KOKKOS ML-IAP needs CuPy to wrap GPU device arrays; install cupy-cuda12x in the GK env."
     if "unrecognized pair style 'mliap'" in lowered:
         return "FAIL: selected LAMMPS binary does not have the ML-IAP package enabled."
     if "libcuda.so.1" in lowered:

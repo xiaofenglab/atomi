@@ -272,7 +272,7 @@ nvidia-smi || true
 if [ "${LAMMPS_PROFILE}" = "gk_mliap" ]; then
     python - <<'PY' || true
 import importlib.util
-for name in ("lammps", "mliap_unified_couple", "torch", "mace"):
+for name in ("lammps", "mliap_unified_couple", "torch", "cupy", "mace"):
     spec = importlib.util.find_spec(name)
     origin = spec.origin if spec is not None else "missing"
     print(f"python module {name}: {origin}")
@@ -313,7 +313,7 @@ import importlib
 import os
 import sys
 
-required = ("lammps", "lammps.mliap", "torch")
+required = ("lammps", "lammps.mliap", "torch", "cupy")
 # Some CMake ML-IAP builds compile the Cython mliap_unified_couple module into
 # liblammps instead of installing it as a standalone Python extension. Treat it
 # as diagnostic here; the LAMMPS run-0 probe below is the authoritative check.

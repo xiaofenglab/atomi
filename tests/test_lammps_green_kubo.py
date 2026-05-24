@@ -326,6 +326,8 @@ def test_green_kubo_probe_classifies_common_mliap_failures():
     assert "align Python torch" in green_kubo.classify_probe_log(
         "ERROR: Running mliappy unified module failure. AttributeError: partially initialized module 'torch' has no attribute 'fx'"
     )
+    assert "CuPy" in green_kubo.classify_probe_log("NameError: name 'cupy' is not defined")
+    assert "CuPy" in green_kubo.classify_probe_log("ModuleNotFoundError: No module named 'cupy'")
     assert "per-atom energy/virial" in green_kubo.classify_probe_log("ERROR: pair_mace does not support vflag_atom.")
 
 
