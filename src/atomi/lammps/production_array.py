@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import shlex
 import subprocess
@@ -253,6 +254,45 @@ def _gk_sbatch_resource_fallbacks(cfg: dict, active_lines: list[str]) -> list[st
     return fallback_lines
 
 
+def _slurm_time_to_seconds(value: str) -> int:
+    value = str(value).strip()
+    days = 0
+    if "-" in value:
+        day_text, value = value.split("-", 1)
+        days = int(day_text)
+    parts = [int(part) for part in value.split(":")]
+    if len(parts) == 3:
+        hours, minutes, seconds = parts
+    elif len(parts) == 2:
+        hours, minutes, seconds = 0, parts[0], parts[1]
+    elif len(parts) == 1:
+        hours, minutes, seconds = 0, parts[0], 0
+    else:
+        raise ValueError(f"Cannot parse Slurm time {value!r}")
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds
+
+
+def _array_runtime_summary(
+    rows: list[dict[str, str]], array_limit: int | None, walltime_override: str | None
+) -> dict[str, str | int]:
+    task_count = len(rows)
+    concurrency = max(1, min(int(array_limit or task_count or 1), task_count or 1))
+    batches = math.ceil(task_count / concurrency) if task_count else 0
+    max_walltime = walltime_override or max(
+        (row["walltime"] for row in rows),
+        key=_slurm_time_to_seconds,
+        default="01:00:00",
+    )
+    elapsed_seconds = _slurm_time_to_seconds(max_walltime) * batches
+    return {
+        "task_count": task_count,
+        "array_limit": concurrency,
+        "batches": batches,
+        "walltime_per_task": max_walltime,
+        "estimated_elapsed": hours_to_slurm(elapsed_seconds / 3600.0),
+    }
+
+
 def write_array_script(
     path: Path,
     *,
@@ -272,7 +312,8 @@ def write_array_script(
     active_lines = _active_sbatch_lines(wrapper_text)
     active_lines.extend(_gk_sbatch_resource_fallbacks(cfg, active_lines))
     task_count = len(rows)
-    max_walltime = walltime or max((row["walltime"] for row in rows), default="01:00:00")
+    runtime_summary = _array_runtime_summary(rows, array_limit, walltime)
+    max_walltime = str(runtime_summary["walltime_per_task"])
     array_spec = f"1-{task_count}"
     if array_limit and array_limit > 0:
         array_spec += f"%{array_limit}"
@@ -315,6 +356,8 @@ def write_array_script(
         f"MANIFEST={shlex.quote(str(manifest))}",
         "",
         *gk_environment_lines,
+        f'echo "Atomi array estimate: tasks={runtime_summary["task_count"]} array_limit={runtime_summary["array_limit"]} batches={runtime_summary["batches"]}"',
+        f'echo "Atomi array estimate: walltime_per_task={runtime_summary["walltime_per_task"]} estimated_elapsed={runtime_summary["estimated_elapsed"]}"',
         'echo "Running md-engine production array task ${TASK_ID}"',
         '"${PYTHON_EXE}" -m atomi.lammps.production_array \\',
         '  --run-task \\',
@@ -404,6 +447,7 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("No production stages matched the requested selection.")
 
     rows = build_manifest_rows(root, cfg, stages)
+    runtime_summary = _array_runtime_summary(rows, args.array_limit, args.walltime)
     write_manifest(manifest, rows)
     write_array_script(
         script,
@@ -424,6 +468,13 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Wrote manifest: {manifest}")
     print(f"Wrote Slurm array script: {script}")
     print(f"Array concurrency limit: {args.array_limit}")
+    print(
+        "Estimated array runtime: "
+        f"{runtime_summary['task_count']} run(s), "
+        f"{runtime_summary['walltime_per_task']} per run, "
+        f"{runtime_summary['batches']} batch(es), "
+        f"{runtime_summary['estimated_elapsed']} elapsed at array limit {runtime_summary['array_limit']}"
+    )
     if args.submit:
         out = subprocess.check_output(["sbatch", str(script)], cwd=root).decode().strip()
         print(out)

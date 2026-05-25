@@ -299,6 +299,8 @@ def test_md_engine_array_injects_gk_mliap_runtime_environment(tmp_path, monkeypa
     assert "#SBATCH --partition=gpu" in script_text
     assert "#SBATCH --gres=gpu:1" in script_text
     assert "#SBATCH --array=1-1%7" in script_text
+    assert 'Atomi array estimate: tasks=1 array_limit=1 batches=1' in script_text
+    assert 'Atomi array estimate: walltime_per_task=' in script_text
 
 
 def test_lammps_wrapper_fail_fast_when_gk_exe_missing() -> None:
@@ -962,4 +964,5 @@ def test_md_engine_array_generates_selected_production_manifest_and_script(tmp_p
     assert [row["task_id"] for row in rows] == ["1", "2"]
     script_text = script.read_text(encoding="utf-8")
     assert "#SBATCH --array=1-2%2" in script_text
+    assert "Atomi array estimate: tasks=2 array_limit=2 batches=1" in script_text
     assert "--run-task" in script_text
