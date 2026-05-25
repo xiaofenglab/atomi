@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import re
 import shlex
@@ -56,6 +57,102 @@ def seed_values(args: argparse.Namespace) -> list[int]:
             values.extend(int(part.strip()) for part in str(item).split(",") if part.strip())
         return values
     return [int(args.seed_start) + i * int(args.seed_step) for i in range(int(args.n_seeds))]
+
+
+def _positive_float_or_none(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _resolve_gk_steps_per_hour(args: argparse.Namespace) -> float | None:
+    value = args.gk_steps_per_hour
+    if value is None:
+        value = os.environ.get("ATOMI_LAMMPS_GK_STEPS_PER_HOUR")
+    return _positive_float_or_none(value)
+
+
+def _resolve_gk_walltime_safety_factor(args: argparse.Namespace) -> float:
+    env_value = _positive_float_or_none(os.environ.get("ATOMI_LAMMPS_GK_WALLTIME_SAFETY_FACTOR"))
+    value = args.gk_walltime_safety_factor if args.gk_walltime_safety_factor is not None else env_value
+    return float(value if value is not None else 1.25)
+
+
+def _gk_nvt_steps(args: argparse.Namespace) -> int:
+    return max(0, int(round(float(args.nvt_preequilibration_ps) / float(args.timestep_ps))))
+
+
+def _gk_walltime_hours(args: argparse.Namespace) -> float | None:
+    steps_per_hour = _resolve_gk_steps_per_hour(args)
+    if steps_per_hour is None:
+        return None
+    nve_steps = int(round(float(args.nve_time_ps) / float(args.timestep_ps)))
+    total_steps = nve_steps + _gk_nvt_steps(args)
+    return max((total_steps / steps_per_hour) * _resolve_gk_walltime_safety_factor(args), 0.25)
+
+
+def apply_gk_runtime_performance(cfg: dict[str, Any], template: dict[str, Any], args: argparse.Namespace) -> None:
+    """Record an observed GK/ML-IAP throughput so array walltimes do not reuse old MD timings."""
+    steps_per_hour = _resolve_gk_steps_per_hour(args)
+    if steps_per_hour is None:
+        return
+    template_perf = template.get("performance", {}) if isinstance(template.get("performance", {}), dict) else {}
+    reference_atoms = int(
+        args.gk_reference_atoms
+        or template_perf.get("atoms")
+        or template_perf.get("atoms_small")
+        or template_perf.get("reference_atoms")
+        or 1
+    )
+    cfg["performance"] = {
+        "model": "observed_gk_mliap_steps_per_hour",
+        "reference_atoms": reference_atoms,
+        "atoms_small": reference_atoms,
+        "atoms_large": reference_atoms,
+        "reference_steps": float(steps_per_hour),
+        "reference_hours": 1.0,
+        "safety_factor": _resolve_gk_walltime_safety_factor(args),
+        "notes": [
+            "This performance block is for generated GK/ML-IAP stages only.",
+            "It is based on observed ML-IAP steps/hour, not the old pair_style mace/kk MD timing.",
+        ],
+    }
+
+
+def gk_runtime_estimate(args: argparse.Namespace, stage_count: int, array_limit: int | None) -> dict[str, Any]:
+    nve_steps = int(round(float(args.nve_time_ps) / float(args.timestep_ps)))
+    nvt_steps = _gk_nvt_steps(args)
+    total_steps = nve_steps + nvt_steps
+    steps_per_hour = _resolve_gk_steps_per_hour(args)
+    estimate: dict[str, Any] = {
+        "timestep_ps": float(args.timestep_ps),
+        "timestep_fs": float(args.timestep_ps) * 1000.0,
+        "nve_steps_per_stage": nve_steps,
+        "nvt_preequilibration_steps_per_stage": nvt_steps,
+        "estimated_total_md_steps_per_stage": total_steps,
+        "n_stages": int(stage_count),
+        "array_limit": int(array_limit) if array_limit else None,
+    }
+    if steps_per_hour is not None:
+        safety = _resolve_gk_walltime_safety_factor(args)
+        walltime = max((total_steps / steps_per_hour) * safety, 0.25)
+        concurrency = max(1, int(array_limit or stage_count or 1))
+        batches = math.ceil(stage_count / concurrency) if stage_count else 0
+        estimate.update(
+            {
+                "observed_steps_per_hour": float(steps_per_hour),
+                "walltime_safety_factor": safety,
+                "estimated_walltime_hours_per_stage": walltime,
+                "estimated_gpu_hours_all_stages": walltime * stage_count,
+                "estimated_array_batches": batches,
+                "estimated_elapsed_hours_at_array_limit": walltime * batches,
+            }
+        )
+    return estimate
 
 
 def copy_gk_base_config(template: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -196,6 +293,8 @@ def build_gk_stages(records: list[dict[str, Any]], root: Path, args: argparse.Na
                 stage["input_restart_fallback"] = relative_to_root(restart, root)
             if args.walltime_hours is not None:
                 stage["walltime_hours"] = float(args.walltime_hours)
+            elif (estimated_walltime := _gk_walltime_hours(args)) is not None:
+                stage["walltime_hours"] = float(estimated_walltime)
             stages.append(stage)
             manifest.append(
                 {
@@ -255,6 +354,7 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
     if cfg.get("pair_style_backend") == "mliap":
         cfg["runtime_profile"] = "lammps_gk_mliap"
         args.keep_accelerated_suffix_for_heat_flux = True
+        apply_gk_runtime_performance(cfg, template, args)
         cfg["green_kubo_settings"]["notes"].append(
             "This config requests pair_style_backend=mliap; use the private lammps_gk_mliap profile/GK ML-IAP LAMMPS binary."
         )
@@ -275,9 +375,12 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
         "n_seeds_per_temperature": len(seed_values(args)),
         "n_stages": len(stages),
         "temperatures_K": [float(rec["temperature"]) for rec in records],
+        "runtime_estimate": gk_runtime_estimate(args, len(stages), args.array_limit),
         "run_command": f"md-engine-array --config {relative_to_root(config_out, root)} --outdir {relative_to_root(outdir / 'array', root)} --job-name gk-array --array-limit {args.array_limit}",
         "analyze_command": f"thermal-gk-lammps analyze --gk-config {relative_to_root(config_out, root)} --outdir {relative_to_root(outdir / 'fit', root)}",
     }
+    cfg["green_kubo_settings"]["runtime_estimate"] = plan["runtime_estimate"]
+    write_json(config_out, cfg)
     plan_path = outdir / "gk_plan.json"
     write_json(plan_path, plan)
     print(f"Wrote Green-Kubo config: {config_out}")
@@ -285,6 +388,15 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
     print(f"Wrote Green-Kubo plan: {plan_path}")
     print("Run with:")
     print(f"  {plan['run_command']}")
+    estimate = plan["runtime_estimate"]
+    if "estimated_walltime_hours_per_stage" in estimate:
+        print(
+            "Estimated GK walltime per stage: "
+            f"{estimate['estimated_walltime_hours_per_stage']:.2f} h "
+            f"({estimate['estimated_total_md_steps_per_stage']} steps at "
+            f"{estimate['observed_steps_per_hour']:.0f} steps/hour, safety "
+            f"{estimate['walltime_safety_factor']:.2f})"
+        )
     print("Analyze after jobs finish with:")
     print(f"  {plan['analyze_command']}")
     return plan
@@ -912,6 +1024,25 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument("--model-elements", nargs="+", help="Element/type order for pair_coeff, e.g. O U. Commas are accepted.")
     prep.add_argument("--array-limit", type=int, default=10, help="Suggested md-engine-array concurrency. Default: 10.")
     prep.add_argument("--walltime-hours", type=float, help="Optional walltime override for every GK seed stage.")
+    prep.add_argument(
+        "--gk-steps-per-hour",
+        type=float,
+        help=(
+            "Observed GK/ML-IAP throughput used to estimate per-stage walltime. "
+            "Also read from ATOMI_LAMMPS_GK_STEPS_PER_HOUR when unset."
+        ),
+    )
+    prep.add_argument(
+        "--gk-walltime-safety-factor",
+        type=float,
+        default=None,
+        help="Safety multiplier for --gk-steps-per-hour estimates. Default: 1.25 or ATOMI_LAMMPS_GK_WALLTIME_SAFETY_FACTOR.",
+    )
+    prep.add_argument(
+        "--gk-reference-atoms",
+        type=int,
+        help="Atom count for documenting the observed GK throughput. Defaults to the template performance atom count when available.",
+    )
     prep.add_argument(
         "--prefer-restart",
         action="store_true",
