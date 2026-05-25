@@ -38,6 +38,7 @@ EV_TO_J = 1.602176634e-19
 ANGSTROM_TO_M = 1.0e-10
 PS_TO_S = 1.0e-12
 KB_J_PER_K = 1.380649e-23
+DEFAULT_GK_MLIAP_TIMESTEP_PS = 0.00025
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -67,6 +68,20 @@ def _positive_float_or_none(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _gk_mliap_requested(template: dict[str, Any], args: argparse.Namespace) -> bool:
+    backend = args.pair_style_backend if args.pair_style_backend is not None else template.get("pair_style_backend")
+    return backend == "mliap" or template.get("runtime_profile") == "lammps_gk_mliap"
+
+
+def _resolve_prepare_timestep_ps(template: dict[str, Any], args: argparse.Namespace) -> float:
+    if args.timestep_ps is not None:
+        return float(args.timestep_ps)
+    if _gk_mliap_requested(template, args):
+        env_timestep = _positive_float_or_none(os.environ.get("ATOMI_LAMMPS_GK_TIMESTEP_PS"))
+        return float(env_timestep or DEFAULT_GK_MLIAP_TIMESTEP_PS)
+    return float(template.get("timestep_ps", template.get("timestep", 0.0001)))
 
 
 def _resolve_gk_steps_per_hour(args: argparse.Namespace) -> float | None:
@@ -180,6 +195,8 @@ def copy_gk_base_config(template: dict[str, Any], args: argparse.Namespace) -> d
     cfg = {key: template[key] for key in keys if key in template}
     timestep_ps = float(args.timestep_ps if args.timestep_ps is not None else template.get("timestep", 0.0001))
     run_steps = int(round(float(args.nve_time_ps) / timestep_ps))
+    cfg["timestep"] = timestep_ps
+    cfg["timestep_ps"] = timestep_ps
     cfg["generated_by"] = "atomi thermal-gk-lammps prepare"
     cfg["description"] = (
         "Generated Green-Kubo NVE heat-current workflow. Each stage starts from "
@@ -333,8 +350,7 @@ def write_manifest(path: Path, rows: list[dict]) -> None:
 
 def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
     records, root, template = discover_npt_records(args)
-    if args.timestep_ps is None:
-        args.timestep_ps = float(template.get("timestep_ps", template.get("timestep", 0.0001)))
+    args.timestep_ps = _resolve_prepare_timestep_ps(template, args)
     records = select_temperature_records(records, args)
     if not records:
         raise RuntimeError("No NPT records matched the Green-Kubo temperature selection.")
@@ -1018,7 +1034,14 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument("--sample-interval-ps", type=float, default=0.01)
     prep.add_argument("--correlation-time-ps", type=float, default=50.0)
     prep.add_argument("--plateau-window-ps", type=float, default=5.0)
-    prep.add_argument("--timestep-ps", type=float, help="Override timestep in ps. Defaults to template config timestep.")
+    prep.add_argument(
+        "--timestep-ps",
+        type=float,
+        help=(
+            "Override timestep in ps. Defaults to 0.00025 ps for ML-IAP GK runs "
+            "and to the template config timestep otherwise."
+        ),
+    )
     prep.add_argument("--model-file", type=Path, help="Override model file for GK stages, e.g. a converted MACE ML-IAP model.")
     prep.add_argument("--pair-style-backend", choices=("mace", "mliap"), help="Pair-style backend written to GK inputs.")
     prep.add_argument("--model-elements", nargs="+", help="Element/type order for pair_coeff, e.g. O U. Commas are accepted.")

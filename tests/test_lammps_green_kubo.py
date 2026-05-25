@@ -175,6 +175,9 @@ def test_green_kubo_prepare_can_write_mliap_backend(tmp_path, monkeypatch):
     out = json.loads((tmp_path / "config_gk_mliap.json").read_text(encoding="utf-8"))
     assert out["runtime_profile"] == "lammps_gk_mliap"
     assert out["pair_style_backend"] == "mliap"
+    assert out["timestep"] == 0.00025
+    assert out["timestep_ps"] == 0.00025
+    assert out["stages"][0]["fixed_steps"] == 4000
     assert out["model_file"].endswith("model-mliap_lammps.pt")
     assert out["model_elements"] == ["O", "U"]
     assert out["slurm_resources"]["partition"] == "gpu"
@@ -188,9 +191,79 @@ def test_green_kubo_prepare_can_write_mliap_backend(tmp_path, monkeypatch):
     assert "pair_style      mliap unified" in text
     assert "pair_coeff      * * O U" in text
     assert "suffix          kk" in text
+    assert "timestep        0.00025" in text
     assert "suffix          off" not in text
     assert out["green_kubo_settings"]["heat_flux_suffix"] == "kk"
     assert not out["stages"][0]["green_kubo_settings"]["disable_accelerated_suffix_for_heat_flux"]
+
+
+def test_green_kubo_prepare_applies_timestep_to_generated_input(tmp_path):
+    cfg = base_cfg(tmp_path)
+    cfg["timestep"] = 0.0001
+    cfg["stages"] = [
+        {
+            "name": "npt_prod_300K",
+            "type": "npt",
+            "temperature": 300,
+            "production_run": True,
+            "chunk_name": "chunk_production",
+        }
+    ]
+    config = tmp_path / "config_production.json"
+    config.write_text(json.dumps(cfg), encoding="utf-8")
+    stage_dir = tmp_path / "stages" / "npt_prod_300K"
+    chunk = stage_dir / "chunk_production"
+    chunk.mkdir(parents=True)
+    (chunk / "log.in.npt_prod_300K_production").write_text("LAMMPS log\n", encoding="utf-8")
+    (stage_dir / "npt_prod_300K.data").write_text("data\n", encoding="utf-8")
+    model = tmp_path / "model-mliap_lammps.pt"
+    model.write_text("model\n", encoding="utf-8")
+    set_project_root(tmp_path)
+
+    green_kubo.main(
+        [
+            "prepare",
+            "--config",
+            str(config),
+            "--config-out",
+            "config_gk_mliap_timestep.json",
+            "--model-file",
+            str(model),
+            "--pair-style-backend",
+            "mliap",
+            "--model-elements",
+            "O",
+            "U",
+            "--n-seeds",
+            "1",
+            "--nve-time-ps",
+            "0.02",
+            "--nvt-preequilibration-ps",
+            "0.002",
+            "--timestep-ps",
+            "0.00025",
+            "--sample-interval-ps",
+            "0.001",
+            "--correlation-time-ps",
+            "0.005",
+        ]
+    )
+
+    out = json.loads((tmp_path / "config_gk_mliap_timestep.json").read_text(encoding="utf-8"))
+    text, _data, _restart, steps = generate_production_input(
+        out,
+        out["stages"][0],
+        tmp_path / out["stages"][0]["input_structure"],
+        "gk_mliap_timestep",
+    )
+    assert out["timestep"] == 0.00025
+    assert out["timestep_ps"] == 0.00025
+    assert steps == 80
+    assert "timestep        0.00025" in text
+    assert "run             8" in text
+    assert "fix             JJ all ave/correlate 4 5 20" in text
+    assert "run             80" in text
+    assert "timestep        0.0001" not in text
 
 
 def test_green_kubo_prepare_records_mliap_runtime_estimate(tmp_path):
