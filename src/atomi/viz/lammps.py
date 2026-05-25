@@ -1,4 +1,5 @@
 import math
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -31,6 +32,16 @@ class LammpsThermoSummary:
     volume_std: float | None
     relative_volume_std_percent: float | None
     volume_drift_percent: float | None
+
+
+@dataclass(frozen=True)
+class LammpsRunProgress:
+    timestep_ps: float | None
+    current_steps: float
+    expected_steps: float | None
+    current_ps: float | None
+    expected_ps: float | None
+    percent: float | None
 
 
 def read_thermo_rows(logfile: Path) -> list[LammpsThermoRow]:
@@ -121,12 +132,44 @@ def format_summary(summary: LammpsThermoSummary) -> str:
     return "\n".join(lines)
 
 
+def summarize_lammps_run_progress(
+    logfile: Path,
+    rows: list[LammpsThermoRow],
+    timestep_ps: float | None = None,
+) -> LammpsRunProgress | None:
+    """Summarize active LAMMPS run progress from echoed timestep/run commands."""
+    if not rows:
+        return None
+    text = logfile.read_text(encoding="utf-8", errors="replace")
+    timestep = float(timestep_ps) if timestep_ps is not None else _infer_timestep_ps(text)
+    first_step, latest_step = _latest_thermo_block_step_span(logfile)
+    if first_step is None or latest_step is None:
+        first_step = rows[0].step
+        latest_step = rows[-1].step
+    current_steps = max(0.0, latest_step - first_step)
+    expected_steps = _infer_latest_run_steps(text)
+    current_ps = current_steps * timestep if timestep is not None else None
+    expected_ps = expected_steps * timestep if timestep is not None and expected_steps is not None else None
+    percent = None
+    if expected_steps not in (None, 0):
+        percent = 100.0 * min(max(current_steps / expected_steps, 0.0), 1.0)
+    return LammpsRunProgress(
+        timestep_ps=timestep,
+        current_steps=current_steps,
+        expected_steps=expected_steps,
+        current_ps=current_ps,
+        expected_ps=expected_ps,
+        percent=percent,
+    )
+
+
 def plot_lammps_live(
     logfile: Path,
     window: int = 40,
     interval: float = 10.0,
     once: bool = False,
     stop_on_finish: bool = True,
+    timestep_ps: float | None = None,
 ) -> None:
     """Monitor a LAMMPS log file and redraw terminal thermo plots when rows change."""
     if window < 1:
@@ -144,7 +187,7 @@ def plot_lammps_live(
             current_count = len(rows)
             if current_count != previous_count or once:
                 subprocess.run(["clear"], check=False)
-                _print_live_header(logfile, rows, interval)
+                _print_live_header(logfile, rows, interval, timestep_ps=timestep_ps)
                 _run_gnuplot(logfile, script, window)
                 previous_count = current_count
             if once:
@@ -158,7 +201,13 @@ def plot_lammps_live(
         return
 
 
-def _print_live_header(logfile: Path, rows: list[LammpsThermoRow], interval: float) -> None:
+def _print_live_header(
+    logfile: Path,
+    rows: list[LammpsThermoRow],
+    interval: float,
+    *,
+    timestep_ps: float | None = None,
+) -> None:
     print("============================================================")
     print(" Live LAMMPS thermo monitor")
     print(f" File    : {logfile}")
@@ -176,6 +225,18 @@ def _print_live_header(logfile: Path, rows: list[LammpsThermoRow], interval: flo
     print(f" Latest P      : {_fmt(latest.pressure)}")
     print(f" Latest V      : {_fmt(latest.volume)}")
     print(f" Latest PE     : {_fmt(latest.potential_energy)}")
+    progress = summarize_lammps_run_progress(logfile, rows, timestep_ps=timestep_ps)
+    if progress:
+        print(f" Timestep      : {_fmt(progress.timestep_ps)} ps ({_fmt(_ps_to_fs(progress.timestep_ps))} fs)")
+        if progress.expected_steps is not None:
+            print(
+                " MD progress   : "
+                f"{_fmt(progress.current_steps)}/{_fmt(progress.expected_steps)} steps, "
+                f"{_fmt(progress.current_ps)}/{_fmt(progress.expected_ps)} ps "
+                f"({_fmt(progress.percent)}%)"
+            )
+        else:
+            print(f" MD progress   : {_fmt(progress.current_steps)} steps, {_fmt(progress.current_ps)} ps")
     recent = summarize_recent_runtime_fraction(rows, fraction=0.2)
     if recent:
         print(" Last 20% avg")
@@ -256,6 +317,47 @@ def _contains_loop_time(logfile: Path) -> bool:
         return any(line.startswith("Loop time") for line in handle)
 
 
+def _infer_timestep_ps(text: str) -> float | None:
+    matches = re.findall(r"(?m)^\s*timestep\s+([0-9.eE+-]+)\b", text)
+    if matches:
+        return float(matches[-1])
+    matches = re.findall(r"(?m)^\s*Time step\s*:\s*([0-9.eE+-]+)\b", text)
+    if matches:
+        return float(matches[-1])
+    return None
+
+
+def _infer_latest_run_steps(text: str) -> float | None:
+    matches = re.findall(r"(?m)^\s*run\s+([0-9]+)\b", text)
+    return float(matches[-1]) if matches else None
+
+
+def _latest_thermo_block_step_span(logfile: Path) -> tuple[float | None, float | None]:
+    first_step: float | None = None
+    latest_step: float | None = None
+    in_block = False
+    with logfile.open(encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if stripped.startswith("Step"):
+                in_block = True
+                first_step = None
+                latest_step = None
+                continue
+            if stripped.startswith("Loop time"):
+                in_block = False
+                continue
+            if not in_block:
+                continue
+            parts = stripped.split()
+            if not parts or not _is_number(parts[0]):
+                continue
+            step = float(parts[0])
+            first_step = step if first_step is None else first_step
+            latest_step = step
+    return first_step, latest_step
+
+
 def _series(rows: list[LammpsThermoRow], field: str) -> list[float]:
     values = [getattr(row, field) for row in rows]
     return [value for value in values if value is not None]
@@ -320,6 +422,10 @@ def _fmt(value: float | None) -> str:
     if value is None:
         return "NA"
     return f"{value:.6g}"
+
+
+def _ps_to_fs(value: float | None) -> float | None:
+    return None if value is None else value * 1000.0
 
 
 def _fmt_avg_error(avg: float | None, err: float | None, err_percent: float | None) -> str:

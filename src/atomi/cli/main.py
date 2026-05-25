@@ -86,6 +86,12 @@ def build_parser() -> argparse.ArgumentParser:
     lammps_live.add_argument("--interval", type=float, default=10.0)
     lammps_live.add_argument("--once", action="store_true", help="Draw once and exit.")
     lammps_live.add_argument(
+        "--timestep-ps",
+        type=float,
+        default=None,
+        help="Override the LAMMPS timestep in ps, for example 0.0001 for 0.1 fs or 0.00025 for 0.25 fs.",
+    )
+    lammps_live.add_argument(
         "--keep-going",
         action="store_true",
         help="Keep monitoring after a Loop time line appears.",
@@ -1199,6 +1205,7 @@ def main(argv: list[str] | None = None) -> None:
             interval=args.interval,
             once=args.once,
             stop_on_finish=not args.keep_going,
+            timestep_ps=args.timestep_ps,
         )
         return
 

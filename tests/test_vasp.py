@@ -11,7 +11,12 @@ from atomi.vasp.checks import (
     collect_run_energies,
     vasp_energies,
 )
-from atomi.viz.lammps import read_thermo_rows, summarize_recent_runtime_fraction, summarize_thermo
+from atomi.viz.lammps import (
+    read_thermo_rows,
+    summarize_lammps_run_progress,
+    summarize_recent_runtime_fraction,
+    summarize_thermo,
+)
 from atomi.viz.vasp_live import count_dav_steps
 
 
@@ -422,3 +427,51 @@ def test_lammps_recent_runtime_fraction_reports_error_percent(tmp_path: Path) ->
     assert summary["potential_energy"] == -16
     assert summary["potential_energy_std"] == 2
     assert summary["potential_energy_std_percent"] == pytest.approx(12.5)
+
+
+def test_lammps_run_progress_uses_timestep_and_latest_run_block(tmp_path: Path) -> None:
+    log = tmp_path / "log.gk"
+    log.write_text(
+        "timestep        0.00025\n"
+        "run             10000\n"
+        "Step Temp PotEng TotEng Press Volume\n"
+        "0 300 -10 -9 100 1000\n"
+        "10000 301 -11 -10 90 1001\n"
+        "Loop time of 1 on 1 procs\n"
+        "run             80000\n"
+        "Step Temp PotEng TotEng Press Volume\n"
+        "10000 300 -10 -9 100 1000\n"
+        "11000 300 -10 -9 100 1000\n"
+        "13000 300 -10 -9 100 1000\n",
+        encoding="utf-8",
+    )
+
+    progress = summarize_lammps_run_progress(log, read_thermo_rows(log))
+
+    assert progress is not None
+    assert progress.timestep_ps == pytest.approx(0.00025)
+    assert progress.current_steps == pytest.approx(3000)
+    assert progress.expected_steps == pytest.approx(80000)
+    assert progress.current_ps == pytest.approx(0.75)
+    assert progress.expected_ps == pytest.approx(20.0)
+    assert progress.percent == pytest.approx(3.75)
+
+
+def test_lammps_run_progress_can_override_timestep(tmp_path: Path) -> None:
+    log = tmp_path / "log.old-md"
+    log.write_text(
+        "run 50000\n"
+        "Step Temp PotEng TotEng Press Volume\n"
+        "0 300 -10 -9 100 1000\n"
+        "5000 300 -10 -9 100 1000\n",
+        encoding="utf-8",
+    )
+
+    progress = summarize_lammps_run_progress(log, read_thermo_rows(log), timestep_ps=0.0001)
+
+    assert progress is not None
+    assert progress.timestep_ps == pytest.approx(0.0001)
+    assert progress.current_steps == pytest.approx(5000)
+    assert progress.expected_steps == pytest.approx(50000)
+    assert progress.current_ps == pytest.approx(0.5)
+    assert progress.expected_ps == pytest.approx(5.0)
