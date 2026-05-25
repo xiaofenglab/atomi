@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
+import os
 import shlex
 import subprocess
 import sys
@@ -152,6 +154,105 @@ def _active_sbatch_lines(wrapper_text: str) -> list[str]:
     return lines
 
 
+SBATCH_RESOURCE_OPTIONS = (
+    "partition",
+    "gres",
+    "nodes",
+    "ntasks",
+    "cpus-per-task",
+    "mem-per-cpu",
+    "mem",
+)
+
+
+SBATCH_RESOURCE_ENV = {
+    "partition": "ATOMI_LAMMPS_PARTITION",
+    "gres": "ATOMI_LAMMPS_GRES",
+    "nodes": "ATOMI_LAMMPS_NODES",
+    "ntasks": "ATOMI_LAMMPS_NTASKS",
+    "cpus-per-task": "ATOMI_LAMMPS_CPUS_PER_TASK",
+    "mem-per-cpu": "ATOMI_LAMMPS_MEM_PER_CPU",
+    "mem": "ATOMI_LAMMPS_MEM",
+}
+
+
+def _sbatch_option(line: str) -> str:
+    return line.removeprefix("#SBATCH ").split("=", 1)[0].split()[0].lstrip("-").replace("_", "-")
+
+
+def _sbatch_options_present(lines: list[str]) -> set[str]:
+    return {_sbatch_option(line) for line in lines if line.startswith("#SBATCH ")}
+
+
+def _resource_value(mapping: dict, option: str) -> str | None:
+    aliases = {
+        "cpus-per-task": ("cpus_per_task", "cpus-per-task"),
+        "mem-per-cpu": ("mem_per_cpu", "mem-per-cpu"),
+    }
+    for key in aliases.get(option, (option.replace("-", "_"), option)):
+        value = mapping.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _load_private_hpc_config() -> dict:
+    candidates: list[Path] = []
+    env_config = os.environ.get("ATOMI_HPC_CONFIG")
+    if env_config:
+        candidates.append(Path(env_config).expanduser())
+    candidates.append(Path.home() / "atomi_hpc" / "atomi_hpc_config.kit.local.json")
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return {}
+
+
+def _profile_resource(profile: dict, option: str) -> str | None:
+    resources = profile.get("slurm_resources", {})
+    if isinstance(resources, dict):
+        value = _resource_value(resources, option)
+        if value is not None:
+            return value
+    return _resource_value(profile, option)
+
+
+def _gk_sbatch_resource_fallbacks(cfg: dict, active_lines: list[str]) -> list[str]:
+    """Add literal GPU #SBATCH resources for GK arrays before Slurm submission.
+
+    Runtime ``confighpc`` exports happen after Slurm has already parsed the
+    script, so GK array scripts must carry concrete partition/GRES directives
+    at generation time.
+    """
+    gk_mliap = cfg.get("runtime_profile") == "lammps_gk_mliap" or cfg.get("pair_style_backend") == "mliap"
+    if not gk_mliap:
+        return []
+    present = _sbatch_options_present(active_lines)
+    config = _load_private_hpc_config()
+    profiles = config.get("profiles", {}) if isinstance(config.get("profiles", {}), dict) else {}
+    profile_order = [
+        profiles.get("lammps_gk_mliap", {}),
+        profiles.get("lammps_md_engine", {}),
+    ]
+    fallback_lines: list[str] = []
+    for option in SBATCH_RESOURCE_OPTIONS:
+        if option in present:
+            continue
+        value = os.environ.get(SBATCH_RESOURCE_ENV.get(option, ""))
+        if value in (None, ""):
+            for profile in profile_order:
+                if isinstance(profile, dict):
+                    value = _profile_resource(profile, option)
+                    if value is not None:
+                        break
+        if value not in (None, ""):
+            fallback_lines.append(f"#SBATCH --{option}={value}")
+    return fallback_lines
+
+
 def write_array_script(
     path: Path,
     *,
@@ -169,6 +270,7 @@ def write_array_script(
     wrapper_text = lammps_wrapper_text(cfg)
     wrapper_text = _apply_sbatch_resource_overrides(wrapper_text, cfg)
     active_lines = _active_sbatch_lines(wrapper_text)
+    active_lines.extend(_gk_sbatch_resource_fallbacks(cfg, active_lines))
     task_count = len(rows)
     max_walltime = walltime or max((row["walltime"] for row in rows), default="01:00:00")
     array_spec = f"1-{task_count}"

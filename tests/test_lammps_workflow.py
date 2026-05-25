@@ -209,7 +209,27 @@ def test_stage_wrapper_rewrites_sbatch_resources_from_environment(tmp_path, monk
     assert "#SBATCH --time=05:36:00" in text
 
 
-def test_md_engine_array_injects_gk_mliap_runtime_environment(tmp_path) -> None:
+def test_md_engine_array_injects_gk_mliap_runtime_environment(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("ATOMI_LAMMPS_PARTITION", raising=False)
+    monkeypatch.delenv("ATOMI_LAMMPS_GRES", raising=False)
+    monkeypatch.delenv("ATOMI_HPC_CONFIG", raising=False)
+    home = tmp_path / "home"
+    hpc_dir = home / "atomi_hpc"
+    hpc_dir.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    (hpc_dir / "atomi_hpc_config.kit.local.json").write_text(
+        json.dumps(
+            {
+                "profiles": {
+                    "lammps_gk_mliap": {
+                        "partition": "gpu",
+                        "gres": "gpu:1",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     wrapper = tmp_path / "legacy_wrapper.sh"
     wrapper.write_text(
         "#!/bin/bash\n"
@@ -276,6 +296,8 @@ def test_md_engine_array_injects_gk_mliap_runtime_environment(tmp_path) -> None:
     assert "ATOMI_LAMMPS_GK_EXTRA_LD_LIBRARY_PATH" in script_text
     assert "TORCH_DISABLE_ADDR2LINE" in script_text
     assert "ATOMI_LMP_GK_EXE" in script_text
+    assert "#SBATCH --partition=gpu" in script_text
+    assert "#SBATCH --gres=gpu:1" in script_text
     assert "#SBATCH --array=1-1%7" in script_text
 
 
