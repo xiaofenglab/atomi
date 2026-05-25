@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 
 from atomi.viz.cp2k import plot_cp2k, plot_cp2k_all
+from atomi.viz.gk import main as plot_gk_main
 from atomi.viz.lammps import plot_lammps_live
 from atomi.viz.mace import plot_mace_live
 from atomi.viz.vasp_live import plot_vasp_live, plot_vasp_live4
@@ -61,6 +62,11 @@ def plotlammps(argv: list[str] | None = None) -> None:
         once=args.once,
         stop_on_finish=not args.keep_going,
     )
+
+
+def plotgk(argv: list[str] | None = None) -> None:
+    """Compatibility command: plotgk [chunk_dir|heatflux_hcacf.dat]."""
+    plot_gk_main(argv)
 
 
 def plotcp2k(argv: list[str] | None = None) -> None:

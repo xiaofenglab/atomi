@@ -32,6 +32,7 @@ from atomi.lammps.workflow import (
     lammps_pair_lines,
     lammps_wrapper_text,
 )
+from atomi.viz.gk import plot_gk_once, print_gk_summary, read_hcacf_rows
 
 
 EV_TO_J = 1.602176634e-19
@@ -747,38 +748,18 @@ def latest_hcacf_path(root: Path, stage: dict[str, Any]) -> Path:
 
 
 def parse_hcacf_dat(path: Path, timestep_ps: float) -> list[dict[str, float]]:
-    blocks: list[list[dict[str, float]]] = []
-    current: list[dict[str, float]] = []
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            parts = stripped.split()
-            try:
-                values = [float(part) for part in parts]
-            except ValueError:
-                continue
-            if len(values) == 2:
-                if current:
-                    blocks.append(current)
-                    current = []
-                continue
-            if len(values) >= 5:
-                time_ps = values[1] * float(timestep_ps)
-                current.append(
-                    {
-                        "time_ps": time_ps,
-                        "HCACF_x": values[2],
-                        "HCACF_y": values[3],
-                        "HCACF_z": values[4],
-                    }
-                )
-    if current:
-        blocks.append(current)
-    if not blocks:
+    rows = read_hcacf_rows(path, timestep_ps)
+    if not rows:
         raise ValueError(f"No HCACF blocks found in {path}")
-    return blocks[-1]
+    return [
+        {
+            "time_ps": row["time_ps"],
+            "HCACF_x": row["HCACF_x"],
+            "HCACF_y": row["HCACF_y"],
+            "HCACF_z": row["HCACF_z"],
+        }
+        for row in rows
+    ]
 
 
 def write_hcacf_csv(path: Path, rows: list[dict[str, float]]) -> None:
@@ -1110,6 +1091,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     probe.add_argument("--execute", action="store_true", help="Run the probe immediately on this machine/session.")
 
+    status = sub.add_parser("status", help="Print GK chunk progress in NVT/NVE steps and ps.")
+    status.add_argument("chunk_dir", type=Path, nargs="?", default=Path("."))
+    status.add_argument("--input", type=Path, help="Explicit GK input file. Default: newest in.gk*_production in chunk.")
+    status.add_argument("--log", type=Path, help="Explicit LAMMPS log file. Default: newest log.in.gk*_production in chunk.")
+
+    plot = sub.add_parser("plot", help="One-shot terminal plot for GK HCACF and running raw integral.")
+    plot.add_argument("chunk_or_hcacf", type=Path, nargs="?", default=Path("."))
+    plot.add_argument("--timestep-ps", type=float, help="Override timestep in ps. Default reads the GK input file.")
+    plot.add_argument("--window", type=int, default=220, help="Rows to show in the terminal plot. Default: 220.")
+    plot.add_argument("--timeseries", action="store_true", help="Also plot heatflux_timeseries.dat when present.")
+
     ana = sub.add_parser("analyze", help="Integrate completed GK HCACF files into k(T).")
     ana.add_argument("--gk-config", type=Path, default=Path("config_gk.json"))
     ana.add_argument("--outdir", type=Path, default=Path("analysis/gk_lammps/fit"))
@@ -1137,6 +1129,17 @@ def main(argv: list[str] | None = None) -> Any:
         return None
     if args.command == "probe":
         probe_main(args)
+        return None
+    if args.command == "status":
+        print_gk_summary(args.chunk_dir.resolve(), input_file=args.input, log_file=args.log)
+        return None
+    if args.command == "plot":
+        plot_gk_once(
+            args.chunk_or_hcacf,
+            timestep_ps=args.timestep_ps,
+            window=args.window,
+            timeseries=args.timeseries,
+        )
         return None
     if args.command == "analyze":
         analyze_main(args)

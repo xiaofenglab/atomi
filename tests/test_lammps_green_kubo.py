@@ -2,6 +2,7 @@ import json
 
 from atomi.lammps import green_kubo
 from atomi.lammps.workflow import generate_production_input, green_kubo_settings, set_project_root
+from atomi.viz.gk import read_gk_run_plan, read_hcacf_rows, summarize_gk_status
 
 
 def base_cfg(tmp_path):
@@ -534,3 +535,78 @@ def test_green_kubo_analyze_integrates_lammps_hcacf(tmp_path):
     table = (tmp_path / "analysis" / "gk_fit" / "thermal_conductivity_T.csv").read_text(encoding="utf-8")
     assert "GK_MD_T300K" in table
     assert "0.00625" in table
+
+
+def test_green_kubo_hcacf_parser_handles_lammps_count_column(tmp_path):
+    hcacf = tmp_path / "heatflux_hcacf.dat"
+    hcacf.write_text(
+        "\n".join(
+            [
+                "# TimeStep Number-of-time-windows",
+                "# Index TimeDelta Ncount c_flux[1]*c_flux[1] c_flux[2]*c_flux[2] c_flux[3]*c_flux[3]",
+                "8000 200",
+                "192 7640 10 75123.5 -1.23732e+06 -2.99007e+06",
+                "193 7680 9 586779 -798807 -2.05871e+06",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = read_hcacf_rows(hcacf, 0.00025)
+
+    assert abs(rows[0]["time_ps"] - 1.91) < 1.0e-12
+    assert rows[0]["count"] == 10
+    assert rows[0]["HCACF_x"] == 75123.5
+    assert rows[0]["HCACF_y"] == -1.23732e6
+    assert rows[0]["HCACF_z"] == -2.99007e6
+
+
+def test_green_kubo_status_reports_nve_progress_after_reset(tmp_path):
+    input_file = tmp_path / "in.gk_T300K_s01_production"
+    input_file.write_text(
+        "\n".join(
+            [
+                "timestep        0.00025",
+                'print           "Atomi GK phase: short NVT pre-equilibration before NVE heat-current production"',
+                "run             8000",
+                "reset_timestep  0",
+                'print           "Atomi GK phase: NVE heat-current production and HCACF accumulation"',
+                "fix             JJ all ave/correlate 40 200 8000 c_atomi_flux[1] c_atomi_flux[2] c_atomi_flux[3] type auto file heatflux_hcacf.dat ave running",
+                "run             80000",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    log_file = tmp_path / "log.in.gk_T300K_s01_production"
+    log_file.write_text(
+        "\n".join(
+            [
+                'print           "Atomi GK phase: short NVT pre-equilibration before NVE heat-current production"',
+                "Step Temp PotEng",
+                "0 300 -1",
+                "8000 301 -1",
+                "Loop time of 1 on 1 procs for 8000 steps",
+                'print           "Atomi GK phase: NVE heat-current production and HCACF accumulation"',
+                "Step Temp PotEng",
+                "0 301 -1",
+                "3000 300 -1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    plan = read_gk_run_plan(input_file)
+    status = summarize_gk_status(log_file, plan)
+
+    assert plan.nvt_steps == 8000
+    assert plan.nve_steps == 80000
+    assert plan.nevery == 40
+    assert plan.nrepeat == 200
+    assert plan.nfreq == 8000
+    assert status.phase == "nve"
+    assert status.current_steps == 3000
+    assert status.expected_steps == 80000
+    assert status.current_ps == 0.75
