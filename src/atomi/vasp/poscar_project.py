@@ -39,6 +39,13 @@ class ProjectionResult:
     warnings: list[str]
 
 
+@dataclass(frozen=True)
+class PreparedStructure:
+    structure: PoscarStructure
+    origin_indices: list[int]
+    operations: list[dict[str, object]]
+
+
 def project_poscar_elements(
     source_poscar: Path,
     target_poscar: Path,
@@ -54,6 +61,11 @@ def project_poscar_elements(
     max_cation_distance_A: float = 1.5,
     strict: bool = True,
     magmom_decimals: int = 3,
+    source_repeat: tuple[int, int, int] | None = None,
+    target_repeat: tuple[int, int, int] | None = None,
+    source_supercell: tuple[int, int, int] | None = None,
+    source_keep_cells: tuple[int, int, int] | None = None,
+    source_crop_fraction: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None = None,
 ) -> ProjectionResult:
     """Project cation identities and MAGMOMs from source POSCAR A onto structure POSCAR B."""
     source_poscar = source_poscar.expanduser().resolve()
@@ -64,8 +76,18 @@ def project_poscar_elements(
     match_csv = match_csv.expanduser().resolve() if match_csv is not None else output_poscar.with_name("poscar_projection_map.csv")
     plan_json = plan_json.expanduser().resolve() if plan_json is not None else output_poscar.with_name("poscar_projection_plan.json")
 
-    source = read_poscar_structure(source_poscar)
-    target = read_poscar_structure(target_poscar)
+    source_raw = read_poscar_structure(source_poscar)
+    target_raw = read_poscar_structure(target_poscar)
+    source_prepared = prepare_structure(
+        source_raw,
+        repeat=source_repeat,
+        crop_supercell=source_supercell,
+        crop_keep_cells=source_keep_cells,
+        crop_fraction=source_crop_fraction,
+    )
+    target_prepared = prepare_structure(target_raw, repeat=target_repeat)
+    source = source_prepared.structure
+    target = target_prepared.structure
     source_symbols = atom_symbols(source)
     target_symbols = atom_symbols(target)
     anion_set = set(anion_elements or ["O"])
@@ -76,7 +98,8 @@ def project_poscar_elements(
         raise ValueError(
             "Source/target cation counts differ: "
             f"{len(source_cations)} in {source_poscar}, {len(target_cations)} in {target_poscar}. "
-            "Use --cation-elements/--anion-elements to define the projected sublattice."
+            "Use --cation-elements/--anion-elements to define the projected sublattice, or use "
+            "--source-repeat/--target-repeat/--source-supercell/--source-keep-cells to make the cells commensurate."
         )
     if not source_cations:
         raise ValueError("No cation sites found to project.")
@@ -123,6 +146,13 @@ def project_poscar_elements(
     if source_incar is not None:
         if output_incar is None:
             output_incar = output_poscar.with_name("INCAR")
+        raw_source_symbols = atom_symbols(source_raw)
+        raw_source_moments = existing_magmom_values(source_incar, len(raw_source_symbols))
+        source_moments = (
+            [raw_source_moments[index] for index in source_prepared.origin_indices]
+            if raw_source_moments is not None
+            else None
+        )
         output_moments = projected_magmom_values(
             source,
             target,
@@ -130,7 +160,7 @@ def project_poscar_elements(
             target_symbols,
             projected_symbols,
             source_by_target,
-            source_incar,
+            source_moments,
             cation_set,
             anion_set,
         )
@@ -159,6 +189,8 @@ def project_poscar_elements(
             "source_incar": str(source_incar) if source_incar else "",
             "output_poscar": str(output_poscar),
             "output_incar": str(output_incar) if output_incar else "",
+            "source_operations": source_prepared.operations,
+            "target_operations": target_prepared.operations,
             "cation_elements": sorted(cation_set),
             "anion_elements": sorted(anion_set),
             "source_cation_count": len(source_cations),
@@ -194,6 +226,131 @@ def atom_symbols(structure: PoscarStructure) -> list[str]:
     for symbol, count in zip(structure.species.symbols, structure.species.counts):
         symbols.extend([symbol] * count)
     return symbols
+
+
+def prepare_structure(
+    structure: PoscarStructure,
+    *,
+    repeat: tuple[int, int, int] | None = None,
+    crop_supercell: tuple[int, int, int] | None = None,
+    crop_keep_cells: tuple[int, int, int] | None = None,
+    crop_fraction: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None = None,
+) -> PreparedStructure:
+    origin_indices = list(range(structure.species.total_atoms))
+    operations: list[dict[str, object]] = []
+    if repeat is not None and repeat != (1, 1, 1):
+        structure, origin_indices = repeat_structure(structure, origin_indices, repeat)
+        operations.append({"kind": "repeat", "repeat": list(repeat)})
+    if crop_supercell is not None or crop_keep_cells is not None:
+        if crop_supercell is None or crop_keep_cells is None:
+            raise ValueError("--source-supercell and --source-keep-cells must be used together.")
+        ranges = tuple((0.0, crop_keep_cells[i] / crop_supercell[i]) for i in range(3))
+        structure, origin_indices = crop_structure_fraction(structure, origin_indices, ranges)
+        operations.append(
+            {
+                "kind": "source_keep_cells",
+                "source_supercell": list(crop_supercell),
+                "keep_cells": list(crop_keep_cells),
+                "fraction_ranges": [list(item) for item in ranges],
+            }
+        )
+    if crop_fraction is not None:
+        structure, origin_indices = crop_structure_fraction(structure, origin_indices, crop_fraction)
+        operations.append({"kind": "fraction_crop", "fraction_ranges": [list(item) for item in crop_fraction]})
+    return PreparedStructure(structure=structure, origin_indices=origin_indices, operations=operations)
+
+
+def repeat_structure(
+    structure: PoscarStructure,
+    origin_indices: list[int],
+    repeat: tuple[int, int, int],
+) -> tuple[PoscarStructure, list[int]]:
+    if any(value <= 0 for value in repeat):
+        raise ValueError(f"Repeat values must be positive, got {repeat}.")
+    symbols = atom_symbols(structure)
+    repeated_symbols: list[str] = []
+    repeated_positions: list[list[float]] = []
+    repeated_origins: list[int] = []
+    for atom_index, (symbol, position) in enumerate(zip(symbols, structure.scaled_positions)):
+        for i in range(repeat[0]):
+            for j in range(repeat[1]):
+                for k in range(repeat[2]):
+                    repeated_symbols.append(symbol)
+                    repeated_positions.append(
+                        [
+                            (position[0] + i) / repeat[0],
+                            (position[1] + j) / repeat[1],
+                            (position[2] + k) / repeat[2],
+                        ]
+                    )
+                    repeated_origins.append(origin_indices[atom_index])
+    cell = [
+        [value * repeat[axis] for value in vector]
+        for axis, vector in enumerate(structure.cell)
+    ]
+    return grouped_structure(repeated_symbols, repeated_positions, repeated_origins, cell, structure.species.symbols)
+
+
+def crop_structure_fraction(
+    structure: PoscarStructure,
+    origin_indices: list[int],
+    ranges: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
+) -> tuple[PoscarStructure, list[int]]:
+    for lower, upper in ranges:
+        if not (0.0 <= lower < upper <= 1.0):
+            raise ValueError(f"Crop fractions must satisfy 0 <= lower < upper <= 1, got {ranges}.")
+    symbols = atom_symbols(structure)
+    kept_symbols: list[str] = []
+    kept_positions: list[list[float]] = []
+    kept_origins: list[int] = []
+    tol = 1.0e-10
+    for atom_index, (symbol, position) in enumerate(zip(symbols, structure.scaled_positions)):
+        if all(ranges[axis][0] - tol <= position[axis] < ranges[axis][1] - tol for axis in range(3)):
+            kept_symbols.append(symbol)
+            kept_positions.append(
+                [
+                    (position[axis] - ranges[axis][0]) / (ranges[axis][1] - ranges[axis][0])
+                    for axis in range(3)
+                ]
+            )
+            kept_origins.append(origin_indices[atom_index])
+    if not kept_symbols:
+        raise ValueError(f"Source crop {ranges} removed all atoms.")
+    cell = [
+        [value * (ranges[axis][1] - ranges[axis][0]) for value in vector]
+        for axis, vector in enumerate(structure.cell)
+    ]
+    return grouped_structure(kept_symbols, kept_positions, kept_origins, cell, structure.species.symbols)
+
+
+def grouped_structure(
+    symbols: list[str],
+    positions: list[list[float]],
+    origins: list[int],
+    cell: list[list[float]],
+    order: list[str],
+) -> tuple[PoscarStructure, list[int]]:
+    full_order = complete_species_order(order, symbols)
+    grouped_symbols: list[str] = []
+    grouped_positions: list[list[float]] = []
+    grouped_origins: list[int] = []
+    counts: list[int] = []
+    for symbol in full_order:
+        group = [index for index, item in enumerate(symbols) if item == symbol]
+        if not group:
+            continue
+        grouped_symbols.append(symbol)
+        counts.append(len(group))
+        grouped_positions.extend(positions[index] for index in group)
+        grouped_origins.extend(origins[index] for index in group)
+    return (
+        PoscarStructure(
+            species=PoscarSpecies(symbols=grouped_symbols, counts=counts),
+            cell=cell,
+            scaled_positions=grouped_positions,
+        ),
+        grouped_origins,
+    )
 
 
 def selected_cation_indices(symbols: list[str], cation_elements: set[str], anion_elements: set[str]) -> list[int]:
@@ -293,11 +450,10 @@ def projected_magmom_values(
     target_symbols: list[str],
     projected_symbols: list[str],
     source_by_target: dict[int, int],
-    source_incar: Path,
+    source_moments: list[float] | None,
     cation_elements: set[str],
     anion_elements: set[str],
 ) -> list[float] | None:
-    source_moments = existing_magmom_values(source_incar, len(source_symbols))
     if source_moments is None:
         return None
     moments = [0.0] * len(target_symbols)
@@ -407,6 +563,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cation-elements", action="append", default=[], help="Projected sublattice elements, e.g. U,Gd. Default: all non-anion elements.")
     parser.add_argument("--anion-elements", action="append", default=["O"], help="Elements to leave on the anion/non-projected sublattice. Default: O.")
     parser.add_argument("--species-order", action="append", default=[], help="Output POSCAR species order, comma-separated or repeatable.")
+    parser.add_argument("--source-repeat", help="Repeat POSCAR A before projection, e.g. 2x2x2.")
+    parser.add_argument("--target-repeat", help="Repeat POSCAR B before projection/output, e.g. 1x2x2.")
+    parser.add_argument("--source-supercell", help="Cell count represented by POSCAR A, e.g. 2x3x3.")
+    parser.add_argument("--source-keep-cells", help="Crop POSCAR A to the first cell block, e.g. 2x2x2.")
+    parser.add_argument(
+        "--source-crop-fraction",
+        help="Explicit POSCAR A fractional crop, e.g. 0:1,0:2/3,0:2/3. Applied after --source-repeat.",
+    )
     parser.add_argument("--max-cation-distance", type=float, default=1.5, help="Fail if any projected cation match exceeds this distance in Angstrom.")
     parser.add_argument("--allow-large-cation-distance", action="store_true", help="Warn instead of failing when the cation match exceeds the distance limit.")
     parser.add_argument("--magmom-decimals", type=int, default=3)
@@ -435,6 +599,11 @@ def main(argv: list[str] | None = None) -> None:
         max_cation_distance_A=args.max_cation_distance,
         strict=not args.allow_large_cation_distance,
         magmom_decimals=args.magmom_decimals,
+        source_repeat=parse_repeat(args.source_repeat) if args.source_repeat else None,
+        target_repeat=parse_repeat(args.target_repeat) if args.target_repeat else None,
+        source_supercell=parse_repeat(args.source_supercell) if args.source_supercell else None,
+        source_keep_cells=parse_repeat(args.source_keep_cells) if args.source_keep_cells else None,
+        source_crop_fraction=parse_fraction_ranges(args.source_crop_fraction) if args.source_crop_fraction else None,
     )
     print(f"Projected POSCAR : {result.output_poscar}")
     if result.output_incar:
@@ -449,6 +618,39 @@ def main(argv: list[str] | None = None) -> None:
     )
     for warning in result.warnings:
         print(f"WARNING: {warning}")
+
+
+def parse_repeat(raw: str) -> tuple[int, int, int]:
+    parts = raw.lower().replace(",", "x").split("x")
+    if len(parts) != 3:
+        raise ValueError(f"Expected repeat AxBxC, got {raw!r}.")
+    repeat = tuple(int(part.strip()) for part in parts)
+    if any(value <= 0 for value in repeat):
+        raise ValueError(f"Repeat values must be positive, got {raw!r}.")
+    return repeat
+
+
+def parse_fraction_ranges(
+    raw: str,
+) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
+    pieces = [piece.strip() for piece in raw.split(",") if piece.strip()]
+    if len(pieces) != 3:
+        raise ValueError(f"Expected three fractional ranges, got {raw!r}.")
+    ranges = []
+    for piece in pieces:
+        if ":" not in piece:
+            raise ValueError(f"Expected range lower:upper, got {piece!r}.")
+        lower, upper = piece.split(":", 1)
+        ranges.append((parse_fraction_value(lower), parse_fraction_value(upper)))
+    return tuple(ranges)  # type: ignore[return-value]
+
+
+def parse_fraction_value(raw: str) -> float:
+    raw = raw.strip()
+    if "/" in raw:
+        numerator, denominator = raw.split("/", 1)
+        return float(numerator) / float(denominator)
+    return float(raw)
 
 
 if __name__ == "__main__":

@@ -48,6 +48,51 @@ def write_relaxed_target_poscar(path: Path) -> None:
     )
 
 
+def write_2x3x3_cation_source(path: Path) -> None:
+    positions: list[tuple[str, tuple[float, float, float]]] = []
+    gd_position = (0.75, 0.5, 0.5)
+    for i in range(2):
+        for j in range(3):
+            for k in range(3):
+                position = ((i + 0.5) / 2, (j + 0.5) / 3, (k + 0.5) / 3)
+                symbol = "Gd" if position == gd_position else "U"
+                positions.append((symbol, position))
+    grouped = [item for item in positions if item[0] == "U"] + [item for item in positions if item[0] == "Gd"]
+    path.write_text(
+        "A 2x3x3 cation pattern\n"
+        "1.0\n"
+        "2.0 0.0 0.0\n"
+        "0.0 3.0 0.0\n"
+        "0.0 0.0 3.0\n"
+        "U Gd\n"
+        "17 1\n"
+        "Direct\n"
+        + "".join(f"{x:.10f} {y:.10f} {z:.10f}\n" for _symbol, (x, y, z) in grouped),
+        encoding="utf-8",
+    )
+
+
+def write_2x2x2_cation_target(path: Path) -> None:
+    positions = [
+        ((i + 0.5) / 2, (j + 0.5) / 2, (k + 0.5) / 2)
+        for i in range(2)
+        for j in range(2)
+        for k in range(2)
+    ]
+    path.write_text(
+        "B Ia-3-like doubled cell cation skeleton\n"
+        "1.0\n"
+        "2.0 0.0 0.0\n"
+        "0.0 2.0 0.0\n"
+        "0.0 0.0 2.0\n"
+        "U\n"
+        "8\n"
+        "Direct\n"
+        + "".join(f"{x:.10f} {y:.10f} {z:.10f}\n" for x, y, z in positions),
+        encoding="utf-8",
+    )
+
+
 def test_project_poscar_maps_cation_elements_by_site_and_rewrites_magmom(tmp_path: Path) -> None:
     source = tmp_path / "A_POSCAR"
     target = tmp_path / "B_POSCAR"
@@ -86,6 +131,41 @@ def test_project_poscar_maps_cation_elements_by_site_and_rewrites_magmom(tmp_pat
     assert plan["source_cation_count"] == 2
     assert plan["target_cation_count"] == 2
     assert plan["species_counts"] == {"U": 1, "Gd": 1, "O": 3}
+
+
+def test_project_poscar_crops_2x3x3_source_to_2x2x2_target(tmp_path: Path) -> None:
+    source = tmp_path / "A_2x3x3_POSCAR"
+    target = tmp_path / "B_2x2x2_POSCAR"
+    out = tmp_path / "projected_crop"
+    write_2x3x3_cation_source(source)
+    write_2x2x2_cation_target(target)
+
+    project_main(
+        [
+            "--element-poscar",
+            str(source),
+            "--structure-poscar",
+            str(target),
+            "--outdir",
+            str(out),
+            "--source-supercell",
+            "2x3x3",
+            "--source-keep-cells",
+            "2x2x2",
+            "--cation-elements",
+            "U,Gd",
+        ]
+    )
+
+    projected = read_poscar_structure(out / "POSCAR")
+    assert projected.species.symbols == ["U", "Gd"]
+    assert projected.species.counts == [7, 1]
+    assert atom_symbols(projected).count("Gd") == 1
+    plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    assert plan["source_cation_count"] == 8
+    assert plan["target_cation_count"] == 8
+    assert plan["source_operations"][0]["source_supercell"] == [2, 3, 3]
+    assert plan["source_operations"][0]["keep_cells"] == [2, 2, 2]
 
 
 def test_materials_opt_project_poscar_alias(tmp_path: Path) -> None:
