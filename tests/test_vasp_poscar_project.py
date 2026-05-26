@@ -294,6 +294,39 @@ def test_project_poscar_uses_target_centered_species_order_and_reorders_magmom(t
     assert existing_magmom_values(out / "INCAR", 5) == pytest.approx([2, 7, 0, 0, 0])
 
 
+def test_project_poscar_uses_cation_elements_order_for_output_cations(tmp_path: Path) -> None:
+    source = tmp_path / "A_POSCAR"
+    target = tmp_path / "B_POSCAR"
+    incar = tmp_path / "A_INCAR"
+    out = tmp_path / "projected_cation_order"
+    write_weird_order_source_poscar(source)
+    write_relaxed_target_poscar(target)
+    incar.write_text("ENCUT = 520\nMAGMOM = 7 4*0 2\n", encoding="utf-8")
+
+    project_main(
+        [
+            "--element-poscar",
+            str(source),
+            "--structure-poscar",
+            str(target),
+            "--incar-a",
+            str(incar),
+            "--outdir",
+            str(out),
+            "--cation-elements",
+            "Gd,U",
+        ]
+    )
+
+    projected = read_poscar_structure(out / "POSCAR")
+    assert projected.species.symbols == ["Gd", "U", "O"]
+    assert projected.species.counts == [1, 1, 3]
+    assert existing_magmom_values(out / "INCAR", 5) == pytest.approx([7, 2, 0, 0, 0])
+    plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    assert plan["cation_elements"] == ["Gd", "U"]
+    assert plan["species_order"] == ["Gd", "U", "O"]
+
+
 def test_project_poscar_aligns_global_cation_origin_before_matching(tmp_path: Path) -> None:
     source = tmp_path / "A_POSCAR"
     target = tmp_path / "B_POSCAR"

@@ -91,7 +91,8 @@ def project_poscar_elements(
     raw_source_symbols = atom_symbols(source_raw)
     raw_source_moments = existing_magmom_values(source_incar, len(raw_source_symbols)) if source_incar is not None else None
     anion_set = set(anion_elements or ["O"])
-    cation_set = set(cation_elements or [])
+    cation_order = list(cation_elements or [])
+    cation_set = set(cation_order)
     target_prepared = prepare_structure(target_raw, repeat=target_repeat)
     target = target_prepared.structure
     target_symbols = atom_symbols(target)
@@ -212,6 +213,7 @@ def project_poscar_elements(
         source.species.symbols,
         target.species.symbols,
         projected_symbols,
+        cation_order,
         cation_set,
         anion_set,
     )
@@ -297,7 +299,7 @@ def project_poscar_elements(
             "source_operations": source_prepared.operations,
             "target_operations": target_prepared.operations,
             "cation_origin_alignment": cation_origin_alignment,
-            "cation_elements": sorted(cation_set),
+            "cation_elements": cation_order or sorted(cation_set),
             "anion_elements": sorted(anion_set),
             "source_cation_count": len(source_cations),
             "target_cation_count": len(target_cations),
@@ -1086,6 +1088,7 @@ def default_projection_species_order(
     source_order: list[str],
     target_order: list[str],
     projected_symbols: list[str],
+    cation_order: list[str],
     cation_elements: set[str],
     anion_elements: set[str],
 ) -> list[str]:
@@ -1094,6 +1097,9 @@ def default_projection_species_order(
     anions = present & anion_elements
 
     order: list[str] = []
+    for symbol in cation_order:
+        if symbol in cations and symbol not in order:
+            order.append(symbol)
     for symbol in target_order:
         if symbol in cations and symbol not in order:
             order.append(symbol)
