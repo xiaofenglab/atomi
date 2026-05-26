@@ -21,8 +21,8 @@ if (nfiles >= 1) {
     latest_de_cmd  = "awk '/^DAV:/{de=$4} END{print (de!=\"\"?de:\"NA\")}' " . file
     latest_E_cmd   = "awk '/^DAV:/{e=$3} END{print (e!=\"\"?e:\"NA\")}' " . file
     nstep_cmd      = "awk '/^DAV:/{n++} END{print (n>0?n:0)}' " . file
-    latest_dt_cmd  = "awk 'NF>=4 && $1 !~ /^#/{dt=$3} END{print (dt!=\"\"?sprintf(\"%.1fs\",dt):\"NA\")}' " . timefile
-    mean_dt_cmd    = "awk 'NF>=4 && $1 !~ /^#/{sum+=$3; n++} END{print (n>0?sprintf(\"%.1fs\",sum/n):\"NA\")}' " . timefile
+    latest_dt_cmd  = "awk 'NF>=4 && $1 !~ /^#/{dt=$3} /^# state/{base=$3} END{if(dt!=\"\") print sprintf(\"%.1fs\",dt); else if(base!=\"\") print \"waiting>DAV\" base; else print \"waiting\"}' " . timefile
+    mean_dt_cmd    = "awk 'NF>=4 && $1 !~ /^#/{sum+=$3; n++} /^# state/{base=$3} END{if(n>0) print sprintf(\"%.1fs\",sum/n); else if(base!=\"\") print \"waiting>DAV\" base; else print \"waiting\"}' " . timefile
 
     fname      = system(fname_cmd)
     latest_de  = system(latest_de_cmd)
@@ -71,8 +71,8 @@ if (nfiles >= 2) {
     latest_de_cmd  = "awk '/^DAV:/{de=$4} END{print (de!=\"\"?de:\"NA\")}' " . file
     latest_E_cmd   = "awk '/^DAV:/{e=$3} END{print (e!=\"\"?e:\"NA\")}' " . file
     nstep_cmd      = "awk '/^DAV:/{n++} END{print (n>0?n:0)}' " . file
-    latest_dt_cmd  = "awk 'NF>=4 && $1 !~ /^#/{dt=$3} END{print (dt!=\"\"?sprintf(\"%.1fs\",dt):\"NA\")}' " . timefile
-    mean_dt_cmd    = "awk 'NF>=4 && $1 !~ /^#/{sum+=$3; n++} END{print (n>0?sprintf(\"%.1fs\",sum/n):\"NA\")}' " . timefile
+    latest_dt_cmd  = "awk 'NF>=4 && $1 !~ /^#/{dt=$3} /^# state/{base=$3} END{if(dt!=\"\") print sprintf(\"%.1fs\",dt); else if(base!=\"\") print \"waiting>DAV\" base; else print \"waiting\"}' " . timefile
+    mean_dt_cmd    = "awk 'NF>=4 && $1 !~ /^#/{sum+=$3; n++} /^# state/{base=$3} END{if(n>0) print sprintf(\"%.1fs\",sum/n); else if(base!=\"\") print \"waiting>DAV\" base; else print \"waiting\"}' " . timefile
 
     fname      = system(fname_cmd)
     latest_de  = system(latest_de_cmd)
@@ -121,8 +121,8 @@ if (nfiles >= 3) {
     latest_de_cmd  = "awk '/^DAV:/{de=$4} END{print (de!=\"\"?de:\"NA\")}' " . file
     latest_E_cmd   = "awk '/^DAV:/{e=$3} END{print (e!=\"\"?e:\"NA\")}' " . file
     nstep_cmd      = "awk '/^DAV:/{n++} END{print (n>0?n:0)}' " . file
-    latest_dt_cmd  = "awk 'NF>=4 && $1 !~ /^#/{dt=$3} END{print (dt!=\"\"?sprintf(\"%.1fs\",dt):\"NA\")}' " . timefile
-    mean_dt_cmd    = "awk 'NF>=4 && $1 !~ /^#/{sum+=$3; n++} END{print (n>0?sprintf(\"%.1fs\",sum/n):\"NA\")}' " . timefile
+    latest_dt_cmd  = "awk 'NF>=4 && $1 !~ /^#/{dt=$3} /^# state/{base=$3} END{if(dt!=\"\") print sprintf(\"%.1fs\",dt); else if(base!=\"\") print \"waiting>DAV\" base; else print \"waiting\"}' " . timefile
+    mean_dt_cmd    = "awk 'NF>=4 && $1 !~ /^#/{sum+=$3; n++} /^# state/{base=$3} END{if(n>0) print sprintf(\"%.1fs\",sum/n); else if(base!=\"\") print \"waiting>DAV\" base; else print \"waiting\"}' " . timefile
 
     fname      = system(fname_cmd)
     latest_de  = system(latest_de_cmd)
@@ -171,8 +171,8 @@ if (nfiles >= 4) {
     latest_de_cmd  = "awk '/^DAV:/{de=$4} END{print (de!=\"\"?de:\"NA\")}' " . file
     latest_E_cmd   = "awk '/^DAV:/{e=$3} END{print (e!=\"\"?e:\"NA\")}' " . file
     nstep_cmd      = "awk '/^DAV:/{n++} END{print (n>0?n:0)}' " . file
-    latest_dt_cmd  = "awk 'NF>=4 && $1 !~ /^#/{dt=$3} END{print (dt!=\"\"?sprintf(\"%.1fs\",dt):\"NA\")}' " . timefile
-    mean_dt_cmd    = "awk 'NF>=4 && $1 !~ /^#/{sum+=$3; n++} END{print (n>0?sprintf(\"%.1fs\",sum/n):\"NA\")}' " . timefile
+    latest_dt_cmd  = "awk 'NF>=4 && $1 !~ /^#/{dt=$3} /^# state/{base=$3} END{if(dt!=\"\") print sprintf(\"%.1fs\",dt); else if(base!=\"\") print \"waiting>DAV\" base; else print \"waiting\"}' " . timefile
+    mean_dt_cmd    = "awk 'NF>=4 && $1 !~ /^#/{sum+=$3; n++} /^# state/{base=$3} END{if(n>0) print sprintf(\"%.1fs\",sum/n); else if(base!=\"\") print \"waiting>DAV\" base; else print \"waiting\"}' " . timefile
 
     fname      = system(fname_cmd)
     latest_de  = system(latest_de_cmd)
