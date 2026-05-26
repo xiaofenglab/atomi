@@ -68,6 +68,25 @@ def write_relaxed_target_poscar(path: Path) -> None:
     )
 
 
+def write_origin_shifted_target_poscar(path: Path) -> None:
+    path.write_text(
+        "B relaxed structure with shifted cation origin\n"
+        "1.0\n"
+        "4.1 0.0 0.0\n"
+        "0.0 4.1 0.0\n"
+        "0.0 0.0 4.1\n"
+        "U O\n"
+        "2 3\n"
+        "Direct\n"
+        "0.2100000000 0.2700000000 0.1000000000\n"
+        "0.7200000000 0.7500000000 0.6000000000\n"
+        "0.2600000000 0.2400000000 0.2500000000\n"
+        "0.7400000000 0.7600000000 0.7500000000\n"
+        "0.2500000000 0.7500000000 0.2400000000\n",
+        encoding="utf-8",
+    )
+
+
 def write_2x3x3_cation_source(path: Path) -> None:
     positions: list[tuple[str, tuple[float, float, float]]] = []
     gd_position = (0.75, 0.5, 0.5)
@@ -264,6 +283,37 @@ def test_project_poscar_uses_target_centered_species_order_and_reorders_magmom(t
     assert projected.species.symbols == ["U", "Gd", "O"]
     assert projected.species.counts == [1, 1, 3]
     assert existing_magmom_values(out / "INCAR", 5) == pytest.approx([2, 7, 0, 0, 0])
+
+
+def test_project_poscar_aligns_global_cation_origin_before_matching(tmp_path: Path) -> None:
+    source = tmp_path / "A_POSCAR"
+    target = tmp_path / "B_POSCAR"
+    out = tmp_path / "projected_shifted"
+    write_source_poscar(source)
+    write_origin_shifted_target_poscar(target)
+
+    project_main(
+        [
+            "--element-poscar",
+            str(source),
+            "--structure-poscar",
+            str(target),
+            "--outdir",
+            str(out),
+            "--cation-elements",
+            "U,Gd",
+            "--max-cation-distance",
+            "0.1",
+        ]
+    )
+
+    projected = read_poscar_structure(out / "POSCAR")
+    assert atom_symbols(projected)[:2] == ["U", "Gd"]
+    plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    alignment = plan["cation_origin_alignment"]
+    assert alignment["improved"] is True
+    assert alignment["shift_fractional"] == pytest.approx([0.2, 0.25, 0.1])
+    assert alignment["max_cation_distance_after_A"] < 0.1
 
 
 def test_project_poscar_crops_2x3x3_source_to_2x2x2_target(tmp_path: Path) -> None:

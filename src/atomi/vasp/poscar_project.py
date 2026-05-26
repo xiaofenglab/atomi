@@ -73,6 +73,7 @@ def project_poscar_elements(
     source_crop_fraction: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None = None,
     source_crop_policy: str = "defect_preserving",
     scale_target_volume_to_source: bool = False,
+    align_cation_origin: bool = True,
 ) -> ProjectionResult:
     """Project cation identities and MAGMOMs from source POSCAR A onto structure POSCAR B."""
     source_poscar = source_poscar.expanduser().resolve()
@@ -142,8 +143,23 @@ def project_poscar_elements(
     if not source_cations:
         raise ValueError("No cation sites found to project.")
 
+    source_for_matching = source
+    cation_origin_alignment = {
+        "enabled": align_cation_origin,
+        "shift_fractional": [0.0, 0.0, 0.0],
+        "max_cation_distance_before_A": None,
+        "max_cation_distance_after_A": None,
+        "mean_cation_distance_after_A": None,
+    }
+    if align_cation_origin:
+        source_for_matching, cation_origin_alignment = align_source_cation_origin(
+            source,
+            source_cations,
+            target,
+            target_cations,
+        )
     matches = nearest_site_assignment(
-        source.scaled_positions,
+        source_for_matching.scaled_positions,
         source_cations,
         target.scaled_positions,
         target_cations,
@@ -157,6 +173,30 @@ def project_poscar_elements(
             f"--max-cation-distance {max_cation_distance_A:.4g} A."
         )
         if strict:
+            write_match_csv(match_csv, matches, source_symbols, target_symbols, source_for_matching, target)
+            write_plan_json(
+                plan_json,
+                {
+                    "schema": "atomi.vasp.poscar_projection.v1",
+                    "status": "failed_distance_check",
+                    "source_poscar": str(source_poscar),
+                    "target_poscar": str(target_poscar),
+                    "prepared_source_poscar": str(prepared_source_poscar) if prepared_source_poscar else "",
+                    "match_csv": str(match_csv),
+                    "source_operations": source_prepared.operations,
+                    "target_operations": target_prepared.operations,
+                    "cation_origin_alignment": cation_origin_alignment,
+                    "source_cation_count": len(source_cations),
+                    "target_cation_count": len(target_cations),
+                    "max_cation_distance_A": worst,
+                    "distance_limit_A": max_cation_distance_A,
+                    "warnings": [message],
+                    "notes": [
+                        "Distance check failed before final POSCAR writing.",
+                        "Inspect the diagnostic map CSV and cation_origin_alignment before retrying with --allow-large-cation-distance.",
+                    ],
+                },
+            )
             raise ValueError(message + " Use --allow-large-cation-distance only after inspecting the map CSV.")
         warnings.append(message)
 
@@ -227,7 +267,7 @@ def project_poscar_elements(
         anion_set,
         magmom_decimals,
     )
-    write_match_csv(match_csv, matches, source_symbols, target_symbols, source, target)
+    write_match_csv(match_csv, matches, source_symbols, target_symbols, source_for_matching, target)
     write_plan_json(
         plan_json,
         {
@@ -240,6 +280,7 @@ def project_poscar_elements(
             "output_incar": str(output_incar) if output_incar else "",
             "source_operations": source_prepared.operations,
             "target_operations": target_prepared.operations,
+            "cation_origin_alignment": cation_origin_alignment,
             "cation_elements": sorted(cation_set),
             "anion_elements": sorted(anion_set),
             "source_cation_count": len(source_cations),
@@ -846,6 +887,84 @@ def selected_cation_indices(symbols: list[str], cation_elements: set[str], anion
     return [index for index, symbol in enumerate(symbols) if symbol not in anion_elements]
 
 
+def align_source_cation_origin(
+    source: PoscarStructure,
+    source_indices: list[int],
+    target: PoscarStructure,
+    target_indices: list[int],
+) -> tuple[PoscarStructure, dict[str, object]]:
+    before = nearest_site_assignment(source.scaled_positions, source_indices, target.scaled_positions, target_indices, target.cell)
+    before_worst = max((match.distance_A for match in before), default=0.0)
+    best_shift = [0.0, 0.0, 0.0]
+    best_matches = before
+    best_score = assignment_score(before)
+    candidates = cation_origin_shift_candidates(source.scaled_positions, source_indices, target.scaled_positions, target_indices)
+    for shift in candidates:
+        shifted_positions = shift_fractional_positions(source.scaled_positions, shift)
+        matches = nearest_site_assignment(shifted_positions, source_indices, target.scaled_positions, target_indices, target.cell)
+        score = assignment_score(matches)
+        if score < best_score:
+            best_shift = shift
+            best_matches = matches
+            best_score = score
+    shifted_source = PoscarStructure(
+        species=source.species,
+        cell=source.cell,
+        scaled_positions=shift_fractional_positions(source.scaled_positions, best_shift),
+    )
+    return shifted_source, {
+        "enabled": True,
+        "shift_fractional": [round(wrap_fractional_delta(value), 12) for value in best_shift],
+        "max_cation_distance_before_A": before_worst,
+        "max_cation_distance_after_A": best_score[0],
+        "mean_cation_distance_after_A": best_score[1],
+        "candidate_count": len(candidates),
+        "improved": assignment_score(best_matches) < assignment_score(before),
+    }
+
+
+def assignment_score(matches: list[SiteMatch]) -> tuple[float, float]:
+    if not matches:
+        return (0.0, 0.0)
+    worst = max(match.distance_A for match in matches)
+    mean = sum(match.distance_A for match in matches) / len(matches)
+    return (worst, mean)
+
+
+def cation_origin_shift_candidates(
+    source_positions: list[list[float]],
+    source_indices: list[int],
+    target_positions: list[list[float]],
+    target_indices: list[int],
+) -> list[list[float]]:
+    if not source_indices or not target_indices:
+        return [[0.0, 0.0, 0.0]]
+    reference = source_positions[source_indices[0]]
+    seen: set[tuple[float, float, float]] = set()
+    candidates: list[list[float]] = []
+    for shift in [[0.0, 0.0, 0.0], *([target_positions[index][axis] - reference[axis] for axis in range(3)] for index in target_indices)]:
+        normalized = [value % 1.0 for value in shift]
+        key = tuple(round(value, 10) for value in normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(normalized)
+    return candidates
+
+
+def shift_fractional_positions(positions: list[list[float]], shift: list[float]) -> list[list[float]]:
+    return [[(position[axis] + shift[axis]) % 1.0 for axis in range(3)] for position in positions]
+
+
+def wrap_fractional_delta(value: float) -> float:
+    wrapped = value - round(value)
+    if wrapped <= -0.5:
+        wrapped += 1.0
+    if wrapped > 0.5:
+        wrapped -= 1.0
+    return wrapped
+
+
 def nearest_site_assignment(
     source_positions: list[list[float]],
     source_indices: list[int],
@@ -1106,6 +1225,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Uniformly scale POSCAR B cell to the prepared POSCAR A volume before matching/output; B fractional coordinates are preserved.",
     )
+    parser.add_argument(
+        "--no-align-cation-origin",
+        action="store_true",
+        help="Disable automatic global fractional-origin alignment of source cation sites before nearest-site matching.",
+    )
     parser.add_argument("--max-cation-distance", type=float, default=1.5, help="Fail if any projected cation match exceeds this distance in Angstrom.")
     parser.add_argument("--allow-large-cation-distance", action="store_true", help="Warn instead of failing when the cation match exceeds the distance limit.")
     parser.add_argument("--magmom-decimals", type=int, default=3)
@@ -1142,6 +1266,7 @@ def main(argv: list[str] | None = None) -> None:
         source_crop_fraction=parse_fraction_ranges(args.source_crop_fraction) if args.source_crop_fraction else None,
         source_crop_policy=args.source_crop_policy.replace("-", "_"),
         scale_target_volume_to_source=args.scale_target_volume_to_source,
+        align_cation_origin=not args.no_align_cation_origin,
     )
     print(f"Projected POSCAR : {result.output_poscar}")
     if result.prepared_source_poscar:
