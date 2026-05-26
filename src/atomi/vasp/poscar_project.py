@@ -330,18 +330,40 @@ def choose_defect_preserving_crop_ranges(
     cation_counts = Counter(symbols[index] for index in cation_indices)
     max_count = max(cation_counts.values(), default=0)
     minority_symbols = {symbol for symbol, count in cation_counts.items() if count < max_count}
+    if not minority_symbols:
+        origin = (0, 0, 0)
+        ranges = crop_ranges_from_origin(supercell, keep_cells, origin)
+        kept = indices_in_fraction_ranges(structure.scaled_positions, ranges)
+        meta = {
+            "selection_policy": "defect_preserving",
+            "selection_reason": "regular_origin_crop_no_minority_cation",
+            "crop_origin_cells": list(origin),
+            "minority_cation_elements": [],
+            "minority_cations_available": 0,
+            "minority_cations_kept": 0,
+            "charge_variant_cations_available": 0,
+            "charge_variant_cations_kept": 0,
+            "source_magnetic_signature": magnetic_signature(symbols, cation_indices, origin_indices, source_moments),
+            "crop_magnetic_signature": magnetic_signature(symbols, sorted(kept & set(cation_indices)), origin_indices, source_moments),
+        }
+        return ranges, meta
+
     charge_variant_indices = charge_variant_cation_indices(symbols, cation_indices, origin_indices, source_moments)
+    source_magnetic_buckets = magnetic_buckets(symbols, cation_indices, origin_indices, source_moments)
 
     best_origin = candidate_origins[0]
     best_ranges = crop_ranges_from_origin(supercell, keep_cells, best_origin)
-    best_score: tuple[int, int, int, int, int, int] | None = None
+    best_score: tuple[int, int, int, int, int, int, int] | None = None
     best_kept: set[int] = set()
     for origin in candidate_origins:
         ranges = crop_ranges_from_origin(supercell, keep_cells, origin)
         kept = indices_in_fraction_ranges(structure.scaled_positions, ranges)
+        kept_cations = sorted(kept & set(cation_indices))
+        kept_magnetic_buckets = magnetic_buckets(symbols, kept_cations, origin_indices, source_moments)
         score = (
             sum(1 for index in kept if symbols[index] in minority_symbols),
             sum(1 for index in kept if index in charge_variant_indices),
+            len(source_magnetic_buckets & kept_magnetic_buckets),
             sum(1 for index in kept if index in cation_indices),
             -origin[0],
             -origin[1],
@@ -361,6 +383,14 @@ def choose_defect_preserving_crop_ranges(
         "minority_cations_kept": sum(1 for index in best_kept if symbols[index] in minority_symbols),
         "charge_variant_cations_available": len(charge_variant_indices),
         "charge_variant_cations_kept": sum(1 for index in best_kept if index in charge_variant_indices),
+        "magnetic_signature_note": "Signs are inferred from INCAR MAGMOM for cations: positive, negative, or zero.",
+        "source_magnetic_signature": magnetic_signature(symbols, cation_indices, origin_indices, source_moments),
+        "crop_magnetic_signature": magnetic_signature(
+            symbols,
+            sorted(best_kept & set(cation_indices)),
+            origin_indices,
+            source_moments,
+        ),
     }
     return best_ranges, meta
 
@@ -402,6 +432,48 @@ def charge_variant_cation_indices(
             if round(moment, 3) != dominant_value:
                 variants.add(index)
     return variants
+
+
+def magnetic_buckets(
+    symbols: list[str],
+    indices: list[int],
+    origin_indices: list[int],
+    source_moments: list[float] | None,
+) -> set[tuple[str, str]]:
+    if source_moments is None:
+        return set()
+    return {
+        (symbols[index], moment_sign(source_moments[origin_indices[index]]))
+        for index in indices
+        if origin_indices[index] < len(source_moments)
+    }
+
+
+def magnetic_signature(
+    symbols: list[str],
+    indices: list[int],
+    origin_indices: list[int],
+    source_moments: list[float] | None,
+) -> dict[str, dict[str, int]]:
+    signature: dict[str, dict[str, int]] = {}
+    if source_moments is None:
+        return signature
+    for index in indices:
+        if origin_indices[index] >= len(source_moments):
+            continue
+        symbol = symbols[index]
+        sign = moment_sign(source_moments[origin_indices[index]])
+        signature.setdefault(symbol, {"positive": 0, "negative": 0, "zero": 0})
+        signature[symbol][sign] += 1
+    return signature
+
+
+def moment_sign(value: float) -> str:
+    if value > 1.0e-8:
+        return "positive"
+    if value < -1.0e-8:
+        return "negative"
+    return "zero"
 
 
 def repeat_structure(

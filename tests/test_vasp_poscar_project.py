@@ -105,7 +105,7 @@ def write_2x3x3_defect_cation_source(path: Path) -> list[float]:
                 elif (i, j, k) == u5_cell:
                     positions.append(("U", position, 5.0))
                 else:
-                    positions.append(("U", position, 2.0))
+                    positions.append(("U", position, 2.0 if (i + j + k) % 2 == 0 else -2.0))
     grouped = [item for item in positions if item[0] == "U"] + [item for item in positions if item[0] == "Gd"]
     path.write_text(
         "A 2x3x3 cation pattern with defects outside origin crop\n"
@@ -120,6 +120,29 @@ def write_2x3x3_defect_cation_source(path: Path) -> list[float]:
         encoding="utf-8",
     )
     return [moment for _symbol, _position, moment in grouped]
+
+
+def write_2x3x3_equal_cation_source(path: Path) -> None:
+    positions: list[tuple[str, tuple[float, float, float]]] = []
+    for i in range(2):
+        for j in range(3):
+            for k in range(3):
+                position = ((i + 0.5) / 2, (j + 0.5) / 3, (k + 0.5) / 3)
+                symbol = "Gd" if len(positions) < 9 else "U"
+                positions.append((symbol, position))
+    grouped = [item for item in positions if item[0] == "U"] + [item for item in positions if item[0] == "Gd"]
+    path.write_text(
+        "A 2x3x3 equal cation pattern\n"
+        "1.0\n"
+        "2.0 0.0 0.0\n"
+        "0.0 3.0 0.0\n"
+        "0.0 0.0 3.0\n"
+        "U Gd\n"
+        "9 9\n"
+        "Direct\n"
+        + "".join(f"{x:.10f} {y:.10f} {z:.10f}\n" for _symbol, (x, y, z) in grouped),
+        encoding="utf-8",
+    )
 
 
 def write_2x2x2_cation_target(path: Path) -> None:
@@ -283,13 +306,49 @@ def test_project_poscar_crop_prefers_minority_and_charge_coupled_cations(tmp_pat
     assert output_moments is not None
     assert output_moments.count(7.0) == 1
     assert output_moments.count(5.0) == 1
-    assert output_moments.count(2.0) == 6
+    assert sum(1 for moment in output_moments if abs(moment) == 2.0) == 6
     plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
     operation = plan["source_operations"][0]
     assert operation["selection_policy"] == "defect_preserving"
     assert operation["crop_origin_cells"] == [0, 1, 1]
     assert operation["minority_cations_kept"] == 1
     assert operation["charge_variant_cations_kept"] == 1
+    assert operation["source_magnetic_signature"]["U"]["positive"] > 0
+    assert operation["source_magnetic_signature"]["U"]["negative"] > 0
+    assert operation["crop_magnetic_signature"]["U"]["positive"] > 0
+    assert operation["crop_magnetic_signature"]["U"]["negative"] > 0
+    assert operation["crop_magnetic_signature"]["Gd"]["positive"] == 1
+
+
+def test_project_poscar_equal_cation_counts_use_regular_origin_crop(tmp_path: Path) -> None:
+    source = tmp_path / "A_2x3x3_POSCAR"
+    target = tmp_path / "B_2x2x2_POSCAR"
+    out = tmp_path / "projected_equal_crop"
+    write_2x3x3_equal_cation_source(source)
+    write_2x2x2_cation_target(target)
+
+    project_main(
+        [
+            "--element-poscar",
+            str(source),
+            "--structure-poscar",
+            str(target),
+            "--outdir",
+            str(out),
+            "--source-supercell",
+            "2x3x3",
+            "--source-keep-cells",
+            "2x2x2",
+            "--cation-elements",
+            "U,Gd",
+        ]
+    )
+
+    plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    operation = plan["source_operations"][0]
+    assert operation["crop_origin_cells"] == [0, 0, 0]
+    assert operation["selection_reason"] == "regular_origin_crop_no_minority_cation"
+    assert operation["minority_cation_elements"] == []
 
 
 def test_materials_opt_project_poscar_alias(tmp_path: Path) -> None:
