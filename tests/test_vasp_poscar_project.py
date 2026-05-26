@@ -187,7 +187,7 @@ def write_large_volume_2x2x2_cation_target(path: Path) -> None:
     )
 
 
-def test_project_poscar_maps_cation_elements_by_site_and_rewrites_magmom(tmp_path: Path) -> None:
+def test_project_poscar_maps_cation_elements_by_site_and_rewrites_magmom(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     source = tmp_path / "A_POSCAR"
     target = tmp_path / "B_POSCAR"
     incar = tmp_path / "A_INCAR"
@@ -225,6 +225,15 @@ def test_project_poscar_maps_cation_elements_by_site_and_rewrites_magmom(tmp_pat
     assert plan["source_cation_count"] == 2
     assert plan["target_cation_count"] == 2
     assert plan["species_counts"] == {"U": 1, "Gd": 1, "O": 3}
+    assert plan["cation_magmom_summary"]["U"]["count"] == 1
+    assert plan["cation_magmom_summary"]["U"]["positive"] == 1
+    assert plan["cation_magmom_summary"]["Gd"]["count"] == 1
+    assert plan["cation_magmom_summary"]["Gd"]["positive"] == 1
+    assert "O" not in plan["cation_magmom_summary"]
+    stdout = capsys.readouterr().out
+    assert "Cation MAGMOM" in stdout
+    assert "U: n=1 +1 -0 0=0" in stdout
+    assert "Gd: n=1 +1 -0 0=0" in stdout
 
 
 def test_project_poscar_uses_target_centered_species_order_and_reorders_magmom(tmp_path: Path) -> None:

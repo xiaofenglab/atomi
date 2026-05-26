@@ -39,6 +39,7 @@ class ProjectionResult:
     cation_matches: list[SiteMatch]
     max_cation_distance_A: float
     output_species: PoscarSpecies
+    cation_magmom_summary: dict[str, dict[str, object]]
     warnings: list[str]
 
 
@@ -184,6 +185,7 @@ def project_poscar_elements(
     output_poscar.write_text(poscar_text, encoding="utf-8")
 
     output_moments: list[float] | None = None
+    output_moments_grouped: list[float] | None = None
     if source_incar is not None:
         if output_incar is None:
             output_incar = output_poscar.with_name("INCAR")
@@ -218,6 +220,13 @@ def project_poscar_elements(
         output_incar.parent.mkdir(parents=True, exist_ok=True)
         output_incar.write_text(incar_text, encoding="utf-8")
 
+    cation_magmom_summary = final_cation_magmom_summary(
+        output_species,
+        output_moments_grouped,
+        cation_set,
+        anion_set,
+        magmom_decimals,
+    )
     write_match_csv(match_csv, matches, source_symbols, target_symbols, source, target)
     write_plan_json(
         plan_json,
@@ -239,6 +248,7 @@ def project_poscar_elements(
             "distance_limit_A": max_cation_distance_A,
             "species_order": output_species.symbols,
             "species_counts": dict(zip(output_species.symbols, output_species.counts)),
+            "cation_magmom_summary": cation_magmom_summary,
             "warnings": warnings,
             "notes": [
                 "Cation species and cation MAGMOM values were projected from source POSCAR A.",
@@ -258,6 +268,7 @@ def project_poscar_elements(
         cation_matches=matches,
         max_cation_distance_A=worst,
         output_species=output_species,
+        cation_magmom_summary=cation_magmom_summary,
         warnings=warnings,
     )
 
@@ -551,6 +562,79 @@ def magnetic_signature(
         signature.setdefault(symbol, {"positive": 0, "negative": 0, "zero": 0})
         signature[symbol][sign] += 1
     return signature
+
+
+def final_cation_magmom_summary(
+    species: PoscarSpecies,
+    moments: list[float] | None,
+    cation_elements: set[str],
+    anion_elements: set[str],
+    decimals: int,
+) -> dict[str, dict[str, object]]:
+    if moments is None:
+        return {}
+    symbols: list[str] = []
+    for symbol, count in zip(species.symbols, species.counts):
+        symbols.extend([symbol] * count)
+    cation_indices = selected_cation_indices(symbols, cation_elements, anion_elements)
+    summary: dict[str, dict[str, object]] = {}
+    for index in cation_indices:
+        symbol = symbols[index]
+        value = moments[index]
+        rounded_value = round(value, decimals)
+        entry = summary.setdefault(
+            symbol,
+            {
+                "count": 0,
+                "positive": 0,
+                "negative": 0,
+                "zero": 0,
+                "sum": 0.0,
+                "min": rounded_value,
+                "max": rounded_value,
+                "moment_histogram": {},
+                "unique_abs_moments": [],
+            },
+        )
+        entry["count"] = int(entry["count"]) + 1
+        sign = moment_sign(value)
+        entry[sign] = int(entry[sign]) + 1
+        entry["sum"] = float(entry["sum"]) + value
+        entry["min"] = min(float(entry["min"]), rounded_value)
+        entry["max"] = max(float(entry["max"]), rounded_value)
+        histogram = entry["moment_histogram"]
+        if isinstance(histogram, dict):
+            key = f"{rounded_value:g}"
+            histogram[key] = int(histogram.get(key, 0)) + 1
+    for symbol, entry in summary.items():
+        count = int(entry["count"])
+        total = float(entry["sum"])
+        histogram = entry["moment_histogram"]
+        abs_values = []
+        if isinstance(histogram, dict):
+            abs_values = sorted({round(abs(float(value)), decimals) for value in histogram})
+        entry["sum"] = round(total, decimals)
+        entry["mean"] = round(total / count, decimals) if count else 0.0
+        entry["unique_abs_moments"] = abs_values
+        summary[symbol] = entry
+    return {symbol: summary[symbol] for symbol in species.symbols if symbol in summary}
+
+
+def format_cation_magmom_summary(summary: dict[str, dict[str, object]]) -> list[str]:
+    lines: list[str] = []
+    for symbol, entry in summary.items():
+        abs_values = entry.get("unique_abs_moments", [])
+        if isinstance(abs_values, list):
+            abs_text = ",".join(f"{float(value):g}" for value in abs_values) if abs_values else "none"
+        else:
+            abs_text = "none"
+        lines.append(
+            f"{symbol}: n={entry.get('count', 0)} "
+            f"+{entry.get('positive', 0)} -{entry.get('negative', 0)} 0={entry.get('zero', 0)} "
+            f"sum={float(entry.get('sum', 0.0)):g} mean={float(entry.get('mean', 0.0)):g} "
+            f"abs=[{abs_text}]"
+        )
+    return lines
 
 
 def moment_sign(value: float) -> str:
@@ -1072,6 +1156,10 @@ def main(argv: list[str] | None = None) -> None:
         "Output species   : "
         + " ".join(f"{symbol}:{count}" for symbol, count in zip(result.output_species.symbols, result.output_species.counts))
     )
+    if result.cation_magmom_summary:
+        print("Cation MAGMOM   :")
+        for line in format_cation_magmom_summary(result.cation_magmom_summary):
+            print(f"  {line}")
     for warning in result.warnings:
         print(f"WARNING: {warning}")
 
