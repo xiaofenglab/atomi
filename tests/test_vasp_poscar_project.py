@@ -355,6 +355,86 @@ def test_project_poscar_equal_cation_counts_use_regular_origin_crop(tmp_path: Pa
     assert operation["minority_cation_elements"] == []
 
 
+def test_project_poscar_crop_repairs_relaxed_boundary_cation_count(tmp_path: Path) -> None:
+    source = tmp_path / "A_2x3x3_POSCAR"
+    target = tmp_path / "B_2x2x2_POSCAR"
+    out = tmp_path / "projected_boundary_repair"
+    write_2x3x3_cation_source(source)
+    write_2x2x2_cation_target(target)
+    lines = source.read_text(encoding="utf-8").splitlines()
+    lines[8] = "0.2500000000 -0.0001000000 0.0000000000"
+    lines[9] = "0.2500000000 0.3333333333 0.6668000000"
+    source.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    project_main(
+        [
+            "--element-poscar",
+            str(source),
+            "--structure-poscar",
+            str(target),
+            "--outdir",
+            str(out),
+            "--source-supercell",
+            "2x3x3",
+            "--source-keep-cells",
+            "2x2x2",
+            "--source-crop-policy",
+            "origin",
+            "--cation-elements",
+            "U,Gd",
+        ]
+    )
+
+    prepared = read_poscar_structure(out / "POSCAR_A_prepared")
+    assert prepared.species.total_atoms == 8
+    assert prepared.species.symbols == ["U", "Gd"]
+    assert prepared.species.counts == [7, 1]
+    plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    operation = plan["source_operations"][0]
+    assert operation["cation_boundary_repair"] is True
+    assert operation["cation_count_before_repair"] == 6
+    assert operation["cation_count_after_repair"] == 8
+    assert operation["expected_cation_count"] == 8
+
+
+def test_project_poscar_boundary_repair_preserves_balanced_cation_counts(tmp_path: Path) -> None:
+    source = tmp_path / "A_2x3x3_POSCAR"
+    target = tmp_path / "B_2x2x2_POSCAR"
+    out = tmp_path / "projected_balanced_repair"
+    write_2x3x3_equal_cation_source(source)
+    write_2x2x2_cation_target(target)
+    lines = source.read_text(encoding="utf-8").splitlines()
+    lines[8] = "0.2500000000 -0.0001000000 0.0000000000"
+    lines[9] = "0.2500000000 0.3333333333 0.6668000000"
+    source.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    project_main(
+        [
+            "--element-poscar",
+            str(source),
+            "--structure-poscar",
+            str(target),
+            "--outdir",
+            str(out),
+            "--source-supercell",
+            "2x3x3",
+            "--source-keep-cells",
+            "2x2x2",
+            "--cation-elements",
+            "U,Gd",
+        ]
+    )
+
+    prepared = read_poscar_structure(out / "POSCAR_A_prepared")
+    assert prepared.species.symbols == ["U", "Gd"]
+    assert prepared.species.counts == [4, 4]
+    plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    operation = plan["source_operations"][0]
+    assert operation["selection_reason"] == "regular_origin_crop_no_minority_cation"
+    assert operation["cation_boundary_repair"] is True
+    assert operation["cation_species_target_counts"] == {"Gd": 4, "U": 4}
+
+
 def test_materials_opt_project_poscar_alias(tmp_path: Path) -> None:
     source = tmp_path / "A_POSCAR"
     target = tmp_path / "B_POSCAR"

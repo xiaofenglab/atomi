@@ -87,6 +87,10 @@ def project_poscar_elements(
     raw_source_moments = existing_magmom_values(source_incar, len(raw_source_symbols)) if source_incar is not None else None
     anion_set = set(anion_elements or ["O"])
     cation_set = set(cation_elements or [])
+    target_prepared = prepare_structure(target_raw, repeat=target_repeat)
+    target = target_prepared.structure
+    target_symbols = atom_symbols(target)
+    target_cations = selected_cation_indices(target_symbols, cation_set, anion_set)
     source_prepared = prepare_structure(
         source_raw,
         repeat=source_repeat,
@@ -97,10 +101,9 @@ def project_poscar_elements(
         source_moments=raw_source_moments,
         cation_elements=cation_set,
         anion_elements=anion_set,
+        expected_cation_count=len(target_cations),
     )
-    target_prepared = prepare_structure(target_raw, repeat=target_repeat)
     source = source_prepared.structure
-    target = target_prepared.structure
     prepared_source_poscar = (
         prepared_source_poscar.expanduser().resolve()
         if prepared_source_poscar is not None
@@ -119,9 +122,7 @@ def project_poscar_elements(
         prepared_source_poscar.write_text(source_text, encoding="utf-8")
 
     source_symbols = atom_symbols(source)
-    target_symbols = atom_symbols(target)
     source_cations = selected_cation_indices(source_symbols, cation_set, anion_set)
-    target_cations = selected_cation_indices(target_symbols, cation_set, anion_set)
     if len(source_cations) != len(target_cations):
         raise ValueError(
             "Source/target cation counts differ: "
@@ -271,6 +272,7 @@ def prepare_structure(
     source_moments: list[float] | None = None,
     cation_elements: set[str] | None = None,
     anion_elements: set[str] | None = None,
+    expected_cation_count: int | None = None,
 ) -> PreparedStructure:
     origin_indices = list(range(structure.species.total_atoms))
     operations: list[dict[str, object]] = []
@@ -298,7 +300,14 @@ def prepare_structure(
             )
         else:
             raise ValueError(f"Unknown source crop policy {crop_policy!r}.")
-        structure, origin_indices = crop_structure_fraction(structure, origin_indices, ranges)
+        structure, origin_indices, repair_meta = crop_structure_fraction(
+            structure,
+            origin_indices,
+            ranges,
+            expected_cation_count=expected_cation_count,
+            cation_elements=cation_elements or set(),
+            anion_elements=anion_elements or {"O"},
+        )
         operations.append(
             {
                 "kind": "source_keep_cells",
@@ -306,11 +315,19 @@ def prepare_structure(
                 "keep_cells": list(crop_keep_cells),
                 "fraction_ranges": [list(item) for item in ranges],
                 **crop_meta,
+                **repair_meta,
             }
         )
     if crop_fraction is not None:
-        structure, origin_indices = crop_structure_fraction(structure, origin_indices, crop_fraction)
-        operations.append({"kind": "fraction_crop", "fraction_ranges": [list(item) for item in crop_fraction]})
+        structure, origin_indices, repair_meta = crop_structure_fraction(
+            structure,
+            origin_indices,
+            crop_fraction,
+            expected_cation_count=expected_cation_count,
+            cation_elements=cation_elements or set(),
+            anion_elements=anion_elements or {"O"},
+        )
+        operations.append({"kind": "fraction_crop", "fraction_ranges": [list(item) for item in crop_fraction], **repair_meta})
     return PreparedStructure(structure=structure, origin_indices=origin_indices, operations=operations)
 
 
@@ -532,17 +549,51 @@ def crop_structure_fraction(
     structure: PoscarStructure,
     origin_indices: list[int],
     ranges: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
-) -> tuple[PoscarStructure, list[int]]:
+    *,
+    expected_cation_count: int | None = None,
+    cation_elements: set[str] | None = None,
+    anion_elements: set[str] | None = None,
+) -> tuple[PoscarStructure, list[int], dict[str, object]]:
     for lower, upper in ranges:
         if not (0.0 <= lower < upper <= 1.0):
             raise ValueError(f"Crop fractions must satisfy 0 <= lower < upper <= 1, got {ranges}.")
     symbols = atom_symbols(structure)
+    kept_indices = indices_in_fraction_ranges(structure.scaled_positions, ranges)
+    repair_meta: dict[str, object] = {}
+    if expected_cation_count is not None:
+        cation_indices = selected_cation_indices(symbols, cation_elements or set(), anion_elements or {"O"})
+        kept_cations = sorted(kept_indices & set(cation_indices))
+        if len(kept_cations) != expected_cation_count:
+            cation_count_targets = balanced_cation_count_targets(symbols, cation_indices, expected_cation_count)
+            repaired_cations = repaired_crop_cation_indices(
+                structure.scaled_positions,
+                symbols,
+                cation_indices,
+                ranges,
+                expected_cation_count,
+                cation_count_targets,
+            )
+            kept_indices = (kept_indices - set(cation_indices)) | set(repaired_cations)
+            repair_meta = {
+                "cation_boundary_repair": True,
+                "cation_count_before_repair": len(kept_cations),
+                "cation_count_after_repair": len(repaired_cations),
+                "expected_cation_count": expected_cation_count,
+                "cation_species_target_counts": cation_count_targets,
+            }
+        else:
+            repair_meta = {
+                "cation_boundary_repair": False,
+                "cation_count_before_repair": len(kept_cations),
+                "cation_count_after_repair": len(kept_cations),
+                "expected_cation_count": expected_cation_count,
+            }
+
     kept_symbols: list[str] = []
     kept_positions: list[list[float]] = []
     kept_origins: list[int] = []
-    tol = 1.0e-10
     for atom_index, (symbol, position) in enumerate(zip(symbols, structure.scaled_positions)):
-        if all(ranges[axis][0] - tol <= position[axis] < ranges[axis][1] - tol for axis in range(3)):
+        if atom_index in kept_indices:
             kept_symbols.append(symbol)
             kept_positions.append(
                 [
@@ -557,7 +608,75 @@ def crop_structure_fraction(
         [value * (ranges[axis][1] - ranges[axis][0]) for value in vector]
         for axis, vector in enumerate(structure.cell)
     ]
-    return grouped_structure(kept_symbols, kept_positions, kept_origins, cell, structure.species.symbols)
+    prepared, prepared_origins = grouped_structure(kept_symbols, kept_positions, kept_origins, cell, structure.species.symbols)
+    return prepared, prepared_origins, repair_meta
+
+
+def repaired_crop_cation_indices(
+    positions: list[list[float]],
+    symbols: list[str],
+    cation_indices: list[int],
+    ranges: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
+    expected_count: int,
+    species_target_counts: dict[str, int] | None = None,
+) -> list[int]:
+    if expected_count > len(cation_indices):
+        raise ValueError(f"Cannot repair crop to {expected_count} cations; source has only {len(cation_indices)} cations.")
+    if species_target_counts:
+        repaired: list[int] = []
+        for symbol, count in species_target_counts.items():
+            species_indices = [index for index in cation_indices if symbols[index] == symbol]
+            if count > len(species_indices):
+                raise ValueError(f"Cannot repair crop to {count} {symbol} cations; source has only {len(species_indices)}.")
+            repaired.extend(
+                sorted(
+                    species_indices,
+                    key=lambda index: (
+                        distance_to_fraction_box(positions[index], ranges),
+                        index,
+                    ),
+                )[:count]
+            )
+        if len(repaired) == expected_count:
+            return sorted(repaired)
+    ranked = sorted(
+        cation_indices,
+        key=lambda index: (
+            distance_to_fraction_box(positions[index], ranges),
+            index,
+        ),
+    )
+    return sorted(ranked[:expected_count])
+
+
+def balanced_cation_count_targets(
+    symbols: list[str],
+    cation_indices: list[int],
+    expected_count: int,
+) -> dict[str, int] | None:
+    counts = Counter(symbols[index] for index in cation_indices)
+    if len(counts) < 2:
+        return None
+    if len(set(counts.values())) != 1:
+        return None
+    if expected_count % len(counts) != 0:
+        return None
+    per_species = expected_count // len(counts)
+    return {symbol: per_species for symbol in sorted(counts)}
+
+
+def distance_to_fraction_box(
+    position: list[float],
+    ranges: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
+) -> float:
+    distance_sq = 0.0
+    for axis, value in enumerate(position):
+        lower, upper = ranges[axis]
+        if value < lower:
+            distance_sq += (lower - value) ** 2
+        elif value >= upper:
+            distance_sq += (value - upper) ** 2
+    return math.sqrt(distance_sq)
 
 
 def grouped_structure(
