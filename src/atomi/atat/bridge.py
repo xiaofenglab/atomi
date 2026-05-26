@@ -3721,6 +3721,11 @@ def quick_opt_main(argv: list[str] | None = None) -> None:
     if argv and argv[0] in {"parent-defect", "defect-poscar", "substitution-defect", "poscar-defect"}:
         parent_defect_main(argv[1:])
         return
+    if argv and argv[0] in {"project-poscar", "project-elements", "poscar-project", "relaxed-project"}:
+        from atomi.vasp.poscar_project import main as project_poscar_main
+
+        project_poscar_main(argv[1:])
+        return
     if argv and argv[0] in {"relax-seeds", "relax_seed", "relax-seed"}:
         relax_seeds_main(argv[1:])
         return
@@ -4229,6 +4234,8 @@ def build_parser() -> argparse.ArgumentParser:
     atat_poscar_parser.add_argument("args", nargs=argparse.REMAINDER)
     parent_parser = subparsers.add_parser("parent-defect", help="Build substitution/vacancy POSCARs from a parent POSCAR.")
     parent_parser.add_argument("args", nargs=argparse.REMAINDER)
+    project_parser = subparsers.add_parser("project-poscar", help="Project element identities from one POSCAR onto another POSCAR structure.")
+    project_parser.add_argument("args", nargs=argparse.REMAINDER)
     quick_parser = subparsers.add_parser("quick-opt", help="Create a quick materials optimization scaffold.")
     quick_parser.add_argument("args", nargs=argparse.REMAINDER)
     return parser
@@ -4254,6 +4261,10 @@ def main(argv: list[str] | None = None) -> None:
         atat_poscar_main(rest)
     elif command in {"parent-defect", "defect-poscar", "substitution-defect", "poscar-defect"}:
         parent_defect_main(rest)
+    elif command in {"project-poscar", "project-elements", "poscar-project", "relaxed-project"}:
+        from atomi.vasp.poscar_project import main as project_poscar_main
+
+        project_poscar_main(rest)
     elif command in {"quick-opt", "quick", "materials-opt"}:
         quick_opt_main(rest)
     else:

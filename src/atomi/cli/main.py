@@ -623,6 +623,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vasp_defect_cloud.add_argument("defect_cloud_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("vasp-project-poscar", "poscar-project-elements"):
+        vasp_project_poscar = subparsers.add_parser(
+            command_name,
+            help="Project element identities from POSCAR A onto relaxed coordinates from POSCAR B.",
+        )
+        vasp_project_poscar.add_argument("project_poscar_args", nargs=argparse.REMAINDER)
+
     vasp_md_snapshot_candidates = subparsers.add_parser(
         "vasp-md-snapshot-candidates",
         help="Harvest successful md-engine LAMMPS frames into VASP-ready folders.",
@@ -1126,6 +1133,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.defect_cloud import main as vasp_defect_cloud_main
 
         vasp_defect_cloud_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in ("vasp-project-poscar", "poscar-project-elements"):
+        from atomi.vasp.poscar_project import main as vasp_project_poscar_main
+
+        vasp_project_poscar_main(raw_args[1:])
         return
     if raw_args and raw_args[0] == "vasp-md-snapshot-candidates":
         from atomi.vasp.md_snapshots import main as vasp_md_snapshot_candidates_main
