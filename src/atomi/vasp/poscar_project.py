@@ -4,7 +4,9 @@ import argparse
 import csv
 import json
 import math
+from collections import Counter
 from dataclasses import dataclass
+from itertools import product
 from pathlib import Path
 
 from atomi.vasp.magmom import (
@@ -66,6 +68,7 @@ def project_poscar_elements(
     source_supercell: tuple[int, int, int] | None = None,
     source_keep_cells: tuple[int, int, int] | None = None,
     source_crop_fraction: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None = None,
+    source_crop_policy: str = "defect_preserving",
 ) -> ProjectionResult:
     """Project cation identities and MAGMOMs from source POSCAR A onto structure POSCAR B."""
     source_poscar = source_poscar.expanduser().resolve()
@@ -78,20 +81,26 @@ def project_poscar_elements(
 
     source_raw = read_poscar_structure(source_poscar)
     target_raw = read_poscar_structure(target_poscar)
+    raw_source_symbols = atom_symbols(source_raw)
+    raw_source_moments = existing_magmom_values(source_incar, len(raw_source_symbols)) if source_incar is not None else None
+    anion_set = set(anion_elements or ["O"])
+    cation_set = set(cation_elements or [])
     source_prepared = prepare_structure(
         source_raw,
         repeat=source_repeat,
         crop_supercell=source_supercell,
         crop_keep_cells=source_keep_cells,
         crop_fraction=source_crop_fraction,
+        crop_policy=source_crop_policy,
+        source_moments=raw_source_moments,
+        cation_elements=cation_set,
+        anion_elements=anion_set,
     )
     target_prepared = prepare_structure(target_raw, repeat=target_repeat)
     source = source_prepared.structure
     target = target_prepared.structure
     source_symbols = atom_symbols(source)
     target_symbols = atom_symbols(target)
-    anion_set = set(anion_elements or ["O"])
-    cation_set = set(cation_elements or [])
     source_cations = selected_cation_indices(source_symbols, cation_set, anion_set)
     target_cations = selected_cation_indices(target_symbols, cation_set, anion_set)
     if len(source_cations) != len(target_cations):
@@ -128,10 +137,14 @@ def project_poscar_elements(
         projected_symbols[match.target_index] = source_symbols[match.source_index]
         source_by_target[match.target_index] = match.source_index
 
-    output_order = complete_species_order(
-        species_order or default_species_order(source.species.symbols, target.species.symbols),
+    default_order = default_projection_species_order(
+        source.species.symbols,
+        target.species.symbols,
         projected_symbols,
+        cation_set,
+        anion_set,
     )
+    output_order = complete_species_order(species_order or default_order, projected_symbols)
     output_species, output_indices = grouped_species_and_indices(projected_symbols, output_order)
     poscar_text = write_poscar_text(
         f"Projected {source_poscar.name} elements onto {target_poscar.name} structure",
@@ -146,8 +159,6 @@ def project_poscar_elements(
     if source_incar is not None:
         if output_incar is None:
             output_incar = output_poscar.with_name("INCAR")
-        raw_source_symbols = atom_symbols(source_raw)
-        raw_source_moments = existing_magmom_values(source_incar, len(raw_source_symbols))
         source_moments = (
             [raw_source_moments[index] for index in source_prepared.origin_indices]
             if raw_source_moments is not None
@@ -235,6 +246,10 @@ def prepare_structure(
     crop_supercell: tuple[int, int, int] | None = None,
     crop_keep_cells: tuple[int, int, int] | None = None,
     crop_fraction: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None = None,
+    crop_policy: str = "defect_preserving",
+    source_moments: list[float] | None = None,
+    cation_elements: set[str] | None = None,
+    anion_elements: set[str] | None = None,
 ) -> PreparedStructure:
     origin_indices = list(range(structure.species.total_atoms))
     operations: list[dict[str, object]] = []
@@ -244,7 +259,24 @@ def prepare_structure(
     if crop_supercell is not None or crop_keep_cells is not None:
         if crop_supercell is None or crop_keep_cells is None:
             raise ValueError("--source-supercell and --source-keep-cells must be used together.")
-        ranges = tuple((0.0, crop_keep_cells[i] / crop_supercell[i]) for i in range(3))
+        if crop_policy == "origin":
+            ranges = crop_ranges_from_origin(crop_supercell, crop_keep_cells, (0, 0, 0))
+            crop_meta = {
+                "selection_policy": "origin",
+                "crop_origin_cells": [0, 0, 0],
+            }
+        elif crop_policy == "defect_preserving":
+            ranges, crop_meta = choose_defect_preserving_crop_ranges(
+                structure,
+                origin_indices,
+                crop_supercell,
+                crop_keep_cells,
+                source_moments=source_moments,
+                cation_elements=cation_elements or set(),
+                anion_elements=anion_elements or {"O"},
+            )
+        else:
+            raise ValueError(f"Unknown source crop policy {crop_policy!r}.")
         structure, origin_indices = crop_structure_fraction(structure, origin_indices, ranges)
         operations.append(
             {
@@ -252,12 +284,124 @@ def prepare_structure(
                 "source_supercell": list(crop_supercell),
                 "keep_cells": list(crop_keep_cells),
                 "fraction_ranges": [list(item) for item in ranges],
+                **crop_meta,
             }
         )
     if crop_fraction is not None:
         structure, origin_indices = crop_structure_fraction(structure, origin_indices, crop_fraction)
         operations.append({"kind": "fraction_crop", "fraction_ranges": [list(item) for item in crop_fraction]})
     return PreparedStructure(structure=structure, origin_indices=origin_indices, operations=operations)
+
+
+def crop_ranges_from_origin(
+    supercell: tuple[int, int, int],
+    keep_cells: tuple[int, int, int],
+    origin_cells: tuple[int, int, int],
+) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
+    for axis in range(3):
+        if supercell[axis] <= 0 or keep_cells[axis] <= 0:
+            raise ValueError(f"Source supercell and keep-cells values must be positive, got {supercell} and {keep_cells}.")
+        if keep_cells[axis] > supercell[axis]:
+            raise ValueError(f"Cannot keep {keep_cells} cells from source supercell {supercell}.")
+        if origin_cells[axis] < 0 or origin_cells[axis] + keep_cells[axis] > supercell[axis]:
+            raise ValueError(f"Crop origin {origin_cells} with keep-cells {keep_cells} is outside source supercell {supercell}.")
+    return tuple((origin_cells[i] / supercell[i], (origin_cells[i] + keep_cells[i]) / supercell[i]) for i in range(3))
+
+
+def choose_defect_preserving_crop_ranges(
+    structure: PoscarStructure,
+    origin_indices: list[int],
+    supercell: tuple[int, int, int],
+    keep_cells: tuple[int, int, int],
+    *,
+    source_moments: list[float] | None,
+    cation_elements: set[str],
+    anion_elements: set[str],
+) -> tuple[tuple[tuple[float, float], tuple[float, float], tuple[float, float]], dict[str, object]]:
+    candidate_origins = [
+        tuple(origin)
+        for origin in product(*(range(supercell[axis] - keep_cells[axis] + 1) for axis in range(3)))
+    ]
+    if not candidate_origins:
+        raise ValueError(f"Cannot keep {keep_cells} cells from source supercell {supercell}.")
+
+    symbols = atom_symbols(structure)
+    cation_indices = selected_cation_indices(symbols, cation_elements, anion_elements)
+    cation_counts = Counter(symbols[index] for index in cation_indices)
+    max_count = max(cation_counts.values(), default=0)
+    minority_symbols = {symbol for symbol, count in cation_counts.items() if count < max_count}
+    charge_variant_indices = charge_variant_cation_indices(symbols, cation_indices, origin_indices, source_moments)
+
+    best_origin = candidate_origins[0]
+    best_ranges = crop_ranges_from_origin(supercell, keep_cells, best_origin)
+    best_score: tuple[int, int, int, int, int, int] | None = None
+    best_kept: set[int] = set()
+    for origin in candidate_origins:
+        ranges = crop_ranges_from_origin(supercell, keep_cells, origin)
+        kept = indices_in_fraction_ranges(structure.scaled_positions, ranges)
+        score = (
+            sum(1 for index in kept if symbols[index] in minority_symbols),
+            sum(1 for index in kept if index in charge_variant_indices),
+            sum(1 for index in kept if index in cation_indices),
+            -origin[0],
+            -origin[1],
+            -origin[2],
+        )
+        if best_score is None or score > best_score:
+            best_origin = origin
+            best_ranges = ranges
+            best_score = score
+            best_kept = kept
+
+    meta = {
+        "selection_policy": "defect_preserving",
+        "crop_origin_cells": list(best_origin),
+        "minority_cation_elements": sorted(minority_symbols),
+        "minority_cations_available": sum(1 for index in cation_indices if symbols[index] in minority_symbols),
+        "minority_cations_kept": sum(1 for index in best_kept if symbols[index] in minority_symbols),
+        "charge_variant_cations_available": len(charge_variant_indices),
+        "charge_variant_cations_kept": sum(1 for index in best_kept if index in charge_variant_indices),
+    }
+    return best_ranges, meta
+
+
+def indices_in_fraction_ranges(
+    positions: list[list[float]],
+    ranges: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
+) -> set[int]:
+    tol = 1.0e-10
+    return {
+        index
+        for index, position in enumerate(positions)
+        if all(ranges[axis][0] - tol <= position[axis] < ranges[axis][1] - tol for axis in range(3))
+    }
+
+
+def charge_variant_cation_indices(
+    symbols: list[str],
+    cation_indices: list[int],
+    origin_indices: list[int],
+    source_moments: list[float] | None,
+) -> set[int]:
+    if source_moments is None:
+        return set()
+    by_symbol: dict[str, list[tuple[int, float]]] = {}
+    for index in cation_indices:
+        if origin_indices[index] >= len(source_moments):
+            continue
+        by_symbol.setdefault(symbols[index], []).append((index, abs(source_moments[origin_indices[index]])))
+    variants: set[int] = set()
+    for group in by_symbol.values():
+        if len(group) < 2:
+            continue
+        bins = Counter(round(moment, 3) for _index, moment in group)
+        dominant_value, dominant_count = bins.most_common(1)[0]
+        if dominant_count == len(group):
+            continue
+        for index, moment in group:
+            if round(moment, 3) != dominant_value:
+                variants.add(index)
+    return variants
 
 
 def repeat_structure(
@@ -402,6 +546,36 @@ def default_species_order(source_order: list[str], target_order: list[str]) -> l
     order: list[str] = []
     for symbol in [*source_order, *target_order]:
         if symbol not in order:
+            order.append(symbol)
+    return order
+
+
+def default_projection_species_order(
+    source_order: list[str],
+    target_order: list[str],
+    projected_symbols: list[str],
+    cation_elements: set[str],
+    anion_elements: set[str],
+) -> list[str]:
+    present = set(projected_symbols)
+    cations = {symbol for symbol in present if symbol in cation_elements} if cation_elements else present - anion_elements
+    anions = present & anion_elements
+
+    order: list[str] = []
+    for symbol in target_order:
+        if symbol in cations and symbol not in order:
+            order.append(symbol)
+    for symbol in source_order:
+        if symbol in cations and symbol not in order:
+            order.append(symbol)
+    for symbol in target_order:
+        if symbol in anions and symbol not in order:
+            order.append(symbol)
+    for symbol in source_order:
+        if symbol in anions and symbol not in order:
+            order.append(symbol)
+    for symbol in default_species_order(source_order, target_order):
+        if symbol in present and symbol not in order:
             order.append(symbol)
     return order
 
@@ -566,7 +740,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-repeat", help="Repeat POSCAR A before projection, e.g. 2x2x2.")
     parser.add_argument("--target-repeat", help="Repeat POSCAR B before projection/output, e.g. 1x2x2.")
     parser.add_argument("--source-supercell", help="Cell count represented by POSCAR A, e.g. 2x3x3.")
-    parser.add_argument("--source-keep-cells", help="Crop POSCAR A to the first cell block, e.g. 2x2x2.")
+    parser.add_argument("--source-keep-cells", help="Crop POSCAR A to a matching cell block, e.g. 2x2x2.")
+    parser.add_argument(
+        "--source-crop-policy",
+        choices=["defect-preserving", "origin"],
+        default="defect-preserving",
+        help="How to choose a --source-keep-cells crop window. Default preserves minority/charge-coupled cations.",
+    )
     parser.add_argument(
         "--source-crop-fraction",
         help="Explicit POSCAR A fractional crop, e.g. 0:1,0:2/3,0:2/3. Applied after --source-repeat.",
@@ -604,6 +784,7 @@ def main(argv: list[str] | None = None) -> None:
         source_supercell=parse_repeat(args.source_supercell) if args.source_supercell else None,
         source_keep_cells=parse_repeat(args.source_keep_cells) if args.source_keep_cells else None,
         source_crop_fraction=parse_fraction_ranges(args.source_crop_fraction) if args.source_crop_fraction else None,
+        source_crop_policy=args.source_crop_policy.replace("-", "_"),
     )
     print(f"Projected POSCAR : {result.output_poscar}")
     if result.output_incar:
