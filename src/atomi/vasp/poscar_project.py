@@ -71,6 +71,7 @@ def project_poscar_elements(
     source_keep_cells: tuple[int, int, int] | None = None,
     source_crop_fraction: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None = None,
     source_crop_policy: str = "defect_preserving",
+    scale_target_volume_to_source: bool = False,
 ) -> ProjectionResult:
     """Project cation identities and MAGMOMs from source POSCAR A onto structure POSCAR B."""
     source_poscar = source_poscar.expanduser().resolve()
@@ -104,6 +105,13 @@ def project_poscar_elements(
         expected_cation_count=len(target_cations),
     )
     source = source_prepared.structure
+    if scale_target_volume_to_source:
+        target, scale_operation = scale_structure_volume_to_reference(target, source)
+        target_prepared = PreparedStructure(
+            structure=target,
+            origin_indices=target_prepared.origin_indices,
+            operations=[*target_prepared.operations, scale_operation],
+        )
     prepared_source_poscar = (
         prepared_source_poscar.expanduser().resolve()
         if prepared_source_poscar is not None
@@ -259,6 +267,45 @@ def atom_symbols(structure: PoscarStructure) -> list[str]:
     for symbol, count in zip(structure.species.symbols, structure.species.counts):
         symbols.extend([symbol] * count)
     return symbols
+
+
+def cell_volume(cell: list[list[float]]) -> float:
+    a, b, c = cell
+    return abs(
+        a[0] * (b[1] * c[2] - b[2] * c[1])
+        - a[1] * (b[0] * c[2] - b[2] * c[0])
+        + a[2] * (b[0] * c[1] - b[1] * c[0])
+    )
+
+
+def scale_structure_volume_to_reference(
+    structure: PoscarStructure,
+    reference: PoscarStructure,
+) -> tuple[PoscarStructure, dict[str, object]]:
+    source_volume = cell_volume(reference.cell)
+    target_volume = cell_volume(structure.cell)
+    if source_volume <= 0.0 or target_volume <= 0.0:
+        raise ValueError(
+            "Cannot scale target volume because source or target cell volume is zero "
+            f"(source={source_volume:.8g}, target={target_volume:.8g})."
+        )
+    linear_scale = (source_volume / target_volume) ** (1.0 / 3.0)
+    scaled = PoscarStructure(
+        species=structure.species,
+        cell=[[value * linear_scale for value in vector] for vector in structure.cell],
+        scaled_positions=structure.scaled_positions,
+    )
+    return (
+        scaled,
+        {
+            "kind": "scale_volume_to_source",
+            "source_volume_A3": source_volume,
+            "target_volume_before_A3": target_volume,
+            "target_volume_after_A3": cell_volume(scaled.cell),
+            "linear_scale": linear_scale,
+            "note": "Target fractional coordinates are preserved; target cell is uniformly scaled to prepared source volume.",
+        },
+    )
 
 
 def prepare_structure(
@@ -970,6 +1017,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--source-crop-fraction",
         help="Explicit POSCAR A fractional crop, e.g. 0:1,0:2/3,0:2/3. Applied after --source-repeat.",
     )
+    parser.add_argument(
+        "--scale-target-volume-to-source",
+        action="store_true",
+        help="Uniformly scale POSCAR B cell to the prepared POSCAR A volume before matching/output; B fractional coordinates are preserved.",
+    )
     parser.add_argument("--max-cation-distance", type=float, default=1.5, help="Fail if any projected cation match exceeds this distance in Angstrom.")
     parser.add_argument("--allow-large-cation-distance", action="store_true", help="Warn instead of failing when the cation match exceeds the distance limit.")
     parser.add_argument("--magmom-decimals", type=int, default=3)
@@ -1005,6 +1057,7 @@ def main(argv: list[str] | None = None) -> None:
         source_keep_cells=parse_repeat(args.source_keep_cells) if args.source_keep_cells else None,
         source_crop_fraction=parse_fraction_ranges(args.source_crop_fraction) if args.source_crop_fraction else None,
         source_crop_policy=args.source_crop_policy.replace("-", "_"),
+        scale_target_volume_to_source=args.scale_target_volume_to_source,
     )
     print(f"Projected POSCAR : {result.output_poscar}")
     if result.prepared_source_poscar:

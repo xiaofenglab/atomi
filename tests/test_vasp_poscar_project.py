@@ -6,7 +6,7 @@ import pytest
 
 from atomi.cli.main import main as atomi_main
 from atomi.vasp.magmom import existing_magmom_values, read_poscar_structure
-from atomi.vasp.poscar_project import atom_symbols, main as project_main
+from atomi.vasp.poscar_project import atom_symbols, cell_volume, main as project_main
 
 
 def write_source_poscar(path: Path) -> None:
@@ -158,6 +158,27 @@ def write_2x2x2_cation_target(path: Path) -> None:
         "2.0 0.0 0.0\n"
         "0.0 2.0 0.0\n"
         "0.0 0.0 2.0\n"
+        "U\n"
+        "8\n"
+        "Direct\n"
+        + "".join(f"{x:.10f} {y:.10f} {z:.10f}\n" for x, y, z in positions),
+        encoding="utf-8",
+    )
+
+
+def write_large_volume_2x2x2_cation_target(path: Path) -> None:
+    positions = [
+        ((i + 0.5) / 2, (j + 0.5) / 2, (k + 0.5) / 2)
+        for i in range(2)
+        for j in range(2)
+        for k in range(2)
+    ]
+    path.write_text(
+        "B larger-volume doubled cell cation skeleton\n"
+        "1.0\n"
+        "4.0 0.0 0.0\n"
+        "0.0 4.0 0.0\n"
+        "0.0 0.0 4.0\n"
         "U\n"
         "8\n"
         "Direct\n"
@@ -433,6 +454,44 @@ def test_project_poscar_boundary_repair_preserves_balanced_cation_counts(tmp_pat
     assert operation["selection_reason"] == "regular_origin_crop_no_minority_cation"
     assert operation["cation_boundary_repair"] is True
     assert operation["cation_species_target_counts"] == {"Gd": 4, "U": 4}
+
+
+def test_project_poscar_can_scale_target_volume_to_prepared_source(tmp_path: Path) -> None:
+    source = tmp_path / "A_2x3x3_POSCAR"
+    target = tmp_path / "B_large_POSCAR"
+    out = tmp_path / "projected_scaled_target"
+    write_2x3x3_cation_source(source)
+    write_large_volume_2x2x2_cation_target(target)
+
+    project_main(
+        [
+            "--element-poscar",
+            str(source),
+            "--structure-poscar",
+            str(target),
+            "--outdir",
+            str(out),
+            "--source-supercell",
+            "2x3x3",
+            "--source-keep-cells",
+            "2x2x2",
+            "--cation-elements",
+            "U,Gd",
+            "--scale-target-volume-to-source",
+        ]
+    )
+
+    prepared = read_poscar_structure(out / "POSCAR_A_prepared")
+    projected = read_poscar_structure(out / "POSCAR")
+    assert cell_volume(projected.cell) == pytest.approx(cell_volume(prepared.cell))
+    target_positions = read_poscar_structure(target).scaled_positions
+    for projected_position, target_position in zip(projected.scaled_positions, target_positions):
+        assert projected_position == pytest.approx(target_position)
+    plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    operation = plan["target_operations"][-1]
+    assert operation["kind"] == "scale_volume_to_source"
+    assert operation["target_volume_before_A3"] == pytest.approx(64.0)
+    assert operation["target_volume_after_A3"] == pytest.approx(cell_volume(prepared.cell))
 
 
 def test_materials_opt_project_poscar_alias(tmp_path: Path) -> None:
