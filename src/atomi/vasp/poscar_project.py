@@ -39,7 +39,9 @@ class ProjectionResult:
     cation_matches: list[SiteMatch]
     max_cation_distance_A: float
     output_species: PoscarSpecies
+    source_cation_magmom_summary: dict[str, dict[str, object]]
     cation_magmom_summary: dict[str, dict[str, object]]
+    cation_magmom_comparison: dict[str, dict[str, object]]
     warnings: list[str]
 
 
@@ -224,6 +226,7 @@ def project_poscar_elements(
     output_poscar.parent.mkdir(parents=True, exist_ok=True)
     output_poscar.write_text(poscar_text, encoding="utf-8")
 
+    source_moments: list[float] | None = None
     output_moments: list[float] | None = None
     output_moments_grouped: list[float] | None = None
     if source_incar is not None:
@@ -260,11 +263,24 @@ def project_poscar_elements(
         output_incar.parent.mkdir(parents=True, exist_ok=True)
         output_incar.write_text(incar_text, encoding="utf-8")
 
+    source_cation_magmom_summary = final_cation_magmom_summary(
+        source.species,
+        source_moments,
+        cation_set,
+        anion_set,
+        magmom_decimals,
+    )
     cation_magmom_summary = final_cation_magmom_summary(
         output_species,
         output_moments_grouped,
         cation_set,
         anion_set,
+        magmom_decimals,
+    )
+    cation_magmom_comparison = compare_cation_magmom_summaries(
+        source_cation_magmom_summary,
+        cation_magmom_summary,
+        output_species.symbols,
         magmom_decimals,
     )
     write_match_csv(match_csv, matches, source_symbols, target_symbols, source_for_matching, target)
@@ -289,7 +305,9 @@ def project_poscar_elements(
             "distance_limit_A": max_cation_distance_A,
             "species_order": output_species.symbols,
             "species_counts": dict(zip(output_species.symbols, output_species.counts)),
+            "source_cation_magmom_summary": source_cation_magmom_summary,
             "cation_magmom_summary": cation_magmom_summary,
+            "cation_magmom_comparison": cation_magmom_comparison,
             "warnings": warnings,
             "notes": [
                 "Cation species and cation MAGMOM values were projected from source POSCAR A.",
@@ -309,7 +327,9 @@ def project_poscar_elements(
         cation_matches=matches,
         max_cation_distance_A=worst,
         output_species=output_species,
+        source_cation_magmom_summary=source_cation_magmom_summary,
         cation_magmom_summary=cation_magmom_summary,
+        cation_magmom_comparison=cation_magmom_comparison,
         warnings=warnings,
     )
 
@@ -674,6 +694,56 @@ def format_cation_magmom_summary(summary: dict[str, dict[str, object]]) -> list[
             f"+{entry.get('positive', 0)} -{entry.get('negative', 0)} 0={entry.get('zero', 0)} "
             f"sum={float(entry.get('sum', 0.0)):g} mean={float(entry.get('mean', 0.0)):g} "
             f"abs=[{abs_text}]"
+        )
+    return lines
+
+
+def compare_cation_magmom_summaries(
+    source: dict[str, dict[str, object]],
+    output: dict[str, dict[str, object]],
+    output_order: list[str],
+    decimals: int,
+) -> dict[str, dict[str, object]]:
+    symbols = [symbol for symbol in output_order if symbol in source or symbol in output]
+    symbols.extend(symbol for symbol in source if symbol not in symbols)
+    comparison: dict[str, dict[str, object]] = {}
+    for symbol in symbols:
+        source_entry = source.get(symbol, {})
+        output_entry = output.get(symbol, {})
+        comparison[symbol] = {
+            "source_count": int(source_entry.get("count", 0)),
+            "output_count": int(output_entry.get("count", 0)),
+            "count_delta": int(output_entry.get("count", 0)) - int(source_entry.get("count", 0)),
+            "source_positive": int(source_entry.get("positive", 0)),
+            "output_positive": int(output_entry.get("positive", 0)),
+            "positive_delta": int(output_entry.get("positive", 0)) - int(source_entry.get("positive", 0)),
+            "source_negative": int(source_entry.get("negative", 0)),
+            "output_negative": int(output_entry.get("negative", 0)),
+            "negative_delta": int(output_entry.get("negative", 0)) - int(source_entry.get("negative", 0)),
+            "source_zero": int(source_entry.get("zero", 0)),
+            "output_zero": int(output_entry.get("zero", 0)),
+            "zero_delta": int(output_entry.get("zero", 0)) - int(source_entry.get("zero", 0)),
+            "source_sum": float(source_entry.get("sum", 0.0)),
+            "output_sum": float(output_entry.get("sum", 0.0)),
+            "sum_delta": round(float(output_entry.get("sum", 0.0)) - float(source_entry.get("sum", 0.0)), decimals),
+            "source_unique_abs_moments": source_entry.get("unique_abs_moments", []),
+            "output_unique_abs_moments": output_entry.get("unique_abs_moments", []),
+            "unique_abs_moments_match": source_entry.get("unique_abs_moments", []) == output_entry.get("unique_abs_moments", []),
+        }
+    return comparison
+
+
+def format_cation_magmom_comparison(comparison: dict[str, dict[str, object]]) -> list[str]:
+    lines: list[str] = []
+    for symbol, entry in comparison.items():
+        lines.append(
+            f"{symbol}: n {entry['source_count']}->{entry['output_count']} "
+            f"(delta {entry['count_delta']:+d}); "
+            f"+/-/0 {entry['source_positive']}/{entry['source_negative']}/{entry['source_zero']}"
+            f"->{entry['output_positive']}/{entry['output_negative']}/{entry['output_zero']}; "
+            f"sum {float(entry['source_sum']):g}->{float(entry['output_sum']):g} "
+            f"(delta {float(entry['sum_delta']):+g}); "
+            f"abs_match={entry['unique_abs_moments_match']}"
         )
     return lines
 
@@ -1281,9 +1351,17 @@ def main(argv: list[str] | None = None) -> None:
         "Output species   : "
         + " ".join(f"{symbol}:{count}" for symbol, count in zip(result.output_species.symbols, result.output_species.counts))
     )
+    if result.source_cation_magmom_summary:
+        print("Prepared A MAGMOM:")
+        for line in format_cation_magmom_summary(result.source_cation_magmom_summary):
+            print(f"  {line}")
     if result.cation_magmom_summary:
-        print("Cation MAGMOM   :")
+        print("Projected C MAGMOM:")
         for line in format_cation_magmom_summary(result.cation_magmom_summary):
+            print(f"  {line}")
+    if result.cation_magmom_comparison:
+        print("Cation MAGMOM check:")
+        for line in format_cation_magmom_comparison(result.cation_magmom_comparison):
             print(f"  {line}")
     for warning in result.warnings:
         print(f"WARNING: {warning}")

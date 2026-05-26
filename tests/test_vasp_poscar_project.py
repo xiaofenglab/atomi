@@ -244,15 +244,24 @@ def test_project_poscar_maps_cation_elements_by_site_and_rewrites_magmom(tmp_pat
     assert plan["source_cation_count"] == 2
     assert plan["target_cation_count"] == 2
     assert plan["species_counts"] == {"U": 1, "Gd": 1, "O": 3}
+    assert plan["source_cation_magmom_summary"]["U"]["count"] == 1
+    assert plan["source_cation_magmom_summary"]["U"]["positive"] == 1
+    assert plan["source_cation_magmom_summary"]["Gd"]["count"] == 1
+    assert plan["source_cation_magmom_summary"]["Gd"]["positive"] == 1
     assert plan["cation_magmom_summary"]["U"]["count"] == 1
     assert plan["cation_magmom_summary"]["U"]["positive"] == 1
     assert plan["cation_magmom_summary"]["Gd"]["count"] == 1
     assert plan["cation_magmom_summary"]["Gd"]["positive"] == 1
+    assert plan["cation_magmom_comparison"]["U"]["count_delta"] == 0
+    assert plan["cation_magmom_comparison"]["Gd"]["unique_abs_moments_match"] is True
     assert "O" not in plan["cation_magmom_summary"]
     stdout = capsys.readouterr().out
-    assert "Cation MAGMOM" in stdout
+    assert "Prepared A MAGMOM" in stdout
+    assert "Projected C MAGMOM" in stdout
+    assert "Cation MAGMOM check" in stdout
     assert "U: n=1 +1 -0 0=0" in stdout
     assert "Gd: n=1 +1 -0 0=0" in stdout
+    assert "U: n 1->1 (delta +0)" in stdout
 
 
 def test_project_poscar_uses_target_centered_species_order_and_reorders_magmom(tmp_path: Path) -> None:
