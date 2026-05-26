@@ -32,6 +32,7 @@ class ProjectionResult:
     source_poscar: Path
     target_poscar: Path
     output_poscar: Path
+    prepared_source_poscar: Path | None
     output_incar: Path | None
     match_csv: Path
     plan_json: Path
@@ -53,6 +54,7 @@ def project_poscar_elements(
     target_poscar: Path,
     *,
     output_poscar: Path,
+    prepared_source_poscar: Path | None = None,
     source_incar: Path | None = None,
     output_incar: Path | None = None,
     match_csv: Path | None = None,
@@ -99,6 +101,23 @@ def project_poscar_elements(
     target_prepared = prepare_structure(target_raw, repeat=target_repeat)
     source = source_prepared.structure
     target = target_prepared.structure
+    prepared_source_poscar = (
+        prepared_source_poscar.expanduser().resolve()
+        if prepared_source_poscar is not None
+        else output_poscar.with_name("POSCAR_A_prepared")
+        if source_prepared.operations
+        else None
+    )
+    if prepared_source_poscar is not None:
+        source_text = write_poscar_text(
+            f"Prepared source {source_poscar.name} used for projection",
+            source.species,
+            source.cell,
+            source.scaled_positions,
+        )
+        prepared_source_poscar.parent.mkdir(parents=True, exist_ok=True)
+        prepared_source_poscar.write_text(source_text, encoding="utf-8")
+
     source_symbols = atom_symbols(source)
     target_symbols = atom_symbols(target)
     source_cations = selected_cation_indices(source_symbols, cation_set, anion_set)
@@ -199,6 +218,7 @@ def project_poscar_elements(
             "target_poscar": str(target_poscar),
             "source_incar": str(source_incar) if source_incar else "",
             "output_poscar": str(output_poscar),
+            "prepared_source_poscar": str(prepared_source_poscar) if prepared_source_poscar else "",
             "output_incar": str(output_incar) if output_incar else "",
             "source_operations": source_prepared.operations,
             "target_operations": target_prepared.operations,
@@ -222,6 +242,7 @@ def project_poscar_elements(
         source_poscar=source_poscar,
         target_poscar=target_poscar,
         output_poscar=output_poscar,
+        prepared_source_poscar=prepared_source_poscar,
         output_incar=output_incar,
         match_csv=match_csv,
         plan_json=plan_json,
@@ -803,6 +824,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--incar-a", "--source-incar", dest="source_incar", type=Path)
     parser.add_argument("--outdir", type=Path, default=Path("PROJECTED_POSCAR"))
     parser.add_argument("--out-poscar", type=Path)
+    parser.add_argument(
+        "--out-source-poscar",
+        "--out-prepared-source-poscar",
+        dest="prepared_source_poscar",
+        type=Path,
+        help="Write the repeated/cropped POSCAR A used for projection. Default: POSCAR_A_prepared when source operations are applied.",
+    )
     parser.add_argument("--out-incar", type=Path)
     parser.add_argument("--match-csv", type=Path)
     parser.add_argument("--plan-json", type=Path)
@@ -841,6 +869,7 @@ def main(argv: list[str] | None = None) -> None:
         args.source_poscar,
         args.target_poscar,
         output_poscar=output_poscar,
+        prepared_source_poscar=args.prepared_source_poscar,
         source_incar=args.source_incar,
         output_incar=output_incar,
         match_csv=args.match_csv or (outdir / "poscar_projection_map.csv"),
@@ -859,6 +888,8 @@ def main(argv: list[str] | None = None) -> None:
         source_crop_policy=args.source_crop_policy.replace("-", "_"),
     )
     print(f"Projected POSCAR : {result.output_poscar}")
+    if result.prepared_source_poscar:
+        print(f"Prepared source  : {result.prepared_source_poscar}")
     if result.output_incar:
         print(f"Projected INCAR  : {result.output_incar}")
     print(f"Projection map   : {result.match_csv}")

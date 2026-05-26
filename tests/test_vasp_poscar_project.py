@@ -261,12 +261,16 @@ def test_project_poscar_crops_2x3x3_source_to_2x2x2_target(tmp_path: Path) -> No
     )
 
     projected = read_poscar_structure(out / "POSCAR")
+    prepared = read_poscar_structure(out / "POSCAR_A_prepared")
     assert projected.species.symbols == ["U", "Gd"]
     assert projected.species.counts == [7, 1]
+    assert prepared.species.symbols == ["U", "Gd"]
+    assert prepared.species.counts == [7, 1]
     assert atom_symbols(projected).count("Gd") == 1
     plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
     assert plan["source_cation_count"] == 8
     assert plan["target_cation_count"] == 8
+    assert plan["prepared_source_poscar"] == str(out / "POSCAR_A_prepared")
     assert plan["source_operations"][0]["source_supercell"] == [2, 3, 3]
     assert plan["source_operations"][0]["keep_cells"] == [2, 2, 2]
 
