@@ -17,7 +17,7 @@ from atomi.viz.lammps import (
     summarize_recent_runtime_fraction,
     summarize_thermo,
 )
-from atomi.viz.vasp_live import count_dav_steps
+from atomi.viz.vasp_live import count_dav_steps, dav_timing_path, update_dav_timing
 
 
 def test_missing_inputs_reports_absent_files(tmp_path: Path) -> None:
@@ -37,6 +37,46 @@ def test_count_dav_steps(tmp_path: Path) -> None:
     )
 
     assert count_dav_steps(output) == 2
+
+
+def test_update_dav_timing_excludes_initialization_and_batches_new_dav_steps(tmp_path: Path) -> None:
+    output = tmp_path / "vasp.out"
+    output.write_text(
+        "initialization text\n"
+        "DAV:   1    -0.100000E+02   -0.100E+01   -0.100E+01  10  0.1E-02\n",
+        encoding="utf-8",
+    )
+
+    first = update_dav_timing(output, now=100.0)
+    assert first.dav_count == 1
+    assert first.timed_steps == 0
+    assert first.latest_seconds is None
+
+    output.write_text(
+        output.read_text(encoding="utf-8")
+        + "DAV:   2    -0.110000E+02   -0.100E+00   -0.100E+00  10  0.1E-03\n",
+        encoding="utf-8",
+    )
+    second = update_dav_timing(output, now=112.0)
+    assert second.dav_count == 2
+    assert second.timed_steps == 1
+    assert second.latest_seconds == pytest.approx(12.0)
+
+    output.write_text(
+        output.read_text(encoding="utf-8")
+        + "DAV:   3    -0.111000E+02   -0.100E-01   -0.100E-01  10  0.1E-04\n"
+        + "DAV:   4    -0.112000E+02   -0.100E-02   -0.100E-02  10  0.1E-05\n",
+        encoding="utf-8",
+    )
+    third = update_dav_timing(output, now=132.0)
+    assert third.timed_steps == 3
+    assert third.latest_seconds == pytest.approx(10.0)
+    assert third.mean_seconds == pytest.approx((12.0 + 10.0 + 10.0) / 3.0)
+    timing_text = dav_timing_path(output).read_text(encoding="utf-8")
+    assert "first observed DAV count is a baseline" in timing_text
+    assert "2 112.000000 12.000000 1" in timing_text
+    assert "3 132.000000 10.000000 2" in timing_text
+    assert "4 132.000000 10.000000 2" in timing_text
 
 
 def test_check_runs_marks_stale_output_as_stopped(tmp_path: Path) -> None:
