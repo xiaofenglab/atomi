@@ -1,13 +1,31 @@
-if (!exists("nfiles")) nfiles = 1
-if (nfiles < 1) nfiles = 1
-if (nfiles > 4) nfiles = 4
+if (!exists("nfiles")) {
+    nfiles = 1
+}
+if (nfiles < 1) {
+    nfiles = 1
+}
+if (nfiles > 4) {
+    nfiles = 4
+}
 
-if (!exists("win")) win = 100
-if (win < 1) win = 100
-if (!exists("timefile1")) timefile1 = ""
-if (!exists("timefile2")) timefile2 = ""
-if (!exists("timefile3")) timefile3 = ""
-if (!exists("timefile4")) timefile4 = ""
+if (!exists("win")) {
+    win = 100
+}
+if (win < 1) {
+    win = 100
+}
+if (!exists("timefile1")) {
+    timefile1 = ""
+}
+if (!exists("timefile2")) {
+    timefile2 = ""
+}
+if (!exists("timefile3")) {
+    timefile3 = ""
+}
+if (!exists("timefile4")) {
+    timefile4 = ""
+}
 
 set term dumb ansi 160 48
 set multiplot layout 2,2 title sprintf("VASP SCF Monitor (log10|dE| + Energy + observed DAV time, window=%d)", int(win))
@@ -16,8 +34,12 @@ set multiplot layout 2,2 title sprintf("VASP SCF Monitor (log10|dE| + Energy + o
 if (nfiles >= 1) {
     file = file1
     timefile = timefile1
-    if (!exists("fileshell1")) fileshell1 = file1
-    if (!exists("timefileshell1")) timefileshell1 = timefile1
+    if (!exists("fileshell1")) {
+        fileshell1 = file1
+    }
+    if (!exists("timefileshell1")) {
+        timefileshell1 = timefile1
+    }
     fileshell = fileshell1
     timefileshell = timefileshell1
 
@@ -70,8 +92,12 @@ if (nfiles >= 1) {
 if (nfiles >= 2) {
     file = file2
     timefile = timefile2
-    if (!exists("fileshell2")) fileshell2 = file2
-    if (!exists("timefileshell2")) timefileshell2 = timefile2
+    if (!exists("fileshell2")) {
+        fileshell2 = file2
+    }
+    if (!exists("timefileshell2")) {
+        timefileshell2 = timefile2
+    }
     fileshell = fileshell2
     timefileshell = timefileshell2
 
@@ -124,8 +150,12 @@ if (nfiles >= 2) {
 if (nfiles >= 3) {
     file = file3
     timefile = timefile3
-    if (!exists("fileshell3")) fileshell3 = file3
-    if (!exists("timefileshell3")) timefileshell3 = timefile3
+    if (!exists("fileshell3")) {
+        fileshell3 = file3
+    }
+    if (!exists("timefileshell3")) {
+        timefileshell3 = timefile3
+    }
     fileshell = fileshell3
     timefileshell = timefileshell3
 
@@ -178,8 +208,12 @@ if (nfiles >= 3) {
 if (nfiles >= 4) {
     file = file4
     timefile = timefile4
-    if (!exists("fileshell4")) fileshell4 = file4
-    if (!exists("timefileshell4")) timefileshell4 = timefile4
+    if (!exists("fileshell4")) {
+        fileshell4 = file4
+    }
+    if (!exists("timefileshell4")) {
+        timefileshell4 = timefile4
+    }
     fileshell = fileshell4
     timefileshell = timefileshell4
 

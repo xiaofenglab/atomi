@@ -1,6 +1,7 @@
 from pathlib import Path
 import os
 import time
+from importlib.resources import files
 
 import pytest
 
@@ -67,6 +68,17 @@ def test_run_gnuplot_reports_stderr(monkeypatch: pytest.MonkeyPatch, tmp_path: P
 
     with pytest.raises(RuntimeError, match="all points y value undefined"):
         _run_gnuplot(["file='vasp.out'"], script)
+
+
+def test_vasp_live4_gnuplot_uses_block_if_syntax() -> None:
+    script = files("atomi").joinpath("viz", "gnuplot", "vasp_live4.gp")
+    offenders = [
+        line
+        for line in script.read_text(encoding="utf-8").splitlines()
+        if line.lstrip().startswith("if ") and "{" not in line
+    ]
+
+    assert offenders == []
 
 
 def test_update_dav_timing_excludes_initialization_and_batches_new_dav_steps(tmp_path: Path) -> None:
