@@ -607,6 +607,19 @@ def _nonempty(value: Any) -> str:
     return text
 
 
+def _set_first_nonempty(
+    exports: dict[str, str],
+    env_key: str,
+    source: dict[str, Any],
+    *fields: str,
+) -> None:
+    for field in fields:
+        value = source.get(field)
+        if _nonempty(value):
+            exports.setdefault(env_key, str(value))
+            return
+
+
 def collect_environment_exports(config: dict[str, Any], config_path: Path | None = None) -> dict[str, str]:
     """Collect sourceable environment exports from a private HPC config."""
     exports: dict[str, str] = {}
@@ -660,6 +673,40 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
         for field, env_key in gk_mappings.items():
             if _nonempty(lammps_gk.get(field)):
                 exports.setdefault(env_key, str(lammps_gk[field]))
+        performance = lammps_gk.get("performance", {})
+        if isinstance(performance, dict):
+            _set_first_nonempty(
+                exports,
+                "ATOMI_LAMMPS_GK_STEPS_PER_HOUR",
+                performance,
+                "steps_per_hour",
+                "gk_steps_per_hour",
+                "observed_steps_per_hour",
+                "reference_steps_per_hour",
+            )
+            _set_first_nonempty(
+                exports,
+                "ATOMI_LAMMPS_GK_WALLTIME_SAFETY_FACTOR",
+                performance,
+                "walltime_safety_factor",
+                "safety_factor",
+            )
+            _set_first_nonempty(
+                exports,
+                "ATOMI_LAMMPS_GK_TIMESTEP_PS",
+                performance,
+                "default_timestep_ps",
+                "timestep_ps",
+                "reference_timestep_ps",
+            )
+            _set_first_nonempty(
+                exports,
+                "ATOMI_LAMMPS_GK_REFERENCE_ATOMS",
+                performance,
+                "reference_atoms",
+                "atoms",
+                "atoms_small",
+            )
 
     cp2k = profiles.get("cp2k", {})
     if isinstance(cp2k, dict):

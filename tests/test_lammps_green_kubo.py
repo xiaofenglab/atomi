@@ -339,6 +339,68 @@ def test_green_kubo_prepare_records_mliap_runtime_estimate(tmp_path):
     assert out["performance"]["reference_steps"] == 3000.0
 
 
+def test_green_kubo_prepare_reads_mliap_timing_from_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("ATOMI_LAMMPS_GK_STEPS_PER_HOUR", "2600")
+    monkeypatch.setenv("ATOMI_LAMMPS_GK_WALLTIME_SAFETY_FACTOR", "1.25")
+    cfg = base_cfg(tmp_path)
+    cfg["stages"] = [
+        {
+            "name": "npt_prod_300K",
+            "type": "npt",
+            "temperature": 300,
+            "production_run": True,
+            "chunk_name": "chunk_production",
+        }
+    ]
+    config = tmp_path / "config_production.json"
+    config.write_text(json.dumps(cfg), encoding="utf-8")
+    stage_dir = tmp_path / "stages" / "npt_prod_300K"
+    chunk = stage_dir / "chunk_production"
+    chunk.mkdir(parents=True)
+    (chunk / "log.in.npt_prod_300K_production").write_text("LAMMPS log\n", encoding="utf-8")
+    (stage_dir / "npt_prod_300K.data").write_text("data\n", encoding="utf-8")
+    model = tmp_path / "model-mliap_lammps.pt"
+    model.write_text("model\n", encoding="utf-8")
+    set_project_root(tmp_path)
+
+    green_kubo.main(
+        [
+            "prepare",
+            "--config",
+            str(config),
+            "--outdir",
+            "analysis/gk_mliap_env_estimate",
+            "--config-out",
+            "config_gk_mliap_env_estimate.json",
+            "--model-file",
+            str(model),
+            "--pair-style-backend",
+            "mliap",
+            "--model-elements",
+            "O",
+            "U",
+            "--n-seeds",
+            "1",
+            "--nve-time-ps",
+            "1.0",
+            "--nvt-preequilibration-ps",
+            "0.25",
+            "--timestep-ps",
+            "0.00025",
+            "--array-limit",
+            "1",
+        ]
+    )
+
+    out = json.loads((tmp_path / "config_gk_mliap_env_estimate.json").read_text(encoding="utf-8"))
+    estimate = out["green_kubo_settings"]["runtime_estimate"]
+    assert estimate["estimated_total_md_steps_per_stage"] == 5000
+    assert estimate["observed_steps_per_hour"] == 2600.0
+    assert estimate["walltime_safety_factor"] == 1.25
+    assert estimate["estimated_walltime_hours_per_stage"] == 2.4038461538461537
+    assert out["stages"][0]["walltime_hours"] == 2.4038461538461537
+
+
 def test_green_kubo_mliap_probe_forces_gk_binary(tmp_path):
     cfg = base_cfg(tmp_path)
     data = tmp_path / "start.data"

@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -102,12 +103,60 @@ def _gk_nvt_steps(args: argparse.Namespace) -> int:
     return max(0, int(round(float(args.nvt_preequilibration_ps) / float(args.timestep_ps))))
 
 
+def _gk_total_steps(args: argparse.Namespace) -> int:
+    nve_steps = int(round(float(args.nve_time_ps) / float(args.timestep_ps)))
+    return nve_steps + _gk_nvt_steps(args)
+
+
+def _parse_prompted_steps_per_hour(value: str, total_steps: int) -> float | None:
+    text = value.strip().lower()
+    if not text:
+        return None
+    if text.endswith("h"):
+        hours = _positive_float_or_none(text[:-1])
+        if hours is None:
+            return None
+        return float(total_steps) / hours
+    return _positive_float_or_none(text)
+
+
+def maybe_prompt_gk_steps_per_hour(template: dict[str, Any], args: argparse.Namespace) -> None:
+    """Prompt once for GK/ML-IAP throughput when no config/env/CLI estimate exists."""
+    if not _gk_mliap_requested(template, args):
+        return
+    if args.walltime_hours is not None or _resolve_gk_steps_per_hour(args) is not None:
+        return
+    total_steps = _gk_total_steps(args)
+    nvt_steps = _gk_nvt_steps(args)
+    nve_steps = total_steps - nvt_steps
+    message = (
+        "GK/ML-IAP timing is not configured. "
+        f"This prepare request expects about {total_steps} MD steps per seed "
+        f"({nvt_steps} NVT + {nve_steps} NVE at {float(args.timestep_ps) * 1000.0:g} fs). "
+        "Store a reusable value in profiles.lammps_gk_mliap.performance.steps_per_hour "
+        "or ATOMI_LAMMPS_GK_STEPS_PER_HOUR."
+    )
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print(f"WARNING: {message}")
+        return
+    print(message)
+    raw = input(
+        "Enter observed GK steps/hour, or observed hours for one seed as e.g. 42.3h "
+        "[blank to continue without estimate]: "
+    )
+    steps_per_hour = _parse_prompted_steps_per_hour(raw, total_steps)
+    if steps_per_hour is None:
+        if raw.strip():
+            raise ValueError("Could not parse GK timing input. Use steps/hour or hours like 42.3h.")
+        return
+    args.gk_steps_per_hour = steps_per_hour
+
+
 def _gk_walltime_hours(args: argparse.Namespace) -> float | None:
     steps_per_hour = _resolve_gk_steps_per_hour(args)
     if steps_per_hour is None:
         return None
-    nve_steps = int(round(float(args.nve_time_ps) / float(args.timestep_ps)))
-    total_steps = nve_steps + _gk_nvt_steps(args)
+    total_steps = _gk_total_steps(args)
     return max((total_steps / steps_per_hour) * _resolve_gk_walltime_safety_factor(args), 0.25)
 
 
@@ -352,6 +401,7 @@ def write_manifest(path: Path, rows: list[dict]) -> None:
 def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
     records, root, template = discover_npt_records(args)
     args.timestep_ps = _resolve_prepare_timestep_ps(template, args)
+    maybe_prompt_gk_steps_per_hour(template, args)
     records = select_temperature_records(records, args)
     if not records:
         raise RuntimeError("No NPT records matched the Green-Kubo temperature selection.")
@@ -1254,7 +1304,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help=(
             "Observed GK/ML-IAP throughput used to estimate per-stage walltime. "
-            "Also read from ATOMI_LAMMPS_GK_STEPS_PER_HOUR when unset."
+            "Also read from ATOMI_LAMMPS_GK_STEPS_PER_HOUR, which confighpc can "
+            "export from profiles.lammps_gk_mliap.performance.steps_per_hour."
         ),
     )
     prep.add_argument(

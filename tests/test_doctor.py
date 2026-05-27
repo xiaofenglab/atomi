@@ -275,6 +275,12 @@ def test_confighpc_exports_separate_gk_lammps_profile(tmp_path: Path) -> None:
                         "lammps_prefix": "/private/mliap",
                         "python_shared_lib": "/private/python/lib",
                         "environment": {"ATOMI_LAMMPS_GK_BACKEND": "mliap", "MACE_ALLOW_CPU": "true"},
+                        "performance": {
+                            "steps_per_hour": 2600,
+                            "walltime_safety_factor": 1.25,
+                            "default_timestep_ps": 0.00025,
+                            "reference_atoms": 768,
+                        },
                     },
                 },
             }
@@ -293,6 +299,10 @@ def test_confighpc_exports_separate_gk_lammps_profile(tmp_path: Path) -> None:
     assert "export ATOMI_LAMMPS_GK_PREFIX=/private/mliap" in env_text
     assert "export ATOMI_LAMMPS_GK_BACKEND=mliap" in env_text
     assert "export ATOMI_LAMMPS_GK_EXTRA_LD_LIBRARY_PATH=/private/python/lib" in env_text
+    assert "export ATOMI_LAMMPS_GK_STEPS_PER_HOUR=2600" in env_text
+    assert "export ATOMI_LAMMPS_GK_WALLTIME_SAFETY_FACTOR=1.25" in env_text
+    assert "export ATOMI_LAMMPS_GK_TIMESTEP_PS=0.00025" in env_text
+    assert "export ATOMI_LAMMPS_GK_REFERENCE_ATOMS=768" in env_text
     assert "export MACE_ALLOW_CPU=true" in env_text
 
 
