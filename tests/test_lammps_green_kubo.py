@@ -537,6 +537,69 @@ def test_green_kubo_analyze_integrates_lammps_hcacf(tmp_path):
     assert "0.00625" in table
 
 
+def test_green_kubo_validate_reports_seed_and_axis_warnings(tmp_path, capsys):
+    cfg = base_cfg(tmp_path)
+    cfg["stages"] = [
+        {
+            "name": "gk_T300K_s01",
+            "type": "nve",
+            "temperature": 300,
+            "green_kubo_run": True,
+            "chunk_name": "chunk_gk",
+            "velocity_seed": 100,
+        }
+    ]
+    config = tmp_path / "config_gk.json"
+    config.write_text(json.dumps(cfg), encoding="utf-8")
+    fit = tmp_path / "analysis" / "gk_fit"
+    fit.mkdir(parents=True)
+    chunk = tmp_path / "stages" / "gk_T300K_s01" / "chunk_gk"
+    chunk.mkdir(parents=True)
+    hcacf = chunk / "heatflux_hcacf.dat"
+    hcacf.write_text(
+        "\n".join(
+            [
+                "# TimeStep Number-of-time-windows",
+                "# Index TimeDelta c_flux[1]*c_flux[1] c_flux[2]*c_flux[2] c_flux[3]*c_flux[3]",
+                "100 1",
+                "1 0 1.0 1.0 1.0",
+                "2 10 0.5 0.5 0.5",
+                "3 20 0.25 0.25 0.25",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (fit / "gk_seed_summary.csv").write_text(
+        "stage_name,temperature_K,seed,status,hcacf_path,k_seed_W_mK\n"
+        f"gk_T300K_s01,300,100,ok,{hcacf},1.0\n",
+        encoding="utf-8",
+    )
+    (fit / "thermal_conductivity_T.csv").write_text(
+        "T_K,k_W_mK,k_x_W_mK,k_y_W_mK,k_z_W_mK,n_gk_seeds\n"
+        "300,1.0,0.5,1.0,2.0,1\n",
+        encoding="utf-8",
+    )
+
+    green_kubo.main(
+        [
+            "validate",
+            "--gk-config",
+            str(config),
+            "--fit-dir",
+            str(fit),
+            "--min-seeds",
+            "3",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert "GK Validation Summary" in output
+    assert "T=300 K" in output
+    assert "only 1 ok seed" in output
+    assert "axis spread high" in output
+
+
 def test_green_kubo_hcacf_parser_handles_lammps_count_column(tmp_path):
     hcacf = tmp_path / "heatflux_hcacf.dat"
     hcacf.write_text(

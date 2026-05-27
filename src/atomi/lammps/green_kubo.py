@@ -766,6 +766,23 @@ def write_hcacf_csv(path: Path, rows: list[dict[str, float]]) -> None:
     write_csv(path, rows, ["time_ps", "HCACF_x", "HCACF_y", "HCACF_z"])
 
 
+def read_csv_dicts(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def finite_float_or_none(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
 def summarize_gk_log(path: Path | None, timestep_ps: float, window_ps: float) -> dict[str, float | None]:
     if path is None:
         return {"temperature_mean_K": None, "volume_mean_A3": None}
@@ -982,6 +999,210 @@ def analyze_main(args: argparse.Namespace) -> dict[str, Any]:
     return metadata
 
 
+def cumulative_hcacf_integral(rows: list[dict[str, float]]) -> list[float]:
+    values: list[float] = []
+    integral = 0.0
+    previous_time: float | None = None
+    previous_hcacf: float | None = None
+    for row in rows:
+        time = float(row["time_ps"])
+        hcacf = float(np.mean([row["HCACF_x"], row["HCACF_y"], row["HCACF_z"]]))
+        if previous_time is not None and previous_hcacf is not None:
+            integral += 0.5 * (previous_hcacf + hcacf) * (time - previous_time)
+        values.append(integral)
+        previous_time = time
+        previous_hcacf = hcacf
+    return values
+
+
+def plateau_drift_fraction(rows: list[dict[str, float]], *, tail_fraction: float) -> float | None:
+    if len(rows) < 4:
+        return None
+    tail_fraction = min(max(tail_fraction, 0.05), 1.0)
+    integrals = cumulative_hcacf_integral(rows)
+    tail_count = max(2, int(math.ceil(len(integrals) * tail_fraction)))
+    tail = np.asarray(integrals[-tail_count:], dtype=float)
+    full = np.asarray(integrals, dtype=float)
+    scale = max(float(np.max(np.abs(full))), abs(float(tail[-1])), 1.0e-30)
+    return float((np.max(tail) - np.min(tail)) / scale)
+
+
+def sample_mean_std(values: list[float]) -> tuple[float | None, float | None]:
+    finite = [value for value in values if math.isfinite(value)]
+    if not finite:
+        return None, None
+    if len(finite) == 1:
+        return float(finite[0]), 0.0
+    return float(np.mean(finite)), float(np.std(finite, ddof=1))
+
+
+def warning_level(value: float | None, warn: float, fail: float) -> str:
+    if value is None:
+        return "unknown"
+    if value >= fail:
+        return "fail"
+    if value >= warn:
+        return "warn"
+    return "ok"
+
+
+def validate_main(args: argparse.Namespace) -> dict[str, Any]:
+    config = args.gk_config.resolve()
+    cfg = load_json(config)
+    root = config.parent.resolve()
+    fit_dir = resolve_root_path(args.fit_dir, root)
+    seed_rows = read_csv_dicts(fit_dir / "gk_seed_summary.csv")
+    final_rows = read_csv_dicts(fit_dir / "thermal_conductivity_T.csv")
+    if not seed_rows:
+        raise FileNotFoundError(f"No seed summary found at {fit_dir / 'gk_seed_summary.csv'}")
+    if not final_rows:
+        raise FileNotFoundError(f"No k(T) table found at {fit_dir / 'thermal_conductivity_T.csv'}")
+
+    expected_stages = [stage for stage in cfg.get("stages", []) if stage.get("green_kubo_run", False)]
+    expected_by_name = {stage["name"]: stage for stage in expected_stages}
+    seed_by_temp: dict[float, list[dict[str, str]]] = {}
+    for row in seed_rows:
+        temp = finite_float_or_none(row.get("temperature_K"))
+        if temp is not None:
+            seed_by_temp.setdefault(temp, []).append(row)
+
+    final_by_temp: dict[float, dict[str, str]] = {}
+    for row in final_rows:
+        temp = finite_float_or_none(row.get("T_K") or row.get("temperature_K"))
+        if temp is not None:
+            final_by_temp[temp] = row
+
+    reports: list[dict[str, Any]] = []
+    global_warnings: list[str] = []
+    seen_stages = {row.get("stage_name") for row in seed_rows}
+    missing_expected = sorted(name for name in expected_by_name if name not in seen_stages)
+    if missing_expected:
+        global_warnings.append(f"missing expected stage rows: {', '.join(missing_expected)}")
+
+    for temp in sorted(set(seed_by_temp) | set(final_by_temp)):
+        rows = seed_by_temp.get(temp, [])
+        ok_rows = [row for row in rows if row.get("status") == "ok"]
+        bad_rows = [row for row in rows if row.get("status") != "ok"]
+        k_seed_values = [
+            value
+            for row in ok_rows
+            if (value := finite_float_or_none(row.get("k_seed_W_mK"))) is not None
+        ]
+        seed_mean, seed_std = sample_mean_std(k_seed_values)
+        seed_cv = abs(seed_std / seed_mean) if seed_mean not in (None, 0.0) and seed_std is not None else None
+        final = final_by_temp.get(temp, {})
+        k_final = finite_float_or_none(final.get("k_W_mK"))
+        axes = [
+            value
+            for key in ("k_x_W_mK", "k_y_W_mK", "k_z_W_mK")
+            if (value := finite_float_or_none(final.get(key))) is not None
+        ]
+        axis_spread = None
+        if len(axes) == 3 and k_final not in (None, 0.0):
+            axis_spread = (max(axes) - min(axes)) / abs(k_final)
+
+        drift_values: list[float] = []
+        missing_hcacf = 0
+        for row in ok_rows:
+            hcacf_path = Path(row.get("hcacf_path") or "")
+            if not hcacf_path.is_absolute():
+                hcacf_path = root / hcacf_path
+            if not hcacf_path.exists():
+                missing_hcacf += 1
+                continue
+            try:
+                table = parse_hcacf_dat(hcacf_path, float(cfg.get("timestep_ps", cfg.get("timestep", DEFAULT_GK_MLIAP_TIMESTEP_PS))))
+            except Exception:
+                missing_hcacf += 1
+                continue
+            drift = plateau_drift_fraction(table, tail_fraction=args.plateau_tail_fraction)
+            if drift is not None:
+                drift_values.append(drift)
+        drift_mean, drift_std = sample_mean_std(drift_values)
+
+        warnings: list[str] = []
+        if len(ok_rows) < args.min_seeds:
+            warnings.append(f"only {len(ok_rows)} ok seed(s); target >= {args.min_seeds}")
+        if bad_rows:
+            warnings.append(f"{len(bad_rows)} seed row(s) not ok")
+        if missing_hcacf:
+            warnings.append(f"{missing_hcacf} ok seed(s) missing readable HCACF")
+        if warning_level(axis_spread, args.axis_spread_warn_fraction, args.axis_spread_fail_fraction) != "ok":
+            warnings.append(f"axis spread high: {axis_spread:.1%}" if axis_spread is not None else "axis spread unavailable")
+        if warning_level(seed_cv, args.seed_cv_warn_fraction, args.seed_cv_fail_fraction) != "ok":
+            warnings.append(f"seed CV high: {seed_cv:.1%}" if seed_cv is not None else "seed CV unavailable")
+        if warning_level(drift_mean, args.plateau_drift_warn_fraction, args.plateau_drift_fail_fraction) != "ok":
+            warnings.append(f"late integral drift high: {drift_mean:.1%}" if drift_mean is not None else "late integral drift unavailable")
+
+        status = "ok"
+        if warnings:
+            status = "warn"
+        if (
+            warning_level(axis_spread, args.axis_spread_warn_fraction, args.axis_spread_fail_fraction) == "fail"
+            or warning_level(seed_cv, args.seed_cv_warn_fraction, args.seed_cv_fail_fraction) == "fail"
+            or warning_level(drift_mean, args.plateau_drift_warn_fraction, args.plateau_drift_fail_fraction) == "fail"
+        ):
+            status = "fail"
+        reports.append(
+            {
+                "temperature_K": temp,
+                "status": status,
+                "k_W_mK": k_final,
+                "k_axes_W_mK": axes,
+                "axis_spread_fraction": axis_spread,
+                "seed_count": len(rows),
+                "ok_seed_count": len(ok_rows),
+                "k_seed_mean_W_mK": seed_mean,
+                "k_seed_std_W_mK": seed_std,
+                "seed_cv_fraction": seed_cv,
+                "late_integral_drift_mean_fraction": drift_mean,
+                "late_integral_drift_std_fraction": drift_std,
+                "warnings": warnings,
+            }
+        )
+
+    output = {
+        "schema": "atomi.lammps.green_kubo.validation.v1",
+        "config": str(config),
+        "fit_dir": str(fit_dir),
+        "rules": {
+            "min_seeds": args.min_seeds,
+            "axis_spread_warn_fraction": args.axis_spread_warn_fraction,
+            "axis_spread_fail_fraction": args.axis_spread_fail_fraction,
+            "seed_cv_warn_fraction": args.seed_cv_warn_fraction,
+            "seed_cv_fail_fraction": args.seed_cv_fail_fraction,
+            "plateau_drift_warn_fraction": args.plateau_drift_warn_fraction,
+            "plateau_drift_fail_fraction": args.plateau_drift_fail_fraction,
+            "plateau_tail_fraction": args.plateau_tail_fraction,
+        },
+        "global_warnings": global_warnings,
+        "temperatures": reports,
+    }
+    if args.json_out:
+        json_out = resolve_root_path(args.json_out, root)
+        write_json(json_out, output)
+        print(f"Wrote GK validation JSON: {json_out}")
+
+    print("GK Validation Summary")
+    print("---------------------")
+    if global_warnings:
+        for warning in global_warnings:
+            print(f"WARNING: {warning}")
+    for report in reports:
+        k_label = "NA" if report["k_W_mK"] is None else f"{report['k_W_mK']:.4g}"
+        axis_label = "NA" if report["axis_spread_fraction"] is None else f"{report['axis_spread_fraction']:.1%}"
+        cv_label = "NA" if report["seed_cv_fraction"] is None else f"{report['seed_cv_fraction']:.1%}"
+        drift_label = "NA" if report["late_integral_drift_mean_fraction"] is None else f"{report['late_integral_drift_mean_fraction']:.1%}"
+        print(
+            f"T={report['temperature_K']:g} K  status={report['status']}  "
+            f"k={k_label} W/m/K  ok_seeds={report['ok_seed_count']}/{report['seed_count']}  "
+            f"axis_spread={axis_label}  seed_cv={cv_label}  late_drift={drift_label}"
+        )
+        for warning in report["warnings"]:
+            print(f"  - {warning}")
+    return output
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="thermal-gk-lammps",
@@ -1118,6 +1339,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use LAMMPS metal heat/flux scaling from mean T,V, or leave raw/unscaled. Default: metal.",
     )
     ana.add_argument("--green-kubo-scale", type=float, help="Manual scale overriding --scale-mode.")
+    val = sub.add_parser("validate", help="Summarize GK fit quality, seed statistics, and decision-rule warnings.")
+    val.add_argument("--gk-config", type=Path, default=Path("config_gk.json"))
+    val.add_argument("--fit-dir", type=Path, default=Path("analysis/gk_lammps/fit"))
+    val.add_argument("--json-out", type=Path, help="Optional validation report JSON. Relative paths are rooted at the config directory.")
+    val.add_argument("--min-seeds", type=int, default=5, help="Warn when fewer ok seeds are available. Default: 5.")
+    val.add_argument("--axis-spread-warn-fraction", type=float, default=0.25)
+    val.add_argument("--axis-spread-fail-fraction", type=float, default=0.50)
+    val.add_argument("--seed-cv-warn-fraction", type=float, default=0.25)
+    val.add_argument("--seed-cv-fail-fraction", type=float, default=0.50)
+    val.add_argument("--plateau-drift-warn-fraction", type=float, default=0.35)
+    val.add_argument("--plateau-drift-fail-fraction", type=float, default=0.75)
+    val.add_argument("--plateau-tail-fraction", type=float, default=0.25, help="Tail fraction of HCACF integral used for drift check.")
     return parser
 
 
@@ -1143,6 +1376,10 @@ def main(argv: list[str] | None = None) -> Any:
         return None
     if args.command == "analyze":
         analyze_main(args)
+        return None
+    if args.command == "validate":
+        validate_main(args)
+        return None
         return None
     parser.error(f"unknown command {args.command}")
 
