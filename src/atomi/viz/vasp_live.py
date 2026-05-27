@@ -1,4 +1,5 @@
 import shutil
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -20,7 +21,7 @@ def count_dav_steps(path: Path) -> int:
     """Count VASP electronic steps written as DAV lines."""
     try:
         with path.open(encoding="utf-8", errors="replace") as handle:
-            return sum(1 for line in handle if line.startswith("DAV:"))
+            return sum(1 for line in handle if line.lstrip().startswith("DAV:"))
     except FileNotFoundError:
         return 0
 
@@ -91,7 +92,9 @@ def plot_vasp_live(
                 _run_gnuplot(
                     [
                         f"file='{_gnuplot_quote(output_file)}'",
+                        f'fileshell="{_gnuplot_double_quote_shell(output_file)}"',
                         f"timefile='{_gnuplot_quote(timing.timing_file)}'",
+                        f'timefileshell="{_gnuplot_double_quote_shell(timing.timing_file)}"',
                         f"win={window}",
                     ],
                     script,
@@ -133,7 +136,15 @@ def plot_vasp_live4(
                     for index, path in enumerate(output_files, start=1)
                 )
                 args.extend(
+                    f'fileshell{index}="{_gnuplot_double_quote_shell(path)}"'
+                    for index, path in enumerate(output_files, start=1)
+                )
+                args.extend(
                     f"timefile{index}='{_gnuplot_quote(timing.timing_file)}'"
+                    for index, timing in enumerate(timings, start=1)
+                )
+                args.extend(
+                    f'timefileshell{index}="{_gnuplot_double_quote_shell(timing.timing_file)}"'
                     for index, timing in enumerate(timings, start=1)
                 )
                 _run_gnuplot(args, script)
@@ -148,7 +159,19 @@ def plot_vasp_live4(
 
 def _run_gnuplot(assignments: list[str], script: Path) -> None:
     expression = "; ".join(assignments)
-    subprocess.run(["gnuplot", "-e", expression, str(script)], check=True)
+    command = ["gnuplot", "-e", expression, str(script)]
+    result = subprocess.run(command, text=True, capture_output=True, check=False)
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.returncode != 0:
+        message = [
+            f"gnuplot failed with exit code {result.returncode}.",
+            f"script: {script}",
+            f"assignments: {expression}",
+        ]
+        if result.stderr:
+            message.extend(["gnuplot stderr:", result.stderr.rstrip()])
+        raise RuntimeError("\n".join(message))
 
 
 def _validate_files(paths: list[Path]) -> None:
@@ -168,6 +191,10 @@ def _clear_terminal() -> None:
 
 def _gnuplot_quote(path: Path) -> str:
     return str(path).replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _gnuplot_double_quote_shell(path: Path) -> str:
+    return shlex.quote(str(path)).replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _read_dav_timing(path: Path) -> tuple[int | None, float | None, list[tuple[int, float, float, int]]]:

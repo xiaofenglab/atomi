@@ -17,7 +17,7 @@ from atomi.viz.lammps import (
     summarize_recent_runtime_fraction,
     summarize_thermo,
 )
-from atomi.viz.vasp_live import count_dav_steps, dav_timing_path, update_dav_timing
+from atomi.viz.vasp_live import _run_gnuplot, count_dav_steps, dav_timing_path, update_dav_timing
 
 
 def test_missing_inputs_reports_absent_files(tmp_path: Path) -> None:
@@ -37,6 +37,36 @@ def test_count_dav_steps(tmp_path: Path) -> None:
     )
 
     assert count_dav_steps(output) == 2
+
+
+def test_count_dav_steps_accepts_indented_vasp_lines(tmp_path: Path) -> None:
+    output = tmp_path / "vasp.out"
+    output.write_text(
+        " running\n"
+        "  DAV:   1    -0.100000E+02   -0.100E+01   -0.100E+01\n"
+        "\tDAV:   2    -0.110000E+02   -0.100E+00   -0.100E+00\n",
+        encoding="utf-8",
+    )
+
+    assert count_dav_steps(output) == 2
+
+
+def test_run_gnuplot_reports_stderr(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    script = tmp_path / "plot.gp"
+    script.write_text("bad command\n", encoding="utf-8")
+
+    class Result:
+        stdout = "partial plot\n"
+        stderr = "line 12: all points y value undefined\n"
+        returncode = 1
+
+    def fake_run(*_args, **_kwargs):
+        return Result()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="all points y value undefined"):
+        _run_gnuplot(["file='vasp.out'"], script)
 
 
 def test_update_dav_timing_excludes_initialization_and_batches_new_dav_steps(tmp_path: Path) -> None:

@@ -12,17 +12,23 @@ if (win < 1) {
 if (!exists("timefile")) {
     timefile = ""
 }
+if (!exists("fileshell")) {
+    fileshell = file
+}
+if (!exists("timefileshell")) {
+    timefileshell = timefile
+}
 
 set term dumb ansi 140 56
 set multiplot layout 3,1 title sprintf("VASP SCF Monitor (window=%d)", int(win))
 
-fname_cmd      = "basename " . file
-latest_de_cmd  = "awk '/^DAV:/{de=$4} END{print (de!=\"\"?de:\"NA\")}' " . file
-latest_rms_cmd = "awk '/^DAV:/{r=$7} END{print (r!=\"\"?r:\"NA\")}' " . file
-latest_E_cmd   = "awk '/^DAV:/{e=$3} END{print (e!=\"\"?e:\"NA\")}' " . file
-nstep_cmd      = "awk '/^DAV:/{n++} END{print (n>0?n:0)}' " . file
-latest_dt_cmd  = "awk 'NF>=4 && $1 !~ /^#/{dt=$3} /^# state/{base=$3} END{if(dt!=\"\") print sprintf(\"%.1fs\",dt); else if(base!=\"\") print \"waiting>DAV\" base; else print \"waiting\"}' " . timefile
-mean_dt_cmd    = "awk 'NF>=4 && $1 !~ /^#/{sum+=$3; n++} /^# state/{base=$3} END{if(n>0) print sprintf(\"%.1fs\",sum/n); else if(base!=\"\") print \"waiting>DAV\" base; else print \"waiting\"}' " . timefile
+fname_cmd      = "basename -- " . fileshell
+latest_de_cmd  = "awk '/^[[:space:]]*DAV:/{de=$4} END{print (de!=\"\"?de:\"NA\")}' " . fileshell
+latest_rms_cmd = "awk '/^[[:space:]]*DAV:/{if(NF>=7) r=$7} END{print (r!=\"\"?r:\"NA\")}' " . fileshell
+latest_E_cmd   = "awk '/^[[:space:]]*DAV:/{e=$3} END{print (e!=\"\"?e:\"NA\")}' " . fileshell
+nstep_cmd      = "awk '/^[[:space:]]*DAV:/{n++} END{print (n>0?n:0)}' " . fileshell
+latest_dt_cmd  = "awk 'NF>=4 && $1 !~ /^#/{dt=$3} /^# state/{base=$3} END{if(dt!=\"\") print sprintf(\"%.1fs\",dt); else if(base!=\"\") print \"waiting>DAV\" base; else print \"waiting\"}' " . timefileshell
+mean_dt_cmd    = "awk 'NF>=4 && $1 !~ /^#/{sum+=$3; n++} /^# state/{base=$3} END{if(n>0) print sprintf(\"%.1fs\",sum/n); else if(base!=\"\") print \"waiting>DAV\" base; else print \"waiting\"}' " . timefileshell
 
 fname      = system(fname_cmd)
 latest_de  = system(latest_de_cmd)
@@ -61,8 +67,8 @@ set grid
 set key off
 
 plot \
-    "< awk '/^DAV:/{c++; v=$4+0; if (v<0) v=-v; if (v>0) print c, log(v)/log(10)}' ".file using 1:2 with lines lc rgb "red" title "log10(|dE|)", \
-    "< awk '/^DAV:/{c++; print c,$3}' ".file using 1:2 axes x1y2 with lines lc rgb "cyan" title "E"
+    "< awk '/^[[:space:]]*DAV:/{c++; v=$4+0; if (v<0) v=-v; if (v>0){print c, log(v)/log(10); p++}} END{if(p==0) print 1,0}' ".fileshell using 1:2 with lines lc rgb "red" title "log10(|dE|)", \
+    "< awk '/^[[:space:]]*DAV:/{c++; if(NF>=3){print c,$3; p++}} END{if(p==0) print 1,0}' ".fileshell using 1:2 axes x1y2 with lines lc rgb "cyan" title "E"
 
 # -------- panel 2: log10(rms) --------
 unset label
@@ -81,7 +87,7 @@ set key off
 set label 1 sprintf("latest rms: %s", latest_rms) at graph 0.98,0.95 right textcolor rgb "magenta"
 
 plot \
-    "< awk '/^DAV:/{c++; v=$7+0; if (v>0) print c, log(v)/log(10)}' ".file using 1:2 with lines lc rgb "magenta" title "log10(rms)"
+    "< awk '/^[[:space:]]*DAV:/{c++; if(NF>=7){v=$7+0; if (v>0){print c, log(v)/log(10); p++}}} END{if(p==0) print 1,0}' ".fileshell using 1:2 with lines lc rgb "magenta" title "log10(rms)"
 
 # -------- panel 3: observed DAV seconds --------
 unset label
@@ -100,6 +106,6 @@ set key off
 set label 1 sprintf("live timing excludes initialization; batch refreshes are averaged per new DAV") at graph 0.02,0.95 left textcolor rgb "green"
 
 plot \
-    "< awk 'NF>=4 && $1 !~ /^#/{n++; print $1,$3} END{if(n==0) print 1,0}' ".timefile using 1:2 with linespoints lc rgb "green" title "seconds/DAV"
+    "< awk 'NF>=4 && $1 !~ /^#/{n++; print $1,$3} END{if(n==0) print 1,0}' ".timefileshell using 1:2 with linespoints lc rgb "green" title "seconds/DAV"
 
 unset multiplot
