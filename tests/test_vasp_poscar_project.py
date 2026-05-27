@@ -12,7 +12,7 @@ from atomi.vasp.magmom import (
     read_poscar_structure,
     strip_incar_comment,
 )
-from atomi.vasp.poscar_project import atom_symbols, cell_volume, main as project_main
+from atomi.vasp.poscar_project import atom_symbols, cell_volume, main as project_main, repaired_crop_cation_indices
 
 
 def write_source_poscar(path: Path) -> None:
@@ -199,6 +199,55 @@ def write_2x3x3_balanced_fold_source(path: Path) -> list[float]:
         "0.0 0.0 3.0\n"
         "Gd U O\n"
         "9 9 36\n"
+        "Direct\n"
+        + "".join(f"{x:.10f} {y:.10f} {z:.10f}\n" for _symbol, (x, y, z), _moment in grouped),
+        encoding="utf-8",
+    )
+    return [moment for _symbol, _position, moment in grouped]
+
+
+def write_2x3x3_noisy_charge_coupled_source(path: Path) -> list[float]:
+    positions: list[tuple[str, tuple[float, float, float], float]] = []
+    gd_cells = {(1, 2, 2), (0, 2, 1)}
+    u5_cell = (0, 2, 2)
+    noisy_u4 = [
+        -1.994,
+        2.011,
+        -2.005,
+        1.990,
+        -1.989,
+        -1.997,
+        1.996,
+        -1.996,
+        -2.001,
+        2.015,
+        1.986,
+        2.000,
+        2.015,
+        1.990,
+        -1.992,
+    ]
+    u4_index = 0
+    for i in range(2):
+        for j in range(3):
+            for k in range(3):
+                position = ((i + 0.5) / 2, (j + 0.5) / 3, (k + 0.5) / 3)
+                if (i, j, k) in gd_cells:
+                    positions.append(("Gd", position, 7.071 if (i + j + k) % 2 == 0 else -7.070))
+                elif (i, j, k) == u5_cell:
+                    positions.append(("U", position, -1.044))
+                else:
+                    positions.append(("U", position, noisy_u4[u4_index]))
+                    u4_index += 1
+    grouped = [item for item in positions if item[0] == "Gd"] + [item for item in positions if item[0] == "U"]
+    path.write_text(
+        "A 2x3x3 noisy Gd/U charge-coupled pattern\n"
+        "1.0\n"
+        "2.0 0.0 0.0\n"
+        "0.0 3.0 0.0\n"
+        "0.0 0.0 3.0\n"
+        "Gd U\n"
+        "2 16\n"
         "Direct\n"
         + "".join(f"{x:.10f} {y:.10f} {z:.10f}\n" for _symbol, (x, y, z), _moment in grouped),
         encoding="utf-8",
@@ -514,6 +563,46 @@ def test_project_poscar_crop_prefers_minority_and_charge_coupled_cations(tmp_pat
     assert operation["crop_magnetic_signature"]["Gd"]["positive"] == 1
 
 
+def test_project_poscar_crop_preserves_noisy_charge_coupled_host(tmp_path: Path) -> None:
+    source = tmp_path / "A_noisy_charge_POSCAR"
+    target = tmp_path / "B_2x2x2_POSCAR"
+    incar = tmp_path / "A_INCAR"
+    out = tmp_path / "projected_noisy_charge_crop"
+    moments = write_2x3x3_noisy_charge_coupled_source(source)
+    write_2x2x2_cation_target(target)
+    incar.write_text("MAGMOM = " + " ".join(f"{moment:g}" for moment in moments) + "\n", encoding="utf-8")
+
+    project_main(
+        [
+            "--element-poscar",
+            str(source),
+            "--structure-poscar",
+            str(target),
+            "--incar-a",
+            str(incar),
+            "--outdir",
+            str(out),
+            "--source-supercell",
+            "2x3x3",
+            "--source-keep-cells",
+            "2x2x2",
+            "--cation-elements",
+            "Gd,U",
+        ]
+    )
+
+    output_moments = existing_magmom_values(out / "INCAR", 8)
+    assert output_moments is not None
+    assert sum(1 for moment in output_moments if abs(moment) > 6.0) == 2
+    assert sum(1 for moment in output_moments if 0.8 < abs(moment) < 1.3) == 1
+    assert sum(1 for moment in output_moments if 1.7 < abs(moment) < 2.3) == 5
+    plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    operation = plan["source_operations"][0]
+    assert operation["selection_policy"] == "defect_preserving"
+    assert operation["minority_cations_kept"] == 2
+    assert operation["charge_variant_cations_kept"] == 1
+
+
 def test_project_poscar_equal_cation_counts_use_regular_origin_crop(tmp_path: Path) -> None:
     source = tmp_path / "A_2x3x3_POSCAR"
     target = tmp_path / "B_2x2x2_POSCAR"
@@ -605,6 +694,46 @@ def test_project_poscar_can_reduce_source_to_representative_cation_cell(tmp_path
     assert plan["cation_magmom_comparison"]["U"]["unique_abs_moments_match"] is True
 
 
+def test_project_poscar_reduction_preserves_noisy_charge_coupled_host(tmp_path: Path) -> None:
+    source = tmp_path / "A_noisy_charge_POSCAR"
+    target = tmp_path / "B_2x2x2_POSCAR"
+    incar = tmp_path / "A_INCAR"
+    out = tmp_path / "projected_noisy_charge"
+    moments = write_2x3x3_noisy_charge_coupled_source(source)
+    write_2x2x2_cation_target(target)
+    incar.write_text("MAGMOM = " + " ".join(f"{moment:g}" for moment in moments) + "\n", encoding="utf-8")
+
+    project_main(
+        [
+            "--element-poscar",
+            str(source),
+            "--structure-poscar",
+            str(target),
+            "--incar-a",
+            str(incar),
+            "--outdir",
+            str(out),
+            "--source-supercell",
+            "2x3x3",
+            "--source-reduce-cells",
+            "2x2x2",
+            "--cation-elements",
+            "Gd,U",
+        ]
+    )
+
+    output_moments = existing_magmom_values(out / "INCAR", 8)
+    assert output_moments is not None
+    assert sum(1 for moment in output_moments if abs(moment) > 6.0) == 2
+    assert sum(1 for moment in output_moments if 0.8 < abs(moment) < 1.3) == 1
+    assert sum(1 for moment in output_moments if 1.7 < abs(moment) < 2.3) == 5
+    plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    operation = plan["source_operations"][0]
+    assert operation["cation_species_selected_counts"] == {"Gd": 2, "U": 6}
+    assert operation["cation_abs_moment_target_counts"]["U|negative|1"] == 1
+    assert operation["cation_abs_moment_selected_counts"]["U|negative|1"] == 1
+
+
 def test_project_poscar_crop_repairs_relaxed_boundary_cation_count(tmp_path: Path) -> None:
     source = tmp_path / "A_2x3x3_POSCAR"
     target = tmp_path / "B_2x2x2_POSCAR"
@@ -683,6 +812,25 @@ def test_project_poscar_boundary_repair_preserves_balanced_cation_counts(tmp_pat
     assert operation["selection_reason"] == "regular_origin_crop_no_minority_cation"
     assert operation["cation_boundary_repair"] is True
     assert operation["cation_species_target_counts"] == {"Gd": 4, "U": 4}
+
+
+def test_crop_boundary_repair_prefers_protected_cations() -> None:
+    repaired = repaired_crop_cation_indices(
+        positions=[
+            [0.92, 0.92, 0.92],
+            [0.10, 0.10, 0.10],
+            [0.20, 0.20, 0.20],
+            [0.30, 0.30, 0.30],
+        ],
+        symbols=["U", "U", "U", "U"],
+        cation_indices=[0, 1, 2, 3],
+        ranges=((0.0, 0.5), (0.0, 0.5), (0.0, 0.5)),
+        expected_count=2,
+        protected_indices={0},
+    )
+
+    assert 0 in repaired
+    assert len(repaired) == 2
 
 
 def test_project_poscar_can_scale_target_volume_to_prepared_source(tmp_path: Path) -> None:

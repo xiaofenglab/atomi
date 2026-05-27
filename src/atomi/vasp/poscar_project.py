@@ -20,6 +20,8 @@ from atomi.vasp.magmom import (
     strip_incar_comment,
 )
 
+MOMENT_FAMILY_TOLERANCE = 0.35
+
 
 @dataclass(frozen=True)
 class SiteMatch:
@@ -542,6 +544,7 @@ def prepare_structure(
             expected_cation_count=expected_cation_count,
             cation_elements=cation_elements or set(),
             anion_elements=anion_elements or {"O"},
+            source_moments=source_moments,
         )
         operations.append(
             {
@@ -561,6 +564,7 @@ def prepare_structure(
             expected_cation_count=expected_cation_count,
             cation_elements=cation_elements or set(),
             anion_elements=anion_elements or {"O"},
+            source_moments=source_moments,
         )
         operations.append({"kind": "fraction_crop", "fraction_ranges": [list(item) for item in crop_fraction], **repair_meta})
     return PreparedStructure(structure=structure, origin_indices=origin_indices, operations=operations)
@@ -595,6 +599,8 @@ def reduce_structure_to_representative_cell(
         raise ValueError("No cation sites found for representative source reduction.")
     cation_index_set = set(cation_indices)
     non_cation_indices = [index for index in range(len(symbols)) if index not in cation_index_set]
+    cation_moment_labels = moment_family_labels(symbols, cation_indices, origin_indices, source_moments)
+    non_cation_moment_labels = moment_family_labels(symbols, non_cation_indices, origin_indices, source_moments)
 
     slot_candidates = folded_atom_candidate_slots(
         structure,
@@ -603,7 +609,8 @@ def reduce_structure_to_representative_cell(
         supercell,
         reduce_cells,
         source_moments,
-        site_tolerance,
+        moment_labels=cation_moment_labels,
+        site_tolerance=site_tolerance,
     )
     target_count = expected_cation_count if expected_cation_count is not None else len(slot_candidates)
     if len(slot_candidates) != target_count:
@@ -621,7 +628,16 @@ def reduce_structure_to_representative_cell(
     )
     desired_sign_counts = proportional_group_targets(source_sign_counts, desired_species_counts)
     source_abs_counts = Counter(
-        (symbols[index], cation_moment_sign(index, origin_indices, source_moments), cation_abs_moment_label(index, origin_indices, source_moments))
+        (
+            symbols[index],
+            cation_moment_sign(index, origin_indices, source_moments),
+            cation_abs_moment_label(
+                index,
+                origin_indices,
+                source_moments,
+                cation_moment_labels,
+            ),
+        )
         for index in cation_indices
     )
     desired_abs_counts = proportional_group_targets(source_abs_counts, desired_sign_counts)
@@ -640,7 +656,8 @@ def reduce_structure_to_representative_cell(
         supercell,
         reduce_cells,
         source_moments,
-        site_tolerance,
+        moment_labels=non_cation_moment_labels,
+        site_tolerance=site_tolerance,
     )
     selected_non_cations: list[RepresentativeCandidate] = []
     non_cation_score = 0.0
@@ -665,7 +682,12 @@ def reduce_structure_to_representative_cell(
             (
                 symbols[index],
                 cation_moment_sign(index, origin_indices, source_moments),
-                cation_abs_moment_label(index, origin_indices, source_moments),
+                cation_abs_moment_label(
+                    index,
+                    origin_indices,
+                    source_moments,
+                    non_cation_moment_labels,
+                ),
             )
             for index in non_cation_indices
         )
@@ -728,6 +750,21 @@ def reduce_structure_to_representative_cell(
         "non_cation_abs_moment_selected_counts": stringify_counter(selected_non_cation_abs_counts),
         "source_magnetic_signature": magnetic_signature(symbols, cation_indices, origin_indices, source_moments),
         "reduced_magnetic_signature": magnetic_signature(symbols, selected_source_indices, origin_indices, source_moments),
+        "source_moment_family_counts": stringify_counter(
+            Counter(
+                (
+                    symbols[index],
+                    cation_moment_sign(index, origin_indices, source_moments),
+                    cation_abs_moment_label(
+                        index,
+                        origin_indices,
+                        source_moments,
+                        cation_moment_labels,
+                    ),
+                )
+                for index in cation_indices
+            )
+        ),
         "note": (
             "Source sites were folded into the requested smaller source cell. One representative "
             "source cation was selected per folded cation site for projection, and one representative "
@@ -745,6 +782,8 @@ def folded_atom_candidate_slots(
     supercell: tuple[int, int, int],
     reduce_cells: tuple[int, int, int],
     source_moments: list[float] | None,
+    *,
+    moment_labels: dict[int, str] | None = None,
     site_tolerance: float,
 ) -> list[list[RepresentativeCandidate]]:
     symbols = atom_symbols(structure)
@@ -758,7 +797,7 @@ def folded_atom_candidate_slots(
                 symbol=symbols[index],
                 folded_position=tuple(folded),
                 sign=cation_moment_sign(index, origin_indices, source_moments),
-                abs_moment=cation_abs_moment_label(index, origin_indices, source_moments),
+                abs_moment=cation_abs_moment_label(index, origin_indices, source_moments, moment_labels),
             )
         )
     return cluster_folded_candidates(candidates, site_tolerance)
@@ -815,10 +854,65 @@ def cation_moment_sign(index: int, origin_indices: list[int], source_moments: li
     return moment_sign(source_moments[origin_indices[index]])
 
 
-def cation_abs_moment_label(index: int, origin_indices: list[int], source_moments: list[float] | None) -> str:
+def cation_abs_moment_label(
+    index: int,
+    origin_indices: list[int],
+    source_moments: list[float] | None,
+    moment_labels: dict[int, str] | None = None,
+) -> str:
+    if moment_labels and index in moment_labels:
+        return moment_labels[index]
     if source_moments is None or origin_indices[index] >= len(source_moments):
         return "unknown"
     return f"{round(abs(source_moments[origin_indices[index]]), 3):g}"
+
+
+def moment_family_labels(
+    symbols: list[str],
+    atom_indices: list[int],
+    origin_indices: list[int],
+    source_moments: list[float] | None,
+    *,
+    tolerance: float = MOMENT_FAMILY_TOLERANCE,
+) -> dict[int, str]:
+    """Group noisy cation moment magnitudes into chemically meaningful families.
+
+    Relaxed VASP moments commonly vary by a few hundredths around the same
+    nominal charge/spin state.  We therefore cluster |MAGMOM| by element before
+    selecting representatives, so U4-like ~2 moments do not appear as many
+    separate groups that can crowd out rare U5-like ~1 moments.
+    """
+    if source_moments is None:
+        return {}
+    labels: dict[int, str] = {}
+    by_symbol: dict[str, list[tuple[int, float]]] = {}
+    for index in atom_indices:
+        if origin_indices[index] >= len(source_moments):
+            continue
+        by_symbol.setdefault(symbols[index], []).append((index, abs(source_moments[origin_indices[index]])))
+
+    for group in by_symbol.values():
+        clusters: list[tuple[float, list[tuple[int, float]]]] = []
+        for index, value in sorted(group, key=lambda item: item[1]):
+            if not clusters:
+                clusters.append((value, [(index, value)]))
+                continue
+            nearest_cluster = min(
+                enumerate(clusters),
+                key=lambda item: abs(value - item[1][0]),
+            )
+            cluster_index, (center, members) = nearest_cluster
+            if abs(value - center) <= tolerance:
+                updated_members = [*members, (index, value)]
+                updated_center = sum(member_value for _member_index, member_value in updated_members) / len(updated_members)
+                clusters[cluster_index] = (updated_center, updated_members)
+            else:
+                clusters.append((value, [(index, value)]))
+        for center, members in clusters:
+            label = f"{round(center, 1):g}"
+            for index, _value in members:
+                labels[index] = label
+    return labels
 
 
 def proportional_count_targets(counts: Counter[str], total: int, *, preserve_present: bool = False) -> dict[str, int]:
@@ -1118,21 +1212,22 @@ def charge_variant_cation_indices(
 ) -> set[int]:
     if source_moments is None:
         return set()
-    by_symbol: dict[str, list[tuple[int, float]]] = {}
+    family_labels = moment_family_labels(symbols, cation_indices, origin_indices, source_moments)
+    by_symbol: dict[str, list[tuple[int, str]]] = {}
     for index in cation_indices:
         if origin_indices[index] >= len(source_moments):
             continue
-        by_symbol.setdefault(symbols[index], []).append((index, abs(source_moments[origin_indices[index]])))
+        by_symbol.setdefault(symbols[index], []).append((index, family_labels.get(index, "unknown")))
     variants: set[int] = set()
     for group in by_symbol.values():
         if len(group) < 2:
             continue
-        bins = Counter(round(moment, 3) for _index, moment in group)
-        dominant_value, dominant_count = bins.most_common(1)[0]
+        bins = Counter(label for _index, label in group)
+        dominant_label, dominant_count = bins.most_common(1)[0]
         if dominant_count == len(group):
             continue
-        for index, moment in group:
-            if round(moment, 3) != dominant_value:
+        for index, label in group:
+            if label != dominant_label:
                 variants.add(index)
     return variants
 
@@ -1341,6 +1436,7 @@ def crop_structure_fraction(
     expected_cation_count: int | None = None,
     cation_elements: set[str] | None = None,
     anion_elements: set[str] | None = None,
+    source_moments: list[float] | None = None,
 ) -> tuple[PoscarStructure, list[int], dict[str, object]]:
     for lower, upper in ranges:
         if not (0.0 <= lower < upper <= 1.0):
@@ -1351,6 +1447,15 @@ def crop_structure_fraction(
     if expected_cation_count is not None:
         cation_indices = selected_cation_indices(symbols, cation_elements or set(), anion_elements or {"O"})
         kept_cations = sorted(kept_indices & set(cation_indices))
+        cation_counts = Counter(symbols[index] for index in cation_indices)
+        max_cation_count = max(cation_counts.values(), default=0)
+        minority_symbols = {symbol for symbol, count in cation_counts.items() if count < max_cation_count}
+        charge_variant_indices = charge_variant_cation_indices(symbols, cation_indices, origin_indices, source_moments)
+        protected_cation_indices = {
+            index
+            for index in cation_indices
+            if symbols[index] in minority_symbols or index in charge_variant_indices
+        }
         if len(kept_cations) != expected_cation_count:
             cation_count_targets = balanced_cation_count_targets(symbols, cation_indices, expected_cation_count)
             repaired_cations = repaired_crop_cation_indices(
@@ -1360,6 +1465,7 @@ def crop_structure_fraction(
                 ranges,
                 expected_cation_count,
                 cation_count_targets,
+                protected_indices=protected_cation_indices,
             )
             kept_indices = (kept_indices - set(cation_indices)) | set(repaired_cations)
             repair_meta = {
@@ -1368,6 +1474,12 @@ def crop_structure_fraction(
                 "cation_count_after_repair": len(repaired_cations),
                 "expected_cation_count": expected_cation_count,
                 "cation_species_target_counts": cation_count_targets,
+                "minority_cations_after_repair": sum(
+                    1 for index in repaired_cations if symbols[index] in minority_symbols
+                ),
+                "charge_variant_cations_after_repair": sum(
+                    1 for index in repaired_cations if index in charge_variant_indices
+                ),
             }
         else:
             repair_meta = {
@@ -1407,9 +1519,12 @@ def repaired_crop_cation_indices(
     ranges: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
     expected_count: int,
     species_target_counts: dict[str, int] | None = None,
+    *,
+    protected_indices: set[int] | None = None,
 ) -> list[int]:
     if expected_count > len(cation_indices):
         raise ValueError(f"Cannot repair crop to {expected_count} cations; source has only {len(cation_indices)} cations.")
+    protected_indices = protected_indices or set()
     if species_target_counts:
         repaired: list[int] = []
         for symbol, count in species_target_counts.items():
@@ -1420,6 +1535,7 @@ def repaired_crop_cation_indices(
                 sorted(
                     species_indices,
                     key=lambda index: (
+                        0 if index in protected_indices else 1,
                         distance_to_fraction_box(positions[index], ranges),
                         index,
                     ),
@@ -1430,6 +1546,7 @@ def repaired_crop_cation_indices(
     ranked = sorted(
         cation_indices,
         key=lambda index: (
+            0 if index in protected_indices else 1,
             distance_to_fraction_box(positions[index], ranges),
             index,
         ),
