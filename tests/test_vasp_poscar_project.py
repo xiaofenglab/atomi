@@ -5,7 +5,13 @@ from pathlib import Path
 import pytest
 
 from atomi.cli.main import main as atomi_main
-from atomi.vasp.magmom import existing_magmom_values, read_poscar_structure
+from atomi.vasp.magmom import (
+    existing_magmom_values,
+    expand_magmom_tokens,
+    find_magmom_line,
+    read_poscar_structure,
+    strip_incar_comment,
+)
 from atomi.vasp.poscar_project import atom_symbols, cell_volume, main as project_main
 
 
@@ -66,6 +72,13 @@ def write_relaxed_target_poscar(path: Path) -> None:
         "0.25 0.75 0.24\n",
         encoding="utf-8",
     )
+
+
+def expanded_magmom_values(incar: Path) -> list[float]:
+    _line_index, line = find_magmom_line(incar.read_text(encoding="utf-8", errors="replace").splitlines())
+    assert line is not None
+    body = strip_incar_comment(line).split("=", 1)[-1]
+    return expand_magmom_tokens(body.split())
 
 
 def write_origin_shifted_target_poscar(path: Path) -> None:
@@ -270,6 +283,8 @@ def test_project_poscar_maps_cation_elements_by_site_and_rewrites_magmom(tmp_pat
     assert [(row["target_atom"], row["source_element"]) for row in rows] == [("1", "Gd"), ("2", "U")]
 
     plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    assert plan["source_magmom_count"] == 6
+    assert plan["output_magmom_count"] == 5
     assert plan["source_cation_count"] == 2
     assert plan["target_cation_count"] == 2
     assert plan["species_counts"] == {"U": 1, "Gd": 1, "O": 3}
@@ -291,6 +306,30 @@ def test_project_poscar_maps_cation_elements_by_site_and_rewrites_magmom(tmp_pat
     assert "U: n=1 +1 -0 0=0" in stdout
     assert "Gd: n=1 +1 -0 0=0" in stdout
     assert "U: n 1->1 (delta +0)" in stdout
+
+
+def test_project_poscar_rejects_mismatched_source_magmom_count(tmp_path: Path) -> None:
+    source = tmp_path / "A_POSCAR"
+    target = tmp_path / "B_POSCAR"
+    incar = tmp_path / "A_INCAR"
+    out = tmp_path / "projected_bad_magmom"
+    write_source_poscar(source)
+    write_relaxed_target_poscar(target)
+    incar.write_text("ENCUT = 520\nMAGMOM = 2 7 4*0 99\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="MAGMOM count .* source POSCAR"):
+        project_main(
+            [
+                "--element-poscar",
+                str(source),
+                "--structure-poscar",
+                str(target),
+                "--incar-a",
+                str(incar),
+                "--outdir",
+                str(out),
+            ]
+        )
 
 
 def test_project_poscar_uses_target_centered_species_order_and_reorders_magmom(tmp_path: Path) -> None:
@@ -545,6 +584,9 @@ def test_project_poscar_can_reduce_source_to_representative_cation_cell(tmp_path
     assert output_moments[:4] == pytest.approx([7.0, 7.0, 7.0, 7.0])
     assert {abs(moment) for moment in output_moments[4:]} == {2.0}
     plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    assert plan["source_magmom_count"] == 54
+    assert plan["output_magmom_count"] == 8
+    assert len(expanded_magmom_values(out / "INCAR")) == projected.species.total_atoms
     operation = plan["source_operations"][0]
     assert operation["kind"] == "source_representative_reduce"
     assert operation["source_supercell"] == [2, 3, 3]

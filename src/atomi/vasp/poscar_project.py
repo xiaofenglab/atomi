@@ -12,11 +12,12 @@ from pathlib import Path
 from atomi.vasp.magmom import (
     PoscarSpecies,
     PoscarStructure,
-    existing_magmom_values,
+    expand_magmom_tokens,
     find_magmom_line,
     format_magmom_line,
     parse_element_list,
     read_poscar_structure,
+    strip_incar_comment,
 )
 
 
@@ -38,6 +39,7 @@ class ProjectionResult:
     plan_json: Path
     cation_matches: list[SiteMatch]
     max_cation_distance_A: float
+    output_magmom_count: int | None
     output_species: PoscarSpecies
     source_cation_magmom_summary: dict[str, dict[str, object]]
     cation_magmom_summary: dict[str, dict[str, object]]
@@ -89,6 +91,7 @@ def project_poscar_elements(
     source_crop_policy: str = "defect_preserving",
     scale_target_volume_to_source: bool = False,
     align_cation_origin: bool = True,
+    strict_magmom_preservation: bool = True,
 ) -> ProjectionResult:
     """Project cation identities and MAGMOMs from source POSCAR A onto structure POSCAR B."""
     source_poscar = source_poscar.expanduser().resolve()
@@ -102,7 +105,7 @@ def project_poscar_elements(
     source_raw = read_poscar_structure(source_poscar)
     target_raw = read_poscar_structure(target_poscar)
     raw_source_symbols = atom_symbols(source_raw)
-    raw_source_moments = existing_magmom_values(source_incar, len(raw_source_symbols)) if source_incar is not None else None
+    raw_source_moments = strict_existing_magmom_values(source_incar, len(raw_source_symbols)) if source_incar is not None else None
     anion_set = set(anion_elements or ["O"])
     cation_order = list(cation_elements or [])
     cation_set = set(cation_order)
@@ -247,6 +250,7 @@ def project_poscar_elements(
     source_moments: list[float] | None = None
     output_moments: list[float] | None = None
     output_moments_grouped: list[float] | None = None
+    output_magmom_count: int | None = None
     if source_incar is not None:
         if output_incar is None:
             output_incar = output_poscar.with_name("INCAR")
@@ -277,6 +281,11 @@ def project_poscar_elements(
                 decimals=magmom_decimals,
                 compact_zero=True,
             )
+            output_magmom_count = validate_magmom_line_count(
+                magmom_line,
+                output_species.total_atoms,
+                context=f"projected INCAR for {output_poscar}",
+            )
             incar_text = replace_or_append_magmom_text(incar_text, magmom_line)
         output_incar.parent.mkdir(parents=True, exist_ok=True)
         output_incar.write_text(incar_text, encoding="utf-8")
@@ -301,11 +310,14 @@ def project_poscar_elements(
         output_species.symbols,
         magmom_decimals,
     )
+    magmom_warnings = cation_magmom_preservation_warnings(cation_magmom_comparison)
+    warnings.extend(magmom_warnings)
     write_match_csv(match_csv, matches, source_symbols, target_symbols, source_for_matching, target)
     write_plan_json(
         plan_json,
         {
             "schema": "atomi.vasp.poscar_projection.v1",
+            "status": "failed_magmom_preservation_check" if strict_magmom_preservation and magmom_warnings else "ok",
             "source_poscar": str(source_poscar),
             "target_poscar": str(target_poscar),
             "source_incar": str(source_incar) if source_incar else "",
@@ -319,6 +331,8 @@ def project_poscar_elements(
             "anion_elements": sorted(anion_set),
             "source_cation_count": len(source_cations),
             "target_cation_count": len(target_cations),
+            "source_magmom_count": len(raw_source_moments) if raw_source_moments is not None else None,
+            "output_magmom_count": output_magmom_count,
             "max_cation_distance_A": worst,
             "distance_limit_A": max_cation_distance_A,
             "species_order": output_species.symbols,
@@ -326,6 +340,9 @@ def project_poscar_elements(
             "source_cation_magmom_summary": source_cation_magmom_summary,
             "cation_magmom_summary": cation_magmom_summary,
             "cation_magmom_comparison": cation_magmom_comparison,
+            "strict_magmom_preservation": strict_magmom_preservation,
+            "magmom_preservation_ok": not magmom_warnings,
+            "magmom_preservation_warnings": magmom_warnings,
             "warnings": warnings,
             "notes": [
                 "Cation species and cation MAGMOM values were projected from source POSCAR A.",
@@ -334,6 +351,12 @@ def project_poscar_elements(
             ],
         },
     )
+    if strict_magmom_preservation and magmom_warnings:
+        raise ValueError(
+            "Projected cation MAGMOM is not preserved from prepared source A: "
+            + "; ".join(magmom_warnings)
+            + ". Inspect POSCAR_A_prepared, INCAR, and the plan JSON, or use --allow-magmom-mismatch only after review."
+        )
     return ProjectionResult(
         source_poscar=source_poscar,
         target_poscar=target_poscar,
@@ -344,12 +367,66 @@ def project_poscar_elements(
         plan_json=plan_json,
         cation_matches=matches,
         max_cation_distance_A=worst,
+        output_magmom_count=output_magmom_count,
         output_species=output_species,
         source_cation_magmom_summary=source_cation_magmom_summary,
         cation_magmom_summary=cation_magmom_summary,
         cation_magmom_comparison=cation_magmom_comparison,
         warnings=warnings,
     )
+
+
+def strict_existing_magmom_values(incar: Path, total_atoms: int) -> list[float] | None:
+    lines = incar.read_text(encoding="utf-8", errors="replace").splitlines()
+    line_index, line = find_magmom_line(lines)
+    if line_index is None or line is None:
+        return None
+    body = strip_incar_comment(line).split("=", 1)[-1]
+    try:
+        values = expand_magmom_tokens(body.split())
+    except ValueError as exc:
+        raise ValueError(f"Could not parse MAGMOM in {incar}.") from exc
+    if len(values) != total_atoms:
+        raise ValueError(
+            f"MAGMOM count in {incar} is {len(values)}, but source POSCAR has {total_atoms} atoms. "
+            "Use a matching INCAR_A for POSCAR_A; Atomi will not truncate or pad MAGMOM during projection."
+        )
+    return values
+
+
+def validate_magmom_line_count(magmom_line: str, total_atoms: int, *, context: str) -> int:
+    body = strip_incar_comment(magmom_line).split("=", 1)[-1]
+    values = expand_magmom_tokens(body.split())
+    if len(values) != total_atoms:
+        raise ValueError(
+            f"MAGMOM count for {context} is {len(values)}, but output POSCAR has {total_atoms} atoms. "
+            "This indicates an internal projection/order bug; do not run VASP with this INCAR."
+        )
+    return len(values)
+
+
+def cation_magmom_preservation_warnings(comparison: dict[str, dict[str, object]]) -> list[str]:
+    warnings: list[str] = []
+    for symbol, entry in comparison.items():
+        if int(entry.get("count_delta", 0)) != 0:
+            warnings.append(f"{symbol} cation count changed by {entry['count_delta']:+d}")
+        sign_changed = (
+            int(entry.get("positive_delta", 0)) != 0
+            or int(entry.get("negative_delta", 0)) != 0
+            or int(entry.get("zero_delta", 0)) != 0
+        )
+        if sign_changed:
+            warnings.append(
+                f"{symbol} sign counts changed "
+                f"(+ {entry['source_positive']}->{entry['output_positive']}, "
+                f"- {entry['source_negative']}->{entry['output_negative']}, "
+                f"0 {entry['source_zero']}->{entry['output_zero']})"
+            )
+        if abs(float(entry.get("sum_delta", 0.0))) > 1.0e-8:
+            warnings.append(f"{symbol} moment sum changed by {float(entry['sum_delta']):+g}")
+        if entry.get("unique_abs_moments_match") is not True:
+            warnings.append(f"{symbol} absolute moment set changed")
+    return warnings
 
 
 def atom_symbols(structure: PoscarStructure) -> list[str]:
@@ -1798,6 +1875,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-cation-distance", type=float, default=1.5, help="Fail if any projected cation match exceeds this distance in Angstrom.")
     parser.add_argument("--allow-large-cation-distance", action="store_true", help="Warn instead of failing when the cation match exceeds the distance limit.")
+    parser.add_argument(
+        "--allow-magmom-mismatch",
+        action="store_true",
+        help="Warn instead of failing if projected cation MAGMOM signs/counts/magnitudes differ from prepared source A.",
+    )
     parser.add_argument("--magmom-decimals", type=int, default=3)
     return parser
 
@@ -1836,12 +1918,15 @@ def main(argv: list[str] | None = None) -> None:
         source_crop_policy=args.source_crop_policy.replace("-", "_"),
         scale_target_volume_to_source=args.scale_target_volume_to_source,
         align_cation_origin=not args.no_align_cation_origin,
+        strict_magmom_preservation=not args.allow_magmom_mismatch,
     )
     print(f"Projected POSCAR : {result.output_poscar}")
     if result.prepared_source_poscar:
         print(f"Prepared source  : {result.prepared_source_poscar}")
     if result.output_incar:
         print(f"Projected INCAR  : {result.output_incar}")
+        if result.output_magmom_count is not None:
+            print(f"Projected MAGMOM : {result.output_magmom_count} values for {result.output_species.total_atoms} atoms")
     print(f"Projection map   : {result.match_csv}")
     print(f"Projection plan  : {result.plan_json}")
     print(f"Cation matches   : {len(result.cation_matches)}")
