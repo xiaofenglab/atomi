@@ -164,6 +164,32 @@ def write_2x3x3_equal_cation_source(path: Path) -> None:
     )
 
 
+def write_2x3x3_balanced_fold_source(path: Path) -> list[float]:
+    positions: list[tuple[str, tuple[float, float, float], float]] = []
+    for i in range(2):
+        for j in range(3):
+            for k in range(3):
+                position = ((i + 0.5) / 2, (j + 0.5) / 3, (k + 0.5) / 3)
+                if (i + j + k) % 2 == 0:
+                    positions.append(("Gd", position, 7.0))
+                else:
+                    positions.append(("U", position, 2.0 if (i + k) % 2 == 0 else -2.0))
+    grouped = [item for item in positions if item[0] == "Gd"] + [item for item in positions if item[0] == "U"]
+    path.write_text(
+        "A 2x3x3 balanced cation pattern for representative folding\n"
+        "1.0\n"
+        "2.0 0.0 0.0\n"
+        "0.0 3.0 0.0\n"
+        "0.0 0.0 3.0\n"
+        "Gd U\n"
+        "9 9\n"
+        "Direct\n"
+        + "".join(f"{x:.10f} {y:.10f} {z:.10f}\n" for _symbol, (x, y, z), _moment in grouped),
+        encoding="utf-8",
+    )
+    return [moment for _symbol, _position, moment in grouped]
+
+
 def write_2x2x2_cation_target(path: Path) -> None:
     positions = [
         ((i + 0.5) / 2, (j + 0.5) / 2, (k + 0.5) / 2)
@@ -475,6 +501,58 @@ def test_project_poscar_equal_cation_counts_use_regular_origin_crop(tmp_path: Pa
     assert operation["crop_origin_cells"] == [0, 0, 0]
     assert operation["selection_reason"] == "regular_origin_crop_no_minority_cation"
     assert operation["minority_cation_elements"] == []
+
+
+def test_project_poscar_can_reduce_source_to_representative_cation_cell(tmp_path: Path) -> None:
+    source = tmp_path / "A_2x3x3_POSCAR"
+    target = tmp_path / "B_2x2x2_POSCAR"
+    incar = tmp_path / "A_INCAR"
+    out = tmp_path / "projected_reduced"
+    moments = write_2x3x3_balanced_fold_source(source)
+    write_2x2x2_cation_target(target)
+    incar.write_text("MAGMOM = " + " ".join(f"{moment:g}" for moment in moments) + "\n", encoding="utf-8")
+
+    project_main(
+        [
+            "--element-poscar",
+            str(source),
+            "--structure-poscar",
+            str(target),
+            "--incar-a",
+            str(incar),
+            "--outdir",
+            str(out),
+            "--source-supercell",
+            "2x3x3",
+            "--source-reduce-cells",
+            "2x2x2",
+            "--cation-elements",
+            "Gd,U",
+        ]
+    )
+
+    prepared = read_poscar_structure(out / "POSCAR_A_prepared")
+    projected = read_poscar_structure(out / "POSCAR")
+    assert prepared.species.symbols == ["Gd", "U"]
+    assert prepared.species.counts == [4, 4]
+    assert projected.species.symbols == ["Gd", "U"]
+    assert projected.species.counts == [4, 4]
+    output_moments = existing_magmom_values(out / "INCAR", 8)
+    assert output_moments is not None
+    assert output_moments[:4] == pytest.approx([7.0, 7.0, 7.0, 7.0])
+    assert {abs(moment) for moment in output_moments[4:]} == {2.0}
+    plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    operation = plan["source_operations"][0]
+    assert operation["kind"] == "source_representative_reduce"
+    assert operation["source_supercell"] == [2, 3, 3]
+    assert operation["reduce_cells"] == [2, 2, 2]
+    assert operation["source_cation_count"] == 18
+    assert operation["folded_cation_site_count"] == 8
+    assert operation["cation_species_target_counts"] == {"Gd": 4, "U": 4}
+    assert operation["cation_species_selected_counts"] == {"Gd": 4, "U": 4}
+    assert plan["source_cation_magmom_summary"]["Gd"]["count"] == 4
+    assert plan["cation_magmom_comparison"]["Gd"]["count_delta"] == 0
+    assert plan["cation_magmom_comparison"]["U"]["unique_abs_moments_match"] is True
 
 
 def test_project_poscar_crop_repairs_relaxed_boundary_cation_count(tmp_path: Path) -> None:

@@ -52,6 +52,16 @@ class PreparedStructure:
     operations: list[dict[str, object]]
 
 
+@dataclass(frozen=True)
+class RepresentativeCandidate:
+    source_index: int
+    origin_index: int
+    symbol: str
+    folded_position: tuple[float, float, float]
+    sign: str
+    abs_moment: str
+
+
 def project_poscar_elements(
     source_poscar: Path,
     target_poscar: Path,
@@ -72,6 +82,9 @@ def project_poscar_elements(
     target_repeat: tuple[int, int, int] | None = None,
     source_supercell: tuple[int, int, int] | None = None,
     source_keep_cells: tuple[int, int, int] | None = None,
+    source_reduce_cells: tuple[int, int, int] | None = None,
+    source_reduce_beam_width: int = 256,
+    source_reduce_site_tolerance: float = 0.05,
     source_crop_fraction: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None = None,
     source_crop_policy: str = "defect_preserving",
     scale_target_volume_to_source: bool = False,
@@ -102,6 +115,9 @@ def project_poscar_elements(
         repeat=source_repeat,
         crop_supercell=source_supercell,
         crop_keep_cells=source_keep_cells,
+        reduce_cells=source_reduce_cells,
+        reduce_beam_width=source_reduce_beam_width,
+        reduce_site_tolerance=source_reduce_site_tolerance,
         crop_fraction=source_crop_fraction,
         crop_policy=source_crop_policy,
         source_moments=raw_source_moments,
@@ -388,6 +404,9 @@ def prepare_structure(
     repeat: tuple[int, int, int] | None = None,
     crop_supercell: tuple[int, int, int] | None = None,
     crop_keep_cells: tuple[int, int, int] | None = None,
+    reduce_cells: tuple[int, int, int] | None = None,
+    reduce_beam_width: int = 256,
+    reduce_site_tolerance: float = 0.05,
     crop_fraction: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None = None,
     crop_policy: str = "defect_preserving",
     source_moments: list[float] | None = None,
@@ -400,7 +419,25 @@ def prepare_structure(
     if repeat is not None and repeat != (1, 1, 1):
         structure, origin_indices = repeat_structure(structure, origin_indices, repeat)
         operations.append({"kind": "repeat", "repeat": list(repeat)})
-    if crop_supercell is not None or crop_keep_cells is not None:
+    if reduce_cells is not None:
+        if crop_supercell is None:
+            raise ValueError("--source-reduce-cells requires --source-supercell.")
+        if crop_keep_cells is not None:
+            raise ValueError("--source-reduce-cells cannot be combined with --source-keep-cells.")
+        structure, origin_indices, reduce_meta = reduce_structure_to_representative_cell(
+            structure,
+            origin_indices,
+            crop_supercell,
+            reduce_cells,
+            source_moments=source_moments,
+            cation_elements=cation_elements or set(),
+            anion_elements=anion_elements or {"O"},
+            expected_cation_count=expected_cation_count,
+            beam_width=reduce_beam_width,
+            site_tolerance=reduce_site_tolerance,
+        )
+        operations.append(reduce_meta)
+    if crop_keep_cells is not None or (crop_supercell is not None and reduce_cells is None):
         if crop_supercell is None or crop_keep_cells is None:
             raise ValueError("--source-supercell and --source-keep-cells must be used together.")
         if crop_policy == "origin":
@@ -450,6 +487,369 @@ def prepare_structure(
         )
         operations.append({"kind": "fraction_crop", "fraction_ranges": [list(item) for item in crop_fraction], **repair_meta})
     return PreparedStructure(structure=structure, origin_indices=origin_indices, operations=operations)
+
+
+def reduce_structure_to_representative_cell(
+    structure: PoscarStructure,
+    origin_indices: list[int],
+    supercell: tuple[int, int, int],
+    reduce_cells: tuple[int, int, int],
+    *,
+    source_moments: list[float] | None,
+    cation_elements: set[str],
+    anion_elements: set[str],
+    expected_cation_count: int | None,
+    beam_width: int,
+    site_tolerance: float,
+) -> tuple[PoscarStructure, list[int], dict[str, object]]:
+    for axis in range(3):
+        if supercell[axis] <= 0 or reduce_cells[axis] <= 0:
+            raise ValueError(f"Source supercell and reduce-cells values must be positive, got {supercell} and {reduce_cells}.")
+        if reduce_cells[axis] > supercell[axis]:
+            raise ValueError(f"Cannot reduce source supercell {supercell} to larger cell {reduce_cells}.")
+    if beam_width <= 0:
+        raise ValueError(f"--source-reduce-beam-width must be positive, got {beam_width}.")
+    if site_tolerance < 0.0:
+        raise ValueError(f"--source-reduce-site-tolerance must be non-negative, got {site_tolerance}.")
+
+    symbols = atom_symbols(structure)
+    cation_indices = selected_cation_indices(symbols, cation_elements, anion_elements)
+    if not cation_indices:
+        raise ValueError("No cation sites found for representative source reduction.")
+
+    slot_candidates = folded_cation_candidate_slots(
+        structure,
+        origin_indices,
+        cation_indices,
+        supercell,
+        reduce_cells,
+        source_moments,
+        site_tolerance,
+    )
+    target_count = expected_cation_count if expected_cation_count is not None else len(slot_candidates)
+    if len(slot_candidates) != target_count:
+        raise ValueError(
+            "Representative source reduction produced "
+            f"{len(slot_candidates)} folded cation sites, but target has {target_count} cation sites. "
+            "Use a commensurate --source-supercell/--source-reduce-cells pair or adjust --target-repeat."
+        )
+
+    source_species_counts = Counter(symbols[index] for index in cation_indices)
+    desired_species_counts = proportional_count_targets(source_species_counts, target_count, preserve_present=True)
+    source_sign_counts = Counter(
+        (symbols[index], cation_moment_sign(index, origin_indices, source_moments))
+        for index in cation_indices
+    )
+    desired_sign_counts = proportional_group_targets(source_sign_counts, desired_species_counts)
+    source_abs_counts = Counter(
+        (symbols[index], cation_moment_sign(index, origin_indices, source_moments), cation_abs_moment_label(index, origin_indices, source_moments))
+        for index in cation_indices
+    )
+    desired_abs_counts = proportional_group_targets(source_abs_counts, desired_sign_counts)
+
+    selected, score = choose_representative_candidates(
+        slot_candidates,
+        desired_species_counts,
+        desired_sign_counts,
+        desired_abs_counts,
+        beam_width=beam_width,
+    )
+    selected_symbols = [candidate.symbol for candidate in selected]
+    selected_positions = [list(candidate.folded_position) for candidate in selected]
+    selected_origins = [candidate.origin_index for candidate in selected]
+    selected_source_indices = [candidate.source_index for candidate in selected]
+    cell = [
+        [value * reduce_cells[axis] / supercell[axis] for value in vector]
+        for axis, vector in enumerate(structure.cell)
+    ]
+    order = [symbol for symbol in structure.species.symbols if symbol in set(selected_symbols)]
+    reduced, reduced_origins = grouped_structure(selected_symbols, selected_positions, selected_origins, cell, order)
+    selected_counts = Counter(selected_symbols)
+    selected_sign_counts = Counter((candidate.symbol, candidate.sign) for candidate in selected)
+    selected_abs_counts = Counter((candidate.symbol, candidate.sign, candidate.abs_moment) for candidate in selected)
+    meta = {
+        "kind": "source_representative_reduce",
+        "source_supercell": list(supercell),
+        "reduce_cells": list(reduce_cells),
+        "source_cation_count": len(cation_indices),
+        "folded_cation_site_count": len(slot_candidates),
+        "selected_cation_count": len(selected),
+        "beam_width": beam_width,
+        "folded_site_tolerance_fractional": site_tolerance,
+        "selection_score": score,
+        "cation_species_target_counts": dict(sorted(desired_species_counts.items())),
+        "cation_species_selected_counts": dict(sorted(selected_counts.items())),
+        "cation_sign_target_counts": stringify_counter(desired_sign_counts),
+        "cation_sign_selected_counts": stringify_counter(selected_sign_counts),
+        "cation_abs_moment_target_counts": stringify_counter(desired_abs_counts),
+        "cation_abs_moment_selected_counts": stringify_counter(selected_abs_counts),
+        "source_magnetic_signature": magnetic_signature(symbols, cation_indices, origin_indices, source_moments),
+        "reduced_magnetic_signature": magnetic_signature(symbols, selected_source_indices, origin_indices, source_moments),
+        "note": (
+            "Cation sites were folded into the requested smaller source cell and one representative "
+            "source cation was selected per folded site. Non-cation sites are not projected by this "
+            "reduction; final anion coordinates/species remain from POSCAR B."
+        ),
+    }
+    return reduced, reduced_origins, meta
+
+
+def folded_cation_candidate_slots(
+    structure: PoscarStructure,
+    origin_indices: list[int],
+    cation_indices: list[int],
+    supercell: tuple[int, int, int],
+    reduce_cells: tuple[int, int, int],
+    source_moments: list[float] | None,
+    site_tolerance: float,
+) -> list[list[RepresentativeCandidate]]:
+    symbols = atom_symbols(structure)
+    candidates: list[RepresentativeCandidate] = []
+    for index in cation_indices:
+        folded = folded_position_in_reduced_cell(structure.scaled_positions[index], supercell, reduce_cells)
+        candidates.append(
+            RepresentativeCandidate(
+                source_index=index,
+                origin_index=origin_indices[index],
+                symbol=symbols[index],
+                folded_position=tuple(folded),
+                sign=cation_moment_sign(index, origin_indices, source_moments),
+                abs_moment=cation_abs_moment_label(index, origin_indices, source_moments),
+            )
+        )
+    return cluster_folded_candidates(candidates, site_tolerance)
+
+
+def cluster_folded_candidates(
+    candidates: list[RepresentativeCandidate],
+    site_tolerance: float,
+) -> list[list[RepresentativeCandidate]]:
+    slots: list[list[RepresentativeCandidate]] = []
+    centers: list[tuple[float, float, float]] = []
+    for candidate in sorted(candidates, key=lambda item: item.source_index):
+        distances = [
+            (fractional_l2_distance(candidate.folded_position, center), index)
+            for index, center in enumerate(centers)
+        ]
+        if distances:
+            distance, slot_index = min(distances, key=lambda item: item[0])
+            if distance <= site_tolerance:
+                slots[slot_index].append(candidate)
+                continue
+        centers.append(candidate.folded_position)
+        slots.append([candidate])
+    return [
+        sorted(candidates, key=lambda item: (item.symbol, item.sign, item.abs_moment, item.source_index))
+        for _center, candidates in sorted(zip(centers, slots), key=lambda item: item[0])
+    ]
+
+
+def fractional_l2_distance(left: tuple[float, float, float], right: tuple[float, float, float]) -> float:
+    diff = [left[axis] - right[axis] for axis in range(3)]
+    diff = [value - round(value) for value in diff]
+    return math.sqrt(sum(value * value for value in diff))
+
+
+def folded_position_in_reduced_cell(
+    position: list[float],
+    supercell: tuple[int, int, int],
+    reduce_cells: tuple[int, int, int],
+) -> list[float]:
+    folded: list[float] = []
+    for axis, value in enumerate(position):
+        scaled = (value % 1.0) * supercell[axis]
+        cell_index = min(supercell[axis] - 1, max(0, int(math.floor(scaled + 1.0e-10))))
+        local = scaled - cell_index
+        reduced_cell = cell_index % reduce_cells[axis]
+        folded.append((reduced_cell + local) / reduce_cells[axis])
+    return folded
+
+
+def cation_moment_sign(index: int, origin_indices: list[int], source_moments: list[float] | None) -> str:
+    if source_moments is None or origin_indices[index] >= len(source_moments):
+        return "unknown"
+    return moment_sign(source_moments[origin_indices[index]])
+
+
+def cation_abs_moment_label(index: int, origin_indices: list[int], source_moments: list[float] | None) -> str:
+    if source_moments is None or origin_indices[index] >= len(source_moments):
+        return "unknown"
+    return f"{round(abs(source_moments[origin_indices[index]]), 3):g}"
+
+
+def proportional_count_targets(counts: Counter[str], total: int, *, preserve_present: bool = False) -> dict[str, int]:
+    if total <= 0:
+        return {}
+    symbols = sorted(counts)
+    if not symbols:
+        return {}
+    base = {symbol: 0 for symbol in symbols}
+    remaining = total
+    if preserve_present and total >= len(symbols):
+        base = {symbol: 1 for symbol in symbols}
+        remaining -= len(symbols)
+    available = sum(counts.values())
+    if available <= 0:
+        return base
+    raw = {symbol: counts[symbol] / available * remaining for symbol in symbols}
+    for symbol, value in raw.items():
+        assigned = int(math.floor(value))
+        base[symbol] += assigned
+    short = total - sum(base.values())
+    ranked = sorted(
+        symbols,
+        key=lambda symbol: (
+            raw[symbol] - math.floor(raw[symbol]),
+            -counts[symbol],
+            symbol,
+        ),
+        reverse=True,
+    )
+    for symbol in ranked[:short]:
+        base[symbol] += 1
+    return base
+
+
+def proportional_group_targets(
+    counts: Counter[tuple[str, ...]],
+    parent_targets: dict[str | tuple[str, ...], int],
+) -> dict[tuple[str, ...], int]:
+    result: dict[tuple[str, ...], int] = {}
+    parent_groups: dict[str | tuple[str, ...], Counter[tuple[str, ...]]] = {}
+    for key, count in counts.items():
+        parent: str | tuple[str, ...] = key[0] if len(key) == 2 else key[:2]
+        parent_groups.setdefault(parent, Counter())[key] = count
+    for parent, target_total in parent_targets.items():
+        group_counts = parent_groups.get(parent, Counter())
+        if not group_counts:
+            continue
+        preserve = target_total >= len(group_counts)
+        group_target = proportional_count_targets(group_counts, target_total, preserve_present=preserve)
+        result.update(group_target)
+    return result
+
+
+def choose_representative_candidates(
+    slot_candidates: list[list[RepresentativeCandidate]],
+    desired_species_counts: dict[str, int],
+    desired_sign_counts: dict[tuple[str, ...], int],
+    desired_abs_counts: dict[tuple[str, ...], int],
+    *,
+    beam_width: int,
+) -> tuple[list[RepresentativeCandidate], float]:
+    slots = sorted(slot_candidates, key=lambda candidates: (len(candidates), candidates[0].folded_position if candidates else (0.0, 0.0, 0.0)))
+    states: list[tuple[float, list[RepresentativeCandidate], Counter[str], Counter[tuple[str, str]], Counter[tuple[str, str, str]]]] = [
+        (0.0, [], Counter(), Counter(), Counter())
+    ]
+    total_slots = len(slots)
+    for slot_index, candidates in enumerate(slots, start=1):
+        next_states: list[tuple[float, list[RepresentativeCandidate], Counter[str], Counter[tuple[str, str]], Counter[tuple[str, str, str]]]] = []
+        for _score, selected, species_counts, sign_counts, abs_counts in states:
+            for candidate in candidates:
+                next_species = species_counts.copy()
+                next_sign = sign_counts.copy()
+                next_abs = abs_counts.copy()
+                next_species[candidate.symbol] += 1
+                next_sign[(candidate.symbol, candidate.sign)] += 1
+                next_abs[(candidate.symbol, candidate.sign, candidate.abs_moment)] += 1
+                next_selected = [*selected, candidate]
+                score = representative_partial_score(
+                    next_species,
+                    next_sign,
+                    next_abs,
+                    desired_species_counts,
+                    desired_sign_counts,
+                    desired_abs_counts,
+                    selected_count=slot_index,
+                    total_count=total_slots,
+                )
+                next_states.append((score, next_selected, next_species, next_sign, next_abs))
+        next_states.sort(key=lambda item: (item[0], [candidate.source_index for candidate in item[1]]))
+        states = next_states[:beam_width]
+    final_states = [
+        (
+            representative_final_score(
+                species_counts,
+                sign_counts,
+                abs_counts,
+                desired_species_counts,
+                desired_sign_counts,
+                desired_abs_counts,
+            ),
+            selected,
+        )
+        for _partial, selected, species_counts, sign_counts, abs_counts in states
+    ]
+    final_states.sort(key=lambda item: (item[0], [candidate.source_index for candidate in item[1]]))
+    best_score, best_selected = final_states[0]
+    return best_selected, best_score
+
+
+def representative_partial_score(
+    species_counts: Counter[str],
+    sign_counts: Counter[tuple[str, str]],
+    abs_counts: Counter[tuple[str, str, str]],
+    desired_species_counts: dict[str, int],
+    desired_sign_counts: dict[tuple[str, ...], int],
+    desired_abs_counts: dict[tuple[str, ...], int],
+    *,
+    selected_count: int,
+    total_count: int,
+) -> float:
+    progress = selected_count / total_count if total_count else 1.0
+    return (
+        counter_progress_penalty(species_counts, desired_species_counts, progress, over_weight=500.0, drift_weight=20.0)
+        + counter_progress_penalty(sign_counts, desired_sign_counts, progress, over_weight=120.0, drift_weight=5.0)
+        + counter_progress_penalty(abs_counts, desired_abs_counts, progress, over_weight=40.0, drift_weight=1.0)
+    )
+
+
+def representative_final_score(
+    species_counts: Counter[str],
+    sign_counts: Counter[tuple[str, str]],
+    abs_counts: Counter[tuple[str, str, str]],
+    desired_species_counts: dict[str, int],
+    desired_sign_counts: dict[tuple[str, ...], int],
+    desired_abs_counts: dict[tuple[str, ...], int],
+) -> float:
+    return (
+        counter_final_penalty(species_counts, desired_species_counts, weight=1000.0)
+        + counter_final_penalty(sign_counts, desired_sign_counts, weight=250.0)
+        + counter_final_penalty(abs_counts, desired_abs_counts, weight=50.0)
+    )
+
+
+def counter_progress_penalty(
+    counts: Counter,
+    desired: dict,
+    progress: float,
+    *,
+    over_weight: float,
+    drift_weight: float,
+) -> float:
+    penalty = 0.0
+    for key in set(counts) | set(desired):
+        count = counts.get(key, 0)
+        target = desired.get(key, 0)
+        if count > target:
+            penalty += (count - target) * over_weight
+        penalty += abs(count - target * progress) * drift_weight
+    return penalty
+
+
+def counter_final_penalty(counts: Counter, desired: dict, *, weight: float) -> float:
+    return sum(abs(counts.get(key, 0) - desired.get(key, 0)) for key in set(counts) | set(desired)) * weight
+
+
+def stringify_counter(counter: dict | Counter) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for key, value in counter.items():
+        if isinstance(key, tuple):
+            label = "|".join(str(item) for item in key)
+        else:
+            label = str(key)
+        result[label] = int(value)
+    return dict(sorted(result.items()))
 
 
 def crop_ranges_from_origin(
@@ -1287,6 +1687,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-supercell", help="Cell count represented by POSCAR A, e.g. 2x3x3.")
     parser.add_argument("--source-keep-cells", help="Crop POSCAR A to a matching cell block, e.g. 2x2x2.")
     parser.add_argument(
+        "--source-reduce-cells",
+        help=(
+            "Fold POSCAR A cation sites into this smaller source-cell grid and select a representative "
+            "cation per folded site, e.g. 2x2x2. Requires --source-supercell and cannot be combined "
+            "with --source-keep-cells."
+        ),
+    )
+    parser.add_argument(
+        "--source-reduce-beam-width",
+        type=int,
+        default=256,
+        help="Representative reduction search width. Larger values preserve composition/MAGMOM statistics more carefully. Default: 256.",
+    )
+    parser.add_argument(
+        "--source-reduce-site-tolerance",
+        type=float,
+        default=0.05,
+        help=(
+            "Fractional tolerance in the reduced source cell for clustering folded cation sites. "
+            "Increase slightly if POSCAR A is relaxed/noisy. Default: 0.05."
+        ),
+    )
+    parser.add_argument(
         "--source-crop-policy",
         choices=["defect-preserving", "origin"],
         default="defect-preserving",
@@ -1339,6 +1762,9 @@ def main(argv: list[str] | None = None) -> None:
         target_repeat=parse_repeat(args.target_repeat) if args.target_repeat else None,
         source_supercell=parse_repeat(args.source_supercell) if args.source_supercell else None,
         source_keep_cells=parse_repeat(args.source_keep_cells) if args.source_keep_cells else None,
+        source_reduce_cells=parse_repeat(args.source_reduce_cells) if args.source_reduce_cells else None,
+        source_reduce_beam_width=args.source_reduce_beam_width,
+        source_reduce_site_tolerance=args.source_reduce_site_tolerance,
         source_crop_fraction=parse_fraction_ranges(args.source_crop_fraction) if args.source_crop_fraction else None,
         source_crop_policy=args.source_crop_policy.replace("-", "_"),
         scale_target_volume_to_source=args.scale_target_volume_to_source,
@@ -1357,6 +1783,15 @@ def main(argv: list[str] | None = None) -> None:
         "Output species   : "
         + " ".join(f"{symbol}:{count}" for symbol, count in zip(result.output_species.symbols, result.output_species.counts))
     )
+    for operation in json.loads(result.plan_json.read_text(encoding="utf-8")).get("source_operations", []):
+        if operation.get("kind") == "source_representative_reduce":
+            print(
+                "Source reduction: "
+                f"{'x'.join(str(value) for value in operation.get('source_supercell', []))}"
+                f" -> {'x'.join(str(value) for value in operation.get('reduce_cells', []))}; "
+                f"selected {operation.get('selected_cation_count')} cations; "
+                f"score={float(operation.get('selection_score', 0.0)):g}"
+            )
     if result.source_cation_magmom_summary:
         print("Prepared A MAGMOM:")
         for line in format_cation_magmom_summary(result.source_cation_magmom_summary):
