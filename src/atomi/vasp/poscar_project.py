@@ -516,8 +516,10 @@ def reduce_structure_to_representative_cell(
     cation_indices = selected_cation_indices(symbols, cation_elements, anion_elements)
     if not cation_indices:
         raise ValueError("No cation sites found for representative source reduction.")
+    cation_index_set = set(cation_indices)
+    non_cation_indices = [index for index in range(len(symbols)) if index not in cation_index_set]
 
-    slot_candidates = folded_cation_candidate_slots(
+    slot_candidates = folded_atom_candidate_slots(
         structure,
         origin_indices,
         cation_indices,
@@ -554,9 +556,57 @@ def reduce_structure_to_representative_cell(
         desired_abs_counts,
         beam_width=beam_width,
     )
-    selected_symbols = [candidate.symbol for candidate in selected]
-    selected_positions = [list(candidate.folded_position) for candidate in selected]
-    selected_origins = [candidate.origin_index for candidate in selected]
+    non_cation_slot_candidates = folded_atom_candidate_slots(
+        structure,
+        origin_indices,
+        non_cation_indices,
+        supercell,
+        reduce_cells,
+        source_moments,
+        site_tolerance,
+    )
+    selected_non_cations: list[RepresentativeCandidate] = []
+    non_cation_score = 0.0
+    desired_non_cation_species_counts: dict[str, int] = {}
+    desired_non_cation_sign_counts: dict[tuple[str, ...], int] = {}
+    desired_non_cation_abs_counts: dict[tuple[str, ...], int] = {}
+    if non_cation_slot_candidates:
+        desired_non_cation_species_counts = proportional_count_targets(
+            Counter(symbols[index] for index in non_cation_indices),
+            len(non_cation_slot_candidates),
+            preserve_present=True,
+        )
+        source_non_cation_sign_counts = Counter(
+            (symbols[index], cation_moment_sign(index, origin_indices, source_moments))
+            for index in non_cation_indices
+        )
+        desired_non_cation_sign_counts = proportional_group_targets(
+            source_non_cation_sign_counts,
+            desired_non_cation_species_counts,
+        )
+        source_non_cation_abs_counts = Counter(
+            (
+                symbols[index],
+                cation_moment_sign(index, origin_indices, source_moments),
+                cation_abs_moment_label(index, origin_indices, source_moments),
+            )
+            for index in non_cation_indices
+        )
+        desired_non_cation_abs_counts = proportional_group_targets(
+            source_non_cation_abs_counts,
+            desired_non_cation_sign_counts,
+        )
+        selected_non_cations, non_cation_score = choose_representative_candidates(
+            non_cation_slot_candidates,
+            desired_non_cation_species_counts,
+            desired_non_cation_sign_counts,
+            desired_non_cation_abs_counts,
+            beam_width=beam_width,
+        )
+    selected_all = [*selected, *selected_non_cations]
+    selected_symbols = [candidate.symbol for candidate in selected_all]
+    selected_positions = [list(candidate.folded_position) for candidate in selected_all]
+    selected_origins = [candidate.origin_index for candidate in selected_all]
     selected_source_indices = [candidate.source_index for candidate in selected]
     cell = [
         [value * reduce_cells[axis] / supercell[axis] for value in vector]
@@ -564,9 +614,15 @@ def reduce_structure_to_representative_cell(
     ]
     order = [symbol for symbol in structure.species.symbols if symbol in set(selected_symbols)]
     reduced, reduced_origins = grouped_structure(selected_symbols, selected_positions, selected_origins, cell, order)
-    selected_counts = Counter(selected_symbols)
+    selected_cation_counts = Counter(candidate.symbol for candidate in selected)
     selected_sign_counts = Counter((candidate.symbol, candidate.sign) for candidate in selected)
     selected_abs_counts = Counter((candidate.symbol, candidate.sign, candidate.abs_moment) for candidate in selected)
+    selected_non_cation_counts = Counter(candidate.symbol for candidate in selected_non_cations)
+    selected_non_cation_sign_counts = Counter((candidate.symbol, candidate.sign) for candidate in selected_non_cations)
+    selected_non_cation_abs_counts = Counter(
+        (candidate.symbol, candidate.sign, candidate.abs_moment)
+        for candidate in selected_non_cations
+    )
     meta = {
         "kind": "source_representative_reduce",
         "source_supercell": list(supercell),
@@ -574,30 +630,41 @@ def reduce_structure_to_representative_cell(
         "source_cation_count": len(cation_indices),
         "folded_cation_site_count": len(slot_candidates),
         "selected_cation_count": len(selected),
+        "source_non_cation_count": len(non_cation_indices),
+        "folded_non_cation_site_count": len(non_cation_slot_candidates),
+        "selected_non_cation_count": len(selected_non_cations),
         "beam_width": beam_width,
         "folded_site_tolerance_fractional": site_tolerance,
         "selection_score": score,
+        "non_cation_selection_score": non_cation_score,
         "cation_species_target_counts": dict(sorted(desired_species_counts.items())),
-        "cation_species_selected_counts": dict(sorted(selected_counts.items())),
+        "cation_species_selected_counts": dict(sorted(selected_cation_counts.items())),
         "cation_sign_target_counts": stringify_counter(desired_sign_counts),
         "cation_sign_selected_counts": stringify_counter(selected_sign_counts),
         "cation_abs_moment_target_counts": stringify_counter(desired_abs_counts),
         "cation_abs_moment_selected_counts": stringify_counter(selected_abs_counts),
+        "non_cation_species_target_counts": dict(sorted(desired_non_cation_species_counts.items())),
+        "non_cation_species_selected_counts": dict(sorted(selected_non_cation_counts.items())),
+        "non_cation_sign_target_counts": stringify_counter(desired_non_cation_sign_counts),
+        "non_cation_sign_selected_counts": stringify_counter(selected_non_cation_sign_counts),
+        "non_cation_abs_moment_target_counts": stringify_counter(desired_non_cation_abs_counts),
+        "non_cation_abs_moment_selected_counts": stringify_counter(selected_non_cation_abs_counts),
         "source_magnetic_signature": magnetic_signature(symbols, cation_indices, origin_indices, source_moments),
         "reduced_magnetic_signature": magnetic_signature(symbols, selected_source_indices, origin_indices, source_moments),
         "note": (
-            "Cation sites were folded into the requested smaller source cell and one representative "
-            "source cation was selected per folded site. Non-cation sites are not projected by this "
-            "reduction; final anion coordinates/species remain from POSCAR B."
+            "Source sites were folded into the requested smaller source cell. One representative "
+            "source cation was selected per folded cation site for projection, and one representative "
+            "source non-cation was selected per folded non-cation site so POSCAR_A_prepared remains "
+            "chemically inspectable. Final non-cation coordinates/species still come from POSCAR B."
         ),
     }
     return reduced, reduced_origins, meta
 
 
-def folded_cation_candidate_slots(
+def folded_atom_candidate_slots(
     structure: PoscarStructure,
     origin_indices: list[int],
-    cation_indices: list[int],
+    atom_indices: list[int],
     supercell: tuple[int, int, int],
     reduce_cells: tuple[int, int, int],
     source_moments: list[float] | None,
@@ -605,7 +672,7 @@ def folded_cation_candidate_slots(
 ) -> list[list[RepresentativeCandidate]]:
     symbols = atom_symbols(structure)
     candidates: list[RepresentativeCandidate] = []
-    for index in cation_indices:
+    for index in atom_indices:
         folded = folded_position_in_reduced_cell(structure.scaled_positions[index], supercell, reduce_cells)
         candidates.append(
             RepresentativeCandidate(

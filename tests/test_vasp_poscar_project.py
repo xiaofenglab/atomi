@@ -166,6 +166,7 @@ def write_2x3x3_equal_cation_source(path: Path) -> None:
 
 def write_2x3x3_balanced_fold_source(path: Path) -> list[float]:
     positions: list[tuple[str, tuple[float, float, float], float]] = []
+    anions: list[tuple[str, tuple[float, float, float], float]] = []
     for i in range(2):
         for j in range(3):
             for k in range(3):
@@ -174,15 +175,17 @@ def write_2x3x3_balanced_fold_source(path: Path) -> list[float]:
                     positions.append(("Gd", position, 7.0))
                 else:
                     positions.append(("U", position, 2.0 if (i + k) % 2 == 0 else -2.0))
-    grouped = [item for item in positions if item[0] == "Gd"] + [item for item in positions if item[0] == "U"]
+                anions.append(("O", ((i + 0.25) / 2, (j + 0.25) / 3, (k + 0.25) / 3), 0.0))
+                anions.append(("O", ((i + 0.75) / 2, (j + 0.75) / 3, (k + 0.75) / 3), 0.0))
+    grouped = [item for item in positions if item[0] == "Gd"] + [item for item in positions if item[0] == "U"] + anions
     path.write_text(
-        "A 2x3x3 balanced cation pattern for representative folding\n"
+        "A 2x3x3 balanced cation and anion pattern for representative folding\n"
         "1.0\n"
         "2.0 0.0 0.0\n"
         "0.0 3.0 0.0\n"
         "0.0 0.0 3.0\n"
-        "Gd U\n"
-        "9 9\n"
+        "Gd U O\n"
+        "9 9 36\n"
         "Direct\n"
         + "".join(f"{x:.10f} {y:.10f} {z:.10f}\n" for _symbol, (x, y, z), _moment in grouped),
         encoding="utf-8",
@@ -533,8 +536,8 @@ def test_project_poscar_can_reduce_source_to_representative_cation_cell(tmp_path
 
     prepared = read_poscar_structure(out / "POSCAR_A_prepared")
     projected = read_poscar_structure(out / "POSCAR")
-    assert prepared.species.symbols == ["Gd", "U"]
-    assert prepared.species.counts == [4, 4]
+    assert prepared.species.symbols == ["Gd", "U", "O"]
+    assert prepared.species.counts == [4, 4, 16]
     assert projected.species.symbols == ["Gd", "U"]
     assert projected.species.counts == [4, 4]
     output_moments = existing_magmom_values(out / "INCAR", 8)
@@ -548,8 +551,13 @@ def test_project_poscar_can_reduce_source_to_representative_cation_cell(tmp_path
     assert operation["reduce_cells"] == [2, 2, 2]
     assert operation["source_cation_count"] == 18
     assert operation["folded_cation_site_count"] == 8
+    assert operation["source_non_cation_count"] == 36
+    assert operation["folded_non_cation_site_count"] == 16
+    assert operation["selected_non_cation_count"] == 16
     assert operation["cation_species_target_counts"] == {"Gd": 4, "U": 4}
     assert operation["cation_species_selected_counts"] == {"Gd": 4, "U": 4}
+    assert operation["non_cation_species_target_counts"] == {"O": 16}
+    assert operation["non_cation_species_selected_counts"] == {"O": 16}
     assert plan["source_cation_magmom_summary"]["Gd"]["count"] == 4
     assert plan["cation_magmom_comparison"]["Gd"]["count_delta"] == 0
     assert plan["cation_magmom_comparison"]["U"]["unique_abs_moments_match"] is True
