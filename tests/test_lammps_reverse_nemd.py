@@ -129,9 +129,12 @@ def test_reverse_nemd_prepare_writes_replicated_inputs_and_array(tmp_path, monke
     manifest = (tmp_path / "analysis" / "rnemd" / "rnemd_manifest.tsv").read_text(encoding="utf-8")
     assert "rnemd_T300K_s01" in manifest
     assert "1x1x3" in manifest
+    assert "\r" not in manifest
     array_script = (tmp_path / "analysis" / "rnemd" / "array" / "run_rnemd_array.sh").read_text(encoding="utf-8")
     assert "#SBATCH --array=1-1%1" in array_script
     assert "#SBATCH --partition=gpu" in array_script
+    assert "line=${line%$'\\r'}" in array_script
+    assert "input_name=${input_name%$'\\r'}" in array_script
     assert "./run_stage.sh" in array_script
 
 

@@ -514,7 +514,7 @@ def write_manifest(path: Path, rows: list[dict[str, Any]]) -> None:
         "input_name",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t")
+        writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -555,12 +555,15 @@ def write_array_script(
         f"MANIFEST={shlex.quote(str(manifest_path.resolve()))}",
         "",
         "line=$(awk -F '\\t' -v task=\"$TASK_ID\" 'NR > 1 && $1 == task {print; exit}' \"$MANIFEST\")",
+        "line=${line%$'\\r'}",
         'if [ -z "$line" ]; then',
         '  echo "ERROR: no rNEMD manifest row for task ${TASK_ID}"',
         "  exit 2",
         "fi",
         "IFS=$'\\t' read -r task_id stage_name temperature seed source_npt_stage input_structure input_kind "
         "replicate direction run_time_ps run_steps walltime chunk_dir input_name <<< \"$line\"",
+        "input_name=${input_name%$'\\r'}",
+        "chunk_dir=${chunk_dir%$'\\r'}",
         'echo "Running rNEMD array task ${task_id}: ${stage_name} T=${temperature} K seed=${seed}"',
         'echo "chunk=${chunk_dir}"',
         'echo "input=${input_name}"',
