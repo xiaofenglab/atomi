@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from atomi.lammps import reverse_nemd
 from atomi.lammps.workflow import set_project_root
 
@@ -89,8 +91,6 @@ def test_reverse_nemd_prepare_writes_replicated_inputs_and_array(tmp_path, monke
             "1",
             "--run-time-ps",
             "2",
-            "--replicate",
-            "1x3x3",
             "--direction",
             "z",
             "--rnemd-steps-per-hour",
@@ -104,7 +104,7 @@ def test_reverse_nemd_prepare_writes_replicated_inputs_and_array(tmp_path, monke
 
     generated = json.loads((tmp_path / "config_rnemd.json").read_text(encoding="utf-8"))
     assert generated["runtime_profile"] == "lammps_rnemd"
-    assert generated["rnemd_settings"]["replicate"] == "1x3x3"
+    assert generated["rnemd_settings"]["replicate"] == "1x1x3"
     assert generated["rnemd_settings"]["runtime_estimate"]["run_steps_per_stage"] == 2000
     assert generated["rnemd_settings"]["runtime_estimate"]["estimated_walltime_hours_per_stage"] == 1.0
     assert generated["stages"][0]["walltime_hours"] == 1.0
@@ -114,7 +114,7 @@ def test_reverse_nemd_prepare_writes_replicated_inputs_and_array(tmp_path, monke
     chunk = tmp_path / "analysis" / "rnemd" / "rnemd_T300K_s01" / "chunk_rnemd"
     input_text = (chunk / "in.rnemd_T300K_s01_production").read_text(encoding="utf-8")
     assert "read_data" in input_text
-    assert "replicate       1 3 3" in input_text
+    assert "replicate       1 1 3" in input_text
     assert "suffix          kk" in input_text
     assert "pair_style      mace no_domain_decomposition" in input_text
     assert "fix             rnemd_flux all thermal/conductivity 100 z 20" in input_text
@@ -128,7 +128,7 @@ def test_reverse_nemd_prepare_writes_replicated_inputs_and_array(tmp_path, monke
     assert "#SBATCH --gres=gpu:1" in wrapper
     manifest = (tmp_path / "analysis" / "rnemd" / "rnemd_manifest.tsv").read_text(encoding="utf-8")
     assert "rnemd_T300K_s01" in manifest
-    assert "1x3x3" in manifest
+    assert "1x1x3" in manifest
     array_script = (tmp_path / "analysis" / "rnemd" / "array" / "run_rnemd_array.sh").read_text(encoding="utf-8")
     assert "#SBATCH --array=1-1%1" in array_script
     assert "#SBATCH --partition=gpu" in array_script
@@ -158,8 +158,6 @@ def test_reverse_nemd_prepare_scales_template_timing_by_replicated_atoms(tmp_pat
             "1",
             "--run-time-ps",
             "1",
-            "--replicate",
-            "1x3x3",
             "--array-limit",
             "1",
         ]
@@ -169,6 +167,130 @@ def test_reverse_nemd_prepare_scales_template_timing_by_replicated_atoms(tmp_pat
     estimate = generated["rnemd_settings"]["runtime_estimate"]
     assert estimate["throughput_source"] == "template_performance_scaled_by_atoms"
     assert estimate["base_atoms"] == 768
-    assert estimate["target_atoms"] == 6912
-    assert estimate["estimated_steps_per_hour"] == 2584.0
+    assert estimate["target_atoms"] == 2304
+    assert estimate["estimated_steps_per_hour"] == 7752.0
     assert estimate["run_steps_per_stage"] == 1000
+
+
+def test_reverse_nemd_prepare_rejects_mliap_backend(tmp_path):
+    cfg = base_cfg(tmp_path)
+    cfg["pair_style_backend"] = "mliap"
+    config = write_completed_npt(tmp_path, cfg)
+    set_project_root(tmp_path)
+
+    with pytest.raises(ValueError, match="normal old MACE/Kokkos"):
+        reverse_nemd.main(
+            [
+                "prepare",
+                "--config",
+                str(config),
+                "--outdir",
+                "analysis/rnemd_bad",
+                "--config-out",
+                "config_rnemd_bad.json",
+            ]
+        )
+
+
+def write_synthetic_rnemd_outputs(chunk: Path) -> None:
+    coords = [(i + 0.5) / 20.0 for i in range(20)]
+    temps = []
+    for i, coord in enumerate(coords):
+        if i == 0:
+            temps.append(300.0)
+        elif i <= 9:
+            temps.append(300.0 + 100.0 * coord)
+        elif i == 10:
+            temps.append(360.0)
+        else:
+            temps.append(400.0 - 100.0 * coord)
+    lines = [
+        "# Chunk-averaged data for fix rnemd_profile",
+        "# Timestep Number-of-chunks Total-count",
+        "# Chunk Coord1 Ncount v_rnemd_temp",
+    ]
+    for step in (0, 1000, 2000, 3000):
+        lines.append(f"{step} 20 2304")
+        for index, (coord, temp) in enumerate(zip(coords, temps), start=1):
+            lines.append(f"{index} {coord:.6f} 115.2 {temp:.6f}")
+    (chunk / "rnemd_temperature_profile.dat").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (chunk / "log.in.rnemd_T300K_s01_production").write_text(
+        "\n".join(
+            [
+                "LAMMPS log",
+                "Step Temp PotEng TotEng Press Volume Lx Ly Lz f_rnemd_flux",
+                "0 300 -1 -1 0 9000 10 10 90 0",
+                "1000 300 -1 -1 0 9000 10 10 90 10",
+                "2000 300 -1 -1 0 9000 10 10 90 20",
+                "3000 300 -1 -1 0 9000 10 10 90 30",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_reverse_nemd_analyze_and_validate_outputs(tmp_path):
+    cfg = base_cfg(tmp_path)
+    config = write_completed_npt(tmp_path, cfg)
+    set_project_root(tmp_path)
+    reverse_nemd.main(
+        [
+            "prepare",
+            "--config",
+            str(config),
+            "--outdir",
+            "analysis/rnemd_fit",
+            "--config-out",
+            "config_rnemd_fit.json",
+            "--T-min",
+            "300",
+            "--T-max",
+            "300",
+            "--n-seeds",
+            "1",
+            "--run-time-ps",
+            "3",
+            "--rnemd-steps-per-hour",
+            "3000",
+            "--array-limit",
+            "1",
+        ]
+    )
+    chunk = tmp_path / "analysis" / "rnemd_fit" / "rnemd_T300K_s01" / "chunk_rnemd"
+    write_synthetic_rnemd_outputs(chunk)
+
+    reverse_nemd.main(
+        [
+            "analyze",
+            "--config",
+            str(tmp_path / "config_rnemd_fit.json"),
+            "--outdir",
+            str(tmp_path / "analysis" / "rnemd_fit" / "fit"),
+        ]
+    )
+
+    seed_summary = (tmp_path / "analysis" / "rnemd_fit" / "fit" / "rnemd_seed_summary.csv").read_text(
+        encoding="utf-8"
+    )
+    assert "rnemd_T300K_s01" in seed_summary
+    assert "slope_disagreement_fraction" in seed_summary
+    k_summary = (tmp_path / "analysis" / "rnemd_fit" / "fit" / "thermal_conductivity_rnemd_T.csv").read_text(
+        encoding="utf-8"
+    )
+    assert "temperature_K,k_mean_W_mK" in k_summary
+
+    reverse_nemd.main(
+        [
+            "validate",
+            "--fit-dir",
+            str(tmp_path / "analysis" / "rnemd_fit" / "fit"),
+            "--min-seeds",
+            "1",
+            "--json-out",
+            str(tmp_path / "analysis" / "rnemd_fit" / "fit" / "validate.json"),
+        ]
+    )
+    report = json.loads((tmp_path / "analysis" / "rnemd_fit" / "fit" / "validate.json").read_text(encoding="utf-8"))
+    assert report["reports"][0]["status"] == "pass"
+    assert report["reports"][0]["k_W_mK"] > 0

@@ -12,9 +12,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from atomi.lammps.elastic import (
     discover_npt_records,
     find_restart_or_data,
+    read_lammps_thermo_table,
     relative_to_root,
     resolve_root_path,
     select_temperature_records,
@@ -32,7 +35,11 @@ from atomi.lammps.workflow import (
 
 
 DEFAULT_RNEMD_TIMESTEP_PS = 0.0001
+DEFAULT_RNEMD_REPEAT = "1x1x3"
 DEFAULT_RNEMD_WALLTIME_SAFETY_FACTOR = 1.5
+EV_TO_J = 1.602176634e-19
+ANGSTROM_TO_M = 1.0e-10
+PS_TO_S = 1.0e-12
 
 
 def _positive_float_or_none(value: Any) -> float | None:
@@ -58,7 +65,7 @@ def _parse_repeat(value: str | tuple[int, int, int] | list[int]) -> tuple[int, i
     else:
         parts = [int(part) for part in re.split(r"[xX,\s]+", str(value).strip()) if part]
     if len(parts) != 3 or any(item < 1 for item in parts):
-        raise ValueError(f"Expected a repeat like 1x3x3, got {value!r}.")
+        raise ValueError(f"Expected a repeat like {DEFAULT_RNEMD_REPEAT}, got {value!r}.")
     return parts[0], parts[1], parts[2]
 
 
@@ -280,7 +287,8 @@ def copy_rnemd_base_config(template: dict[str, Any], args: argparse.Namespace, r
         "dump_every": int(args.dump_every),
         "seed_count": len(seed_values(args)),
         "notes": [
-            "rNEMD uses the normal LAMMPS/MACE runtime profile, not the GK ML-IAP profile.",
+            "rNEMD uses the normal LAMMPS/MACE runtime profile in m_lammps_env, not the GK ML-IAP profile.",
+            "The default replicate is 1x1x3 so only the heat-flow axis is lengthened from the NPT-ready cell.",
             "For periodic heat-flow direction, the imposed heat flux is split into two directions in analysis.",
             "LAMMPS fix thermal/conductivity requires an even Nbin value.",
         ],
@@ -567,6 +575,16 @@ def write_array_script(
     path.chmod(0o755)
 
 
+def _guard_old_env_backend(cfg: dict[str, Any]) -> None:
+    backend = str(cfg.get("pair_style_backend", "mace")).lower()
+    if backend == "mliap" or cfg.get("runtime_profile") == "lammps_gk_mliap":
+        raise ValueError(
+            "thermal-rnemd-lammps is intentionally configured for the normal old MACE/Kokkos "
+            "LAMMPS environment. Use pair_style_backend=mace and profiles.lammps_md_engine/"
+            "profiles.lammps_rnemd, not the ML-IAP GK profile."
+        )
+
+
 def build_rnemd_runs(
     cfg: dict[str, Any],
     records: list[dict[str, Any]],
@@ -673,6 +691,7 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
         cfg["model_file"] = relative_to_root(resolve_root_path(args.model_file, root), root)
     if args.pair_style_backend is not None:
         cfg["pair_style_backend"] = args.pair_style_backend
+    _guard_old_env_backend(cfg)
     elements = _split_elements(args.model_elements)
     if elements is not None:
         cfg["model_elements"] = elements
@@ -737,6 +756,366 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
     return plan
 
 
+def _load_json(path: Path) -> dict[str, Any]:
+    import json
+
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _latest_log(chunk_dir: Path, input_name: str | None = None) -> Path:
+    candidates: list[Path] = []
+    if input_name:
+        candidates.extend(chunk_dir.glob(f"log.{input_name}"))
+        candidates.extend(chunk_dir.glob(f"log.{input_name}.*"))
+    candidates.extend(chunk_dir.glob("log.in.rnemd*_production"))
+    candidates.extend(chunk_dir.glob("log.*"))
+    candidates = sorted({path.resolve() for path in candidates if path.exists()}, key=lambda p: p.stat().st_mtime)
+    if not candidates:
+        raise FileNotFoundError(f"No LAMMPS log found in {chunk_dir}")
+    return candidates[-1]
+
+
+def _read_profile_blocks(path: Path) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) == 3:
+            try:
+                timestep = int(float(parts[0]))
+                nchunk = int(float(parts[1]))
+                total_count = float(parts[2])
+            except ValueError:
+                continue
+            current = {"timestep": timestep, "nchunk": nchunk, "total_count": total_count, "rows": []}
+            blocks.append(current)
+            continue
+        if current is None or len(parts) < 4:
+            continue
+        try:
+            current["rows"].append(
+                {
+                    "chunk": int(float(parts[0])),
+                    "coord": float(parts[1]),
+                    "count": float(parts[2]),
+                    "temp": float(parts[3]),
+                }
+            )
+        except ValueError:
+            continue
+    return [block for block in blocks if len(block["rows"]) == int(block["nchunk"])]
+
+
+def _mean_profile(blocks: list[dict[str, Any]], tail_fraction: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    if not blocks:
+        raise ValueError("No complete temperature-profile blocks were found.")
+    start = max(0, int(math.floor(len(blocks) * (1.0 - float(tail_fraction)))))
+    selected = blocks[start:] or blocks
+    nchunk = int(selected[-1]["nchunk"])
+    coords = np.zeros(nchunk, dtype=float)
+    temps = np.zeros(nchunk, dtype=float)
+    counts = np.zeros(nchunk, dtype=float)
+    for block in selected:
+        rows = sorted(block["rows"], key=lambda item: item["chunk"])
+        coords += np.asarray([row["coord"] for row in rows], dtype=float)
+        temps += np.asarray([row["temp"] for row in rows], dtype=float)
+        counts += np.asarray([row["count"] for row in rows], dtype=float)
+    denom = float(len(selected))
+    return coords / denom, temps / denom, counts / denom, len(selected)
+
+
+def _fit_profile_slopes(coords: np.ndarray, temps: np.ndarray) -> dict[str, Any]:
+    nbin = len(coords)
+    if nbin < 8 or nbin % 2:
+        raise ValueError(f"Expected an even profile with at least 8 bins, got {nbin}.")
+    mid = nbin // 2
+    first = np.arange(1, mid)
+    second = np.arange(mid + 1, nbin)
+    if len(first) < 2 or len(second) < 2:
+        raise ValueError("Too few bins remain after excluding swap layers.")
+    slope1, intercept1 = np.polyfit(coords[first], temps[first], 1)
+    slope2, intercept2 = np.polyfit(coords[second], temps[second], 1)
+    slope_abs = float(np.mean([abs(slope1), abs(slope2)]))
+    spread = abs(abs(slope1) - abs(slope2)) / slope_abs if slope_abs > 0 else math.inf
+    return {
+        "slope1_K_per_reduced": float(slope1),
+        "slope2_K_per_reduced": float(slope2),
+        "intercept1_K": float(intercept1),
+        "intercept2_K": float(intercept2),
+        "mean_abs_slope_K_per_reduced": slope_abs,
+        "slope_disagreement_fraction": float(spread),
+    }
+
+
+def _tail_mask(values: np.ndarray, tail_fraction: float) -> np.ndarray:
+    if values.size == 0:
+        return np.zeros(0, dtype=bool)
+    start = max(0, int(math.floor(values.size * (1.0 - float(tail_fraction)))))
+    mask = np.zeros(values.size, dtype=bool)
+    mask[start:] = True
+    if np.count_nonzero(mask) < min(3, values.size):
+        mask[:] = True
+    return mask
+
+
+def _direction_box_and_area(thermo: dict[str, np.ndarray], direction: str, mask: np.ndarray) -> tuple[float, float]:
+    lengths = {
+        "x": ("Lx", "Ly", "Lz"),
+        "y": ("Ly", "Lx", "Lz"),
+        "z": ("Lz", "Lx", "Ly"),
+    }
+    along_key, a_key, b_key = lengths[direction]
+    along = float(np.mean(thermo[along_key][mask]))
+    area = float(np.mean(thermo[a_key][mask]) * np.mean(thermo[b_key][mask]))
+    return along, area
+
+
+def _thermo_flux_column(thermo: dict[str, np.ndarray]) -> np.ndarray:
+    for key in ("f_rnemd_flux", "f_mp", "f_1"):
+        if key in thermo:
+            return thermo[key]
+    for key in thermo:
+        if key.startswith("f_"):
+            return thermo[key]
+    raise KeyError("No fix thermal/conductivity energy column found in thermo output.")
+
+
+def analyze_stage(cfg: dict[str, Any], stage: dict[str, Any], root: Path, args: argparse.Namespace) -> dict[str, Any]:
+    chunk_dir = resolve_root_path(Path(stage["chunk_dir"]), root)
+    input_name = Path(stage.get("input_file", "")).name or None
+    profile_path = chunk_dir / "rnemd_temperature_profile.dat"
+    if not profile_path.exists():
+        raise FileNotFoundError(f"Missing rNEMD temperature profile: {profile_path}")
+    log_path = _latest_log(chunk_dir, input_name=input_name)
+    blocks = _read_profile_blocks(profile_path)
+    coords, temps, counts, n_profile_blocks_used = _mean_profile(blocks, args.profile_tail_fraction)
+    slope_info = _fit_profile_slopes(coords, temps)
+    thermo = read_lammps_thermo_table(log_path)
+    step = np.asarray(thermo["Step"], dtype=float)
+    flux_energy = np.asarray(_thermo_flux_column(thermo), dtype=float)
+    thermo_mask = _tail_mask(step, args.thermo_tail_fraction)
+    timestep_ps = float(cfg.get("timestep_ps", cfg.get("timestep", DEFAULT_RNEMD_TIMESTEP_PS)))
+    time_ps = (step - step[0]) * timestep_ps
+    if np.count_nonzero(thermo_mask) < 2:
+        raise ValueError(f"Not enough thermo rows in {log_path} to fit energy transfer rate.")
+    energy_rate_eV_per_ps, energy_intercept = np.polyfit(time_ps[thermo_mask], flux_energy[thermo_mask], 1)
+    direction = str(stage.get("direction") or cfg.get("rnemd_settings", {}).get("direction", "z"))
+    length_A, area_A2 = _direction_box_and_area(thermo, direction, thermo_mask)
+    slope_K_per_A = slope_info["mean_abs_slope_K_per_reduced"] / length_A
+    heat_flux_W_m2 = abs(float(energy_rate_eV_per_ps)) * EV_TO_J / (
+        2.0 * area_A2 * (ANGSTROM_TO_M**2) * PS_TO_S
+    )
+    k_W_mK = heat_flux_W_m2 / (slope_K_per_A / ANGSTROM_TO_M) if slope_K_per_A > 0 else math.nan
+    row = {
+        "stage_name": stage["name"],
+        "temperature_K": float(stage["temperature"]),
+        "seed": int(stage.get("velocity_seed", 0)),
+        "chunk_dir": str(chunk_dir),
+        "log_path": str(log_path),
+        "profile_path": str(profile_path),
+        "direction": direction,
+        "replicate": str(stage.get("replicate", cfg.get("rnemd_settings", {}).get("replicate", ""))),
+        "timestep_ps": timestep_ps,
+        "run_steps": int(stage.get("fixed_steps", 0)),
+        "profile_blocks": len(blocks),
+        "profile_blocks_used": n_profile_blocks_used,
+        "mean_temperature_K": float(np.average(temps, weights=np.maximum(counts, 1.0))),
+        "length_A": length_A,
+        "area_A2": area_A2,
+        "slope1_K_per_reduced": slope_info["slope1_K_per_reduced"],
+        "slope2_K_per_reduced": slope_info["slope2_K_per_reduced"],
+        "slope_disagreement_fraction": slope_info["slope_disagreement_fraction"],
+        "mean_abs_slope_K_per_A": slope_K_per_A,
+        "energy_rate_eV_per_ps": float(energy_rate_eV_per_ps),
+        "energy_intercept_eV": float(energy_intercept),
+        "heat_flux_W_m2": heat_flux_W_m2,
+        "k_W_mK": float(k_W_mK),
+    }
+    profile_rows = [
+        {
+            "stage_name": stage["name"],
+            "chunk": int(index + 1),
+            "coord_reduced": float(coords[index]),
+            "temperature_K": float(temps[index]),
+            "count": float(counts[index]),
+        }
+        for index in range(len(coords))
+    ]
+    row["profile_rows"] = profile_rows
+    return row
+
+
+def analyze_main(args: argparse.Namespace) -> dict[str, Any]:
+    config = args.config.resolve()
+    cfg = _load_json(config)
+    root = config.parent.resolve()
+    outdir = resolve_root_path(args.outdir, root)
+    stage_rows: list[dict[str, Any]] = []
+    profile_rows: list[dict[str, Any]] = []
+    for stage in cfg.get("stages", []):
+        if not stage.get("rnemd_run", False):
+            continue
+        row = analyze_stage(cfg, stage, root, args)
+        profile_rows.extend(row.pop("profile_rows"))
+        stage_rows.append(row)
+    if not stage_rows:
+        raise RuntimeError(f"No rNEMD stages were found in {config}")
+
+    seed_fields = [
+        "stage_name",
+        "temperature_K",
+        "seed",
+        "k_W_mK",
+        "heat_flux_W_m2",
+        "mean_abs_slope_K_per_A",
+        "slope_disagreement_fraction",
+        "energy_rate_eV_per_ps",
+        "mean_temperature_K",
+        "profile_blocks",
+        "profile_blocks_used",
+        "direction",
+        "replicate",
+        "length_A",
+        "area_A2",
+        "chunk_dir",
+    ]
+    _write_csv(outdir / "rnemd_seed_summary.csv", stage_rows, seed_fields)
+    _write_csv(
+        outdir / "rnemd_temperature_profiles.csv",
+        profile_rows,
+        ["stage_name", "chunk", "coord_reduced", "temperature_K", "count"],
+    )
+    temperatures = sorted({float(row["temperature_K"]) for row in stage_rows})
+    summary_rows: list[dict[str, Any]] = []
+    for temp in temperatures:
+        rows = [row for row in stage_rows if float(row["temperature_K"]) == temp]
+        k_values = np.asarray([row["k_W_mK"] for row in rows], dtype=float)
+        valid = np.isfinite(k_values) & (k_values > 0)
+        ok = k_values[valid]
+        summary_rows.append(
+            {
+                "temperature_K": temp,
+                "k_mean_W_mK": float(np.mean(ok)) if ok.size else math.nan,
+                "k_std_W_mK": float(np.std(ok, ddof=1)) if ok.size > 1 else 0.0,
+                "seed_count": len(rows),
+                "ok_seed_count": int(ok.size),
+                "seed_cv_fraction": float(np.std(ok, ddof=1) / np.mean(ok)) if ok.size > 1 and np.mean(ok) else 0.0,
+                "slope_disagreement_mean_fraction": float(
+                    np.mean([row["slope_disagreement_fraction"] for row in rows])
+                ),
+            }
+        )
+    _write_csv(
+        outdir / "thermal_conductivity_rnemd_T.csv",
+        summary_rows,
+        [
+            "temperature_K",
+            "k_mean_W_mK",
+            "k_std_W_mK",
+            "seed_count",
+            "ok_seed_count",
+            "seed_cv_fraction",
+            "slope_disagreement_mean_fraction",
+        ],
+    )
+    result = {
+        "config": str(config),
+        "outdir": str(outdir),
+        "seed_summary": str(outdir / "rnemd_seed_summary.csv"),
+        "temperature_summary": str(outdir / "thermal_conductivity_rnemd_T.csv"),
+        "profile_summary": str(outdir / "rnemd_temperature_profiles.csv"),
+        "n_stages": len(stage_rows),
+        "n_temperatures": len(summary_rows),
+    }
+    write_json(outdir / "rnemd_analysis_summary.json", result)
+    print(f"Wrote rNEMD seed summary: {result['seed_summary']}")
+    print(f"Wrote rNEMD k(T): {result['temperature_summary']}")
+    for row in summary_rows:
+        print(
+            f"T={row['temperature_K']:g} K  k={row['k_mean_W_mK']:.4g} W/m/K  "
+            f"ok_seeds={row['ok_seed_count']}/{row['seed_count']}  "
+            f"slope_mismatch={row['slope_disagreement_mean_fraction']:.1%}"
+        )
+    return result
+
+
+def validate_main(args: argparse.Namespace) -> dict[str, Any]:
+    fit_dir = args.fit_dir.resolve()
+    summary_path = fit_dir / "thermal_conductivity_rnemd_T.csv"
+    if not summary_path.exists():
+        raise FileNotFoundError(f"Run thermal-rnemd-lammps analyze first; missing {summary_path}")
+    rows: list[dict[str, Any]] = []
+    with summary_path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            rows.append(row)
+    reports: list[dict[str, Any]] = []
+    for row in rows:
+        warnings: list[str] = []
+        status = "pass"
+        ok_seed_count = int(float(row["ok_seed_count"]))
+        seed_count = int(float(row["seed_count"]))
+        k_value = float(row["k_mean_W_mK"])
+        slope_mismatch = float(row["slope_disagreement_mean_fraction"])
+        seed_cv = float(row["seed_cv_fraction"])
+        if ok_seed_count < args.min_seeds:
+            warnings.append(f"Only {ok_seed_count}/{seed_count} valid seed(s); target at least {args.min_seeds}.")
+            status = "warn"
+        if not math.isfinite(k_value) or k_value <= 0:
+            warnings.append("Mean thermal conductivity is not positive/finite.")
+            status = "fail"
+        if slope_mismatch >= args.slope_disagreement_fail_fraction:
+            warnings.append("The two mirrored temperature-gradient slopes disagree strongly.")
+            status = "fail"
+        elif slope_mismatch >= args.slope_disagreement_warn_fraction and status != "fail":
+            warnings.append("The two mirrored temperature-gradient slopes disagree; inspect profile linearity.")
+            status = "warn"
+        if seed_cv >= args.seed_cv_fail_fraction:
+            warnings.append("Seed-to-seed spread is very large.")
+            status = "fail"
+        elif seed_cv >= args.seed_cv_warn_fraction and status != "fail":
+            warnings.append("Seed-to-seed spread is large.")
+            status = "warn"
+        reports.append(
+            {
+                "temperature_K": float(row["temperature_K"]),
+                "status": status,
+                "k_W_mK": k_value,
+                "ok_seed_count": ok_seed_count,
+                "seed_count": seed_count,
+                "seed_cv_fraction": seed_cv,
+                "slope_disagreement_fraction": slope_mismatch,
+                "warnings": warnings,
+            }
+        )
+    output = {"fit_dir": str(fit_dir), "reports": reports}
+    json_out = args.json_out or (fit_dir / "rnemd_validation_summary.json")
+    write_json(json_out, output)
+    print(f"Wrote rNEMD validation JSON: {json_out}")
+    print("rNEMD Validation Summary")
+    print("------------------------")
+    for report in reports:
+        print(
+            f"T={report['temperature_K']:g} K  status={report['status']}  "
+            f"k={report['k_W_mK']:.4g} W/m/K  ok_seeds={report['ok_seed_count']}/{report['seed_count']}  "
+            f"slope_mismatch={report['slope_disagreement_fraction']:.1%}  "
+            f"seed_cv={report['seed_cv_fraction']:.1%}"
+        )
+        for warning in report["warnings"]:
+            print(f"  - {warning}")
+    return output
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="thermal-rnemd-lammps",
@@ -772,7 +1151,11 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument("--seed", action="append", help="Explicit velocity seed. Repeat or comma-separate.")
     prep.add_argument("--run-time-ps", type=float, default=20.0, help="NVE/rNEMD production time after replication.")
     prep.add_argument("--timestep-ps", type=float, help="Override timestep in ps. Default reads template config/env.")
-    prep.add_argument("--replicate", default="1x3x3", help="LAMMPS replicate factors for the NPT-ready data. Default: 1x3x3.")
+    prep.add_argument(
+        "--replicate",
+        default=DEFAULT_RNEMD_REPEAT,
+        help=f"LAMMPS replicate factors for the NPT-ready data. Default: {DEFAULT_RNEMD_REPEAT}.",
+    )
     prep.add_argument("--direction", choices=("x", "y", "z"), default="z", help="Heat-flow direction for swaps. Default: z.")
     prep.add_argument("--nbin", type=int, default=20, help="Even number of layers along --direction. Default: 20.")
     prep.add_argument("--swap-every", type=int, default=100, help="Perform kinetic-energy swaps every N steps. Default: 100.")
@@ -784,7 +1167,11 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument("--dump-every", type=int, default=0, help="Dump atom snapshots every N steps; 0 disables dumps. Default: 0.")
     prep.add_argument("--suffix", choices=("kk", "off", "none"), default="kk")
     prep.add_argument("--model-file", type=Path, help="Override model file for rNEMD stages.")
-    prep.add_argument("--pair-style-backend", choices=("mace", "mliap"), help="Pair-style backend written to rNEMD inputs.")
+    prep.add_argument(
+        "--pair-style-backend",
+        choices=("mace",),
+        help="Pair-style backend written to rNEMD inputs. rNEMD is kept on the old fast MACE/Kokkos route.",
+    )
     prep.add_argument("--model-elements", nargs="+", help="Element/type order for pair_coeff, e.g. O U. Commas are accepted.")
     prep.add_argument("--array-limit", type=int, default=3, help="Slurm array concurrency. Default: 3.")
     prep.add_argument("--job-name", default="rnemd-array")
@@ -822,6 +1209,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use NPT restart files even when matching data files exist. Default prefers data files.",
     )
+
+    ana = sub.add_parser("analyze", help="Fit rNEMD temperature profiles and imposed heat flux into k(T).")
+    ana.add_argument("--config", type=Path, default=Path("config_rnemd.json"))
+    ana.add_argument("--outdir", type=Path, default=Path("analysis/rnemd_lammps/fit"))
+    ana.add_argument("--profile-tail-fraction", type=float, default=0.5)
+    ana.add_argument("--thermo-tail-fraction", type=float, default=0.5)
+
+    val = sub.add_parser("validate", help="Summarize rNEMD fit quality and decision-rule warnings.")
+    val.add_argument("--fit-dir", type=Path, default=Path("analysis/rnemd_lammps/fit"))
+    val.add_argument("--json-out", type=Path, help="Optional validation report JSON.")
+    val.add_argument("--min-seeds", type=int, default=3)
+    val.add_argument("--slope-disagreement-warn-fraction", type=float, default=0.25)
+    val.add_argument("--slope-disagreement-fail-fraction", type=float, default=0.50)
+    val.add_argument("--seed-cv-warn-fraction", type=float, default=0.25)
+    val.add_argument("--seed-cv-fail-fraction", type=float, default=0.50)
     return parser
 
 
@@ -830,6 +1232,10 @@ def main(argv: list[str] | None = None) -> Any:
     args = parser.parse_args(argv)
     if args.command == "prepare":
         return prepare_main(args)
+    if args.command == "analyze":
+        return analyze_main(args)
+    if args.command == "validate":
+        return validate_main(args)
     parser.error(f"unknown command {args.command}")
 
 
