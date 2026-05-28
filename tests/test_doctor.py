@@ -306,6 +306,43 @@ def test_confighpc_exports_separate_gk_lammps_profile(tmp_path: Path) -> None:
     assert "export MACE_ALLOW_CPU=true" in env_text
 
 
+def test_confighpc_exports_rnemd_lammps_timing_profile(tmp_path: Path) -> None:
+    config_path = tmp_path / "atomi_hpc_config.kit.local.json"
+    env_path = tmp_path / "atomi_hpc_env.sh"
+    config_path.write_text(
+        json.dumps(
+            {
+                "site": "KIT",
+                "profiles": {
+                    "lammps_rnemd": {
+                        "env_path": "/private/prod/env",
+                        "lammps_executable": "/private/prod/lmp",
+                        "lammps_prefix": "/private/prod",
+                        "performance": {
+                            "steps_per_hour": 2584,
+                            "walltime_safety_factor": 1.5,
+                            "reference_timestep_ps": 0.0001,
+                            "reference_atoms": 6912,
+                        },
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    doctor.configure_hpc_environment(directory=tmp_path, env_path=env_path)
+    env_text = env_path.read_text(encoding="utf-8")
+
+    assert "export ATOMI_LAMMPS_RNEMD_ENV=/private/prod/env" in env_text
+    assert "export ATOMI_LMP_RNEMD_EXE=/private/prod/lmp" in env_text
+    assert "export ATOMI_LAMMPS_RNEMD_PREFIX=/private/prod" in env_text
+    assert "export ATOMI_LAMMPS_RNEMD_STEPS_PER_HOUR=2584" in env_text
+    assert "export ATOMI_LAMMPS_RNEMD_WALLTIME_SAFETY_FACTOR=1.5" in env_text
+    assert "export ATOMI_LAMMPS_RNEMD_TIMESTEP_PS=0.0001" in env_text
+    assert "export ATOMI_LAMMPS_RNEMD_REFERENCE_ATOMS=6912" in env_text
+
+
 def test_confighpc_prefers_named_local_config_and_warns_on_multiple(tmp_path: Path) -> None:
     less_preferred = tmp_path / "other.local.json"
     preferred = tmp_path / "atomi_hpc_config.kit.local.json"

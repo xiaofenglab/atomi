@@ -202,6 +202,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         thermal_gk_lammps.add_argument("thermal_gk_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("thermal_rnemd_lammps", "thermal-rnemd-lammps", "rnemd-lammps"):
+        thermal_rnemd_lammps = subparsers.add_parser(
+            command_name,
+            help="Prepare reverse-NEMD LAMMPS thermal-conductivity workflows.",
+        )
+        thermal_rnemd_lammps.add_argument("thermal_rnemd_args", nargs=argparse.REMAINDER)
+
     elastic_lammps = subparsers.add_parser(
         "elastic_lammps",
         help="Prepare and fit finite-temperature LAMMPS elastic tensors.",
@@ -822,6 +829,11 @@ def main(argv: list[str] | None = None) -> None:
 
         thermal_gk_lammps_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("thermal_rnemd_lammps", "thermal-rnemd-lammps", "rnemd-lammps"):
+        from atomi.lammps.reverse_nemd import main as thermal_rnemd_lammps_main
+
+        thermal_rnemd_lammps_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "elastic_lammps":
         from atomi.lammps.elastic import main as elastic_lammps_main
 
@@ -1327,6 +1339,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.lammps.green_kubo import main as thermal_gk_lammps_main
 
         thermal_gk_lammps_main(args.thermal_gk_args)
+        return
+
+    if args.subcommand in ("thermal_rnemd_lammps", "thermal-rnemd-lammps", "rnemd-lammps"):
+        from atomi.lammps.reverse_nemd import main as thermal_rnemd_lammps_main
+
+        thermal_rnemd_lammps_main(args.thermal_rnemd_args)
         return
 
     if args.subcommand == "elastic_lammps":

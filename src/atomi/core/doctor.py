@@ -708,6 +708,57 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
                 "atoms_small",
             )
 
+    lammps_rnemd = profiles.get("lammps_rnemd", {})
+    if isinstance(lammps_rnemd, dict):
+        env = lammps_rnemd.get("environment", {})
+        if isinstance(env, dict):
+            for key, value in env.items():
+                if _nonempty(value) and (str(key).startswith("ATOMI_") or str(key) == "PSM2_CUDA"):
+                    exports.setdefault(str(key), str(value))
+        rnemd_mappings = {
+            "env_path": "ATOMI_LAMMPS_RNEMD_ENV",
+            "lammps_executable": "ATOMI_LMP_RNEMD_EXE",
+            "lammps_prefix": "ATOMI_LAMMPS_RNEMD_PREFIX",
+        }
+        for field, env_key in rnemd_mappings.items():
+            if _nonempty(lammps_rnemd.get(field)):
+                exports.setdefault(env_key, str(lammps_rnemd[field]))
+        performance = lammps_rnemd.get("performance", {})
+        if isinstance(performance, dict):
+            _set_first_nonempty(
+                exports,
+                "ATOMI_LAMMPS_RNEMD_STEPS_PER_HOUR",
+                performance,
+                "steps_per_hour",
+                "rnemd_steps_per_hour",
+                "observed_steps_per_hour",
+                "reference_steps_per_hour",
+            )
+            _set_first_nonempty(
+                exports,
+                "ATOMI_LAMMPS_RNEMD_WALLTIME_SAFETY_FACTOR",
+                performance,
+                "walltime_safety_factor",
+                "safety_factor",
+            )
+            _set_first_nonempty(
+                exports,
+                "ATOMI_LAMMPS_RNEMD_TIMESTEP_PS",
+                performance,
+                "default_timestep_ps",
+                "timestep_ps",
+                "reference_timestep_ps",
+            )
+            _set_first_nonempty(
+                exports,
+                "ATOMI_LAMMPS_RNEMD_REFERENCE_ATOMS",
+                performance,
+                "reference_atoms",
+                "atoms",
+                "atoms_small",
+                "reference_base_atoms",
+            )
+
     cp2k = profiles.get("cp2k", {})
     if isinstance(cp2k, dict):
         env = cp2k.get("environment", {})
