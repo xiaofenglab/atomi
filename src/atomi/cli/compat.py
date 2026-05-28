@@ -76,6 +76,13 @@ def plotgk(argv: list[str] | None = None) -> None:
     plot_gk_main(argv)
 
 
+def plotrnemd(argv: list[str] | None = None) -> None:
+    """Compatibility command: plotrnemd [chunk_dir]."""
+    from atomi.lammps.reverse_nemd import plot_cli
+
+    plot_cli(argv)
+
+
 def plotcp2k(argv: list[str] | None = None) -> None:
     """Compatibility command: plotcp2k cp2k.log [trajectory.xyz]."""
     parser = argparse.ArgumentParser(prog="plotcp2k")

@@ -234,6 +234,45 @@ def write_synthetic_rnemd_outputs(chunk: Path) -> None:
     )
 
 
+def test_reverse_nemd_status_reports_live_progress(tmp_path, capsys):
+    cfg = base_cfg(tmp_path)
+    config = write_completed_npt(tmp_path, cfg)
+    set_project_root(tmp_path)
+    reverse_nemd.main(
+        [
+            "prepare",
+            "--config",
+            str(config),
+            "--outdir",
+            "analysis/rnemd_status",
+            "--config-out",
+            "config_rnemd_status.json",
+            "--T-min",
+            "300",
+            "--T-max",
+            "300",
+            "--n-seeds",
+            "1",
+            "--run-time-ps",
+            "3",
+            "--rnemd-steps-per-hour",
+            "3000",
+            "--array-limit",
+            "1",
+        ]
+    )
+    chunk = tmp_path / "analysis" / "rnemd_status" / "rnemd_T300K_s01" / "chunk_rnemd"
+    write_synthetic_rnemd_outputs(chunk)
+
+    reverse_nemd.main(["status", str(chunk)])
+
+    out = capsys.readouterr().out
+    assert "rNEMD run status" in out
+    assert "current      : 3000/3000 steps = 3/3 ps (100.0%)" in out
+    assert "flux energy  : 30" in out
+    assert "profile rows : 4 block(s), latest step 3000 = 3 ps" in out
+
+
 def test_reverse_nemd_analyze_and_validate_outputs(tmp_path):
     cfg = base_cfg(tmp_path)
     config = write_completed_npt(tmp_path, cfg)

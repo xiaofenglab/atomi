@@ -8,7 +8,10 @@ import math
 import os
 import re
 import shlex
+import subprocess
 import sys
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +35,7 @@ from atomi.lammps.workflow import (
     lammps_pair_lines,
     lammps_wrapper_text,
 )
+from atomi.viz.vasp_live import ensure_gnuplot
 
 
 DEFAULT_RNEMD_TIMESTEP_PS = 0.0001
@@ -40,6 +44,42 @@ DEFAULT_RNEMD_WALLTIME_SAFETY_FACTOR = 1.5
 EV_TO_J = 1.602176634e-19
 ANGSTROM_TO_M = 1.0e-10
 PS_TO_S = 1.0e-12
+
+
+@dataclass(frozen=True)
+class RNEMDRunPlan:
+    timestep_ps: float
+    run_steps: int
+    replicate: str = ""
+    direction: str = "z"
+    swap_every: int | None = None
+    nbin: int | None = None
+    profile_nevery: int | None = None
+    profile_nrepeat: int | None = None
+    profile_nfreq: int | None = None
+
+
+@dataclass(frozen=True)
+class RNEMDStatus:
+    current_steps: int
+    expected_steps: int
+    timestep_ps: float
+    latest_temperature_K: float | None = None
+    transferred_energy_eV: float | None = None
+
+    @property
+    def current_ps(self) -> float:
+        return self.current_steps * self.timestep_ps
+
+    @property
+    def expected_ps(self) -> float:
+        return self.expected_steps * self.timestep_ps
+
+    @property
+    def percent(self) -> float:
+        if self.expected_steps <= 0:
+            return 0.0
+        return 100.0 * min(max(self.current_steps / self.expected_steps, 0.0), 1.0)
 
 
 def _positive_float_or_none(value: Any) -> float | None:
@@ -807,6 +847,122 @@ def _latest_log(chunk_dir: Path, input_name: str | None = None) -> Path:
     return candidates[-1]
 
 
+def latest_rnemd_input(chunk_dir: Path) -> Path | None:
+    candidates = sorted(chunk_dir.glob("in.rnemd*_production"), key=lambda path: path.stat().st_mtime)
+    if not candidates:
+        candidates = sorted(chunk_dir.glob("in.*"), key=lambda path: path.stat().st_mtime)
+    return candidates[-1] if candidates else None
+
+
+def latest_rnemd_log(chunk_dir: Path, input_name: str | None = None) -> Path | None:
+    try:
+        return _latest_log(chunk_dir, input_name=input_name)
+    except FileNotFoundError:
+        return None
+
+
+def read_rnemd_run_plan(input_file: Path) -> RNEMDRunPlan:
+    text = input_file.read_text(encoding="utf-8", errors="replace")
+    timestep = _first_float(r"(?m)^\s*timestep\s+([0-9.eE+-]+)", text) or DEFAULT_RNEMD_TIMESTEP_PS
+    run_matches = [int(match.group(1)) for match in re.finditer(r"(?m)^\s*run\s+(\d+)", text)]
+    replicate_match = re.search(r"(?m)^\s*replicate\s+(\d+)\s+(\d+)\s+(\d+)", text)
+    replicate = "x".join(replicate_match.groups()) if replicate_match else ""
+    flux_match = re.search(
+        r"(?m)^\s*fix\s+rnemd_flux\s+all\s+thermal/conductivity\s+(\d+)\s+([xyz])\s+(\d+)",
+        text,
+    )
+    profile_match = re.search(
+        r"(?m)^\s*fix\s+rnemd_profile\s+all\s+ave/chunk\s+(\d+)\s+(\d+)\s+(\d+)",
+        text,
+    )
+    return RNEMDRunPlan(
+        timestep_ps=float(timestep),
+        run_steps=run_matches[-1] if run_matches else 0,
+        replicate=replicate,
+        direction=flux_match.group(2) if flux_match else "z",
+        swap_every=int(flux_match.group(1)) if flux_match else None,
+        nbin=int(flux_match.group(3)) if flux_match else None,
+        profile_nevery=int(profile_match.group(1)) if profile_match else None,
+        profile_nrepeat=int(profile_match.group(2)) if profile_match else None,
+        profile_nfreq=int(profile_match.group(3)) if profile_match else None,
+    )
+
+
+def summarize_rnemd_status(log_file: Path | None, plan: RNEMDRunPlan) -> RNEMDStatus:
+    if log_file is None or not log_file.exists():
+        return RNEMDStatus(0, plan.run_steps, plan.timestep_ps)
+    try:
+        thermo = read_lammps_thermo_table(log_file)
+    except ValueError:
+        return RNEMDStatus(0, plan.run_steps, plan.timestep_ps)
+    step = np.asarray(thermo.get("Step", []), dtype=float)
+    if step.size == 0:
+        return RNEMDStatus(0, plan.run_steps, plan.timestep_ps)
+    current_steps = max(0, int(round(float(step[-1] - step[0]))))
+    latest_temperature = float(thermo["Temp"][-1]) if "Temp" in thermo and len(thermo["Temp"]) else None
+    try:
+        transferred_energy = float(_thermo_flux_column(thermo)[-1])
+    except (KeyError, IndexError):
+        transferred_energy = None
+    return RNEMDStatus(
+        current_steps=current_steps,
+        expected_steps=plan.run_steps,
+        timestep_ps=plan.timestep_ps,
+        latest_temperature_K=latest_temperature,
+        transferred_energy_eV=transferred_energy,
+    )
+
+
+def print_rnemd_summary(
+    chunk_dir: Path,
+    input_file: Path | None = None,
+    log_file: Path | None = None,
+) -> tuple[RNEMDRunPlan, RNEMDStatus]:
+    input_file = input_file or latest_rnemd_input(chunk_dir)
+    if input_file is None:
+        raise FileNotFoundError(f"No rNEMD input file found in {chunk_dir}")
+    log_file = log_file or latest_rnemd_log(chunk_dir, input_name=input_file.name)
+    plan = read_rnemd_run_plan(input_file)
+    status = summarize_rnemd_status(log_file, plan)
+    profile_path = chunk_dir / "rnemd_temperature_profile.dat"
+    blocks = _read_profile_blocks(profile_path) if profile_path.exists() else []
+
+    print("rNEMD run status")
+    print("----------------")
+    print(f"chunk        : {chunk_dir}")
+    print(f"input        : {input_file}")
+    print(f"log          : {log_file if log_file else 'missing'}")
+    print(f"timestep     : {plan.timestep_ps:g} ps ({plan.timestep_ps * 1000:g} fs)")
+    print(f"replicate    : {plan.replicate or 'unknown'}")
+    print(f"direction    : {plan.direction}")
+    print(f"run target   : {plan.run_steps} steps = {plan.run_steps * plan.timestep_ps:g} ps")
+    if plan.swap_every and plan.nbin:
+        print(f"rNEMD swaps  : every {plan.swap_every} steps over {plan.nbin} bins")
+    if plan.profile_nevery and plan.profile_nrepeat and plan.profile_nfreq:
+        print(
+            "profile ave  : "
+            f"nevery={plan.profile_nevery}, nrepeat={plan.profile_nrepeat}, "
+            f"nfreq={plan.profile_nfreq} ({plan.profile_nfreq * plan.timestep_ps:g} ps/window)"
+        )
+    print(
+        f"current      : {status.current_steps}/{status.expected_steps} steps "
+        f"= {status.current_ps:g}/{status.expected_ps:g} ps ({status.percent:.1f}%)"
+    )
+    if status.latest_temperature_K is not None:
+        print(f"latest Temp  : {status.latest_temperature_K:.3g} K")
+    if status.transferred_energy_eV is not None:
+        print(f"flux energy  : {status.transferred_energy_eV:.6g} eV")
+    if blocks:
+        latest = blocks[-1]
+        print(
+            f"profile rows : {len(blocks)} block(s), latest step {latest['timestep']} "
+            f"= {latest['timestep'] * plan.timestep_ps:g} ps"
+        )
+    else:
+        print(f"profile rows : none yet ({profile_path.name})")
+    return plan, status
+
+
 def _read_profile_blocks(path: Path) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
@@ -913,6 +1069,116 @@ def _thermo_flux_column(thermo: dict[str, np.ndarray]) -> np.ndarray:
         if key.startswith("f_"):
             return thermo[key]
     raise KeyError("No fix thermal/conductivity energy column found in thermo output.")
+
+
+def plot_rnemd_once(
+    chunk_dir: Path,
+    *,
+    window: int = 220,
+    profile_tail_fraction: float = 0.5,
+) -> None:
+    chunk_dir = chunk_dir.resolve()
+    plan, _status = print_rnemd_summary(chunk_dir)
+    log_file = latest_rnemd_log(chunk_dir, input_name=(latest_rnemd_input(chunk_dir) or Path("")).name)
+    profile_path = chunk_dir / "rnemd_temperature_profile.dat"
+    thermo_rows = _rnemd_thermo_rows(log_file, plan, window=window) if log_file else []
+    profile_rows = _rnemd_profile_rows(profile_path, profile_tail_fraction) if profile_path.exists() else []
+    if not thermo_rows and not profile_rows:
+        print("No plottable rNEMD thermo/profile rows are available yet.")
+        return
+    ensure_gnuplot()
+    if thermo_rows:
+        _plot_rnemd_thermo(thermo_rows)
+    else:
+        print(f"No thermo rows found in {log_file}")
+    if profile_rows:
+        _plot_rnemd_profile(profile_rows)
+    else:
+        print(f"No complete profile blocks found in {profile_path}")
+
+
+def _rnemd_thermo_rows(log_file: Path | None, plan: RNEMDRunPlan, *, window: int) -> list[dict[str, float]]:
+    if log_file is None or not log_file.exists():
+        return []
+    try:
+        thermo = read_lammps_thermo_table(log_file)
+        step = np.asarray(thermo["Step"], dtype=float)
+        temp = np.asarray(thermo["Temp"], dtype=float)
+        flux = np.asarray(_thermo_flux_column(thermo), dtype=float)
+    except (KeyError, ValueError):
+        return []
+    if step.size == 0:
+        return []
+    start_step = float(step[0])
+    rows = [
+        {
+            "time_ps": float((step[i] - start_step) * plan.timestep_ps),
+            "temperature_K": float(temp[i]),
+            "flux_energy_eV": float(flux[i]),
+        }
+        for i in range(step.size)
+    ]
+    return rows[-max(1, int(window)) :]
+
+
+def _rnemd_profile_rows(profile_path: Path, tail_fraction: float) -> list[dict[str, float]]:
+    try:
+        blocks = _read_profile_blocks(profile_path)
+        coords, temps, counts, _nblocks = _mean_profile(blocks, tail_fraction)
+    except (OSError, ValueError):
+        return []
+    return [
+        {
+            "coord": float(coords[i]),
+            "temperature_K": float(temps[i]),
+            "count": float(counts[i]),
+        }
+        for i in range(len(coords))
+    ]
+
+
+def _plot_rnemd_thermo(rows: list[dict[str, float]]) -> None:
+    with tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False, encoding="utf-8") as handle:
+        path = Path(handle.name)
+        for row in rows:
+            handle.write(f"{row['time_ps']} {row['temperature_K']} {row['flux_energy_eV']}\n")
+    try:
+        script = f"""
+set term dumb ansi 120 24
+set grid
+set key outside
+set y2tics
+set title "rNEMD live thermo"
+set xlabel "time (ps)"
+set ylabel "Temp (K)"
+set y2label "transferred energy (eV)"
+plot "{_gnuplot_quote(path)}" using 1:2 with lines title "Temp", \
+     "{_gnuplot_quote(path)}" using 1:3 axes x1y2 with lines title "f_rnemd_flux"
+unset y2tics
+"""
+        subprocess.run(["gnuplot"], input=script, text=True, check=True)
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def _plot_rnemd_profile(rows: list[dict[str, float]]) -> None:
+    with tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False, encoding="utf-8") as handle:
+        path = Path(handle.name)
+        for row in rows:
+            handle.write(f"{row['coord']} {row['temperature_K']} {row['count']}\n")
+    try:
+        script = f"""
+set term dumb ansi 120 24
+set grid
+set key outside
+set title "rNEMD slab temperature profile"
+set xlabel "reduced coordinate"
+set ylabel "Temp (K)"
+plot "{_gnuplot_quote(path)}" using 1:2 with linespoints title "T profile"
+"""
+        subprocess.run(["gnuplot"], input=script, text=True, check=True)
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def analyze_stage(cfg: dict[str, Any], stage: dict[str, Any], root: Path, args: argparse.Namespace) -> dict[str, Any]:
@@ -1248,6 +1514,21 @@ def build_parser() -> argparse.ArgumentParser:
     val.add_argument("--slope-disagreement-fail-fraction", type=float, default=0.50)
     val.add_argument("--seed-cv-warn-fraction", type=float, default=0.25)
     val.add_argument("--seed-cv-fail-fraction", type=float, default=0.50)
+
+    status = sub.add_parser("status", help="Print live progress for one rNEMD chunk directory.")
+    status.add_argument("chunk_dir", type=Path, nargs="?", default=Path("."))
+    status.add_argument("--input", type=Path, help="Specific rNEMD input file.")
+    status.add_argument("--log", type=Path, help="Specific rNEMD LAMMPS log file.")
+
+    plot = sub.add_parser("plot", help="Plot live rNEMD thermo and slab-profile diagnostics in the terminal.")
+    plot.add_argument("chunk_dir", type=Path, nargs="?", default=Path("."))
+    plot.add_argument("--window", type=int, default=220, help="Thermo rows to show. Default: 220.")
+    plot.add_argument(
+        "--profile-tail-fraction",
+        type=float,
+        default=0.5,
+        help="Fraction of complete profile blocks to average for the profile plot. Default: 0.5.",
+    )
     return parser
 
 
@@ -1260,7 +1541,42 @@ def main(argv: list[str] | None = None) -> Any:
         return analyze_main(args)
     if args.command == "validate":
         return validate_main(args)
+    if args.command == "status":
+        return print_rnemd_summary(args.chunk_dir.resolve(), input_file=args.input, log_file=args.log)
+    if args.command == "plot":
+        return plot_rnemd_once(
+            args.chunk_dir,
+            window=args.window,
+            profile_tail_fraction=args.profile_tail_fraction,
+        )
     parser.error(f"unknown command {args.command}")
+
+
+def plot_cli(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(prog="plotrnemd")
+    parser.add_argument("chunk_dir", type=Path, nargs="?", default=Path("."))
+    parser.add_argument("--window", type=int, default=220, help="Thermo rows to show. Default: 220.")
+    parser.add_argument(
+        "--profile-tail-fraction",
+        type=float,
+        default=0.5,
+        help="Fraction of complete profile blocks to average for the profile plot. Default: 0.5.",
+    )
+    args = parser.parse_args(argv)
+    plot_rnemd_once(
+        args.chunk_dir,
+        window=args.window,
+        profile_tail_fraction=args.profile_tail_fraction,
+    )
+
+
+def _first_float(pattern: str, text: str) -> float | None:
+    match = re.search(pattern, text)
+    return float(match.group(1)) if match else None
+
+
+def _gnuplot_quote(path: Path) -> str:
+    return str(path).replace("\\", "\\\\").replace('"', '\\"')
 
 
 if __name__ == "__main__":
