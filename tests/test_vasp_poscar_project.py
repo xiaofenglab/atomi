@@ -710,6 +710,8 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(
             "Gd=3,U=4,O=-2",
             "--randomize-candidates",
             "3",
+            "--randomize-pool-size",
+            "8",
             "--randomize-seed",
             "17",
         ]
@@ -740,6 +742,8 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(
     random_summary = plan["randomized_candidate_summary"]
     assert random_summary["enabled"] is True
     assert random_summary["candidate_count"] == 3
+    assert random_summary["pool_size"] == 8
+    assert random_summary["selected_count"] == 3
     assert Path(random_summary["atat_rndstr"]).is_file()
     assert Path(random_summary["atat_pseudo_species_map"]).is_file()
     atat_run = Path(random_summary["atat_run_script"])
@@ -760,17 +764,24 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(
     assert "sbatch submit_mcsqs.sbatch" in atat_readme.read_text(encoding="utf-8")
     candidate_index = rows(out / "randomized_candidate_index.csv")
     assert len(candidate_index) == 3
+    pool_index = rows(out / "randomized_pool_rankings.csv")
+    assert len(pool_index) == 8
+    assert {row["stability_status"] for row in candidate_index} == {"ok"}
+    scores = [float(row["stability_score"]) for row in candidate_index]
+    assert scores == sorted(scores, reverse=True)
     for candidate in random_summary["candidates"]:
         candidate_poscar = read_poscar_structure(Path(candidate["poscar"]))
         assert candidate_poscar.species.symbols == ["Gd", "U", "O"]
         assert candidate_poscar.species.counts == [2, 6, 15]
         assert candidate["charge_summary"]["neutrality_ok"] is True
+        assert candidate["stability_rank"]["status"] == "ok"
         assert len(expanded_magmom_values(Path(candidate["incar"]))) == candidate_poscar.species.total_atoms
     captured = capsys.readouterr().out
     assert "Worst cation matches:" in captured
     assert "Removed anion vacancy locality:" in captured
     assert "source atoms [" in captured
     assert "Randomized candidates: 3" in captured
+    assert "Pool       : 8" in captured
     assert "ATAT sbatch:" in captured
 
 

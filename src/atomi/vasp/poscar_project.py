@@ -104,9 +104,12 @@ def project_poscar_elements(
     oxidation_states: dict[str, float] | None = None,
     magmom_oxidation_states: dict[str, list[tuple[float, float]]] | None = None,
     randomize_candidates: int = 0,
+    randomize_pool_size: int | None = None,
     randomize_seed: int = 12345,
     randomize_sublattices: set[str] | None = None,
     randomize_vacancy_label: str = "Va",
+    randomize_min_guest_distance_A: float | None = None,
+    randomize_max_guest_vacancy_distance_A: float | None = None,
     randomize_atat_atoms: int | None = None,
     randomize_atat_job_name: str = "atat-random",
     randomize_mcsqs_walltime: str = "04:00:00",
@@ -395,10 +398,13 @@ def project_poscar_elements(
         oxidation_states or {},
         magmom_oxidation_states or {},
         n_candidates=randomize_candidates,
+        pool_size=randomize_pool_size,
         seed=randomize_seed,
         sublattices=randomize_sublattices,
         vacancy_label=randomize_vacancy_label,
         magmom_decimals=magmom_decimals,
+        min_guest_distance_A=randomize_min_guest_distance_A,
+        max_guest_vacancy_distance_A=randomize_max_guest_vacancy_distance_A,
         atat_atoms=randomize_atat_atoms,
         atat_job_name=randomize_atat_job_name,
         mcsqs_walltime=randomize_mcsqs_walltime,
@@ -2091,10 +2097,13 @@ def write_randomized_projection_candidates(
     magmom_oxidation_states: dict[str, list[tuple[float, float]]],
     *,
     n_candidates: int,
+    pool_size: int | None,
     seed: int,
     sublattices: set[str] | None,
     vacancy_label: str,
     magmom_decimals: int,
+    min_guest_distance_A: float | None = None,
+    max_guest_vacancy_distance_A: float | None = None,
     atat_atoms: int | None = None,
     atat_job_name: str = "atat-random",
     mcsqs_walltime: str = "04:00:00",
@@ -2104,8 +2113,11 @@ def write_randomized_projection_candidates(
     mcsqs_temperature: float | None = None,
     mcsqs_max_steps: int | None = None,
 ) -> dict[str, object]:
+    if n_candidates <= 0 and (pool_size or 0) > 0:
+        n_candidates = 3
     if n_candidates <= 0:
         return {"enabled": False, "candidate_count": 0}
+    pool_count = max(n_candidates, pool_size or n_candidates)
     active_sublattices = sublattices or {"cation", "anion"}
     invalid = active_sublattices - {"cation", "anion"}
     if invalid:
@@ -2125,12 +2137,18 @@ def write_randomized_projection_candidates(
         for index in anion_sites
     ]
     base_incar_text = source_incar.read_text(encoding="utf-8", errors="replace") if source_incar is not None else None
-    rows: list[dict[str, object]] = []
-    runlist: list[str] = []
-    for candidate_number in range(1, n_candidates + 1):
-        candidate_id = f"random_{candidate_number:03d}"
-        run_dir = candidates_dir / candidate_id
-        run_dir.mkdir(parents=True, exist_ok=True)
+    base_vacancy_guest_summary = summarize_vacancy_guest_distances(
+        removed_anion_targets,
+        target,
+        target_symbols,
+        projected_symbols,
+        cation_elements,
+        anion_elements,
+    )
+    base_vacancy_guest_min = base_vacancy_guest_summary.get("min_distance_A")
+    reference_vacancy_guest_min_A = float(base_vacancy_guest_min) if base_vacancy_guest_min is not None else None
+    pool_rows: list[dict[str, object]] = []
+    for pool_index in range(1, pool_count + 1):
         candidate_symbols = list(projected_symbols)
         candidate_moments = list(output_moments) if output_moments is not None else None
         candidate_removed = set(removed_anion_targets)
@@ -2163,6 +2181,93 @@ def write_randomized_projection_candidates(
             output_order,
             excluded_indices=candidate_removed,
         )
+        charge = charge_summary_from_symbols_and_moments(
+            candidate_symbols,
+            candidate_moments,
+            cation_elements,
+            anion_elements,
+            oxidation_states,
+            magmom_oxidation_states,
+            removed_anion_targets=candidate_removed,
+        )
+        guest_distances = summarize_guest_cation_distances_in_structure(
+            target,
+            candidate_symbols,
+            cation_elements,
+            anion_elements,
+            removed_indices=candidate_removed,
+        )
+        vacancy_locality = removed_anion_locality(
+            candidate_removed,
+            target,
+            target_symbols,
+            candidate_symbols,
+            cation_elements,
+        )
+        vacancy_guest = summarize_vacancy_guest_distances(
+            candidate_removed,
+            target,
+            target_symbols,
+            candidate_symbols,
+            cation_elements,
+            anion_elements,
+        )
+        rank_summary = rank_randomized_candidate(
+            charge,
+            guest_distances,
+            vacancy_guest,
+            min_guest_distance_A=min_guest_distance_A,
+            max_guest_vacancy_distance_A=max_guest_vacancy_distance_A,
+            reference_vacancy_guest_min_A=reference_vacancy_guest_min_A,
+        )
+        species_counts = dict(zip(candidate_species.symbols, candidate_species.counts))
+        pool_rows.append(
+            {
+                "pool_index": pool_index,
+                "candidate_id": "",
+                "run_dir": "",
+                "poscar": "",
+                "incar": "",
+                "species_counts": species_counts,
+                "removed_anion_indices_1based": [index + 1 for index in sorted(candidate_removed)],
+                "charge_summary": charge,
+                "guest_cation_distance_summary": guest_distances,
+                "vacancy_guest_distance_summary": vacancy_guest,
+                "removed_anion_nearest_cations": vacancy_locality,
+                "stability_rank": rank_summary,
+                "_candidate_symbols": candidate_symbols,
+                "_candidate_moments": candidate_moments,
+                "_candidate_removed": candidate_removed,
+                "_candidate_species": candidate_species,
+                "_candidate_indices": candidate_indices,
+            }
+        )
+
+    ranked_rows = sorted(
+        pool_rows,
+        key=lambda row: (
+            float(cast_dict(row.get("stability_rank")).get("score", 0.0)),
+            float(cast_dict(row.get("guest_cation_distance_summary")).get("global_min_distance_A", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )
+    selected_rows = [
+        row
+        for row in ranked_rows
+        if cast_dict(row.get("stability_rank")).get("status") != "fail"
+    ][:n_candidates]
+    rows: list[dict[str, object]] = []
+    runlist: list[str] = []
+    for candidate_number, row in enumerate(selected_rows, start=1):
+        candidate_id = f"random_{candidate_number:03d}"
+        run_dir = candidates_dir / candidate_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        candidate_symbols = list(row.pop("_candidate_symbols"))
+        candidate_moments_raw = row.pop("_candidate_moments")
+        candidate_moments = list(candidate_moments_raw) if candidate_moments_raw is not None else None
+        candidate_removed = set(row.pop("_candidate_removed"))
+        candidate_species = row.pop("_candidate_species")
+        candidate_indices = list(row.pop("_candidate_indices"))
         poscar_path = run_dir / "POSCAR"
         poscar_path.write_text(
             write_poscar_text(
@@ -2193,46 +2298,17 @@ def write_randomized_projection_candidates(
             incar_path = str((run_dir / "INCAR").resolve())
             (run_dir / "INCAR").write_text(replace_or_append_magmom_text(base_incar_text, magmom_line), encoding="utf-8")
 
-        charge = charge_summary_from_symbols_and_moments(
-            candidate_symbols,
-            candidate_moments,
-            cation_elements,
-            anion_elements,
-            oxidation_states,
-            magmom_oxidation_states,
-            removed_anion_targets=candidate_removed,
-        )
-        guest_distances = summarize_guest_cation_distances_in_structure(
-            target,
-            candidate_symbols,
-            cation_elements,
-            anion_elements,
-            removed_indices=candidate_removed,
-        )
-        vacancy_locality = removed_anion_locality(
-            candidate_removed,
-            target,
-            target_symbols,
-            candidate_symbols,
-            cation_elements,
-        )
-        species_counts = dict(zip(candidate_species.symbols, candidate_species.counts))
-        rows.append(
-            {
-                "candidate_id": candidate_id,
-                "run_dir": str(run_dir.resolve()),
-                "poscar": str(poscar_path.resolve()),
-                "incar": incar_path,
-                "species_counts": species_counts,
-                "removed_anion_indices_1based": [index + 1 for index in sorted(candidate_removed)],
-                "charge_summary": charge,
-                "guest_cation_distance_summary": guest_distances,
-                "removed_anion_nearest_cations": vacancy_locality,
-            }
-        )
+        row["candidate_id"] = candidate_id
+        row["run_dir"] = str(run_dir.resolve())
+        row["poscar"] = str(poscar_path.resolve())
+        row["incar"] = incar_path
+        row["rank"] = candidate_number
+        rows.append(row)
         runlist.append(str(run_dir.resolve()))
 
+    pool_index = strip_internal_candidate_fields(pool_rows)
     write_randomized_candidate_index(outdir / "randomized_candidate_index.csv", rows)
+    write_randomized_candidate_index(outdir / "randomized_pool_rankings.csv", pool_index)
     (outdir / "randomized_runlist.txt").write_text("\n".join(runlist) + "\n", encoding="utf-8")
     atat_dir = outdir / "atat_random"
     write_projection_atat_rndstr(
@@ -2262,11 +2338,15 @@ def write_randomized_projection_candidates(
     return {
         "enabled": True,
         "mode": "randomized_projected_sublattices",
-        "candidate_count": n_candidates,
+        "requested_candidate_count": n_candidates,
+        "candidate_count": len(rows),
+        "pool_size": pool_count,
+        "selected_count": len(rows),
         "seed": seed,
         "sublattices": sorted(active_sublattices),
         "candidates_dir": str(candidates_dir),
         "candidate_index": str(outdir / "randomized_candidate_index.csv"),
+        "pool_index": str(outdir / "randomized_pool_rankings.csv"),
         "runlist": str(outdir / "randomized_runlist.txt"),
         "atat_rndstr": str(atat_dir / "rndstr.in"),
         "atat_pseudo_species_map": str(atat_dir / "pseudo_species_map.csv"),
@@ -2277,6 +2357,8 @@ def write_randomized_projection_candidates(
             "Direct candidates preserve the projected B cell/coordinates but shuffle occupation labels across selected sublattices.",
             "Cation shuffling moves element and MAGMOM decorations together, so valence/spin counts are preserved.",
             "Anion shuffling moves O/vacancy decorations together; vacancy pseudo-atoms are not written to VASP POSCARs.",
+            "When --randomize-pool-size is larger than --randomize-candidates, Atomi scores the pool and writes only the top ranked structures.",
+            "Ranking is a heuristic screen, not a substitute for VASP relaxation: neutral structures are required when oxidation data is present, guest-guest separation is rewarded, and guest-vacancy locality is kept near the projected reference when possible.",
             "rndstr.in is an ATAT/SQS handoff with pseudo-species labels for valence/spin/vacancy states.",
         ],
         "candidates": rows,
@@ -2285,14 +2367,21 @@ def write_randomized_projection_candidates(
 
 def write_randomized_candidate_index(path: Path, rows: list[dict[str, object]]) -> None:
     fields = [
+        "rank",
         "candidate_id",
+        "pool_index",
         "run_dir",
         "poscar",
         "incar",
+        "stability_score",
+        "stability_status",
+        "stability_notes",
         "species_counts_json",
         "total_charge",
         "neutrality_ok",
         "guest_min_distances_A_json",
+        "guest_global_min_distance_A",
+        "vacancy_guest_min_distance_A",
         "removed_anion_indices_1based",
         "nearest_removed_anion_cations_json",
     ]
@@ -2312,16 +2401,31 @@ def write_randomized_candidate_index(path: Path, rows: list[dict[str, object]]) 
                     for symbol, entry in symbols.items():
                         if isinstance(entry, dict) and entry.get("min_distance_A") is not None:
                             guest_min[str(symbol)] = float(entry["min_distance_A"])
+            else:
+                guest = {}
+            vacancy_guest = row.get("vacancy_guest_distance_summary", {})
+            if not isinstance(vacancy_guest, dict):
+                vacancy_guest = {}
+            stability = row.get("stability_rank", {})
+            if not isinstance(stability, dict):
+                stability = {}
             writer.writerow(
                 {
+                    "rank": row.get("rank", ""),
                     "candidate_id": row.get("candidate_id", ""),
+                    "pool_index": row.get("pool_index", ""),
                     "run_dir": row.get("run_dir", ""),
                     "poscar": row.get("poscar", ""),
                     "incar": row.get("incar", ""),
+                    "stability_score": stability.get("score", ""),
+                    "stability_status": stability.get("status", ""),
+                    "stability_notes": "; ".join(str(item) for item in stability.get("notes", [])),
                     "species_counts_json": json.dumps(row.get("species_counts", {}), sort_keys=True),
                     "total_charge": charge.get("total_charge", ""),
                     "neutrality_ok": charge.get("neutrality_ok", ""),
                     "guest_min_distances_A_json": json.dumps(guest_min, sort_keys=True),
+                    "guest_global_min_distance_A": guest.get("global_min_distance_A", ""),
+                    "vacancy_guest_min_distance_A": vacancy_guest.get("min_distance_A", ""),
                     "removed_anion_indices_1based": " ".join(str(item) for item in row.get("removed_anion_indices_1based", [])),
                     "nearest_removed_anion_cations_json": json.dumps(row.get("removed_anion_nearest_cations", []), sort_keys=True),
                 }
@@ -2388,11 +2492,13 @@ def summarize_guest_cation_distances_in_structure(
     max_count = max(cation_counts.values(), default=0)
     guest_symbols = sorted(symbol for symbol, count in cation_counts.items() if count < max_count and count >= 2)
     symbol_summaries: dict[str, object] = {}
+    global_distances: list[float] = []
     for symbol in guest_symbols:
         indices = [index for index in cation_indices if symbols[index] == symbol]
         distances = pairwise_distances_A(structure, indices)
         if not distances:
             continue
+        global_distances.extend(distances)
         symbol_summaries[symbol] = {
             "atom_indices_1based": [index + 1 for index in indices],
             "pair_count": len(distances),
@@ -2405,8 +2511,139 @@ def summarize_guest_cation_distances_in_structure(
         "periodic_boundary_conditions": True,
         "cation_counts": dict(sorted(cation_counts.items())),
         "guest_symbols": guest_symbols,
+        "global_min_distance_A": round(min(global_distances), 6) if global_distances else None,
+        "global_mean_distance_A": round(sum(global_distances) / len(global_distances), 6) if global_distances else None,
         "symbols": symbol_summaries,
     }
+
+
+def summarize_vacancy_guest_distances(
+    removed_anion_targets: set[int],
+    structure: PoscarStructure,
+    target_symbols: list[str],
+    candidate_symbols: list[str],
+    cation_elements: set[str],
+    anion_elements: set[str],
+) -> dict[str, object]:
+    cation_indices = selected_cation_indices(candidate_symbols, cation_elements, anion_elements)
+    cation_counts = Counter(candidate_symbols[index] for index in cation_indices)
+    max_count = max(cation_counts.values(), default=0)
+    guest_symbols = sorted(symbol for symbol, count in cation_counts.items() if count < max_count)
+    guest_indices = [index for index in cation_indices if candidate_symbols[index] in guest_symbols]
+    entries: list[dict[str, object]] = []
+    distances: list[float] = []
+    for anion_index in sorted(removed_anion_targets):
+        nearest: tuple[float, int] | None = None
+        for guest_index in guest_indices:
+            distance = fractional_distance_A(
+                structure.scaled_positions[anion_index],
+                structure.scaled_positions[guest_index],
+                structure.cell,
+            )
+            if nearest is None or distance < nearest[0]:
+                nearest = (distance, guest_index)
+        if nearest is None:
+            entries.append(
+                {
+                    "removed_target_atom": anion_index + 1,
+                    "removed_element": target_symbols[anion_index],
+                    "nearest_guest_atom": None,
+                    "nearest_guest_element": None,
+                    "nearest_guest_distance_A": None,
+                }
+            )
+            continue
+        distances.append(nearest[0])
+        entries.append(
+            {
+                "removed_target_atom": anion_index + 1,
+                "removed_element": target_symbols[anion_index],
+                "nearest_guest_atom": nearest[1] + 1,
+                "nearest_guest_element": candidate_symbols[nearest[1]],
+                "nearest_guest_distance_A": round(nearest[0], 6),
+            }
+        )
+    return {
+        "enabled": bool(removed_anion_targets and guest_indices),
+        "guest_symbols": guest_symbols,
+        "removed_anion_count": len(removed_anion_targets),
+        "min_distance_A": round(min(distances), 6) if distances else None,
+        "mean_distance_A": round(sum(distances) / len(distances), 6) if distances else None,
+        "entries": entries,
+    }
+
+
+def rank_randomized_candidate(
+    charge_summary: dict[str, object],
+    guest_distances: dict[str, object],
+    vacancy_guest_summary: dict[str, object],
+    *,
+    min_guest_distance_A: float | None,
+    max_guest_vacancy_distance_A: float | None,
+    reference_vacancy_guest_min_A: float | None,
+) -> dict[str, object]:
+    score = 100.0
+    status = "ok"
+    notes: list[str] = []
+    neutrality = charge_summary.get("neutrality_ok")
+    if neutrality is False:
+        score -= 1000.0
+        status = "fail"
+        notes.append("non-neutral charge state")
+    elif neutrality is True:
+        score += 100.0
+        notes.append("neutral charge")
+    else:
+        notes.append("charge neutrality not evaluated")
+
+    guest_min_raw = guest_distances.get("global_min_distance_A")
+    guest_min = float(guest_min_raw) if guest_min_raw is not None else None
+    if guest_min is not None:
+        score += 10.0 * guest_min
+        notes.append(f"guest-guest min distance {guest_min:.3f} A")
+        if min_guest_distance_A is not None and guest_min < min_guest_distance_A:
+            score -= 500.0
+            status = "fail"
+            notes.append(f"guest-guest distance below {min_guest_distance_A:.3f} A")
+
+    vacancy_guest_raw = vacancy_guest_summary.get("min_distance_A")
+    vacancy_guest = float(vacancy_guest_raw) if vacancy_guest_raw is not None else None
+    if vacancy_guest is not None:
+        if reference_vacancy_guest_min_A is not None:
+            delta = abs(vacancy_guest - reference_vacancy_guest_min_A)
+            score += max(0.0, 30.0 - 10.0 * delta)
+            notes.append(
+                f"guest-vacancy min distance {vacancy_guest:.3f} A; "
+                f"reference {reference_vacancy_guest_min_A:.3f} A"
+            )
+        else:
+            score += max(0.0, 30.0 - vacancy_guest)
+            notes.append(f"guest-vacancy min distance {vacancy_guest:.3f} A")
+        if max_guest_vacancy_distance_A is not None and vacancy_guest > max_guest_vacancy_distance_A:
+            score -= 500.0
+            status = "fail"
+            notes.append(f"guest-vacancy distance above {max_guest_vacancy_distance_A:.3f} A")
+
+    return {
+        "score": round(score, 6),
+        "status": status,
+        "notes": notes,
+        "heuristic": (
+            "Neutrality is required when oxidation data is provided; larger guest-guest separation is rewarded; "
+            "guest-vacancy distance is rewarded when it stays near the projected reference locality."
+        ),
+    }
+
+
+def cast_dict(value: object) -> dict[str, object]:
+    return value if isinstance(value, dict) else {}
+
+
+def strip_internal_candidate_fields(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    stripped: list[dict[str, object]] = []
+    for row in rows:
+        stripped.append({key: value for key, value in row.items() if not key.startswith("_")})
+    return stripped
 
 
 def write_projection_atat_rndstr(
@@ -3198,6 +3435,14 @@ def build_parser() -> argparse.ArgumentParser:
             "Cation element/MAGMOM decorations and O/vacancy decorations are shuffled within their sublattices."
         ),
     )
+    parser.add_argument(
+        "--randomize-pool-size",
+        type=int,
+        help=(
+            "Generate and score this many random decorations, then write the top --randomize-candidates. "
+            "If used without --randomize-candidates, Atomi writes the top 3."
+        ),
+    )
     parser.add_argument("--randomize-seed", type=int, default=12345, help="Random seed for --randomize-candidates.")
     parser.add_argument(
         "--randomize-sublattice",
@@ -3209,6 +3454,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--randomize-vacancy-label",
         default="Va",
         help="Vacancy pseudo-species label for the ATAT rndstr.in handoff. Default: Va.",
+    )
+    parser.add_argument(
+        "--randomize-min-guest-distance",
+        type=float,
+        help="Hard filter: fail ranked candidates whose minority guest-cation minimum periodic distance is below this Angstrom value.",
+    )
+    parser.add_argument(
+        "--randomize-max-guest-vacancy-distance",
+        type=float,
+        help="Hard filter: fail ranked candidates whose nearest guest-to-vacancy distance is above this Angstrom value.",
     )
     parser.add_argument(
         "--randomize-atat-atoms",
@@ -3326,10 +3581,13 @@ def main(argv: list[str] | None = None) -> None:
         preserve_anion_vacancies=not args.no_preserve_anion_vacancies,
         oxidation_states=parse_oxidation_states(args.oxidation_state),
         magmom_oxidation_states=parse_magmom_oxidation_states(args.magmom_oxidation),
-        randomize_candidates=args.randomize_candidates,
+        randomize_candidates=args.randomize_candidates or (3 if args.randomize_pool_size else 0),
+        randomize_pool_size=args.randomize_pool_size,
         randomize_seed=args.randomize_seed,
         randomize_sublattices=parse_randomize_sublattices(args.randomize_sublattice),
         randomize_vacancy_label=args.randomize_vacancy_label,
+        randomize_min_guest_distance_A=args.randomize_min_guest_distance,
+        randomize_max_guest_vacancy_distance_A=args.randomize_max_guest_vacancy_distance,
         randomize_atat_atoms=args.randomize_atat_atoms,
         randomize_atat_job_name=args.randomize_atat_job_name,
         randomize_mcsqs_walltime=args.randomize_mcsqs_walltime,
@@ -3397,8 +3655,11 @@ def main(argv: list[str] | None = None) -> None:
             print(f"  {line}")
     if result.randomized_candidate_summary.get("enabled"):
         print(f"Randomized candidates: {result.randomized_candidate_summary.get('candidate_count', 0)}")
+        print(f"  Pool       : {result.randomized_candidate_summary.get('pool_size')}")
+        print(f"  Selected   : {result.randomized_candidate_summary.get('selected_count')}")
         print(f"  Candidates : {result.randomized_candidate_summary.get('candidates_dir')}")
         print(f"  Index      : {result.randomized_candidate_summary.get('candidate_index')}")
+        print(f"  Pool index : {result.randomized_candidate_summary.get('pool_index')}")
         print(f"  Runlist    : {result.randomized_candidate_summary.get('runlist')}")
         print(f"  ATAT rndstr: {result.randomized_candidate_summary.get('atat_rndstr')}")
         print(f"  ATAT run   : {result.randomized_candidate_summary.get('atat_run_script')}")
