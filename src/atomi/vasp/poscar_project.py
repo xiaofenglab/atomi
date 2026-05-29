@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import random
 from collections import Counter
 from dataclasses import dataclass
 from itertools import product
@@ -49,6 +50,7 @@ class ProjectionResult:
     anion_vacancy_summary: dict[str, object]
     charge_summary: dict[str, object]
     guest_cation_distance_summary: dict[str, object]
+    randomized_candidate_summary: dict[str, object]
     warnings: list[str]
 
 
@@ -100,6 +102,10 @@ def project_poscar_elements(
     preserve_anion_vacancies: bool = True,
     oxidation_states: dict[str, float] | None = None,
     magmom_oxidation_states: dict[str, list[tuple[float, float]]] | None = None,
+    randomize_candidates: int = 0,
+    randomize_seed: int = 12345,
+    randomize_sublattices: set[str] | None = None,
+    randomize_vacancy_label: str = "Va",
 ) -> ProjectionResult:
     """Project cation identities and MAGMOMs from source POSCAR A onto structure POSCAR B."""
     source_poscar = source_poscar.expanduser().resolve()
@@ -366,6 +372,25 @@ def project_poscar_elements(
         anion_set,
     )
     warnings.extend(guest_cation_distance_warnings(guest_cation_distance_summary))
+    randomized_candidate_summary = write_randomized_projection_candidates(
+        output_poscar.parent,
+        target,
+        target_symbols,
+        projected_symbols,
+        removed_anion_targets,
+        output_order,
+        output_moments,
+        source_incar,
+        cation_set,
+        anion_set,
+        oxidation_states or {},
+        magmom_oxidation_states or {},
+        n_candidates=randomize_candidates,
+        seed=randomize_seed,
+        sublattices=randomize_sublattices,
+        vacancy_label=randomize_vacancy_label,
+        magmom_decimals=magmom_decimals,
+    )
     write_match_csv(match_csv, matches, source_symbols, target_symbols, source_for_matching, target)
     write_plan_json(
         plan_json,
@@ -397,6 +422,7 @@ def project_poscar_elements(
             "anion_vacancy_summary": anion_vacancy_summary,
             "charge_summary": charge_summary,
             "guest_cation_distance_summary": guest_cation_distance_summary,
+            "randomized_candidate_summary": randomized_candidate_summary,
             "strict_magmom_preservation": strict_magmom_preservation,
             "magmom_preservation_ok": not magmom_warnings,
             "magmom_preservation_warnings": magmom_warnings,
@@ -432,6 +458,7 @@ def project_poscar_elements(
         anion_vacancy_summary=anion_vacancy_summary,
         charge_summary=charge_summary,
         guest_cation_distance_summary=guest_cation_distance_summary,
+        randomized_candidate_summary=randomized_candidate_summary,
         warnings=warnings,
     )
 
@@ -2032,6 +2059,404 @@ def guest_cation_distance_warnings(summary: dict[str, object]) -> list[str]:
     return warnings
 
 
+def write_randomized_projection_candidates(
+    outdir: Path,
+    target: PoscarStructure,
+    target_symbols: list[str],
+    projected_symbols: list[str],
+    removed_anion_targets: set[int],
+    output_order: list[str],
+    output_moments: list[float] | None,
+    source_incar: Path | None,
+    cation_elements: set[str],
+    anion_elements: set[str],
+    oxidation_states: dict[str, float],
+    magmom_oxidation_states: dict[str, list[tuple[float, float]]],
+    *,
+    n_candidates: int,
+    seed: int,
+    sublattices: set[str] | None,
+    vacancy_label: str,
+    magmom_decimals: int,
+) -> dict[str, object]:
+    if n_candidates <= 0:
+        return {"enabled": False, "candidate_count": 0}
+    active_sublattices = sublattices or {"cation", "anion"}
+    invalid = active_sublattices - {"cation", "anion"}
+    if invalid:
+        raise ValueError(f"Unknown randomized sublattice(s): {', '.join(sorted(invalid))}. Use cation and/or anion.")
+
+    rng = random.Random(seed)
+    candidates_dir = outdir / "randomized_candidates"
+    candidates_dir.mkdir(parents=True, exist_ok=True)
+    cation_sites = selected_cation_indices(projected_symbols, cation_elements, anion_elements)
+    anion_sites = [index for index, symbol in enumerate(target_symbols) if symbol in anion_elements]
+    cation_decorations = [
+        (projected_symbols[index], output_moments[index] if output_moments is not None else None)
+        for index in cation_sites
+    ]
+    anion_decorations = [
+        (None, None) if index in removed_anion_targets else (projected_symbols[index], 0.0)
+        for index in anion_sites
+    ]
+    base_incar_text = source_incar.read_text(encoding="utf-8", errors="replace") if source_incar is not None else None
+    rows: list[dict[str, object]] = []
+    runlist: list[str] = []
+    for candidate_number in range(1, n_candidates + 1):
+        candidate_id = f"random_{candidate_number:03d}"
+        run_dir = candidates_dir / candidate_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        candidate_symbols = list(projected_symbols)
+        candidate_moments = list(output_moments) if output_moments is not None else None
+        candidate_removed = set(removed_anion_targets)
+
+        if "cation" in active_sublattices:
+            shuffled_cations = list(cation_decorations)
+            rng.shuffle(shuffled_cations)
+            for target_index, (symbol, moment) in zip(cation_sites, shuffled_cations):
+                candidate_symbols[target_index] = symbol or target_symbols[target_index]
+                if candidate_moments is not None and moment is not None:
+                    candidate_moments[target_index] = moment
+
+        if "anion" in active_sublattices and anion_sites:
+            shuffled_anions = list(anion_decorations)
+            rng.shuffle(shuffled_anions)
+            candidate_removed = set()
+            for target_index, (symbol, moment) in zip(anion_sites, shuffled_anions):
+                if symbol is None:
+                    candidate_removed.add(target_index)
+                    candidate_symbols[target_index] = target_symbols[target_index]
+                    if candidate_moments is not None:
+                        candidate_moments[target_index] = 0.0
+                else:
+                    candidate_symbols[target_index] = symbol
+                    if candidate_moments is not None and moment is not None:
+                        candidate_moments[target_index] = moment
+
+        candidate_species, candidate_indices = grouped_species_and_indices(
+            candidate_symbols,
+            output_order,
+            excluded_indices=candidate_removed,
+        )
+        poscar_path = run_dir / "POSCAR"
+        poscar_path.write_text(
+            write_poscar_text(
+                f"Randomized projected candidate {candidate_id}",
+                candidate_species,
+                target.cell,
+                [target.scaled_positions[index] for index in candidate_indices],
+            ),
+            encoding="utf-8",
+        )
+
+        incar_path = ""
+        if base_incar_text is not None and candidate_moments is not None:
+            grouped_moments = [candidate_moments[index] for index in candidate_indices]
+            selected = species_with_nonzero_moments(candidate_species, grouped_moments)
+            magmom_line = format_magmom_line(
+                candidate_species,
+                grouped_moments,
+                selected_elements=selected,
+                decimals=magmom_decimals,
+                compact_zero=True,
+            )
+            validate_magmom_line_count(
+                magmom_line,
+                candidate_species.total_atoms,
+                context=f"randomized projected INCAR for {poscar_path}",
+            )
+            incar_path = str((run_dir / "INCAR").resolve())
+            (run_dir / "INCAR").write_text(replace_or_append_magmom_text(base_incar_text, magmom_line), encoding="utf-8")
+
+        charge = charge_summary_from_symbols_and_moments(
+            candidate_symbols,
+            candidate_moments,
+            cation_elements,
+            anion_elements,
+            oxidation_states,
+            magmom_oxidation_states,
+            removed_anion_targets=candidate_removed,
+        )
+        guest_distances = summarize_guest_cation_distances_in_structure(
+            target,
+            candidate_symbols,
+            cation_elements,
+            anion_elements,
+            removed_indices=candidate_removed,
+        )
+        vacancy_locality = removed_anion_locality(
+            candidate_removed,
+            target,
+            target_symbols,
+            candidate_symbols,
+            cation_elements,
+        )
+        species_counts = dict(zip(candidate_species.symbols, candidate_species.counts))
+        rows.append(
+            {
+                "candidate_id": candidate_id,
+                "run_dir": str(run_dir.resolve()),
+                "poscar": str(poscar_path.resolve()),
+                "incar": incar_path,
+                "species_counts": species_counts,
+                "removed_anion_indices_1based": [index + 1 for index in sorted(candidate_removed)],
+                "charge_summary": charge,
+                "guest_cation_distance_summary": guest_distances,
+                "removed_anion_nearest_cations": vacancy_locality,
+            }
+        )
+        runlist.append(str(run_dir.resolve()))
+
+    write_randomized_candidate_index(outdir / "randomized_candidate_index.csv", rows)
+    (outdir / "randomized_runlist.txt").write_text("\n".join(runlist) + "\n", encoding="utf-8")
+    atat_dir = outdir / "atat_random"
+    write_projection_atat_rndstr(
+        atat_dir / "rndstr.in",
+        target,
+        target_symbols,
+        cation_sites,
+        anion_sites,
+        cation_decorations,
+        anion_decorations,
+        vacancy_label,
+        active_sublattices,
+        anion_elements,
+    )
+    return {
+        "enabled": True,
+        "mode": "randomized_projected_sublattices",
+        "candidate_count": n_candidates,
+        "seed": seed,
+        "sublattices": sorted(active_sublattices),
+        "candidates_dir": str(candidates_dir),
+        "candidate_index": str(outdir / "randomized_candidate_index.csv"),
+        "runlist": str(outdir / "randomized_runlist.txt"),
+        "atat_rndstr": str(atat_dir / "rndstr.in"),
+        "atat_pseudo_species_map": str(atat_dir / "pseudo_species_map.csv"),
+        "notes": [
+            "Direct candidates preserve the projected B cell/coordinates but shuffle occupation labels across selected sublattices.",
+            "Cation shuffling moves element and MAGMOM decorations together, so valence/spin counts are preserved.",
+            "Anion shuffling moves O/vacancy decorations together; vacancy pseudo-atoms are not written to VASP POSCARs.",
+            "rndstr.in is an ATAT/SQS handoff with pseudo-species labels for valence/spin/vacancy states.",
+        ],
+        "candidates": rows,
+    }
+
+
+def write_randomized_candidate_index(path: Path, rows: list[dict[str, object]]) -> None:
+    fields = [
+        "candidate_id",
+        "run_dir",
+        "poscar",
+        "incar",
+        "species_counts_json",
+        "total_charge",
+        "neutrality_ok",
+        "guest_min_distances_A_json",
+        "removed_anion_indices_1based",
+        "nearest_removed_anion_cations_json",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            charge = row.get("charge_summary", {})
+            if not isinstance(charge, dict):
+                charge = {}
+            guest = row.get("guest_cation_distance_summary", {})
+            guest_min: dict[str, float] = {}
+            if isinstance(guest, dict):
+                symbols = guest.get("symbols", {})
+                if isinstance(symbols, dict):
+                    for symbol, entry in symbols.items():
+                        if isinstance(entry, dict) and entry.get("min_distance_A") is not None:
+                            guest_min[str(symbol)] = float(entry["min_distance_A"])
+            writer.writerow(
+                {
+                    "candidate_id": row.get("candidate_id", ""),
+                    "run_dir": row.get("run_dir", ""),
+                    "poscar": row.get("poscar", ""),
+                    "incar": row.get("incar", ""),
+                    "species_counts_json": json.dumps(row.get("species_counts", {}), sort_keys=True),
+                    "total_charge": charge.get("total_charge", ""),
+                    "neutrality_ok": charge.get("neutrality_ok", ""),
+                    "guest_min_distances_A_json": json.dumps(guest_min, sort_keys=True),
+                    "removed_anion_indices_1based": " ".join(str(item) for item in row.get("removed_anion_indices_1based", [])),
+                    "nearest_removed_anion_cations_json": json.dumps(row.get("removed_anion_nearest_cations", []), sort_keys=True),
+                }
+            )
+
+
+def charge_summary_from_symbols_and_moments(
+    symbols: list[str],
+    moments: list[float] | None,
+    cation_elements: set[str],
+    anion_elements: set[str],
+    oxidation_states: dict[str, float],
+    magmom_oxidation_states: dict[str, list[tuple[float, float]]],
+    *,
+    removed_anion_targets: set[int],
+) -> dict[str, object]:
+    counts: Counter[str] = Counter()
+    charge_by_symbol: Counter[str] = Counter()
+    missing: set[str] = set()
+    cation_charge = 0.0
+    anion_charge = 0.0
+    for index, symbol in enumerate(symbols):
+        if index in removed_anion_targets:
+            continue
+        counts[symbol] += 1
+        moment = moments[index] if moments is not None and index < len(moments) else None
+        oxidation = oxidation_for_symbol(symbol, moment, oxidation_states, magmom_oxidation_states)
+        if oxidation is None:
+            if symbol in cation_elements or symbol in anion_elements:
+                missing.add(symbol)
+            continue
+        charge_by_symbol[symbol] += oxidation
+        if symbol in anion_elements:
+            anion_charge += oxidation
+        else:
+            cation_charge += oxidation
+    total = cation_charge + anion_charge
+    return {
+        "enabled": bool(oxidation_states or magmom_oxidation_states),
+        "species_counts": dict(sorted(counts.items())),
+        "charge_by_symbol": {symbol: float(charge) for symbol, charge in sorted(charge_by_symbol.items())},
+        "cation_charge": float(cation_charge),
+        "anion_charge": float(anion_charge),
+        "total_charge": float(total),
+        "neutrality_ok": abs(total) < 1.0e-6 if oxidation_states or magmom_oxidation_states else None,
+        "missing_oxidation_elements": sorted(missing),
+    }
+
+
+def summarize_guest_cation_distances_in_structure(
+    structure: PoscarStructure,
+    symbols: list[str],
+    cation_elements: set[str],
+    anion_elements: set[str],
+    *,
+    removed_indices: set[int],
+) -> dict[str, object]:
+    cation_indices = [
+        index
+        for index in selected_cation_indices(symbols, cation_elements, anion_elements)
+        if index not in removed_indices
+    ]
+    cation_counts = Counter(symbols[index] for index in cation_indices)
+    max_count = max(cation_counts.values(), default=0)
+    guest_symbols = sorted(symbol for symbol, count in cation_counts.items() if count < max_count and count >= 2)
+    symbol_summaries: dict[str, object] = {}
+    for symbol in guest_symbols:
+        indices = [index for index in cation_indices if symbols[index] == symbol]
+        distances = pairwise_distances_A(structure, indices)
+        if not distances:
+            continue
+        symbol_summaries[symbol] = {
+            "atom_indices_1based": [index + 1 for index in indices],
+            "pair_count": len(distances),
+            "distances_A": [round(value, 6) for value in distances],
+            "min_distance_A": round(min(distances), 6),
+            "mean_distance_A": round(sum(distances) / len(distances), 6),
+        }
+    return {
+        "enabled": True,
+        "periodic_boundary_conditions": True,
+        "cation_counts": dict(sorted(cation_counts.items())),
+        "guest_symbols": guest_symbols,
+        "symbols": symbol_summaries,
+    }
+
+
+def write_projection_atat_rndstr(
+    path: Path,
+    target: PoscarStructure,
+    target_symbols: list[str],
+    cation_sites: list[int],
+    anion_sites: list[int],
+    cation_decorations: list[tuple[str | None, float | None]],
+    anion_decorations: list[tuple[str | None, float | None]],
+    vacancy_label: str,
+    active_sublattices: set[str],
+    anion_elements: set[str],
+) -> None:
+    cation_spec = atat_site_spec(cation_decorations, vacancy_label)
+    anion_spec = atat_site_spec(anion_decorations, vacancy_label)
+    cation_set = set(cation_sites)
+    anion_set = set(anion_sites)
+    lines: list[str] = []
+    for vector in target.cell:
+        lines.append(" ".join(f"{float(value):.12f}" for value in vector))
+    for vector in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)):
+        lines.append(" ".join(f"{float(value):.12f}" for value in vector))
+    for index, position in enumerate(target.scaled_positions):
+        if index in cation_set and "cation" in active_sublattices:
+            species = cation_spec
+        elif index in anion_set and "anion" in active_sublattices:
+            species = anion_spec
+        else:
+            species = target_symbols[index]
+        lines.append(" ".join(f"{float(value):.12f}" for value in position) + f" {species}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_atat_projection_pseudo_species_map(
+        path.with_name("pseudo_species_map.csv"),
+        [*cation_decorations, *anion_decorations],
+        vacancy_label,
+        anion_elements,
+    )
+
+
+def atat_site_spec(decorations: list[tuple[str | None, float | None]], vacancy_label: str) -> str:
+    counts = Counter(pseudo_species_label(symbol, moment, vacancy_label) for symbol, moment in decorations)
+    total = sum(counts.values())
+    if total <= 0:
+        return vacancy_label
+    return ",".join(f"{label}={count / total:.12g}" for label, count in sorted(counts.items()))
+
+
+def pseudo_species_label(symbol: str | None, moment: float | None, vacancy_label: str) -> str:
+    if symbol is None:
+        return vacancy_label
+    if moment is None or abs(moment) < 1.0e-8:
+        return symbol
+    sign = "p" if moment >= 0.0 else "m"
+    family = int(round(abs(moment)))
+    return f"{symbol}_{sign}{family:g}"
+
+
+def write_atat_projection_pseudo_species_map(
+    path: Path,
+    decorations: list[tuple[str | None, float | None]],
+    vacancy_label: str,
+    anion_elements: set[str],
+) -> None:
+    rows = []
+    seen: set[str] = set()
+    for symbol, moment in decorations:
+        label = pseudo_species_label(symbol, moment, vacancy_label)
+        if label in seen:
+            continue
+        seen.add(label)
+        rows.append(
+            {
+                "pseudo_species": label,
+                "element": "" if symbol is None else symbol,
+                "sublattice": "anion" if symbol is None or symbol in anion_elements else "cation",
+                "magmom": "" if moment is None else f"{moment:.8g}",
+                "is_vacancy": "true" if symbol is None else "false",
+                "notes": "pseudo-species label for ATAT rndstr.in; map back to element/MAGMOM before VASP",
+            }
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        fieldnames = ["pseudo_species", "element", "sublattice", "magmom", "is_vacancy", "notes"]
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def default_species_order(source_order: list[str], target_order: list[str]) -> list[str]:
     order: list[str] = []
     for symbol in [*source_order, *target_order]:
@@ -2569,6 +2994,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Map |MAGMOM| to oxidation state, e.g. U:1=5,U:2=4,Gd:7=3.",
     )
+    parser.add_argument(
+        "--randomize-candidates",
+        type=int,
+        default=0,
+        help=(
+            "Write this many randomized occupation candidates on the projected B lattice. "
+            "Cation element/MAGMOM decorations and O/vacancy decorations are shuffled within their sublattices."
+        ),
+    )
+    parser.add_argument("--randomize-seed", type=int, default=12345, help="Random seed for --randomize-candidates.")
+    parser.add_argument(
+        "--randomize-sublattice",
+        action="append",
+        default=[],
+        help="Sublattice(s) to randomize: cation, anion, or both. Default with --randomize-candidates: cation,anion.",
+    )
+    parser.add_argument(
+        "--randomize-vacancy-label",
+        default="Va",
+        help="Vacancy pseudo-species label for the ATAT rndstr.in handoff. Default: Va.",
+    )
     parser.add_argument("--magmom-decimals", type=int, default=3)
     return parser
 
@@ -2644,6 +3090,10 @@ def main(argv: list[str] | None = None) -> None:
         preserve_anion_vacancies=not args.no_preserve_anion_vacancies,
         oxidation_states=parse_oxidation_states(args.oxidation_state),
         magmom_oxidation_states=parse_magmom_oxidation_states(args.magmom_oxidation),
+        randomize_candidates=args.randomize_candidates,
+        randomize_seed=args.randomize_seed,
+        randomize_sublattices=parse_randomize_sublattices(args.randomize_sublattice),
+        randomize_vacancy_label=args.randomize_vacancy_label,
     )
     print(f"Projected POSCAR : {result.output_poscar}")
     if result.prepared_source_poscar:
@@ -2701,6 +3151,12 @@ def main(argv: list[str] | None = None) -> None:
         print("Removed anion vacancy locality:")
         for line in vacancy_lines:
             print(f"  {line}")
+    if result.randomized_candidate_summary.get("enabled"):
+        print(f"Randomized candidates: {result.randomized_candidate_summary.get('candidate_count', 0)}")
+        print(f"  Candidates : {result.randomized_candidate_summary.get('candidates_dir')}")
+        print(f"  Index      : {result.randomized_candidate_summary.get('candidate_index')}")
+        print(f"  Runlist    : {result.randomized_candidate_summary.get('runlist')}")
+        print(f"  ATAT rndstr: {result.randomized_candidate_summary.get('atat_rndstr')}")
     for operation in json.loads(result.plan_json.read_text(encoding="utf-8")).get("source_operations", []):
         if operation.get("kind") == "source_representative_reduce":
             print(
@@ -2734,6 +3190,27 @@ def parse_repeat(raw: str) -> tuple[int, int, int]:
     if any(value <= 0 for value in repeat):
         raise ValueError(f"Repeat values must be positive, got {raw!r}.")
     return repeat
+
+
+def parse_randomize_sublattices(raw_items: list[str]) -> set[str] | None:
+    if not raw_items:
+        return None
+    values = {item.strip().lower() for raw in raw_items for item in raw.replace(",", " ").split() if item.strip()}
+    aliases = {
+        "cations": "cation",
+        "cat": "cation",
+        "anions": "anion",
+        "an": "anion",
+        "both": "both",
+    }
+    normalized = {aliases.get(value, value) for value in values}
+    if "both" in normalized:
+        normalized.update({"cation", "anion"})
+        normalized.discard("both")
+    invalid = normalized - {"cation", "anion"}
+    if invalid:
+        raise ValueError(f"Unknown --randomize-sublattice value(s): {', '.join(sorted(invalid))}.")
+    return normalized
 
 
 def parse_fraction_ranges(

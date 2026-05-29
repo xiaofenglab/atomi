@@ -81,6 +81,11 @@ def expanded_magmom_values(incar: Path) -> list[float]:
     return expand_magmom_tokens(body.split())
 
 
+def rows(path: Path) -> list[dict[str, str]]:
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
 def write_origin_shifted_target_poscar(path: Path) -> None:
     path.write_text(
         "B relaxed structure with shifted cation origin\n"
@@ -703,6 +708,10 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(
             "O",
             "--oxidation-state",
             "Gd=3,U=4,O=-2",
+            "--randomize-candidates",
+            "3",
+            "--randomize-seed",
+            "17",
         ]
     )
 
@@ -728,10 +737,24 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(
     assert gd_distance["source_min_distance_A"] > 0
     assert gd_distance["output_min_distance_A"] > 0
     assert gd_distance["nearest_distance_preserved"] is True
+    random_summary = plan["randomized_candidate_summary"]
+    assert random_summary["enabled"] is True
+    assert random_summary["candidate_count"] == 3
+    assert Path(random_summary["atat_rndstr"]).is_file()
+    assert Path(random_summary["atat_pseudo_species_map"]).is_file()
+    candidate_index = rows(out / "randomized_candidate_index.csv")
+    assert len(candidate_index) == 3
+    for candidate in random_summary["candidates"]:
+        candidate_poscar = read_poscar_structure(Path(candidate["poscar"]))
+        assert candidate_poscar.species.symbols == ["Gd", "U", "O"]
+        assert candidate_poscar.species.counts == [2, 6, 15]
+        assert candidate["charge_summary"]["neutrality_ok"] is True
+        assert len(expanded_magmom_values(Path(candidate["incar"]))) == candidate_poscar.species.total_atoms
     captured = capsys.readouterr().out
     assert "Worst cation matches:" in captured
     assert "Removed anion vacancy locality:" in captured
     assert "source atoms [" in captured
+    assert "Randomized candidates: 3" in captured
 
 
 def test_project_poscar_equal_cation_counts_use_regular_origin_crop(tmp_path: Path) -> None:
