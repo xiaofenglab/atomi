@@ -118,6 +118,7 @@ def test_reverse_nemd_prepare_writes_replicated_inputs_and_array(tmp_path, monke
     assert "suffix          kk" in input_text
     assert "pair_style      mace no_domain_decomposition" in input_text
     assert "fix             rnemd_flux all thermal/conductivity 100 z 20" in input_text
+    assert "variable        rnemd_temp atom c_rnemd_ke/(1.5*8.617333262145e-05)" in input_text
     assert "compute         rnemd_layers all chunk/atom bin/1d z lower 0.05 units reduced" in input_text
     assert "fix             rnemd_profile all ave/chunk 100 100 10000" in input_text
     assert "run             2000" in input_text

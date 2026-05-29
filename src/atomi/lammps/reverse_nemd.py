@@ -44,6 +44,7 @@ DEFAULT_RNEMD_WALLTIME_SAFETY_FACTOR = 1.5
 EV_TO_J = 1.602176634e-19
 ANGSTROM_TO_M = 1.0e-10
 PS_TO_S = 1.0e-12
+KB_EV_PER_K = 8.617333262145e-5
 
 
 @dataclass(frozen=True)
@@ -433,7 +434,8 @@ fix             rnemd_int all nve
 fix             rnemd_flux all thermal/conductivity {int(args.swap_every)} {args.direction} {int(args.nbin)}{swap_suffix}
 
 compute         rnemd_ke all ke/atom
-variable        rnemd_temp atom c_rnemd_ke/1.5
+# LAMMPS ke/atom is in eV for metal units. Convert 2*KE/(3*kB) to K.
+variable        rnemd_temp atom c_rnemd_ke/(1.5*{KB_EV_PER_K:.15g})
 compute         rnemd_layers all chunk/atom bin/1d {args.direction} lower {bin_width:.12g} units reduced
 fix             rnemd_profile all ave/chunk {int(args.profile_nevery)} {int(args.profile_nrepeat)} {int(args.profile_nfreq)} rnemd_layers v_rnemd_temp file rnemd_temperature_profile.dat
 
@@ -1190,6 +1192,18 @@ def analyze_stage(cfg: dict[str, Any], stage: dict[str, Any], root: Path, args: 
     log_path = _latest_log(chunk_dir, input_name=input_name)
     blocks = _read_profile_blocks(profile_path)
     coords, temps, counts, n_profile_blocks_used = _mean_profile(blocks, args.profile_tail_fraction)
+    mean_profile_temperature = float(np.average(temps, weights=np.maximum(counts, 1.0)))
+    nominal_temperature = float(stage["temperature"])
+    if nominal_temperature > 0 and (
+        mean_profile_temperature < 0.2 * nominal_temperature
+        or mean_profile_temperature > 5.0 * nominal_temperature
+    ):
+        raise ValueError(
+            f"rNEMD slab profile mean temperature is {mean_profile_temperature:.6g} K, "
+            f"far from the target {nominal_temperature:g} K for {stage['name']}. "
+            "This usually means the rNEMD input used c_rnemd_ke/1.5 without dividing by kB; "
+            "regenerate the rNEMD inputs with Atomi >=0.6.31 and rerun the stage."
+        )
     slope_info = _fit_profile_slopes(coords, temps)
     thermo = read_lammps_thermo_table(log_path)
     step = np.asarray(thermo["Step"], dtype=float)
@@ -1220,7 +1234,7 @@ def analyze_stage(cfg: dict[str, Any], stage: dict[str, Any], root: Path, args: 
         "run_steps": int(stage.get("fixed_steps", 0)),
         "profile_blocks": len(blocks),
         "profile_blocks_used": n_profile_blocks_used,
-        "mean_temperature_K": float(np.average(temps, weights=np.maximum(counts, 1.0))),
+        "mean_temperature_K": mean_profile_temperature,
         "length_A": length_A,
         "area_A2": area_A2,
         "slope1_K_per_reduced": slope_info["slope1_K_per_reduced"],
