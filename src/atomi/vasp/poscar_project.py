@@ -2573,6 +2573,39 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def format_worst_cation_match_lines(match_csv: Path, *, limit: int) -> list[str]:
+    if limit <= 0 or not match_csv.exists():
+        return []
+    rows = list(csv.DictReader(match_csv.read_text(encoding="utf-8").splitlines()))
+    if not rows:
+        return []
+    rows.sort(key=lambda row: float(row.get("distance_A", "0") or 0.0), reverse=True)
+    lines: list[str] = []
+    for row in rows[:limit]:
+        lines.append(
+            f"target {row.get('target_atom', ''):>4} {row.get('target_element_before', ''):>2} "
+            f"<- source {row.get('source_atom', ''):>4} {row.get('source_element', ''):>2} "
+            f"d={float(row.get('distance_A', '0') or 0.0):.3f} A"
+        )
+    return lines
+
+
+def format_removed_anion_locality_lines(summary: dict[str, object]) -> list[str]:
+    locality = summary.get("removed_anion_nearest_cations", [])
+    if not isinstance(locality, list):
+        return []
+    lines: list[str] = []
+    for entry in locality:
+        if not isinstance(entry, dict):
+            continue
+        lines.append(
+            f"removed target {entry.get('removed_target_atom', '')} {entry.get('removed_element', '')} "
+            f"near target {entry.get('nearest_cation_atom', '')} {entry.get('nearest_cation_element', '')} "
+            f"d={float(entry.get('nearest_cation_distance_A', 0.0)):.3f} A"
+        )
+    return lines
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -2648,13 +2681,26 @@ def main(argv: list[str] | None = None) -> None:
         for symbol, entry in guest_distances.items():
             if not isinstance(entry, dict) or int(entry.get("pair_count", 0)) == 0:
                 continue
+            source_atoms = ",".join(str(index) for index in entry.get("source_atom_indices_1based", []))
+            output_atoms = ",".join(str(index) for index in entry.get("output_atom_indices_1based", []))
             print(
                 f"  {symbol}: nearest {float(entry.get('source_min_distance_A', 0.0)):g} A"
                 f" -> {float(entry.get('output_min_distance_A', 0.0)):g} A; "
                 f"mean {float(entry.get('source_mean_distance_A', 0.0)):g} A"
                 f" -> {float(entry.get('output_mean_distance_A', 0.0)):g} A; "
-                f"pairs={int(entry.get('pair_count', 0))}"
+                f"pairs={int(entry.get('pair_count', 0))}; "
+                f"source atoms [{source_atoms}] -> output atoms [{output_atoms}]"
             )
+    worst_match_lines = format_worst_cation_match_lines(result.match_csv, limit=10)
+    if worst_match_lines:
+        print("Worst cation matches:")
+        for line in worst_match_lines:
+            print(f"  {line}")
+    vacancy_lines = format_removed_anion_locality_lines(result.anion_vacancy_summary)
+    if vacancy_lines:
+        print("Removed anion vacancy locality:")
+        for line in vacancy_lines:
+            print(f"  {line}")
     for operation in json.loads(result.plan_json.read_text(encoding="utf-8")).get("source_operations", []):
         if operation.get("kind") == "source_representative_reduce":
             print(

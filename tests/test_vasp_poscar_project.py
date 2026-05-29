@@ -671,7 +671,10 @@ def test_project_poscar_crop_preserves_noisy_charge_coupled_host(tmp_path: Path)
     assert operation["charge_variant_cations_kept"] == 1
 
 
-def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(tmp_path: Path) -> None:
+def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     source = tmp_path / "A_gd_vo_POSCAR"
     target = tmp_path / "B_2x2x2_uo2_POSCAR"
     incar = tmp_path / "A_INCAR"
@@ -725,6 +728,10 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(tmp_
     assert gd_distance["source_min_distance_A"] > 0
     assert gd_distance["output_min_distance_A"] > 0
     assert gd_distance["nearest_distance_preserved"] is True
+    captured = capsys.readouterr().out
+    assert "Worst cation matches:" in captured
+    assert "Removed anion vacancy locality:" in captured
+    assert "source atoms [" in captured
 
 
 def test_project_poscar_equal_cation_counts_use_regular_origin_crop(tmp_path: Path) -> None:
