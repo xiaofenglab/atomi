@@ -24,6 +24,7 @@ from atomi.lammps.elastic import tensor_components
 
 
 VOIGT_MAT = ((0, 5, 4), (5, 1, 3), (4, 3, 2))
+MOOSE_ELASTIC_PROPERTY_FIELDS = ["T_K", "E_Pa", "nu", "K_Pa", "G_Pa", "rho_kg_m3", "source_tag"]
 
 
 @dataclass
@@ -53,13 +54,14 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(normalize(data), indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str] | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fields: list[str] = []
-    for row in rows:
-        for key in row:
-            if key not in fields:
-                fields.append(key)
+    if fields is None:
+        fields = []
+        for row in rows:
+            for key in row:
+                if key not in fields:
+                    fields.append(key)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
@@ -250,6 +252,18 @@ def directional_backend(tensor: np.ndarray, backend: str) -> tuple[Any, str, str
 
 def safe_label(label: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "._+-" else "_" for ch in label).strip("_") or "elastic"
+
+
+def moose_elastic_property_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        temp = float_or_none(row.get("T_K"))
+        e_pa = float_or_none(row.get("E_Pa"))
+        nu = float_or_none(row.get("nu"))
+        if temp is None or e_pa is None or nu is None:
+            continue
+        out.append({field: row.get(field) for field in MOOSE_ELASTIC_PROPERTY_FIELDS})
+    return out
 
 
 def surface_arrays(
@@ -608,6 +622,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         summary_rows.append(row)
         if not args.no_terminal_report:
             print_terminal_record_report(record, row)
+        temperature = float_or_none(row.get("temperature_K"))
+        if temperature is not None:
+            row["T_K"] = temperature
+        row["source_tag"] = safe_label(str(row.get("source") or args.source_label or "elastic"))
         name = safe_label(record.label)
         if not args.no_elate_inputs:
             target = outdir / "elate_inputs" / f"{name}_tensor_GPa.txt"
@@ -658,6 +676,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         print_terminal_moduli_table(summary_rows)
     summary_csv = outdir / "elastic_thermophysical_summary.csv"
     write_csv(summary_csv, summary_rows)
+    moose_elastic_csv = outdir / "moose_elastic_properties.csv"
+    moose_rows = moose_elastic_property_rows(summary_rows)
+    write_csv(moose_elastic_csv, moose_rows, MOOSE_ELASTIC_PROPERTY_FIELDS)
     debye_csv = ""
     if debye_rows:
         debye_path = outdir / "debye_thermal_functions.csv"
@@ -705,12 +726,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         },
         "outputs": {
             "summary_csv": str(summary_csv),
+            "moose_elastic_properties_csv": str(moose_elastic_csv),
             "debye_thermal_csv": debye_csv,
             "line_plots": line_plots,
         },
     }
     write_json(outdir / "elastic_viz_metadata.json", metadata)
     print(f"Wrote elastic thermophysical summary: {summary_csv}")
+    if moose_rows:
+        print(f"Wrote MOOSE elastic property CSV: {moose_elastic_csv}")
     if line_plots:
         print(f"Wrote {len(line_plots)} summary plots.")
     if surface_outputs:

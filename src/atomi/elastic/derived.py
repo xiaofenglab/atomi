@@ -116,8 +116,16 @@ def complete_elastic_derived(row: dict[str, Any], tensor: np.ndarray | None = No
             out["universal_anisotropy_AU"] = 5.0 * g_v / g_r + k_v / k_r - 6.0
     if e_h is not None:
         out["E_H_Pa"] = e_h * GPA_TO_PA
+        out["E_Pa"] = e_h * GPA_TO_PA
+    if k_h is not None:
+        out["K_H_Pa"] = k_h * GPA_TO_PA
+        out["K_Pa"] = k_h * GPA_TO_PA
+    if g_h is not None:
+        out["G_H_Pa"] = g_h * GPA_TO_PA
+        out["G_Pa"] = g_h * GPA_TO_PA
     if nu_h is not None:
         out["nu_H"] = nu_h
+        out["nu"] = nu_h
     if tensor is not None:
         c = 0.5 * (np.asarray(tensor, dtype=float) + np.asarray(tensor, dtype=float).T)
         eigenvalues = np.linalg.eigvalsh(c)
@@ -181,6 +189,7 @@ def complete_thermophysical_derived(
     v_m = (1.0 / 3.0 * (2.0 / v_s**3 + 1.0 / v_p**3)) ** (-1.0 / 3.0)
     out: dict[str, Any] = {
         "density_kg_m3": density_kg_m3,
+        "rho_kg_m3": density_kg_m3,
         "density_g_cm3": density_kg_m3 / 1000.0,
         "v_s_km_s": v_s / 1000.0,
         "v_p_km_s": v_p / 1000.0,

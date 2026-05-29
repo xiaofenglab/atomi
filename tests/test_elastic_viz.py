@@ -9,6 +9,7 @@ import numpy as np
 from atomi.elastic.derived import complete_thermophysical_derived, formula_atom_count
 from atomi.elastic.viz import main
 from atomi.lammps.elastic import tensor_components, voigt_reuss_hill
+from atomi.moose.material_export import load_external_properties
 
 
 def cubic_tensor() -> np.ndarray:
@@ -27,6 +28,7 @@ def test_derived_debye_temperature_from_formula_volume() -> None:
 
     assert formula_atom_count("UO2") == 3.0
     assert derived["density_g_cm3"] > 9.0
+    assert derived["rho_kg_m3"] == derived["density_kg_m3"]
     assert derived["v_s_km_s"] > 0.0
     assert derived["theta_D_K"] > 0.0
     assert derived["k_min_cahill_W_mK"] > 0.0
@@ -87,10 +89,21 @@ def test_elastic_viz_reads_lammps_tensor_payload(tmp_path: Path, capsys) -> None
 
     summary = list(csv.DictReader((outdir / "elastic_thermophysical_summary.csv").open(encoding="utf-8")))
     assert summary[0]["source"] == "LAMMPS/MD elastic"
+    assert float(summary[0]["T_K"]) == 300.0
+    assert float(summary[0]["E_Pa"]) > 0.0
+    assert float(summary[0]["K_Pa"]) > 0.0
+    assert float(summary[0]["G_Pa"]) > 0.0
+    assert float(summary[0]["nu"]) > 0.0
+    assert float(summary[0]["rho_kg_m3"]) > 0.0
     assert float(summary[0]["theta_D_K"]) > 0.0
     assert float(summary[0]["hardness_teter_GPa"]) > 0.0
     assert float(summary[0]["strain_energy_density_1pct_x_MJ_m3"]) > 0.0
     assert float(summary[0]["fracture_toughness_griffith_MPa_sqrt_m"]) > 0.0
+    moose_rows = list(csv.DictReader((outdir / "moose_elastic_properties.csv").open(encoding="utf-8")))
+    assert moose_rows[0]["source_tag"] == "LAMMPS_MD_elastic"
+    assert float(moose_rows[0]["E_Pa"]) == float(summary[0]["E_Pa"])
+    series, _, _ = load_external_properties([outdir / "moose_elastic_properties.csv"], [], [])
+    assert {"E_Pa", "nu", "K_Pa", "G_Pa", "rho_kg_m3"}.issubset(series)
     assert (outdir / "elate_inputs" / "T300K_tensor_GPa.txt").exists()
     assert (outdir / "elate_surfaces" / "T300K_young_3d.html").exists()
     assert (outdir / "debye_thermal_functions.csv").exists()
