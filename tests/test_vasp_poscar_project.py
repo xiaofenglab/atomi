@@ -720,6 +720,11 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(tmp_
     assert locality[0]["nearest_cation_distance_A"] > 0
     assert plan["charge_summary"]["neutrality_ok"] is True
     assert plan["charge_summary"]["total_charge"] == pytest.approx(0.0)
+    gd_distance = plan["guest_cation_distance_summary"]["symbols"]["Gd"]
+    assert gd_distance["pair_count"] == 1
+    assert gd_distance["source_min_distance_A"] > 0
+    assert gd_distance["output_min_distance_A"] > 0
+    assert gd_distance["nearest_distance_preserved"] is True
 
 
 def test_project_poscar_equal_cation_counts_use_regular_origin_crop(tmp_path: Path) -> None:

@@ -48,6 +48,7 @@ class ProjectionResult:
     cation_magmom_comparison: dict[str, dict[str, object]]
     anion_vacancy_summary: dict[str, object]
     charge_summary: dict[str, object]
+    guest_cation_distance_summary: dict[str, object]
     warnings: list[str]
 
 
@@ -355,6 +356,16 @@ def project_poscar_elements(
     )
     magmom_warnings = cation_magmom_preservation_warnings(cation_magmom_comparison)
     warnings.extend(magmom_warnings)
+    guest_cation_distance_summary = summarize_guest_cation_distances(
+        source_for_matching,
+        target,
+        source_symbols,
+        projected_symbols,
+        matches,
+        cation_set,
+        anion_set,
+    )
+    warnings.extend(guest_cation_distance_warnings(guest_cation_distance_summary))
     write_match_csv(match_csv, matches, source_symbols, target_symbols, source_for_matching, target)
     write_plan_json(
         plan_json,
@@ -385,6 +396,7 @@ def project_poscar_elements(
             "cation_magmom_comparison": cation_magmom_comparison,
             "anion_vacancy_summary": anion_vacancy_summary,
             "charge_summary": charge_summary,
+            "guest_cation_distance_summary": guest_cation_distance_summary,
             "strict_magmom_preservation": strict_magmom_preservation,
             "magmom_preservation_ok": not magmom_warnings,
             "magmom_preservation_warnings": magmom_warnings,
@@ -419,6 +431,7 @@ def project_poscar_elements(
         cation_magmom_comparison=cation_magmom_comparison,
         anion_vacancy_summary=anion_vacancy_summary,
         charge_summary=charge_summary,
+        guest_cation_distance_summary=guest_cation_distance_summary,
         warnings=warnings,
     )
 
@@ -1894,6 +1907,131 @@ def fractional_distance_A(left: list[float], right: list[float], cell: list[list
     return math.sqrt(sum(value * value for value in cart))
 
 
+def pairwise_distances_A(structure: PoscarStructure, indices: list[int]) -> list[float]:
+    distances: list[float] = []
+    for left_offset, left_index in enumerate(indices):
+        for right_index in indices[left_offset + 1 :]:
+            distances.append(
+                fractional_distance_A(
+                    structure.scaled_positions[left_index],
+                    structure.scaled_positions[right_index],
+                    structure.cell,
+                )
+            )
+    return sorted(distances)
+
+
+def summarize_guest_cation_distances(
+    source: PoscarStructure,
+    target: PoscarStructure,
+    source_symbols: list[str],
+    projected_symbols: list[str],
+    matches: list[SiteMatch],
+    cation_elements: set[str],
+    anion_elements: set[str],
+) -> dict[str, object]:
+    cation_indices = selected_cation_indices(projected_symbols, cation_elements, anion_elements)
+    cation_counts = Counter(projected_symbols[index] for index in cation_indices)
+    max_count = max(cation_counts.values(), default=0)
+    guest_symbols = sorted(
+        symbol
+        for symbol, count in cation_counts.items()
+        if count < max_count and count >= 2
+    )
+    summary: dict[str, object] = {
+        "enabled": True,
+        "periodic_boundary_conditions": True,
+        "guest_definition": (
+            "Cation species with lower count than the most abundant projected cation "
+            "and at least two projected atoms."
+        ),
+        "cation_counts": dict(sorted(cation_counts.items())),
+        "guest_symbols": guest_symbols,
+        "symbols": {},
+    }
+    if not guest_symbols:
+        summary["note"] = "No minority cation species has at least two atoms, so no guest-guest pair distance was checked."
+        return summary
+
+    by_symbol: dict[str, list[tuple[int, int]]] = {symbol: [] for symbol in guest_symbols}
+    for match in matches:
+        source_symbol = source_symbols[match.source_index]
+        target_symbol = projected_symbols[match.target_index]
+        if source_symbol == target_symbol and source_symbol in by_symbol:
+            by_symbol[source_symbol].append((match.source_index, match.target_index))
+
+    symbol_summaries: dict[str, object] = {}
+    for symbol in guest_symbols:
+        pairs = sorted(by_symbol.get(symbol, []), key=lambda item: (item[0], item[1]))
+        if len(pairs) < 2:
+            symbol_summaries[symbol] = {
+                "source_atom_indices_1based": [source_index + 1 for source_index, _target_index in pairs],
+                "output_atom_indices_1based": [target_index + 1 for _source_index, target_index in pairs],
+                "pair_count": 0,
+                "note": "Fewer than two matched guest cations were available for pair-distance analysis.",
+            }
+            continue
+        source_indices = [source_index for source_index, _target_index in pairs]
+        target_indices = [target_index for _source_index, target_index in pairs]
+        source_distances = pairwise_distances_A(source, source_indices)
+        output_distances = pairwise_distances_A(target, target_indices)
+        deltas = [
+            output_distance - source_distance
+            for source_distance, output_distance in zip(source_distances, output_distances)
+        ]
+        source_min = min(source_distances)
+        output_min = min(output_distances)
+        source_mean = sum(source_distances) / len(source_distances)
+        output_mean = sum(output_distances) / len(output_distances)
+        min_delta = output_min - source_min
+        mean_delta = output_mean - source_mean
+        nearest_ratio = output_min / source_min if source_min > 1.0e-12 else None
+        compressed = (
+            source_min > 1.0e-12
+            and output_min < source_min - 0.5
+            and output_min / source_min < 0.75
+        )
+        symbol_summaries[symbol] = {
+            "source_atom_indices_1based": [index + 1 for index in source_indices],
+            "output_atom_indices_1based": [index + 1 for index in target_indices],
+            "pair_count": len(source_distances),
+            "source_distances_A": [round(value, 6) for value in source_distances],
+            "output_distances_A": [round(value, 6) for value in output_distances],
+            "source_min_distance_A": round(source_min, 6),
+            "output_min_distance_A": round(output_min, 6),
+            "source_mean_distance_A": round(source_mean, 6),
+            "output_mean_distance_A": round(output_mean, 6),
+            "min_distance_delta_A": round(min_delta, 6),
+            "mean_distance_delta_A": round(mean_delta, 6),
+            "nearest_distance_ratio": round(nearest_ratio, 6) if nearest_ratio is not None else None,
+            "max_pair_distance_delta_A": round(max((abs(delta) for delta in deltas), default=0.0), 6),
+            "nearest_distance_preserved": not compressed,
+            "note": (
+                "Distances are minimum-image guest-guest separations under periodic boundary conditions. "
+                "The output values are measured in the projected POSCAR cell."
+            ),
+        }
+    summary["symbols"] = symbol_summaries
+    return summary
+
+
+def guest_cation_distance_warnings(summary: dict[str, object]) -> list[str]:
+    warnings: list[str] = []
+    symbols = summary.get("symbols", {})
+    if not isinstance(symbols, dict):
+        return warnings
+    for symbol, raw_entry in symbols.items():
+        if not isinstance(raw_entry, dict):
+            continue
+        if raw_entry.get("nearest_distance_preserved") is False:
+            warnings.append(
+                f"{symbol}-{symbol} nearest periodic distance compressed from "
+                f"{float(raw_entry.get('source_min_distance_A', 0.0)):g} A to "
+                f"{float(raw_entry.get('output_min_distance_A', 0.0)):g} A"
+            )
+    return warnings
+
+
 def default_species_order(source_order: list[str], target_order: list[str]) -> list[str]:
     order: list[str] = []
     for symbol in [*source_order, *target_order]:
@@ -2504,6 +2642,19 @@ def main(argv: list[str] | None = None) -> None:
             f"total={float(result.charge_summary.get('total_charge', 0.0)):g} "
             f"neutral={result.charge_summary.get('neutrality_ok')}"
         )
+    guest_distances = result.guest_cation_distance_summary.get("symbols", {})
+    if isinstance(guest_distances, dict) and guest_distances:
+        print("Guest-cation distances:")
+        for symbol, entry in guest_distances.items():
+            if not isinstance(entry, dict) or int(entry.get("pair_count", 0)) == 0:
+                continue
+            print(
+                f"  {symbol}: nearest {float(entry.get('source_min_distance_A', 0.0)):g} A"
+                f" -> {float(entry.get('output_min_distance_A', 0.0)):g} A; "
+                f"mean {float(entry.get('source_mean_distance_A', 0.0)):g} A"
+                f" -> {float(entry.get('output_mean_distance_A', 0.0)):g} A; "
+                f"pairs={int(entry.get('pair_count', 0))}"
+            )
     for operation in json.loads(result.plan_json.read_text(encoding="utf-8")).get("source_operations", []):
         if operation.get("kind") == "source_representative_reduce":
             print(
