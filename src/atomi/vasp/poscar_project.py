@@ -309,6 +309,7 @@ def project_poscar_elements(
         output_order,
         excluded_indices=removed_anion_targets,
     )
+    candidate_folder_mode = randomize_candidates > 0 or (randomize_pool_size or 0) > 0
     poscar_text = write_poscar_text(
         f"Projected {source_poscar.name} elements onto {target_poscar.name} structure",
         output_species,
@@ -317,7 +318,7 @@ def project_poscar_elements(
     )
     output_poscar.parent.mkdir(parents=True, exist_ok=True)
     output_poscar.write_text(poscar_text, encoding="utf-8")
-    copied_static_inputs = copy_static_vasp_inputs(output_poscar.parent, static_vasp_input_dirs)
+    copied_static_inputs = [] if candidate_folder_mode else copy_static_vasp_inputs(output_poscar.parent, static_vasp_input_dirs)
 
     output_moments: list[float] | None = None
     output_moments_grouped: list[float] | None = None
@@ -361,7 +362,19 @@ def project_poscar_elements(
         output_poscar,
         output_incar,
         static_vasp_input_dirs,
-        enabled=randomize_candidates > 0 or (randomize_pool_size or 0) > 0,
+        enabled=candidate_folder_mode,
+    )
+    reported_output_poscar = Path(str(direct_candidate_summary["poscar"])) if direct_candidate_summary.get("enabled") else output_poscar
+    reported_output_incar = (
+        Path(str(direct_candidate_summary["incar"]))
+        if direct_candidate_summary.get("enabled") and direct_candidate_summary.get("incar")
+        else output_incar
+    )
+    cleanup_root_vasp_run_files(
+        output_poscar.parent,
+        output_poscar,
+        output_incar,
+        enabled=candidate_folder_mode,
     )
     source_cation_magmom_summary = final_cation_magmom_summary(
         source.species,
@@ -435,9 +448,9 @@ def project_poscar_elements(
             "source_poscar": str(source_poscar),
             "target_poscar": str(target_poscar),
             "source_incar": str(source_incar) if source_incar else "",
-            "output_poscar": str(output_poscar),
+            "output_poscar": str(reported_output_poscar),
             "prepared_source_poscar": str(prepared_source_poscar) if prepared_source_poscar else "",
-            "output_incar": str(output_incar) if output_incar else "",
+            "output_incar": str(reported_output_incar) if reported_output_incar else "",
             "copied_static_vasp_inputs": [str(path) for path in copied_static_inputs],
             "source_operations": source_prepared.operations,
             "target_operations": target_prepared.operations,
@@ -480,9 +493,9 @@ def project_poscar_elements(
     return ProjectionResult(
         source_poscar=source_poscar,
         target_poscar=target_poscar,
-        output_poscar=output_poscar,
+        output_poscar=reported_output_poscar,
         prepared_source_poscar=prepared_source_poscar,
-        output_incar=output_incar,
+        output_incar=reported_output_incar,
         match_csv=match_csv,
         plan_json=plan_json,
         cation_matches=matches,
@@ -2140,7 +2153,7 @@ def write_randomized_projection_candidates(
         raise ValueError(f"Unknown randomized sublattice(s): {', '.join(sorted(invalid))}. Use cation and/or anion.")
 
     rng = random.Random(seed)
-    candidates_dir = outdir / "randomized_candidates"
+    candidates_dir = outdir / "candidates"
     candidates_dir.mkdir(parents=True, exist_ok=True)
     cation_sites = selected_cation_indices(projected_symbols, cation_elements, anion_elements)
     anion_sites = [index for index, symbol in enumerate(target_symbols) if symbol in anion_elements]
@@ -2684,6 +2697,23 @@ def copy_static_vasp_inputs(destination_dir: Path, source_dirs: list[Path]) -> l
     return copied
 
 
+def cleanup_root_vasp_run_files(
+    outdir: Path,
+    output_poscar: Path,
+    output_incar: Path | None,
+    *,
+    enabled: bool,
+) -> None:
+    if not enabled:
+        return
+    candidates = [output_poscar, output_incar, outdir / "KPOINTS", outdir / "POTCAR"]
+    for path in candidates:
+        if path is None:
+            continue
+        if path.parent == outdir and path.name in {"POSCAR", "INCAR", "KPOINTS", "POTCAR"}:
+            path.unlink(missing_ok=True)
+
+
 def write_direct_projected_candidate_folder(
     outdir: Path,
     output_poscar: Path,
@@ -2694,7 +2724,7 @@ def write_direct_projected_candidate_folder(
 ) -> dict[str, object]:
     if not enabled:
         return {"enabled": False}
-    run_dir = outdir / "randomized_candidates" / "direct_projected"
+    run_dir = outdir / "candidates" / "direct_projected"
     run_dir.mkdir(parents=True, exist_ok=True)
     poscar_target = run_dir / "POSCAR"
     shutil.copy2(output_poscar, poscar_target)

@@ -689,6 +689,9 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(
     incar.write_text("MAGMOM = " + " ".join(f"{moment:g}" for moment in moments) + "\n", encoding="utf-8")
     (tmp_path / "KPOINTS").write_text("Gamma\n", encoding="utf-8")
     (tmp_path / "POTCAR").write_text("fake-potcar\n", encoding="utf-8")
+    out.mkdir()
+    for stale_name in ("POSCAR", "INCAR", "KPOINTS", "POTCAR"):
+        (out / stale_name).write_text("stale\n", encoding="utf-8")
 
     project_main(
         [
@@ -720,16 +723,14 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(
     )
 
     prepared = read_poscar_structure(out / "POSCAR_A_prepared")
-    projected = read_poscar_structure(out / "POSCAR")
     assert prepared.species.symbols == ["Gd", "U", "O"]
     assert prepared.species.counts[:2] == [2, 6]
-    assert projected.species.symbols == ["Gd", "U", "O"]
-    assert projected.species.counts == [2, 6, 15]
-    assert len(expanded_magmom_values(out / "INCAR")) == projected.species.total_atoms
+    assert not (out / "POSCAR").exists()
+    assert not (out / "INCAR").exists()
+    assert not (out / "KPOINTS").exists()
+    assert not (out / "POTCAR").exists()
     plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
-    assert sorted(Path(path).name for path in plan["copied_static_vasp_inputs"]) == ["KPOINTS", "POTCAR"]
-    assert (out / "KPOINTS").read_text(encoding="utf-8") == "Gamma\n"
-    assert (out / "POTCAR").read_text(encoding="utf-8") == "fake-potcar\n"
+    assert plan["copied_static_vasp_inputs"] == []
     assert plan["anion_vacancy_summary"]["removed_anion_counts"] == {"O": 1}
     assert plan["anion_vacancy_summary"]["output_anion_counts"] == {"O": 15}
     locality = plan["anion_vacancy_summary"]["removed_anion_nearest_cations"]
@@ -748,8 +749,11 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(
     assert direct["enabled"] is True
     direct_dir = Path(direct["run_dir"])
     assert direct_dir.name == "direct_projected"
-    assert direct_dir.parent.name == "randomized_candidates"
+    assert direct_dir.parent.name == "candidates"
     direct_poscar = read_poscar_structure(Path(direct["poscar"]))
+    projected = direct_poscar
+    assert Path(plan["output_poscar"]) == Path(direct["poscar"])
+    assert Path(plan["output_incar"]) == Path(direct["incar"])
     assert direct_poscar.species.symbols == ["Gd", "U", "O"]
     assert direct_poscar.species.counts == [2, 6, 15]
     assert len(expanded_magmom_values(Path(direct["incar"]))) == projected.species.total_atoms
@@ -761,6 +765,7 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(
     assert random_summary["candidate_count"] == 3
     assert random_summary["pool_size"] == 8
     assert random_summary["selected_count"] == 3
+    assert Path(random_summary["candidates_dir"]).name == "candidates"
     assert Path(random_summary["atat_rndstr"]).is_file()
     assert Path(random_summary["atat_pseudo_species_map"]).is_file()
     atat_run = Path(random_summary["atat_run_script"])
