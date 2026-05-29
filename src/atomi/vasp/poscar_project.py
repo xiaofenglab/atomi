@@ -46,6 +46,8 @@ class ProjectionResult:
     source_cation_magmom_summary: dict[str, dict[str, object]]
     cation_magmom_summary: dict[str, dict[str, object]]
     cation_magmom_comparison: dict[str, dict[str, object]]
+    anion_vacancy_summary: dict[str, object]
+    charge_summary: dict[str, object]
     warnings: list[str]
 
 
@@ -94,6 +96,9 @@ def project_poscar_elements(
     scale_target_volume_to_source: bool = False,
     align_cation_origin: bool = True,
     strict_magmom_preservation: bool = True,
+    preserve_anion_vacancies: bool = True,
+    oxidation_states: dict[str, float] | None = None,
+    magmom_oxidation_states: dict[str, list[tuple[float, float]]] | None = None,
 ) -> ProjectionResult:
     """Project cation identities and MAGMOMs from source POSCAR A onto structure POSCAR B."""
     source_poscar = source_poscar.expanduser().resolve()
@@ -230,16 +235,58 @@ def project_poscar_elements(
         projected_symbols[match.target_index] = source_symbols[match.source_index]
         source_by_target[match.target_index] = match.source_index
 
+    source_moments: list[float] | None = None
+    if source_incar is not None:
+        source_moments = (
+            [raw_source_moments[index] for index in source_prepared.origin_indices]
+            if raw_source_moments is not None
+            else None
+        )
+
+    removed_anion_targets: set[int] = set()
+    anion_vacancy_summary: dict[str, object] = {}
+    charge_summary: dict[str, object] = {}
+    if preserve_anion_vacancies:
+        removed_anion_targets, anion_vacancy_summary, charge_summary = select_target_anion_vacancies(
+            source_for_matching,
+            target,
+            source_symbols,
+            target_symbols,
+            projected_symbols,
+            source_by_target,
+            source_moments,
+            cation_set,
+            anion_set,
+            oxidation_states or {},
+            magmom_oxidation_states or {},
+        )
+        if removed_anion_targets:
+            warnings.append(
+                "Preserved source anion vacancy count by removing "
+                + ", ".join(
+                    f"{symbol}:{count}"
+                    for symbol, count in sorted(Counter(target_symbols[index] for index in removed_anion_targets).items())
+                )
+                + " target anion site(s)."
+            )
+
     default_order = default_projection_species_order(
         source.species.symbols,
         target.species.symbols,
-        projected_symbols,
+        [symbol for index, symbol in enumerate(projected_symbols) if index not in removed_anion_targets],
         cation_order,
         cation_set,
         anion_set,
     )
-    output_order = complete_species_order(species_order or default_order, projected_symbols)
-    output_species, output_indices = grouped_species_and_indices(projected_symbols, output_order)
+    output_order = complete_species_order(
+        species_order or default_order,
+        [symbol for index, symbol in enumerate(projected_symbols) if index not in removed_anion_targets],
+    )
+    output_species, output_indices = grouped_species_and_indices(
+        projected_symbols,
+        output_order,
+        excluded_indices=removed_anion_targets,
+    )
     poscar_text = write_poscar_text(
         f"Projected {source_poscar.name} elements onto {target_poscar.name} structure",
         output_species,
@@ -249,18 +296,12 @@ def project_poscar_elements(
     output_poscar.parent.mkdir(parents=True, exist_ok=True)
     output_poscar.write_text(poscar_text, encoding="utf-8")
 
-    source_moments: list[float] | None = None
     output_moments: list[float] | None = None
     output_moments_grouped: list[float] | None = None
     output_magmom_count: int | None = None
     if source_incar is not None:
         if output_incar is None:
             output_incar = output_poscar.with_name("INCAR")
-        source_moments = (
-            [raw_source_moments[index] for index in source_prepared.origin_indices]
-            if raw_source_moments is not None
-            else None
-        )
         output_moments = projected_magmom_values(
             source,
             target,
@@ -342,6 +383,8 @@ def project_poscar_elements(
             "source_cation_magmom_summary": source_cation_magmom_summary,
             "cation_magmom_summary": cation_magmom_summary,
             "cation_magmom_comparison": cation_magmom_comparison,
+            "anion_vacancy_summary": anion_vacancy_summary,
+            "charge_summary": charge_summary,
             "strict_magmom_preservation": strict_magmom_preservation,
             "magmom_preservation_ok": not magmom_warnings,
             "magmom_preservation_warnings": magmom_warnings,
@@ -374,6 +417,8 @@ def project_poscar_elements(
         source_cation_magmom_summary=source_cation_magmom_summary,
         cation_magmom_summary=cation_magmom_summary,
         cation_magmom_comparison=cation_magmom_comparison,
+        anion_vacancy_summary=anion_vacancy_summary,
+        charge_summary=charge_summary,
         warnings=warnings,
     )
 
@@ -1127,10 +1172,26 @@ def choose_defect_preserving_crop_ranges(
     cation_counts = Counter(symbols[index] for index in cation_indices)
     max_count = max(cation_counts.values(), default=0)
     minority_symbols = {symbol for symbol, count in cation_counts.items() if count < max_count}
-    if not minority_symbols:
+    candidate_kept = {
+        origin: indices_in_fraction_ranges(structure.scaled_positions, crop_ranges_from_origin(supercell, keep_cells, origin))
+        for origin in candidate_origins
+    }
+    candidate_anion_counts = {
+        origin: Counter(symbols[index] for index in kept if symbols[index] in anion_elements)
+        for origin, kept in candidate_kept.items()
+    }
+    max_anion_counts = {
+        symbol: max((counts.get(symbol, 0) for counts in candidate_anion_counts.values()), default=0)
+        for symbol in anion_elements
+    }
+    any_anion_deficit = any(
+        any(counts.get(symbol, 0) < max_count for symbol, max_count in max_anion_counts.items())
+        for counts in candidate_anion_counts.values()
+    )
+    if not minority_symbols and not any_anion_deficit:
         origin = (0, 0, 0)
         ranges = crop_ranges_from_origin(supercell, keep_cells, origin)
-        kept = indices_in_fraction_ranges(structure.scaled_positions, ranges)
+        kept = candidate_kept[origin]
         meta = {
             "selection_policy": "defect_preserving",
             "selection_reason": "regular_origin_crop_no_minority_cation",
@@ -1140,6 +1201,8 @@ def choose_defect_preserving_crop_ranges(
             "minority_cations_kept": 0,
             "charge_variant_cations_available": 0,
             "charge_variant_cations_kept": 0,
+            "anion_vacancy_elements": [],
+            "anion_vacancies_kept": 0,
             "source_magnetic_signature": magnetic_signature(symbols, cation_indices, origin_indices, source_moments),
             "crop_magnetic_signature": magnetic_signature(symbols, sorted(kept & set(cation_indices)), origin_indices, source_moments),
         }
@@ -1150,17 +1213,22 @@ def choose_defect_preserving_crop_ranges(
 
     best_origin = candidate_origins[0]
     best_ranges = crop_ranges_from_origin(supercell, keep_cells, best_origin)
-    best_score: tuple[int, int, int, int, int, int, int] | None = None
+    best_score: tuple[int, int, int, int, int, int, int, int] | None = None
     best_kept: set[int] = set()
     for origin in candidate_origins:
         ranges = crop_ranges_from_origin(supercell, keep_cells, origin)
-        kept = indices_in_fraction_ranges(structure.scaled_positions, ranges)
+        kept = candidate_kept[origin]
         kept_cations = sorted(kept & set(cation_indices))
         kept_magnetic_buckets = magnetic_buckets(symbols, kept_cations, origin_indices, source_moments)
+        anion_deficit_score = sum(
+            max_count - candidate_anion_counts[origin].get(symbol, 0)
+            for symbol, max_count in max_anion_counts.items()
+        )
         score = (
             sum(1 for index in kept if symbols[index] in minority_symbols),
             sum(1 for index in kept if index in charge_variant_indices),
             len(source_magnetic_buckets & kept_magnetic_buckets),
+            anion_deficit_score,
             sum(1 for index in kept if index in cation_indices),
             -origin[0],
             -origin[1],
@@ -1180,6 +1248,17 @@ def choose_defect_preserving_crop_ranges(
         "minority_cations_kept": sum(1 for index in best_kept if symbols[index] in minority_symbols),
         "charge_variant_cations_available": len(charge_variant_indices),
         "charge_variant_cations_kept": sum(1 for index in best_kept if index in charge_variant_indices),
+        "anion_vacancy_elements": sorted(
+            symbol
+            for symbol, max_count in max_anion_counts.items()
+            if candidate_anion_counts[best_origin].get(symbol, 0) < max_count
+        ),
+        "anion_vacancies_kept": sum(
+            max_count - candidate_anion_counts[best_origin].get(symbol, 0)
+            for symbol, max_count in max_anion_counts.items()
+        ),
+        "candidate_max_anion_counts": dict(sorted(max_anion_counts.items())),
+        "crop_anion_counts": dict(sorted(candidate_anion_counts[best_origin].items())),
         "magnetic_signature_note": "Signs are inferred from INCAR MAGMOM for cations: positive, negative, or zero.",
         "source_magnetic_signature": magnetic_signature(symbols, cation_indices, origin_indices, source_moments),
         "crop_magnetic_signature": magnetic_signature(
@@ -1497,7 +1576,7 @@ def crop_structure_fraction(
             kept_symbols.append(symbol)
             kept_positions.append(
                 [
-                    (position[axis] - ranges[axis][0]) / (ranges[axis][1] - ranges[axis][0])
+                    ((position[axis] - ranges[axis][0]) / (ranges[axis][1] - ranges[axis][0])) % 1.0
                     for axis in range(3)
                 ]
             )
@@ -1632,7 +1711,19 @@ def align_source_cation_origin(
     best_matches = before
     best_score = assignment_score(before)
     candidates = cation_origin_shift_candidates(source.scaled_positions, source_indices, target.scaled_positions, target_indices)
-    for shift in candidates:
+    ranked_candidates = sorted(
+        candidates,
+        key=lambda shift: quick_cation_shift_score(
+            source.scaled_positions,
+            source_indices,
+            target.scaled_positions,
+            target_indices,
+            target.cell,
+            shift,
+        ),
+    )
+    evaluated_candidates = ranked_candidates[: min(len(ranked_candidates), 96)]
+    for shift in evaluated_candidates:
         shifted_positions = shift_fractional_positions(source.scaled_positions, shift)
         matches = nearest_site_assignment(shifted_positions, source_indices, target.scaled_positions, target_indices, target.cell)
         score = assignment_score(matches)
@@ -1652,6 +1743,7 @@ def align_source_cation_origin(
         "max_cation_distance_after_A": best_score[0],
         "mean_cation_distance_after_A": best_score[1],
         "candidate_count": len(candidates),
+        "evaluated_candidate_count": len(evaluated_candidates),
         "improved": assignment_score(best_matches) < assignment_score(before),
     }
 
@@ -1672,10 +1764,15 @@ def cation_origin_shift_candidates(
 ) -> list[list[float]]:
     if not source_indices or not target_indices:
         return [[0.0, 0.0, 0.0]]
-    reference = source_positions[source_indices[0]]
     seen: set[tuple[float, float, float]] = set()
     candidates: list[list[float]] = []
-    for shift in [[0.0, 0.0, 0.0], *([target_positions[index][axis] - reference[axis] for axis in range(3)] for index in target_indices)]:
+    raw_candidates = [[0.0, 0.0, 0.0]]
+    raw_candidates.extend(
+        [target_positions[target_index][axis] - source_positions[source_index][axis] for axis in range(3)]
+        for source_index in source_indices
+        for target_index in target_indices
+    )
+    for shift in raw_candidates:
         normalized = [value % 1.0 for value in shift]
         key = tuple(round(value, 10) for value in normalized)
         if key in seen:
@@ -1683,6 +1780,26 @@ def cation_origin_shift_candidates(
         seen.add(key)
         candidates.append(normalized)
     return candidates
+
+
+def quick_cation_shift_score(
+    source_positions: list[list[float]],
+    source_indices: list[int],
+    target_positions: list[list[float]],
+    target_indices: list[int],
+    cell: list[list[float]],
+    shift: list[float],
+) -> tuple[float, float]:
+    shifted = shift_fractional_positions(source_positions, shift)
+    nearest: list[float] = []
+    for target_index in target_indices:
+        nearest.append(
+            min(
+                fractional_distance_A(target_positions[target_index], shifted[source_index], cell)
+                for source_index in source_indices
+            )
+        )
+    return (max(nearest, default=0.0), sum(nearest) / len(nearest) if nearest else 0.0)
 
 
 def shift_fractional_positions(positions: list[list[float]], shift: list[float]) -> list[list[float]]:
@@ -1705,26 +1822,66 @@ def nearest_site_assignment(
     target_indices: list[int],
     cell: list[list[float]],
 ) -> list[SiteMatch]:
-    candidates: list[tuple[float, int, int]] = []
+    if len(source_indices) < len(target_indices):
+        raise RuntimeError("Not enough source sites to assign every target site.")
+    distances: dict[tuple[int, int], float] = {}
+    unique_distances: list[float] = []
     for target_index in target_indices:
         for source_index in source_indices:
             distance = fractional_distance_A(target_positions[target_index], source_positions[source_index], cell)
-            candidates.append((distance, target_index, source_index))
-    candidates.sort(key=lambda item: (item[0], item[1], item[2]))
-    used_targets: set[int] = set()
-    used_sources: set[int] = set()
-    matches: list[SiteMatch] = []
-    for distance, target_index, source_index in candidates:
-        if target_index in used_targets or source_index in used_sources:
-            continue
-        used_targets.add(target_index)
-        used_sources.add(source_index)
-        matches.append(SiteMatch(target_index=target_index, source_index=source_index, distance_A=distance))
-        if len(matches) == len(target_indices):
-            break
-    if len(matches) != len(target_indices):
-        raise RuntimeError("Could not build a complete source-target site assignment.")
-    return sorted(matches, key=lambda match: match.target_index)
+            distances[(target_index, source_index)] = distance
+            unique_distances.append(distance)
+    sorted_distances = sorted(set(unique_distances))
+    low = 0
+    high = len(sorted_distances) - 1
+    best_match: dict[int, int] | None = None
+    while low <= high:
+        mid = (low + high) // 2
+        matched = threshold_site_assignment(source_indices, target_indices, distances, sorted_distances[mid])
+        if len(matched) == len(target_indices):
+            best_match = matched
+            high = mid - 1
+        else:
+            low = mid + 1
+    if best_match is not None:
+        return [
+            SiteMatch(
+                target_index=target_index,
+                source_index=source_index,
+                distance_A=distances[(target_index, source_index)],
+            )
+            for target_index, source_index in sorted(best_match.items())
+        ]
+    raise RuntimeError("Could not build a complete source-target site assignment.")
+
+
+def threshold_site_assignment(
+    source_indices: list[int],
+    target_indices: list[int],
+    distances: dict[tuple[int, int], float],
+    threshold: float,
+) -> dict[int, int]:
+    source_match: dict[int, int] = {}
+
+    def assign(target_index: int, seen: set[int]) -> bool:
+        candidates = sorted(
+            source_index
+            for source_index in source_indices
+            if distances[(target_index, source_index)] <= threshold + 1.0e-12
+        )
+        for source_index in candidates:
+            if source_index in seen:
+                continue
+            seen.add(source_index)
+            if source_index not in source_match or assign(source_match[source_index], seen):
+                source_match[source_index] = target_index
+                return True
+        return False
+
+    for target_index in sorted(target_indices):
+        assign(target_index, set())
+    target_match = {target_index: source_index for source_index, target_index in source_match.items()}
+    return target_match
 
 
 def fractional_distance_A(left: list[float], right: list[float], cell: list[list[float]]) -> float:
@@ -1787,12 +1944,17 @@ def complete_species_order(order: list[str], symbols: list[str]) -> list[str]:
     return complete
 
 
-def grouped_species_and_indices(symbols: list[str], order: list[str]) -> tuple[PoscarSpecies, list[int]]:
+def grouped_species_and_indices(
+    symbols: list[str],
+    order: list[str],
+    excluded_indices: set[int] | None = None,
+) -> tuple[PoscarSpecies, list[int]]:
+    excluded_indices = excluded_indices or set()
     counts: list[int] = []
     indices: list[int] = []
     kept_symbols: list[str] = []
     for symbol in order:
-        group = [index for index, item in enumerate(symbols) if item == symbol]
+        group = [index for index, item in enumerate(symbols) if item == symbol and index not in excluded_indices]
         if not group:
             continue
         kept_symbols.append(symbol)
@@ -1814,6 +1976,206 @@ def write_poscar_text(
     lines.append("Direct")
     lines.extend("  " + "  ".join(f"{value % 1.0: .16f}" for value in position) for position in scaled_positions)
     return "\n".join(lines) + "\n"
+
+
+def select_target_anion_vacancies(
+    source: PoscarStructure,
+    target: PoscarStructure,
+    source_symbols: list[str],
+    target_symbols: list[str],
+    projected_symbols: list[str],
+    source_by_target: dict[int, int],
+    source_moments: list[float] | None,
+    cation_elements: set[str],
+    anion_elements: set[str],
+    oxidation_states: dict[str, float],
+    magmom_oxidation_states: dict[str, list[tuple[float, float]]],
+) -> tuple[set[int], dict[str, object], dict[str, object]]:
+    target_anion_indices = [index for index, symbol in enumerate(target_symbols) if symbol in anion_elements]
+    source_anion_indices = [index for index, symbol in enumerate(source_symbols) if symbol in anion_elements]
+    target_counts = Counter(target_symbols[index] for index in target_anion_indices)
+    source_counts = Counter(source_symbols[index] for index in source_anion_indices)
+    desired_counts = dict(source_counts)
+    desired_reason = "prepared_source_anion_count"
+    charge_summary = projected_charge_summary(
+        projected_symbols,
+        source_by_target,
+        source_moments,
+        cation_elements,
+        anion_elements,
+        oxidation_states,
+        magmom_oxidation_states,
+    )
+    charge_desired = charge_neutral_anion_counts(charge_summary, target_counts, oxidation_states)
+    if charge_desired:
+        desired_counts = charge_desired
+        desired_reason = "charge_neutrality"
+    removed: set[int] = set()
+    assignment_distances: list[float] = []
+    for symbol, target_count in target_counts.items():
+        desired_count = min(max(int(desired_counts.get(symbol, target_count)), 0), target_count)
+        if desired_count >= target_count:
+            continue
+        target_group = [index for index in target_anion_indices if target_symbols[index] == symbol]
+        source_group = [index for index in source_anion_indices if source_symbols[index] == symbol]
+        keep_count = min(desired_count, len(source_group), len(target_group))
+        keep, distances = nearest_partial_site_assignment(
+            source.scaled_positions,
+            source_group,
+            target.scaled_positions,
+            target_group,
+            target.cell,
+            keep_count,
+        )
+        assignment_distances.extend(distances)
+        removed.update(index for index in target_group if index not in keep)
+    output_counts = Counter(projected_symbols[index] for index in target_anion_indices if index not in removed)
+    summary = {
+        "enabled": True,
+        "desired_count_reason": desired_reason,
+        "source_anion_counts": dict(sorted(source_counts.items())),
+        "target_anion_counts_before": dict(sorted(target_counts.items())),
+        "desired_anion_counts": dict(sorted((symbol, int(count)) for symbol, count in desired_counts.items())),
+        "output_anion_counts": dict(sorted(output_counts.items())),
+        "removed_target_atom_indices_1based": [index + 1 for index in sorted(removed)],
+        "removed_anion_counts": dict(sorted(Counter(target_symbols[index] for index in removed).items())),
+        "anion_assignment_max_distance_A": max(assignment_distances, default=0.0),
+        "anion_assignment_mean_distance_A": (
+            sum(assignment_distances) / len(assignment_distances) if assignment_distances else 0.0
+        ),
+        "note": (
+            "When source/prepared A has fewer anions than target B, Atomi keeps the target anion "
+            "sites that best match source anions and removes unmatched target anions as vacancies."
+        ),
+    }
+    charge_summary = projected_charge_summary(
+        projected_symbols,
+        source_by_target,
+        source_moments,
+        cation_elements,
+        anion_elements,
+        oxidation_states,
+        magmom_oxidation_states,
+        removed_anion_targets=removed,
+    )
+    return removed, summary, charge_summary
+
+
+def nearest_partial_site_assignment(
+    source_positions: list[list[float]],
+    source_indices: list[int],
+    target_positions: list[list[float]],
+    target_indices: list[int],
+    cell: list[list[float]],
+    keep_count: int,
+) -> tuple[set[int], list[float]]:
+    if keep_count <= 0:
+        return set(), []
+    candidates: list[tuple[float, int, int]] = []
+    for target_index in target_indices:
+        for source_index in source_indices:
+            distance = fractional_distance_A(target_positions[target_index], source_positions[source_index], cell)
+            candidates.append((distance, target_index, source_index))
+    candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+    used_targets: set[int] = set()
+    used_sources: set[int] = set()
+    distances: list[float] = []
+    for distance, target_index, source_index in candidates:
+        if target_index in used_targets or source_index in used_sources:
+            continue
+        used_targets.add(target_index)
+        used_sources.add(source_index)
+        distances.append(distance)
+        if len(used_targets) == keep_count:
+            break
+    return used_targets, distances
+
+
+def projected_charge_summary(
+    projected_symbols: list[str],
+    source_by_target: dict[int, int],
+    source_moments: list[float] | None,
+    cation_elements: set[str],
+    anion_elements: set[str],
+    oxidation_states: dict[str, float],
+    magmom_oxidation_states: dict[str, list[tuple[float, float]]],
+    *,
+    removed_anion_targets: set[int] | None = None,
+) -> dict[str, object]:
+    removed_anion_targets = removed_anion_targets or set()
+    counts: Counter[str] = Counter()
+    charge_by_symbol: Counter[str] = Counter()
+    missing: set[str] = set()
+    cation_charge = 0.0
+    anion_charge = 0.0
+    for index, symbol in enumerate(projected_symbols):
+        if index in removed_anion_targets:
+            continue
+        counts[symbol] += 1
+        moment = None
+        if index in source_by_target and source_moments is not None:
+            source_index = source_by_target[index]
+            if source_index < len(source_moments):
+                moment = source_moments[source_index]
+        oxidation = oxidation_for_symbol(symbol, moment, oxidation_states, magmom_oxidation_states)
+        if oxidation is None:
+            if symbol in cation_elements or symbol in anion_elements:
+                missing.add(symbol)
+            continue
+        charge_by_symbol[symbol] += oxidation
+        if symbol in anion_elements:
+            anion_charge += oxidation
+        else:
+            cation_charge += oxidation
+    total = cation_charge + anion_charge
+    return {
+        "enabled": bool(oxidation_states or magmom_oxidation_states),
+        "species_counts": dict(sorted(counts.items())),
+        "charge_by_symbol": {symbol: float(charge) for symbol, charge in sorted(charge_by_symbol.items())},
+        "cation_charge": float(cation_charge),
+        "anion_charge": float(anion_charge),
+        "total_charge": float(total),
+        "neutrality_ok": abs(total) < 1.0e-6 if oxidation_states or magmom_oxidation_states else None,
+        "missing_oxidation_elements": sorted(missing),
+    }
+
+
+def oxidation_for_symbol(
+    symbol: str,
+    moment: float | None,
+    oxidation_states: dict[str, float],
+    magmom_oxidation_states: dict[str, list[tuple[float, float]]],
+) -> float | None:
+    if moment is not None and symbol in magmom_oxidation_states:
+        target = abs(moment)
+        moment_value, charge = min(
+            magmom_oxidation_states[symbol],
+            key=lambda item: abs(target - item[0]),
+        )
+        if abs(target - moment_value) <= MOMENT_FAMILY_TOLERANCE:
+            return charge
+    return oxidation_states.get(symbol)
+
+
+def charge_neutral_anion_counts(
+    charge_summary: dict[str, object],
+    target_counts: Counter[str],
+    oxidation_states: dict[str, float],
+) -> dict[str, int]:
+    if len(target_counts) != 1:
+        return {}
+    symbol = next(iter(target_counts))
+    anion_charge = oxidation_states.get(symbol)
+    if anion_charge is None or anion_charge >= 0:
+        return {}
+    missing = charge_summary.get("missing_oxidation_elements", [])
+    if missing:
+        return {}
+    cation_charge = float(charge_summary.get("cation_charge", 0.0))
+    desired = int(round(-cation_charge / anion_charge))
+    if desired < 0:
+        return {}
+    return {symbol: min(desired, int(target_counts[symbol]))}
 
 
 def projected_magmom_values(
@@ -1922,7 +2284,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="vasp-project-poscar",
         description=(
             "Project element identities from POSCAR A onto relaxed coordinates from POSCAR B. "
-            "Cations are matched by nearest periodic fractional site; anions are left as in B."
+            "Cations are matched by nearest periodic fractional site; source anion vacancies can be preserved in B."
         ),
     )
     parser.add_argument("--element-poscar", "--poscar-a", dest="source_poscar", type=Path, required=True)
@@ -1997,6 +2359,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Warn instead of failing if projected cation MAGMOM signs/counts/magnitudes differ from prepared source A.",
     )
+    parser.add_argument(
+        "--no-preserve-anion-vacancies",
+        action="store_true",
+        help="Keep all target-B anion sites even if prepared/source A has fewer anions.",
+    )
+    parser.add_argument(
+        "--oxidation-state",
+        action="append",
+        default=[],
+        help="Element oxidation state, repeatable or comma-separated, e.g. Gd=3,U=4,O=-2.",
+    )
+    parser.add_argument(
+        "--magmom-oxidation",
+        action="append",
+        default=[],
+        help="Map |MAGMOM| to oxidation state, e.g. U:1=5,U:2=4,Gd:7=3.",
+    )
     parser.add_argument("--magmom-decimals", type=int, default=3)
     return parser
 
@@ -2036,6 +2415,9 @@ def main(argv: list[str] | None = None) -> None:
         scale_target_volume_to_source=args.scale_target_volume_to_source,
         align_cation_origin=not args.no_align_cation_origin,
         strict_magmom_preservation=not args.allow_magmom_mismatch,
+        preserve_anion_vacancies=not args.no_preserve_anion_vacancies,
+        oxidation_states=parse_oxidation_states(args.oxidation_state),
+        magmom_oxidation_states=parse_magmom_oxidation_states(args.magmom_oxidation),
     )
     print(f"Projected POSCAR : {result.output_poscar}")
     if result.prepared_source_poscar:
@@ -2052,6 +2434,21 @@ def main(argv: list[str] | None = None) -> None:
         "Output species   : "
         + " ".join(f"{symbol}:{count}" for symbol, count in zip(result.output_species.symbols, result.output_species.counts))
     )
+    removed_counts = result.anion_vacancy_summary.get("removed_anion_counts", {})
+    if removed_counts:
+        print(
+            "Anion vacancies : "
+            + " ".join(f"{symbol}:{count}" for symbol, count in removed_counts.items())
+            + " target site(s) removed"
+        )
+    if result.charge_summary.get("enabled"):
+        print(
+            "Charge check     : "
+            f"cation={float(result.charge_summary.get('cation_charge', 0.0)):g} "
+            f"anion={float(result.charge_summary.get('anion_charge', 0.0)):g} "
+            f"total={float(result.charge_summary.get('total_charge', 0.0)):g} "
+            f"neutral={result.charge_summary.get('neutrality_ok')}"
+        )
     for operation in json.loads(result.plan_json.read_text(encoding="utf-8")).get("source_operations", []):
         if operation.get("kind") == "source_representative_reduce":
             print(
@@ -2108,6 +2505,33 @@ def parse_fraction_value(raw: str) -> float:
         numerator, denominator = raw.split("/", 1)
         return float(numerator) / float(denominator)
     return float(raw)
+
+
+def parse_oxidation_states(values: list[str]) -> dict[str, float]:
+    states: dict[str, float] = {}
+    for item in values:
+        for part in str(item).replace(",", " ").split():
+            if not part:
+                continue
+            if "=" not in part:
+                raise ValueError(f"Expected oxidation state like U=4, got {part!r}.")
+            symbol, value = part.split("=", 1)
+            states[symbol.strip()] = float(value)
+    return states
+
+
+def parse_magmom_oxidation_states(values: list[str]) -> dict[str, list[tuple[float, float]]]:
+    states: dict[str, list[tuple[float, float]]] = {}
+    for item in values:
+        for part in str(item).replace(",", " ").split():
+            if not part:
+                continue
+            if ":" not in part or "=" not in part:
+                raise ValueError(f"Expected MAGMOM oxidation map like U:2=4, got {part!r}.")
+            left, charge = part.split("=", 1)
+            symbol, moment = left.split(":", 1)
+            states.setdefault(symbol.strip(), []).append((abs(float(moment)), float(charge)))
+    return states
 
 
 if __name__ == "__main__":

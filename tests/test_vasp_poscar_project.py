@@ -154,6 +154,47 @@ def write_2x3x3_defect_cation_source(path: Path) -> list[float]:
     return [moment for _symbol, _position, moment in grouped]
 
 
+def write_2x3x3_gd_vo_source(path: Path) -> list[float]:
+    cations: list[tuple[str, tuple[float, float, float], float]] = []
+    anions: list[tuple[str, tuple[float, float, float], float]] = []
+    gd_cells = {(0, 2, 2), (1, 2, 2)}
+    vacancy_cell = (0, 1, 1)
+    for i in range(2):
+        for j in range(3):
+            for k in range(3):
+                position = ((i + 0.5) / 2, (j + 0.5) / 3, (k + 0.5) / 3)
+                if (i, j, k) in gd_cells:
+                    cations.append(("Gd", position, 7.0))
+                else:
+                    cations.append(("U", position, 2.0 if (i + j + k) % 2 == 0 else -2.0))
+                anion_sites = [
+                    ((i + 0.25) / 2, (j + 0.25) / 3, (k + 0.25) / 3),
+                    ((i + 0.75) / 2, (j + 0.75) / 3, (k + 0.75) / 3),
+                ]
+                for site_index, anion_position in enumerate(anion_sites):
+                    if (i, j, k) == vacancy_cell and site_index == 0:
+                        continue
+                    anions.append(("O", anion_position, 0.0))
+    grouped = (
+        [item for item in cations if item[0] == "Gd"]
+        + [item for item in cations if item[0] == "U"]
+        + anions
+    )
+    path.write_text(
+        "A 2x3x3 Gd-doped source with one oxygen vacancy\n"
+        "1.0\n"
+        "2.0 0.0 0.0\n"
+        "0.0 3.0 0.0\n"
+        "0.0 0.0 3.0\n"
+        "Gd U O\n"
+        "2 16 35\n"
+        "Direct\n"
+        + "".join(f"{x:.10f} {y:.10f} {z:.10f}\n" for _symbol, (x, y, z), _moment in grouped),
+        encoding="utf-8",
+    )
+    return [moment for _symbol, _position, moment in grouped]
+
+
 def write_2x3x3_equal_cation_source(path: Path) -> None:
     positions: list[tuple[str, tuple[float, float, float]]] = []
     for i in range(2):
@@ -272,6 +313,33 @@ def write_2x2x2_cation_target(path: Path) -> None:
         "8\n"
         "Direct\n"
         + "".join(f"{x:.10f} {y:.10f} {z:.10f}\n" for x, y, z in positions),
+        encoding="utf-8",
+    )
+
+
+def write_2x2x2_uo2_target(path: Path) -> None:
+    cations = [
+        ((i + 0.5) / 2, (j + 0.5) / 2, (k + 0.5) / 2)
+        for i in range(2)
+        for j in range(2)
+        for k in range(2)
+    ]
+    anions = []
+    for i in range(2):
+        for j in range(2):
+            for k in range(2):
+                anions.append(((i + 0.25) / 2, (j + 0.25) / 2, (k + 0.25) / 2))
+                anions.append(((i + 0.75) / 2, (j + 0.75) / 2, (k + 0.75) / 2))
+    path.write_text(
+        "B 2x2x2 full UO2 target\n"
+        "1.0\n"
+        "2.0 0.0 0.0\n"
+        "0.0 2.0 0.0\n"
+        "0.0 0.0 2.0\n"
+        "U O\n"
+        "8 16\n"
+        "Direct\n"
+        + "".join(f"{x:.10f} {y:.10f} {z:.10f}\n" for x, y, z in [*cations, *anions]),
         encoding="utf-8",
     )
 
@@ -601,6 +669,52 @@ def test_project_poscar_crop_preserves_noisy_charge_coupled_host(tmp_path: Path)
     assert operation["selection_policy"] == "defect_preserving"
     assert operation["minority_cations_kept"] == 2
     assert operation["charge_variant_cations_kept"] == 1
+
+
+def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(tmp_path: Path) -> None:
+    source = tmp_path / "A_gd_vo_POSCAR"
+    target = tmp_path / "B_2x2x2_uo2_POSCAR"
+    incar = tmp_path / "A_INCAR"
+    out = tmp_path / "projected_gd_vo"
+    moments = write_2x3x3_gd_vo_source(source)
+    write_2x2x2_uo2_target(target)
+    incar.write_text("MAGMOM = " + " ".join(f"{moment:g}" for moment in moments) + "\n", encoding="utf-8")
+
+    project_main(
+        [
+            "--element-poscar",
+            str(source),
+            "--structure-poscar",
+            str(target),
+            "--incar-a",
+            str(incar),
+            "--outdir",
+            str(out),
+            "--source-supercell",
+            "2x3x3",
+            "--source-keep-cells",
+            "2x2x2",
+            "--cation-elements",
+            "Gd,U",
+            "--anion-elements",
+            "O",
+            "--oxidation-state",
+            "Gd=3,U=4,O=-2",
+        ]
+    )
+
+    prepared = read_poscar_structure(out / "POSCAR_A_prepared")
+    projected = read_poscar_structure(out / "POSCAR")
+    assert prepared.species.symbols == ["Gd", "U", "O"]
+    assert prepared.species.counts[:2] == [2, 6]
+    assert projected.species.symbols == ["Gd", "U", "O"]
+    assert projected.species.counts == [2, 6, 15]
+    assert len(expanded_magmom_values(out / "INCAR")) == projected.species.total_atoms
+    plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    assert plan["anion_vacancy_summary"]["removed_anion_counts"] == {"O": 1}
+    assert plan["anion_vacancy_summary"]["output_anion_counts"] == {"O": 15}
+    assert plan["charge_summary"]["neutrality_ok"] is True
+    assert plan["charge_summary"]["total_charge"] == pytest.approx(0.0)
 
 
 def test_project_poscar_equal_cation_counts_use_regular_origin_crop(tmp_path: Path) -> None:
