@@ -713,6 +713,11 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(tmp_
     plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
     assert plan["anion_vacancy_summary"]["removed_anion_counts"] == {"O": 1}
     assert plan["anion_vacancy_summary"]["output_anion_counts"] == {"O": 15}
+    locality = plan["anion_vacancy_summary"]["removed_anion_nearest_cations"]
+    assert len(locality) == 1
+    assert locality[0]["removed_element"] == "O"
+    assert locality[0]["nearest_cation_element"] in {"Gd", "U"}
+    assert locality[0]["nearest_cation_distance_A"] > 0
     assert plan["charge_summary"]["neutrality_ok"] is True
     assert plan["charge_summary"]["total_charge"] == pytest.approx(0.0)
 

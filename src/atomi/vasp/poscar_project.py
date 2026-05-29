@@ -2030,6 +2030,13 @@ def select_target_anion_vacancies(
         assignment_distances.extend(distances)
         removed.update(index for index in target_group if index not in keep)
     output_counts = Counter(projected_symbols[index] for index in target_anion_indices if index not in removed)
+    removed_locality = removed_anion_locality(
+        removed,
+        target,
+        target_symbols,
+        projected_symbols,
+        cation_elements,
+    )
     summary = {
         "enabled": True,
         "desired_count_reason": desired_reason,
@@ -2039,6 +2046,7 @@ def select_target_anion_vacancies(
         "output_anion_counts": dict(sorted(output_counts.items())),
         "removed_target_atom_indices_1based": [index + 1 for index in sorted(removed)],
         "removed_anion_counts": dict(sorted(Counter(target_symbols[index] for index in removed).items())),
+        "removed_anion_nearest_cations": removed_locality,
         "anion_assignment_max_distance_A": max(assignment_distances, default=0.0),
         "anion_assignment_mean_distance_A": (
             sum(assignment_distances) / len(assignment_distances) if assignment_distances else 0.0
@@ -2059,6 +2067,53 @@ def select_target_anion_vacancies(
         removed_anion_targets=removed,
     )
     return removed, summary, charge_summary
+
+
+def removed_anion_locality(
+    removed_anion_targets: set[int],
+    target: PoscarStructure,
+    target_symbols: list[str],
+    projected_symbols: list[str],
+    cation_elements: set[str],
+) -> list[dict[str, object]]:
+    cation_indices = [index for index, symbol in enumerate(projected_symbols) if symbol in cation_elements]
+    rows: list[dict[str, object]] = []
+    for anion_index in sorted(removed_anion_targets):
+        if not cation_indices:
+            rows.append(
+                {
+                    "removed_target_atom": anion_index + 1,
+                    "removed_element": target_symbols[anion_index],
+                    "nearest_cation_atom": None,
+                    "nearest_cation_element": None,
+                    "nearest_cation_distance_A": None,
+                }
+            )
+            continue
+        nearest = min(
+            (
+                (
+                    fractional_distance_A(
+                        target.scaled_positions[anion_index],
+                        target.scaled_positions[cation_index],
+                        target.cell,
+                    ),
+                    cation_index,
+                )
+                for cation_index in cation_indices
+            ),
+            key=lambda item: (item[0], item[1]),
+        )
+        rows.append(
+            {
+                "removed_target_atom": anion_index + 1,
+                "removed_element": target_symbols[anion_index],
+                "nearest_cation_atom": nearest[1] + 1,
+                "nearest_cation_element": projected_symbols[nearest[1]],
+                "nearest_cation_distance_A": nearest[0],
+            }
+        )
+    return rows
 
 
 def nearest_partial_site_assignment(
