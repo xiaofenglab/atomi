@@ -978,8 +978,26 @@ def analyze_main(args: argparse.Namespace) -> dict[str, Any]:
             label=f"GK_MD_T{label}K",
             meta={},
         )
+        seed_values = [
+            float(row["k_seed_W_mK"])
+            for row in seed_rows
+            if row.get("status") == "ok"
+            and abs(float(row.get("temperature_K", math.nan)) - float(temp)) < 1.0e-8
+            and row.get("k_seed_W_mK") is not None
+            and math.isfinite(float(row["k_seed_W_mK"]))
+        ]
+        seed_mean = float(np.mean(seed_values)) if seed_values else None
+        seed_std = float(np.std(seed_values, ddof=1)) if len(seed_values) > 1 else (0.0 if seed_values else None)
+        seed_sem = seed_std / math.sqrt(len(seed_values)) if seed_std is not None and len(seed_values) > 1 else seed_std
+        seed_cv = abs(seed_std / seed_mean) if seed_mean not in (None, 0.0) and seed_std is not None else None
         for row in rows:
             row["n_gk_seeds"] = len(tables)
+            row["ok_seed_count"] = len(seed_values)
+            row["k_seed_mean_W_mK"] = seed_mean
+            row["k_seed_std_W_mK"] = seed_std
+            row["k_seed_sem_W_mK"] = seed_sem
+            row["k_seed_ci95_W_mK"] = 1.96 * seed_sem if seed_sem is not None else None
+            row["seed_cv_fraction"] = seed_cv
             row["scale_mode"] = scale_mode
             row["scale_to_W_mK"] = scale
             row["volume_mean_A3"] = v_scale
@@ -1018,6 +1036,12 @@ def analyze_main(args: argparse.Namespace) -> dict[str, Any]:
         "k_y_W_mK",
         "k_z_W_mK",
         "n_gk_seeds",
+        "ok_seed_count",
+        "k_seed_mean_W_mK",
+        "k_seed_std_W_mK",
+        "k_seed_sem_W_mK",
+        "k_seed_ci95_W_mK",
+        "seed_cv_fraction",
         "scale_mode",
         "scale_to_W_mK",
         "volume_mean_A3",
@@ -1139,6 +1163,7 @@ def validate_main(args: argparse.Namespace) -> dict[str, Any]:
             if (value := finite_float_or_none(row.get("k_seed_W_mK"))) is not None
         ]
         seed_mean, seed_std = sample_mean_std(k_seed_values)
+        seed_sem = seed_std / math.sqrt(len(k_seed_values)) if seed_std is not None and len(k_seed_values) > 1 else seed_std
         seed_cv = abs(seed_std / seed_mean) if seed_mean not in (None, 0.0) and seed_std is not None else None
         final = final_by_temp.get(temp, {})
         k_final = finite_float_or_none(final.get("k_W_mK"))
@@ -1204,6 +1229,8 @@ def validate_main(args: argparse.Namespace) -> dict[str, Any]:
                 "ok_seed_count": len(ok_rows),
                 "k_seed_mean_W_mK": seed_mean,
                 "k_seed_std_W_mK": seed_std,
+                "k_seed_sem_W_mK": seed_sem,
+                "k_seed_ci95_W_mK": 1.96 * seed_sem if seed_sem is not None else None,
                 "seed_cv_fraction": seed_cv,
                 "late_integral_drift_mean_fraction": drift_mean,
                 "late_integral_drift_std_fraction": drift_std,
@@ -1228,10 +1255,9 @@ def validate_main(args: argparse.Namespace) -> dict[str, Any]:
         "global_warnings": global_warnings,
         "temperatures": reports,
     }
-    if args.json_out:
-        json_out = resolve_root_path(args.json_out, root)
-        write_json(json_out, output)
-        print(f"Wrote GK validation JSON: {json_out}")
+    json_out = resolve_root_path(args.json_out, root) if args.json_out else fit_dir / "gk_validation_summary.json"
+    write_json(json_out, output)
+    print(f"Wrote GK validation JSON: {json_out}")
 
     print("GK Validation Summary")
     print("---------------------")
@@ -1393,7 +1419,11 @@ def build_parser() -> argparse.ArgumentParser:
     val = sub.add_parser("validate", help="Summarize GK fit quality, seed statistics, and decision-rule warnings.")
     val.add_argument("--gk-config", type=Path, default=Path("config_gk.json"))
     val.add_argument("--fit-dir", type=Path, default=Path("analysis/gk_lammps/fit"))
-    val.add_argument("--json-out", type=Path, help="Optional validation report JSON. Relative paths are rooted at the config directory.")
+    val.add_argument(
+        "--json-out",
+        type=Path,
+        help="Validation report JSON. Default: <fit-dir>/gk_validation_summary.json.",
+    )
     val.add_argument("--min-seeds", type=int, default=5, help="Warn when fewer ok seeds are available. Default: 5.")
     val.add_argument("--axis-spread-warn-fraction", type=float, default=0.25)
     val.add_argument("--axis-spread-fail-fraction", type=float, default=0.50)

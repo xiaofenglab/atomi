@@ -188,10 +188,10 @@ def build_parser() -> argparse.ArgumentParser:
         )
         lammps_thermo_series.add_argument("analysis_args", nargs=argparse.REMAINDER)
 
-    for command_name in ("thermal_k_lammps", "thermal-k-lammps"):
+    for command_name in ("thermal_k_lammps", "thermal-k-lammps", "thermal_k_crosscheck", "thermal-k-crosscheck"):
         thermal_k_lammps = subparsers.add_parser(
             command_name,
-            help="Collect thermal conductivity from elastic estimates or MD Green-Kubo tables.",
+            help="Collect, crosscheck, and export thermal conductivity tables.",
         )
         thermal_k_lammps.add_argument("thermal_k_args", nargs=argparse.REMAINDER)
 
@@ -825,7 +825,7 @@ def main(argv: list[str] | None = None) -> None:
 
         thermo_series_main(raw_args[1:])
         return
-    if raw_args and raw_args[0] in ("thermal_k_lammps", "thermal-k-lammps"):
+    if raw_args and raw_args[0] in ("thermal_k_lammps", "thermal-k-lammps", "thermal_k_crosscheck", "thermal-k-crosscheck"):
         from atomi.lammps.thermal_conductivity import main as thermal_k_lammps_main
 
         thermal_k_lammps_main(raw_args[1:])
@@ -1340,7 +1340,7 @@ def main(argv: list[str] | None = None) -> None:
         thermo_series_main(args.analysis_args)
         return
 
-    if args.subcommand in ("thermal_k_lammps", "thermal-k-lammps"):
+    if args.subcommand in ("thermal_k_lammps", "thermal-k-lammps", "thermal_k_crosscheck", "thermal-k-crosscheck"):
         from atomi.lammps.thermal_conductivity import main as thermal_k_lammps_main
 
         thermal_k_lammps_main(args.thermal_k_args)

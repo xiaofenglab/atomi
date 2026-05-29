@@ -27,6 +27,13 @@ def finite_float(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def finite_int(value: Any) -> int | None:
+    number = finite_float(value)
+    if number is None:
+        return None
+    return int(number)
+
+
 def read_csv(path: Path) -> list[dict[str, str]]:
     with path.open("r", newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
@@ -81,6 +88,21 @@ def attach_cell_columns(row: dict[str, Any], meta: dict[str, Any]) -> dict[str, 
     return out
 
 
+def first_finite_value(row: dict[str, Any], names: tuple[str, ...]) -> float | None:
+    for name in names:
+        value = finite_float(row.get(name))
+        if value is not None:
+            return value
+    return None
+
+
+def first_not_none(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
 def elastic_summary_rows(path: Path, select: str, meta: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for row in read_csv(path):
@@ -117,16 +139,30 @@ def conductivity_table_rows(path: Path, label: str | None = None, meta: dict[str
     meta = meta or {}
     for row in read_csv(path):
         temp = finite_float(row.get("T_K") or row.get("temperature_K"))
-        conductivity = finite_float(row.get("k_W_mK") or row.get("thermal_conductivity_W_mK"))
+        conductivity = first_finite_value(
+            row,
+            ("k_W_mK", "k_mean_W_mK", "thermal_conductivity_W_mK"),
+        )
         if temp is None or conductivity is None:
             continue
+        source = label or row.get("source") or "table"
         rows.append(
             attach_cell_columns(
                 {
                 "T_K": temp,
                 "k_W_mK": conductivity,
-                "k_std_W_mK": finite_float(row.get("k_std_W_mK")),
-                "source": label or row.get("source") or "table",
+                "k_std_W_mK": first_finite_value(row, ("k_std_W_mK", "k_seed_std_W_mK")),
+                "k_sem_W_mK": first_finite_value(row, ("k_sem_W_mK", "k_seed_sem_W_mK")),
+                "k_ci95_W_mK": first_finite_value(row, ("k_ci95_W_mK", "k_seed_ci95_W_mK")),
+                "seed_count": first_finite_value(row, ("seed_count", "n_gk_seeds")),
+                "ok_seed_count": first_finite_value(row, ("ok_seed_count", "n_gk_seeds")),
+                "seed_cv_fraction": finite_float(row.get("seed_cv_fraction")),
+                "axis_spread_fraction": finite_float(row.get("axis_spread_fraction")),
+                "slope_disagreement_fraction": first_finite_value(
+                    row,
+                    ("slope_disagreement_fraction", "slope_disagreement_mean_fraction"),
+                ),
+                "source": source,
                 "source_file": str(path),
                 },
                 meta,
@@ -402,6 +438,310 @@ def compare_gk_nma(
     return comparisons
 
 
+def read_json_optional(path: Path) -> Any | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"parse_error": str(path)}
+
+
+def validation_reports_by_temperature(path: Path) -> dict[float, dict[str, Any]]:
+    payload = read_json_optional(path)
+    if not isinstance(payload, dict):
+        return {}
+    reports = payload.get("reports") or payload.get("temperatures") or []
+    if not isinstance(reports, list):
+        return {}
+    out: dict[float, dict[str, Any]] = {}
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        temp = finite_float(report.get("temperature_K") or report.get("T_K"))
+        if temp is not None:
+            out[temp] = report
+    return out
+
+
+def _validation_match(
+    reports: dict[float, dict[str, Any]],
+    temperature: float,
+    tolerance: float = 1.0,
+) -> dict[str, Any]:
+    if not reports:
+        return {}
+    closest = min(reports, key=lambda temp: abs(temp - temperature))
+    if abs(closest - temperature) <= tolerance:
+        return reports[closest]
+    return {}
+
+
+def _route_label(route: str, fit_dir: Path, explicit: str | None, index: int) -> str:
+    if explicit:
+        return explicit
+    name = fit_dir.parent.name or fit_dir.name
+    return f"{route}_{name or index + 1}"
+
+
+def _sem_from_std(std: float | None, count: int | None) -> float | None:
+    if std is None:
+        return None
+    if count is None or count <= 1:
+        return std
+    return std / math.sqrt(count)
+
+
+def _ci95_from_sem(sem: float | None) -> float | None:
+    if sem is None:
+        return None
+    return 1.96 * sem
+
+
+def route_summary_rows(
+    fit_dir: Path,
+    *,
+    route: str,
+    label: str,
+    meta: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    fit_dir = fit_dir.resolve()
+    if route == "gk":
+        table_path = fit_dir / "thermal_conductivity_T.csv"
+        validation_path = fit_dir / "gk_validation_summary.json"
+        seed_summary_path = fit_dir / "gk_seed_summary.csv"
+    elif route == "rnemd":
+        table_path = fit_dir / "thermal_conductivity_rnemd_T.csv"
+        validation_path = fit_dir / "rnemd_validation_summary.json"
+        seed_summary_path = fit_dir / "rnemd_seed_summary.csv"
+    else:
+        raise ValueError(f"Unknown transport route {route!r}")
+    if not table_path.exists():
+        return [], {
+            "kind": f"{route}_fit",
+            "fit_dir": str(fit_dir),
+            "error": f"missing {table_path.name}",
+        }
+    validation = validation_reports_by_temperature(validation_path)
+    rows: list[dict[str, Any]] = []
+    for raw in read_csv(table_path):
+        temp = finite_float(raw.get("T_K") or raw.get("temperature_K"))
+        k_value = first_finite_value(raw, ("k_W_mK", "k_mean_W_mK", "thermal_conductivity_W_mK"))
+        if temp is None or k_value is None:
+            continue
+        report = _validation_match(validation, temp)
+        seed_count = finite_int(raw.get("seed_count") or raw.get("n_gk_seeds") or report.get("seed_count"))
+        ok_seed_count = finite_int(raw.get("ok_seed_count") or raw.get("n_gk_seeds") or report.get("ok_seed_count"))
+        std = first_not_none(
+            first_finite_value(raw, ("k_std_W_mK", "k_seed_std_W_mK")),
+            finite_float(report.get("k_seed_std_W_mK")),
+        )
+        sem = first_finite_value(raw, ("k_sem_W_mK", "k_seed_sem_W_mK"))
+        if sem is None:
+            sem = _sem_from_std(std, ok_seed_count or seed_count)
+        ci95 = first_finite_value(raw, ("k_ci95_W_mK", "k_seed_ci95_W_mK"))
+        if ci95 is None:
+            ci95 = _ci95_from_sem(sem)
+        row = attach_cell_columns(
+            {
+                "T_K": temp,
+                "route": route,
+                "k_W_mK": k_value,
+                "k_std_W_mK": std,
+                "k_sem_W_mK": sem,
+                "k_ci95_W_mK": ci95,
+                "seed_count": seed_count,
+                "ok_seed_count": ok_seed_count,
+                "validation_status": report.get("status", ""),
+                "seed_cv_fraction": first_not_none(
+                    first_finite_value(raw, ("seed_cv_fraction",)),
+                    finite_float(report.get("seed_cv_fraction")),
+                ),
+                "axis_spread_fraction": first_not_none(
+                    first_finite_value(raw, ("axis_spread_fraction",)),
+                    finite_float(report.get("axis_spread_fraction")),
+                ),
+                "late_drift_fraction": first_not_none(
+                    finite_float(report.get("late_integral_drift_mean_fraction")),
+                    finite_float(report.get("late_drift_fraction")),
+                ),
+                "slope_disagreement_fraction": first_not_none(
+                    first_finite_value(
+                        raw,
+                        ("slope_disagreement_fraction", "slope_disagreement_mean_fraction"),
+                    ),
+                    finite_float(report.get("slope_disagreement_fraction")),
+                ),
+                "source": label,
+                "source_file": str(table_path),
+                "fit_dir": str(fit_dir),
+                "validation_json": str(validation_path) if validation_path.exists() else "",
+            },
+            meta,
+        )
+        rows.append(row)
+    return rows, {
+        "kind": f"{route}_fit",
+        "label": label,
+        "fit_dir": str(fit_dir),
+        "temperature_table": str(table_path),
+        "seed_summary": str(seed_summary_path) if seed_summary_path.exists() else "",
+        "validation_json": str(validation_path) if validation_path.exists() else "",
+        "rows": len(rows),
+    }
+
+
+def route_uncertainty(row: dict[str, Any]) -> float | None:
+    for key in ("k_sem_W_mK", "k_ci95_W_mK", "k_std_W_mK"):
+        value = finite_float(row.get(key))
+        if value is not None and value > 0:
+            if key == "k_ci95_W_mK":
+                return value / 1.96
+            return value
+    return None
+
+
+def transport_route_ok(row: dict[str, Any]) -> bool:
+    k_value = finite_float(row.get("k_W_mK"))
+    if k_value is None or k_value <= 0:
+        return False
+    status = str(row.get("validation_status") or "").lower()
+    return status not in {"fail", "failed", "error"}
+
+
+def combine_transport_routes(
+    route_rows: list[dict[str, Any]],
+    *,
+    temperature_tolerance: float,
+    route_disagreement_warn_fraction: float,
+    route_disagreement_fail_fraction: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    remaining = sorted(route_rows, key=lambda row: float(row["T_K"]))
+    clusters: list[list[dict[str, Any]]] = []
+    for row in remaining:
+        temp = float(row["T_K"])
+        for cluster in clusters:
+            center = float(np.mean([float(item["T_K"]) for item in cluster]))
+            if abs(temp - center) <= temperature_tolerance:
+                cluster.append(row)
+                break
+        else:
+            clusters.append([row])
+
+    combined_rows: list[dict[str, Any]] = []
+    crosscheck_rows: list[dict[str, Any]] = []
+    for cluster in clusters:
+        temp = float(np.mean([float(row["T_K"]) for row in cluster]))
+        usable = [row for row in cluster if transport_route_ok(row)]
+        k_values = [float(row["k_W_mK"]) for row in usable]
+        sigmas = [route_uncertainty(row) for row in usable]
+        notes: list[str] = []
+        status = "ok"
+        if len(usable) < len(cluster):
+            notes.append("one or more route rows were invalid or failed validation")
+            status = "warn"
+        if not usable:
+            combined_k = math.nan
+            within = math.nan
+            between = math.nan
+            combined_uq = math.nan
+            status = "fail"
+            notes.append("no usable route estimates")
+        elif len(usable) == 1:
+            combined_k = k_values[0]
+            within = sigmas[0] if sigmas[0] is not None else math.nan
+            between = math.nan
+            combined_uq = within
+            status = "warn"
+            notes.append("single usable route; no cross-route check")
+        elif all(sigma is not None and sigma > 0 for sigma in sigmas):
+            weights = [1.0 / float(sigma) ** 2 for sigma in sigmas if sigma is not None]
+            combined_k = float(sum(weight * value for weight, value in zip(weights, k_values)) / sum(weights))
+            within = math.sqrt(1.0 / sum(weights))
+            between = float(np.std(k_values, ddof=1))
+            combined_uq = max(within, between)
+        else:
+            combined_k = float(np.mean(k_values))
+            between = float(np.std(k_values, ddof=1)) if len(k_values) > 1 else math.nan
+            within = between / math.sqrt(len(k_values)) if math.isfinite(between) else math.nan
+            combined_uq = between if math.isfinite(between) else math.nan
+            notes.append("missing per-route SEM for inverse-variance weighting; used arithmetic mean")
+            status = "warn"
+        spread = None
+        if len(k_values) > 1 and abs(combined_k) > 1.0e-12 and math.isfinite(combined_k):
+            spread = (max(k_values) - min(k_values)) / abs(combined_k)
+            if spread >= route_disagreement_fail_fraction:
+                status = "fail"
+                notes.append("route disagreement exceeds fail threshold")
+            elif spread >= route_disagreement_warn_fraction and status != "fail":
+                status = "warn"
+                notes.append("route disagreement exceeds warning threshold")
+        z_score = None
+        if len(usable) == 2 and all(sigma is not None and sigma > 0 for sigma in sigmas):
+            denom = math.sqrt(float(sigmas[0]) ** 2 + float(sigmas[1]) ** 2)
+            if denom > 0:
+                z_score = abs(k_values[0] - k_values[1]) / denom
+        by_route = {str(row.get("route")): row for row in cluster}
+        gk = by_route.get("gk", {})
+        rnemd = by_route.get("rnemd", {})
+        common = {
+            "T_K": temp,
+            "route_count": len(cluster),
+            "ok_route_count": len(usable),
+            "gk_k_W_mK": finite_float(gk.get("k_W_mK")),
+            "gk_uq_W_mK": route_uncertainty(gk) if gk else None,
+            "gk_status": gk.get("validation_status", ""),
+            "rnemd_k_W_mK": finite_float(rnemd.get("k_W_mK")),
+            "rnemd_uq_W_mK": route_uncertainty(rnemd) if rnemd else None,
+            "rnemd_status": rnemd.get("validation_status", ""),
+            "route_spread_fraction": spread,
+            "route_z_score": z_score,
+            "status": status,
+            "notes": "; ".join(dict.fromkeys(notes)),
+        }
+        combined_row = {
+            "T_K": temp,
+            "k_W_mK": combined_k,
+            "k_std_W_mK": combined_uq,
+            "k_sem_W_mK": within,
+            "k_between_route_std_W_mK": between,
+            "source": "combined_gk_rnemd",
+            "source_tag": "combined_gk_rnemd",
+            **common,
+        }
+        for key in (
+            "formula",
+            "natoms",
+            "atoms_per_formula_unit",
+            "n_formula_units",
+            "target_z_formula_units",
+            "cell_role",
+            "normalization_basis",
+        ):
+            combined_row[key] = cluster[0].get(key)
+        combined_rows.append(combined_row)
+        crosscheck_rows.append(common | {"k_combined_W_mK": combined_k, "k_uq_W_mK": combined_uq})
+    return combined_rows, crosscheck_rows
+
+
+def write_moose_thermal_conductivity_csv(path: Path, rows: list[dict[str, Any]], source_tag: str) -> None:
+    moose_rows = []
+    for row in rows:
+        temp = finite_float(row.get("T_K"))
+        k_value = finite_float(row.get("k_W_mK"))
+        if temp is None or k_value is None:
+            continue
+        moose_rows.append(
+            {
+                "T_K": temp,
+                "k_W_mK": k_value,
+                "k_std_W_mK": finite_float(row.get("k_std_W_mK")),
+                "source_tag": row.get("source_tag") or source_tag,
+            }
+        )
+    write_csv(path, moose_rows, ["T_K", "k_W_mK", "k_std_W_mK", "source_tag"])
+
+
 def maybe_plot(path: Path, rows: list[dict[str, Any]]) -> str:
     try:
         import matplotlib
@@ -458,6 +798,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--k-csv", type=Path, action="append", default=[], help="CSV with T_K,k_W_mK columns.")
     parser.add_argument("--k-label", action="append", default=[], help="Label for each --k-csv table.")
+    parser.add_argument(
+        "--gk-fit-dir",
+        type=Path,
+        action="append",
+        default=[],
+        help="GK fit directory containing thermal_conductivity_T.csv and optional validation JSON.",
+    )
+    parser.add_argument("--gk-fit-label", action="append", default=[], help="Label for each --gk-fit-dir table.")
+    parser.add_argument(
+        "--rnemd-fit-dir",
+        type=Path,
+        action="append",
+        default=[],
+        help="rNEMD fit directory containing thermal_conductivity_rnemd_T.csv and optional validation JSON.",
+    )
+    parser.add_argument("--rnemd-fit-label", action="append", default=[], help="Label for each --rnemd-fit-dir table.")
+    parser.add_argument(
+        "--route-temperature-tolerance-K",
+        type=float,
+        default=1.0,
+        help="Temperature tolerance for matching GK/rNEMD rows. Default: 1 K.",
+    )
+    parser.add_argument("--route-disagreement-warn-fraction", type=float, default=0.25)
+    parser.add_argument("--route-disagreement-fail-fraction", type=float, default=0.50)
+    parser.add_argument(
+        "--moose-k-csv",
+        type=Path,
+        help="MOOSE-readable T_K,k_W_mK,k_std_W_mK source CSV. Default: outdir/moose_thermal_conductivity.csv when routes are combined.",
+    )
     parser.add_argument("--green-kubo-csv", type=Path, action="append", default=[], help="CSV with time_ps and HCACF_x/y/z columns.")
     parser.add_argument("--green-kubo-temperature-K", type=float, action="append", default=[], help="Temperature for each --green-kubo-csv.")
     parser.add_argument("--green-kubo-label", action="append", default=[], help="Label for each Green-Kubo table.")
@@ -545,6 +914,23 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         table_rows = conductivity_table_rows(path.resolve(), label=label, meta=meta)
         rows.extend(table_rows)
         sources.append({"kind": "direct_table", "path": str(path.resolve()), "rows": len(table_rows)})
+    route_rows: list[dict[str, Any]] = []
+    for idx, fit_dir in enumerate(args.gk_fit_dir):
+        label = _route_label("gk", fit_dir, args.gk_fit_label[idx] if idx < len(args.gk_fit_label) else None, idx)
+        extracted, source = route_summary_rows(fit_dir, route="gk", label=label, meta=meta)
+        route_rows.extend(extracted)
+        sources.append(source)
+    for idx, fit_dir in enumerate(args.rnemd_fit_dir):
+        label = _route_label(
+            "rnemd",
+            fit_dir,
+            args.rnemd_fit_label[idx] if idx < len(args.rnemd_fit_label) else None,
+            idx,
+        )
+        extracted, source = route_summary_rows(fit_dir, route="rnemd", label=label, meta=meta)
+        route_rows.extend(extracted)
+        sources.append(source)
+    rows.extend(route_rows)
     for idx, path in enumerate(args.green_kubo_csv):
         temp = args.green_kubo_temperature_K[idx] if idx < len(args.green_kubo_temperature_K) else None
         label = args.green_kubo_label[idx] if idx < len(args.green_kubo_label) else f"green_kubo_{idx + 1}"
@@ -572,8 +958,12 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     rows = sorted(rows, key=lambda row: (float(row["T_K"]), str(row.get("source") or "")))
     fields = [
         "T_K",
+        "route",
         "k_W_mK",
         "k_std_W_mK",
+        "k_sem_W_mK",
+        "k_ci95_W_mK",
+        "k_between_route_std_W_mK",
         "k_min_cahill_W_mK",
         "k_min_clarke_W_mK",
         "k_x_W_mK",
@@ -586,8 +976,26 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "nma_lifetime_mean_ps",
         "nma_lifetime_min_ps",
         "nma_lifetime_max_ps",
+        "seed_count",
+        "ok_seed_count",
+        "seed_cv_fraction",
+        "axis_spread_fraction",
+        "late_drift_fraction",
+        "slope_disagreement_fraction",
+        "validation_status",
+        "route_count",
+        "ok_route_count",
+        "gk_k_W_mK",
+        "rnemd_k_W_mK",
+        "route_spread_fraction",
+        "route_z_score",
+        "status",
+        "notes",
+        "source_tag",
         "source",
         "source_file",
+        "fit_dir",
+        "validation_json",
         "formula",
         "natoms",
         "atoms_per_formula_unit",
@@ -598,6 +1006,49 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     ]
     csv_path = outdir / "thermal_conductivity_T.csv"
     write_csv(csv_path, rows, fields)
+    combined_rows: list[dict[str, Any]] = []
+    crosscheck_rows: list[dict[str, Any]] = []
+    route_summary_path = ""
+    combined_path = ""
+    crosscheck_path = ""
+    moose_k_csv = ""
+    if route_rows:
+        route_summary_path = str(outdir / "thermal_conductivity_route_summary.csv")
+        write_csv(Path(route_summary_path), route_rows, fields)
+        combined_rows, crosscheck_rows = combine_transport_routes(
+            route_rows,
+            temperature_tolerance=args.route_temperature_tolerance_K,
+            route_disagreement_warn_fraction=args.route_disagreement_warn_fraction,
+            route_disagreement_fail_fraction=args.route_disagreement_fail_fraction,
+        )
+        if combined_rows:
+            combined_path = str(outdir / "thermal_conductivity_combined_T.csv")
+            write_csv(Path(combined_path), combined_rows, fields)
+            crosscheck_path = str(outdir / "thermal_conductivity_route_crosscheck.csv")
+            write_csv(
+                Path(crosscheck_path),
+                crosscheck_rows,
+                [
+                    "T_K",
+                    "k_combined_W_mK",
+                    "k_uq_W_mK",
+                    "route_count",
+                    "ok_route_count",
+                    "gk_k_W_mK",
+                    "gk_uq_W_mK",
+                    "gk_status",
+                    "rnemd_k_W_mK",
+                    "rnemd_uq_W_mK",
+                    "rnemd_status",
+                    "route_spread_fraction",
+                    "route_z_score",
+                    "status",
+                    "notes",
+                ],
+            )
+            target = args.moose_k_csv.resolve() if args.moose_k_csv else outdir / "moose_thermal_conductivity.csv"
+            write_moose_thermal_conductivity_csv(target, combined_rows, "combined_gk_rnemd")
+            moose_k_csv = str(target)
     comparisons = []
     comparison_path = ""
     should_compare = args.compare_gk_nma or (
@@ -627,13 +1078,34 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                     "diagnostic",
                 ],
             )
-    plot = "" if args.no_plot else maybe_plot(outdir, rows)
+    plot_rows = rows + combined_rows
+    plot = "" if args.no_plot else maybe_plot(outdir, plot_rows)
     metadata = {
         "schema": "atomi.lammps.thermal_conductivity.v1",
-        "outputs": {"csv": str(csv_path), "plot": plot, "gk_nma_comparison_csv": comparison_path},
+        "outputs": {
+            "csv": str(csv_path),
+            "plot": plot,
+            "gk_nma_comparison_csv": comparison_path,
+            "route_summary_csv": route_summary_path,
+            "route_crosscheck_csv": crosscheck_path,
+            "combined_csv": combined_path,
+            "moose_thermal_conductivity_csv": moose_k_csv,
+        },
         "cell_metadata": meta,
         "n_rows": len(rows),
         "sources": sources,
+        "route_crosscheck": {
+            "n_route_rows": len(route_rows),
+            "n_combined_rows": len(combined_rows),
+            "temperature_tolerance_K": args.route_temperature_tolerance_K,
+            "route_disagreement_warn_fraction": args.route_disagreement_warn_fraction,
+            "route_disagreement_fail_fraction": args.route_disagreement_fail_fraction,
+            "uq_convention": (
+                "Per-route SEM is preferred; route std is used when SEM is absent; "
+                "the final combined uncertainty is the larger of inverse-variance "
+                "within-route uncertainty and between-route spread."
+            ),
+        },
         "gk_nma_comparison": {
             "n_rows": len(comparisons),
             "temperature_tolerance_K": args.gk_nma_temperature_tolerance,
@@ -645,10 +1117,19 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "Green-Kubo raw HCACF integration requires a user-supplied unit scale unless the input is already in W/m/K units.",
             "NMA mode tables diagnose phonon quasiparticle lifetimes; full MD-to-mode projection is generated upstream.",
             "Large GK-NMA gaps can indicate mobile defects, coherent/off-diagonal transport, strong disorder, or an MLIP dynamics issue.",
+            "MOOSE can ingest moose_thermal_conductivity.csv through moose-qha-md-material --property-csv; it supplies T_K,k_W_mK,k_std_W_mK,source_tag.",
         ],
     }
     write_json(outdir / "thermal_conductivity_metadata.json", metadata)
     print(f"Wrote thermal conductivity table: {csv_path}")
+    if route_summary_path:
+        print(f"Wrote route summary: {route_summary_path}")
+    if crosscheck_path:
+        print(f"Wrote route crosscheck: {crosscheck_path}")
+    if combined_path:
+        print(f"Wrote combined k(T): {combined_path}")
+    if moose_k_csv:
+        print(f"Wrote MOOSE thermal-conductivity CSV: {moose_k_csv}")
     if comparison_path:
         print(f"Wrote GK/NMA comparison: {comparison_path}")
     return metadata

@@ -1307,11 +1307,15 @@ def analyze_main(args: argparse.Namespace) -> dict[str, Any]:
         k_values = np.asarray([row["k_W_mK"] for row in rows], dtype=float)
         valid = np.isfinite(k_values) & (k_values > 0)
         ok = k_values[valid]
+        k_std = float(np.std(ok, ddof=1)) if ok.size > 1 else 0.0
+        k_sem = k_std / math.sqrt(int(ok.size)) if ok.size > 1 else k_std
         summary_rows.append(
             {
                 "temperature_K": temp,
                 "k_mean_W_mK": float(np.mean(ok)) if ok.size else math.nan,
-                "k_std_W_mK": float(np.std(ok, ddof=1)) if ok.size > 1 else 0.0,
+                "k_std_W_mK": k_std,
+                "k_sem_W_mK": k_sem,
+                "k_ci95_W_mK": 1.96 * k_sem,
                 "seed_count": len(rows),
                 "ok_seed_count": int(ok.size),
                 "seed_cv_fraction": float(np.std(ok, ddof=1) / np.mean(ok)) if ok.size > 1 and np.mean(ok) else 0.0,
@@ -1327,6 +1331,8 @@ def analyze_main(args: argparse.Namespace) -> dict[str, Any]:
             "temperature_K",
             "k_mean_W_mK",
             "k_std_W_mK",
+            "k_sem_W_mK",
+            "k_ci95_W_mK",
             "seed_count",
             "ok_seed_count",
             "seed_cv_fraction",
@@ -1370,6 +1376,9 @@ def validate_main(args: argparse.Namespace) -> dict[str, Any]:
         ok_seed_count = int(float(row["ok_seed_count"]))
         seed_count = int(float(row["seed_count"]))
         k_value = float(row["k_mean_W_mK"])
+        k_std = float(row.get("k_std_W_mK") or 0.0)
+        k_sem = float(row.get("k_sem_W_mK") or k_std)
+        k_ci95 = float(row.get("k_ci95_W_mK") or (1.96 * k_sem))
         slope_mismatch = float(row["slope_disagreement_mean_fraction"])
         seed_cv = float(row["seed_cv_fraction"])
         if ok_seed_count < args.min_seeds:
@@ -1395,6 +1404,9 @@ def validate_main(args: argparse.Namespace) -> dict[str, Any]:
                 "temperature_K": float(row["temperature_K"]),
                 "status": status,
                 "k_W_mK": k_value,
+                "k_std_W_mK": k_std,
+                "k_sem_W_mK": k_sem,
+                "k_ci95_W_mK": k_ci95,
                 "ok_seed_count": ok_seed_count,
                 "seed_count": seed_count,
                 "seed_cv_fraction": seed_cv,

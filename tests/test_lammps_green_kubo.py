@@ -660,6 +660,8 @@ def test_green_kubo_validate_reports_seed_and_axis_warnings(tmp_path, capsys):
     assert "T=300 K" in output
     assert "only 1 ok seed" in output
     assert "axis spread high" in output
+    report = json.loads((fit / "gk_validation_summary.json").read_text(encoding="utf-8"))
+    assert report["temperatures"][0]["k_seed_sem_W_mK"] == 0.0
 
 
 def test_green_kubo_hcacf_parser_handles_lammps_count_column(tmp_path):
