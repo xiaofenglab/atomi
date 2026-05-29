@@ -750,7 +750,10 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(
     assert atat_readme.is_file()
     assert "mcsqs -2=6" in atat_run.read_text(encoding="utf-8")
     assert "mcsqs -n=" in atat_run.read_text(encoding="utf-8")
-    assert "#SBATCH --time=04:00:00" in atat_submit.read_text(encoding="utf-8")
+    submit_text = atat_submit.read_text(encoding="utf-8")
+    assert "#SBATCH --time=04:00:00" in submit_text
+    assert "SCRIPT_DIR=" in submit_text
+    assert 'cd "${SCRIPT_DIR}"' in submit_text
     assert "sbatch submit_mcsqs.sbatch" in atat_readme.read_text(encoding="utf-8")
     candidate_index = rows(out / "randomized_candidate_index.csv")
     assert len(candidate_index) == 3

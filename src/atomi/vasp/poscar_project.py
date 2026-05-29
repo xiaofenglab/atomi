@@ -5,6 +5,7 @@ import csv
 import json
 import math
 import random
+import shlex
 from collections import Counter
 from dataclasses import dataclass
 from itertools import product
@@ -2509,6 +2510,7 @@ def write_projection_atat_mcsqs_scripts(
     max_steps: int | None,
     vacancy_label: str,
 ) -> dict[str, Path]:
+    atat_dir = atat_dir.expanduser().resolve()
     atat_dir.mkdir(parents=True, exist_ok=True)
     cluster_parts = ["mcsqs"]
     if pair_diameter > 0:
@@ -2570,7 +2572,8 @@ def write_projection_atat_mcsqs_scripts(
                 f"#SBATCH --time={walltime}",
                 "",
                 "set -euo pipefail",
-                'cd "$(dirname "$0")"',
+                f"SCRIPT_DIR={shlex.quote(str(atat_dir))}",
+                'cd "${SCRIPT_DIR}"',
                 'if command -v confighpc >/dev/null 2>&1; then',
                 '  if [ -n "${ATOMI_HPC_CONFIG:-}" ]; then',
                 '    eval "$(confighpc --config "$ATOMI_HPC_CONFIG" --shell)"',
