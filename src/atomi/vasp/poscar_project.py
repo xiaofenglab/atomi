@@ -106,6 +106,14 @@ def project_poscar_elements(
     randomize_seed: int = 12345,
     randomize_sublattices: set[str] | None = None,
     randomize_vacancy_label: str = "Va",
+    randomize_atat_atoms: int | None = None,
+    randomize_atat_job_name: str = "atat-random",
+    randomize_mcsqs_walltime: str = "04:00:00",
+    randomize_mcsqs_pair_diameter: float = 6.0,
+    randomize_mcsqs_triplet_diameter: float | None = None,
+    randomize_mcsqs_quadruplet_diameter: float | None = None,
+    randomize_mcsqs_temperature: float | None = None,
+    randomize_mcsqs_max_steps: int | None = None,
 ) -> ProjectionResult:
     """Project cation identities and MAGMOMs from source POSCAR A onto structure POSCAR B."""
     source_poscar = source_poscar.expanduser().resolve()
@@ -390,6 +398,14 @@ def project_poscar_elements(
         sublattices=randomize_sublattices,
         vacancy_label=randomize_vacancy_label,
         magmom_decimals=magmom_decimals,
+        atat_atoms=randomize_atat_atoms,
+        atat_job_name=randomize_atat_job_name,
+        mcsqs_walltime=randomize_mcsqs_walltime,
+        mcsqs_pair_diameter=randomize_mcsqs_pair_diameter,
+        mcsqs_triplet_diameter=randomize_mcsqs_triplet_diameter,
+        mcsqs_quadruplet_diameter=randomize_mcsqs_quadruplet_diameter,
+        mcsqs_temperature=randomize_mcsqs_temperature,
+        mcsqs_max_steps=randomize_mcsqs_max_steps,
     )
     write_match_csv(match_csv, matches, source_symbols, target_symbols, source_for_matching, target)
     write_plan_json(
@@ -2078,6 +2094,14 @@ def write_randomized_projection_candidates(
     sublattices: set[str] | None,
     vacancy_label: str,
     magmom_decimals: int,
+    atat_atoms: int | None = None,
+    atat_job_name: str = "atat-random",
+    mcsqs_walltime: str = "04:00:00",
+    mcsqs_pair_diameter: float = 6.0,
+    mcsqs_triplet_diameter: float | None = None,
+    mcsqs_quadruplet_diameter: float | None = None,
+    mcsqs_temperature: float | None = None,
+    mcsqs_max_steps: int | None = None,
 ) -> dict[str, object]:
     if n_candidates <= 0:
         return {"enabled": False, "candidate_count": 0}
@@ -2222,6 +2246,18 @@ def write_randomized_projection_candidates(
         active_sublattices,
         anion_elements,
     )
+    script_paths = write_projection_atat_mcsqs_scripts(
+        atat_dir,
+        atat_atoms=atat_atoms or len(target_symbols),
+        job_name=atat_job_name,
+        walltime=mcsqs_walltime,
+        pair_diameter=mcsqs_pair_diameter,
+        triplet_diameter=mcsqs_triplet_diameter,
+        quadruplet_diameter=mcsqs_quadruplet_diameter,
+        temperature=mcsqs_temperature,
+        max_steps=mcsqs_max_steps,
+        vacancy_label=vacancy_label,
+    )
     return {
         "enabled": True,
         "mode": "randomized_projected_sublattices",
@@ -2233,6 +2269,9 @@ def write_randomized_projection_candidates(
         "runlist": str(outdir / "randomized_runlist.txt"),
         "atat_rndstr": str(atat_dir / "rndstr.in"),
         "atat_pseudo_species_map": str(atat_dir / "pseudo_species_map.csv"),
+        "atat_run_script": str(script_paths["run_script"]),
+        "atat_submit_script": str(script_paths["submit_script"]),
+        "atat_readme": str(script_paths["readme"]),
         "notes": [
             "Direct candidates preserve the projected B cell/coordinates but shuffle occupation labels across selected sublattices.",
             "Cation shuffling moves element and MAGMOM decorations together, so valence/spin counts are preserved.",
@@ -2455,6 +2494,131 @@ def write_atat_projection_pseudo_species_map(
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def write_projection_atat_mcsqs_scripts(
+    atat_dir: Path,
+    *,
+    atat_atoms: int,
+    job_name: str,
+    walltime: str,
+    pair_diameter: float,
+    triplet_diameter: float | None,
+    quadruplet_diameter: float | None,
+    temperature: float | None,
+    max_steps: int | None,
+    vacancy_label: str,
+) -> dict[str, Path]:
+    atat_dir.mkdir(parents=True, exist_ok=True)
+    cluster_parts = ["mcsqs"]
+    if pair_diameter > 0:
+        cluster_parts.append(f"-2={pair_diameter:g}")
+    if triplet_diameter is not None and triplet_diameter > 0:
+        cluster_parts.append(f"-3={triplet_diameter:g}")
+    if quadruplet_diameter is not None and quadruplet_diameter > 0:
+        cluster_parts.append(f"-4={quadruplet_diameter:g}")
+    search_parts = ["mcsqs", f"-n={atat_atoms}"]
+    if temperature is not None:
+        search_parts.append(f"-T={temperature:g}")
+    if max_steps is not None:
+        search_parts.append(f"-ms={max_steps}")
+
+    run_script = atat_dir / "run_mcsqs.sh"
+    run_script.write_text(
+        "\n".join(
+            [
+                "#!/bin/bash",
+                "set -euo pipefail",
+                'cd "$(dirname "$0")"',
+                'if [ -n "${ATOMI_ATAT_BIN:-}" ]; then',
+                '  export PATH="${ATOMI_ATAT_BIN}:${PATH}"',
+                "fi",
+                'echo "mcsqs executable: $(command -v mcsqs || true)"',
+                'if ! command -v mcsqs >/dev/null 2>&1; then',
+                '  echo "ERROR: mcsqs is not on PATH. Run confighpc or load/install ATAT first." >&2',
+                "  exit 127",
+                "fi",
+                'echo "Generating ATAT clusters..."',
+                " ".join(cluster_parts) + " > mcsqs_clusters.out 2> mcsqs_clusters.err",
+                'echo "Running ATAT mcsqs search..."',
+                " ".join(search_parts) + " > mcsqs.out 2> mcsqs.err",
+                'if [ -f bestsqs.out ]; then',
+                '  echo "Wrote bestsqs.out"',
+                '  echo "Next: convert with Atomi using pseudo_species_map.csv; vacancy label is ' + vacancy_label + '."',
+                "else",
+                '  echo "WARNING: mcsqs finished without bestsqs.out. Inspect mcsqs.out and mcsqs.err." >&2',
+                "fi",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    run_script.chmod(0o755)
+
+    submit_script = atat_dir / "submit_mcsqs.sbatch"
+    submit_script.write_text(
+        "\n".join(
+            [
+                "#!/bin/bash",
+                f"#SBATCH --job-name={job_name}",
+                "#SBATCH --output=atat_mcsqs.%x.%j.out",
+                "#SBATCH --error=atat_mcsqs.%x.%j.err",
+                "#SBATCH --nodes=1",
+                "#SBATCH --ntasks=1",
+                "#SBATCH --cpus-per-task=1",
+                "#SBATCH --mem-per-cpu=3500M",
+                f"#SBATCH --time={walltime}",
+                "",
+                "set -euo pipefail",
+                'cd "$(dirname "$0")"',
+                'if command -v confighpc >/dev/null 2>&1; then',
+                '  if [ -n "${ATOMI_HPC_CONFIG:-}" ]; then',
+                '    eval "$(confighpc --config "$ATOMI_HPC_CONFIG" --shell)"',
+                '  elif [ -f "$HOME/atomi_hpc/atomi_hpc_config.kit.local.json" ]; then',
+                '    eval "$(confighpc --config "$HOME/atomi_hpc/atomi_hpc_config.kit.local.json" --shell)"',
+                "  fi",
+                "fi",
+                'if [ -n "${ATOMI_ATAT_BIN:-}" ]; then',
+                '  export PATH="${ATOMI_ATAT_BIN}:${PATH}"',
+                "fi",
+                'echo "ATOMI_ATAT_BIN=${ATOMI_ATAT_BIN:-}"',
+                'echo "PATH mcsqs=$(command -v mcsqs || true)"',
+                "bash run_mcsqs.sh",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    submit_script.chmod(0o755)
+
+    readme = atat_dir / "README.md"
+    readme.write_text(
+        "\n".join(
+            [
+                "# Atomi POSCAR Projection ATAT Randomization",
+                "",
+                "This folder was generated by `vasp-project-poscar --randomize-candidates`.",
+                "",
+                "Files:",
+                "- `rndstr.in`: ATAT/SQS random structure input using pseudo-species labels.",
+                "- `pseudo_species_map.csv`: maps pseudo-species labels back to element, sublattice, MAGMOM, and vacancy state.",
+                "- `run_mcsqs.sh`: foreground/debug mcsqs run.",
+                "- `submit_mcsqs.sbatch`: Slurm wrapper for the same mcsqs run.",
+                "",
+                "Submit on HPC:",
+                "",
+                "```bash",
+                "sbatch submit_mcsqs.sbatch",
+                "```",
+                "",
+                "If `bestsqs.out` is written, convert it only with a converter that understands",
+                "`pseudo_species_map.csv`; vacancy pseudo-species must be removed before VASP.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return {"run_script": run_script, "submit_script": submit_script, "readme": readme}
 
 
 def default_species_order(source_order: list[str], target_order: list[str]) -> list[str]:
@@ -3015,6 +3179,47 @@ def build_parser() -> argparse.ArgumentParser:
         default="Va",
         help="Vacancy pseudo-species label for the ATAT rndstr.in handoff. Default: Va.",
     )
+    parser.add_argument(
+        "--randomize-atat-atoms",
+        type=int,
+        help="Target atom/site count passed to ATAT mcsqs -n. Default: full projected target site count.",
+    )
+    parser.add_argument(
+        "--randomize-atat-job-name",
+        default="atat-random",
+        help="Slurm job name written into atat_random/submit_mcsqs.sbatch.",
+    )
+    parser.add_argument(
+        "--randomize-mcsqs-walltime",
+        default="04:00:00",
+        help="Slurm walltime written into atat_random/submit_mcsqs.sbatch. Default: 04:00:00.",
+    )
+    parser.add_argument(
+        "--randomize-mcsqs-pair-diameter",
+        type=float,
+        default=6.0,
+        help="ATAT mcsqs pair cluster diameter passed as -2. Use <=0 to disable. Default: 6.0.",
+    )
+    parser.add_argument(
+        "--randomize-mcsqs-triplet-diameter",
+        type=float,
+        help="Optional ATAT mcsqs triplet cluster diameter passed as -3.",
+    )
+    parser.add_argument(
+        "--randomize-mcsqs-quadruplet-diameter",
+        type=float,
+        help="Optional ATAT mcsqs quadruplet cluster diameter passed as -4.",
+    )
+    parser.add_argument(
+        "--randomize-mcsqs-temperature",
+        type=float,
+        help="Optional ATAT mcsqs Monte Carlo temperature passed as -T.",
+    )
+    parser.add_argument(
+        "--randomize-mcsqs-max-steps",
+        type=int,
+        help="Optional ATAT mcsqs maximum Monte Carlo steps passed as -ms.",
+    )
     parser.add_argument("--magmom-decimals", type=int, default=3)
     return parser
 
@@ -3094,6 +3299,14 @@ def main(argv: list[str] | None = None) -> None:
         randomize_seed=args.randomize_seed,
         randomize_sublattices=parse_randomize_sublattices(args.randomize_sublattice),
         randomize_vacancy_label=args.randomize_vacancy_label,
+        randomize_atat_atoms=args.randomize_atat_atoms,
+        randomize_atat_job_name=args.randomize_atat_job_name,
+        randomize_mcsqs_walltime=args.randomize_mcsqs_walltime,
+        randomize_mcsqs_pair_diameter=args.randomize_mcsqs_pair_diameter,
+        randomize_mcsqs_triplet_diameter=args.randomize_mcsqs_triplet_diameter,
+        randomize_mcsqs_quadruplet_diameter=args.randomize_mcsqs_quadruplet_diameter,
+        randomize_mcsqs_temperature=args.randomize_mcsqs_temperature,
+        randomize_mcsqs_max_steps=args.randomize_mcsqs_max_steps,
     )
     print(f"Projected POSCAR : {result.output_poscar}")
     if result.prepared_source_poscar:
@@ -3157,6 +3370,8 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  Index      : {result.randomized_candidate_summary.get('candidate_index')}")
         print(f"  Runlist    : {result.randomized_candidate_summary.get('runlist')}")
         print(f"  ATAT rndstr: {result.randomized_candidate_summary.get('atat_rndstr')}")
+        print(f"  ATAT run   : {result.randomized_candidate_summary.get('atat_run_script')}")
+        print(f"  ATAT sbatch: {result.randomized_candidate_summary.get('atat_submit_script')}")
     for operation in json.loads(result.plan_json.read_text(encoding="utf-8")).get("source_operations", []):
         if operation.get("kind") == "source_representative_reduce":
             print(
