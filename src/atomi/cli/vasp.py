@@ -4,10 +4,18 @@ from pathlib import Path
 from atomi.codes.vasp import format_outcar_summary, summarize_outcar
 
 
+def _default_outcar() -> Path:
+    for name in ("OUTCAR", "OUTCAR.gz"):
+        path = Path(name)
+        if path.is_file():
+            return path
+    return Path("OUTCAR")
+
+
 def extv(argv: list[str] | None = None) -> None:
     """Compatibility command for quick VASP OUTCAR summaries."""
     parser = argparse.ArgumentParser(prog="extv")
-    parser.add_argument("outcar", type=Path, nargs="?", default=Path("OUTCAR"))
+    parser.add_argument("outcar", type=Path, nargs="?", default=_default_outcar())
     parser.add_argument(
         "--mag-lines",
         type=int,

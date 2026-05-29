@@ -1,4 +1,5 @@
 from pathlib import Path
+import gzip
 import os
 import time
 from importlib.resources import files
@@ -187,6 +188,28 @@ def test_summarize_outcar_uses_selected_file(tmp_path: Path) -> None:
     assert summary.fermi_energy_line is not None
     assert "5.4321" in summary.fermi_energy_line
     assert summary.max_force == 2.0
+
+
+def test_summarize_outcar_reads_gzip(tmp_path: Path) -> None:
+    outcar = tmp_path / "OUTCAR.gz"
+    with gzip.open(outcar, "wt", encoding="utf-8") as handle:
+        handle.write(
+            " free energy    TOTEN  =       -12.3456 eV\n"
+            " total energy-change (2. order) :-0.2\n"
+            " E-fermi :  4.3210     XC(G=0):\n"
+            " TOTAL-FORCE (eV/Angst)\n"
+            " -----------------------------------------------------------------------------------\n"
+            " 0.0 0.0 0.0  0.0 0.0 3.0\n"
+            " total drift: 0.0 0.0 0.0\n"
+        )
+
+    summary = summarize_outcar(outcar)
+
+    assert summary.final_total_energy_line is not None
+    assert "-12.3456" in summary.final_total_energy_line
+    assert summary.fermi_energy_line is not None
+    assert "4.3210" in summary.fermi_energy_line
+    assert summary.max_force == 3.0
 
 
 def test_collect_run_energies_uses_array_logs(tmp_path: Path) -> None:

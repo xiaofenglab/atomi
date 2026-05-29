@@ -1,3 +1,4 @@
+import gzip
 from pathlib import Path
 from typing import NamedTuple
 
@@ -22,7 +23,7 @@ class OutcarSummary(NamedTuple):
 
 def summarize_outcar(path: Path, magnetization_lines: int = 50) -> OutcarSummary:
     """Extract a compact summary from a VASP OUTCAR file."""
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    lines = _read_outcar_lines(path)
     magnetization_lines = max(0, magnetization_lines)
     return OutcarSummary(
         final_total_energy_line=_last_matching(lines, "free energy    TOTEN"),
@@ -38,6 +39,12 @@ def summarize_outcar(path: Path, magnetization_lines: int = 50) -> OutcarSummary
         final_lattice_vectors=_last_block_after(lines, "direct lattice vectors", after=3, tail=3),
         max_force=_max_force(lines),
     )
+
+
+def _read_outcar_lines(path: Path) -> list[str]:
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
+        return handle.read().splitlines()
 
 
 def format_outcar_summary(path: Path, summary: OutcarSummary) -> str:
