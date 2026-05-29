@@ -52,6 +52,7 @@ class ProjectionResult:
     anion_vacancy_summary: dict[str, object]
     charge_summary: dict[str, object]
     guest_cation_distance_summary: dict[str, object]
+    direct_candidate_summary: dict[str, object]
     randomized_candidate_summary: dict[str, object]
     warnings: list[str]
 
@@ -355,6 +356,13 @@ def project_poscar_elements(
         output_incar.parent.mkdir(parents=True, exist_ok=True)
         output_incar.write_text(incar_text, encoding="utf-8")
 
+    direct_candidate_summary = write_direct_projected_candidate_folder(
+        output_poscar.parent,
+        output_poscar,
+        output_incar,
+        static_vasp_input_dirs,
+        enabled=randomize_candidates > 0 or (randomize_pool_size or 0) > 0,
+    )
     source_cation_magmom_summary = final_cation_magmom_summary(
         source.species,
         source_moments,
@@ -450,6 +458,7 @@ def project_poscar_elements(
             "anion_vacancy_summary": anion_vacancy_summary,
             "charge_summary": charge_summary,
             "guest_cation_distance_summary": guest_cation_distance_summary,
+            "direct_candidate_summary": direct_candidate_summary,
             "randomized_candidate_summary": randomized_candidate_summary,
             "strict_magmom_preservation": strict_magmom_preservation,
             "magmom_preservation_ok": not magmom_warnings,
@@ -486,6 +495,7 @@ def project_poscar_elements(
         anion_vacancy_summary=anion_vacancy_summary,
         charge_summary=charge_summary,
         guest_cation_distance_summary=guest_cation_distance_summary,
+        direct_candidate_summary=direct_candidate_summary,
         randomized_candidate_summary=randomized_candidate_summary,
         warnings=warnings,
     )
@@ -2674,6 +2684,36 @@ def copy_static_vasp_inputs(destination_dir: Path, source_dirs: list[Path]) -> l
     return copied
 
 
+def write_direct_projected_candidate_folder(
+    outdir: Path,
+    output_poscar: Path,
+    output_incar: Path | None,
+    source_dirs: list[Path],
+    *,
+    enabled: bool,
+) -> dict[str, object]:
+    if not enabled:
+        return {"enabled": False}
+    run_dir = outdir / "randomized_candidates" / "direct_projected"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    poscar_target = run_dir / "POSCAR"
+    shutil.copy2(output_poscar, poscar_target)
+    incar_target: Path | None = None
+    if output_incar is not None and output_incar.is_file():
+        incar_target = run_dir / "INCAR"
+        shutil.copy2(output_incar, incar_target)
+    copied_static = copy_static_vasp_inputs(run_dir, source_dirs)
+    return {
+        "enabled": True,
+        "candidate_id": "direct_projected",
+        "run_dir": str(run_dir.resolve()),
+        "poscar": str(poscar_target.resolve()),
+        "incar": "" if incar_target is None else str(incar_target.resolve()),
+        "copied_static_vasp_inputs": [str(path) for path in copied_static],
+        "notes": "Direct projected POSCAR mirrored into a candidate folder next to randomized candidates.",
+    }
+
+
 def strip_internal_candidate_fields(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     stripped: list[dict[str, object]] = []
     for row in rows:
@@ -3688,6 +3728,8 @@ def main(argv: list[str] | None = None) -> None:
         print("Removed anion vacancy locality:")
         for line in vacancy_lines:
             print(f"  {line}")
+    if result.direct_candidate_summary.get("enabled"):
+        print(f"Direct candidate : {result.direct_candidate_summary.get('run_dir')}")
     if result.randomized_candidate_summary.get("enabled"):
         print(f"Randomized candidates: {result.randomized_candidate_summary.get('candidate_count', 0)}")
         print(f"  Pool       : {result.randomized_candidate_summary.get('pool_size')}")

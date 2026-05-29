@@ -744,6 +744,18 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(
     assert gd_distance["source_min_distance_A"] > 0
     assert gd_distance["output_min_distance_A"] > 0
     assert gd_distance["nearest_distance_preserved"] is True
+    direct = plan["direct_candidate_summary"]
+    assert direct["enabled"] is True
+    direct_dir = Path(direct["run_dir"])
+    assert direct_dir.name == "direct_projected"
+    assert direct_dir.parent.name == "randomized_candidates"
+    direct_poscar = read_poscar_structure(Path(direct["poscar"]))
+    assert direct_poscar.species.symbols == ["Gd", "U", "O"]
+    assert direct_poscar.species.counts == [2, 6, 15]
+    assert len(expanded_magmom_values(Path(direct["incar"]))) == projected.species.total_atoms
+    assert (direct_dir / "KPOINTS").read_text(encoding="utf-8") == "Gamma\n"
+    assert (direct_dir / "POTCAR").read_text(encoding="utf-8") == "fake-potcar\n"
+    assert sorted(Path(path).name for path in direct["copied_static_vasp_inputs"]) == ["KPOINTS", "POTCAR"]
     random_summary = plan["randomized_candidate_summary"]
     assert random_summary["enabled"] is True
     assert random_summary["candidate_count"] == 3
@@ -789,6 +801,7 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(
     assert "Worst cation matches:" in captured
     assert "Removed anion vacancy locality:" in captured
     assert "source atoms [" in captured
+    assert "Direct candidate :" in captured
     assert "Randomized candidates: 3" in captured
     assert "Pool       : 8" in captured
     assert "ATAT sbatch:" in captured
