@@ -6,6 +6,7 @@ import json
 import math
 import random
 import shlex
+import shutil
 from collections import Counter
 from dataclasses import dataclass
 from itertools import product
@@ -127,6 +128,7 @@ def project_poscar_elements(
     output_incar = output_incar.expanduser().resolve() if output_incar is not None else None
     match_csv = match_csv.expanduser().resolve() if match_csv is not None else output_poscar.with_name("poscar_projection_map.csv")
     plan_json = plan_json.expanduser().resolve() if plan_json is not None else output_poscar.with_name("poscar_projection_plan.json")
+    static_vasp_input_dirs = static_vasp_source_dirs(source_poscar, source_incar)
 
     source_raw = read_poscar_structure(source_poscar)
     target_raw = read_poscar_structure(target_poscar)
@@ -314,6 +316,7 @@ def project_poscar_elements(
     )
     output_poscar.parent.mkdir(parents=True, exist_ok=True)
     output_poscar.write_text(poscar_text, encoding="utf-8")
+    copied_static_inputs = copy_static_vasp_inputs(output_poscar.parent, static_vasp_input_dirs)
 
     output_moments: list[float] | None = None
     output_moments_grouped: list[float] | None = None
@@ -413,6 +416,7 @@ def project_poscar_elements(
         mcsqs_quadruplet_diameter=randomize_mcsqs_quadruplet_diameter,
         mcsqs_temperature=randomize_mcsqs_temperature,
         mcsqs_max_steps=randomize_mcsqs_max_steps,
+        static_vasp_input_dirs=static_vasp_input_dirs,
     )
     write_match_csv(match_csv, matches, source_symbols, target_symbols, source_for_matching, target)
     write_plan_json(
@@ -426,6 +430,7 @@ def project_poscar_elements(
             "output_poscar": str(output_poscar),
             "prepared_source_poscar": str(prepared_source_poscar) if prepared_source_poscar else "",
             "output_incar": str(output_incar) if output_incar else "",
+            "copied_static_vasp_inputs": [str(path) for path in copied_static_inputs],
             "source_operations": source_prepared.operations,
             "target_operations": target_prepared.operations,
             "cation_origin_alignment": cation_origin_alignment,
@@ -2112,6 +2117,7 @@ def write_randomized_projection_candidates(
     mcsqs_quadruplet_diameter: float | None = None,
     mcsqs_temperature: float | None = None,
     mcsqs_max_steps: int | None = None,
+    static_vasp_input_dirs: list[Path] | None = None,
 ) -> dict[str, object]:
     if n_candidates <= 0 and (pool_size or 0) > 0:
         n_candidates = 3
@@ -2278,6 +2284,7 @@ def write_randomized_projection_candidates(
             ),
             encoding="utf-8",
         )
+        copied_static_inputs = copy_static_vasp_inputs(run_dir, static_vasp_input_dirs or [])
 
         incar_path = ""
         if base_incar_text is not None and candidate_moments is not None:
@@ -2302,6 +2309,7 @@ def write_randomized_projection_candidates(
         row["run_dir"] = str(run_dir.resolve())
         row["poscar"] = str(poscar_path.resolve())
         row["incar"] = incar_path
+        row["copied_static_vasp_inputs"] = [str(path) for path in copied_static_inputs]
         row["rank"] = candidate_number
         rows.append(row)
         runlist.append(str(run_dir.resolve()))
@@ -2373,6 +2381,7 @@ def write_randomized_candidate_index(path: Path, rows: list[dict[str, object]]) 
         "run_dir",
         "poscar",
         "incar",
+        "copied_static_vasp_inputs",
         "stability_score",
         "stability_status",
         "stability_notes",
@@ -2417,6 +2426,7 @@ def write_randomized_candidate_index(path: Path, rows: list[dict[str, object]]) 
                     "run_dir": row.get("run_dir", ""),
                     "poscar": row.get("poscar", ""),
                     "incar": row.get("incar", ""),
+                    "copied_static_vasp_inputs": " ".join(str(item) for item in row.get("copied_static_vasp_inputs", [])),
                     "stability_score": stability.get("score", ""),
                     "stability_status": stability.get("status", ""),
                     "stability_notes": "; ".join(str(item) for item in stability.get("notes", [])),
@@ -2637,6 +2647,31 @@ def rank_randomized_candidate(
 
 def cast_dict(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
+
+
+def static_vasp_source_dirs(source_poscar: Path, source_incar: Path | None) -> list[Path]:
+    dirs: list[Path] = []
+    for path in (source_incar, source_poscar):
+        if path is None:
+            continue
+        directory = path.expanduser().resolve().parent
+        if directory not in dirs:
+            dirs.append(directory)
+    return dirs
+
+
+def copy_static_vasp_inputs(destination_dir: Path, source_dirs: list[Path]) -> list[Path]:
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    copied: list[Path] = []
+    for name in ("KPOINTS", "POTCAR"):
+        for source_dir in source_dirs:
+            source = source_dir / name
+            if source.is_file():
+                target = destination_dir / name
+                shutil.copy2(source, target)
+                copied.append(target.resolve())
+                break
+    return copied
 
 
 def strip_internal_candidate_fields(rows: list[dict[str, object]]) -> list[dict[str, object]]:

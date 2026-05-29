@@ -687,6 +687,8 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(
     moments = write_2x3x3_gd_vo_source(source)
     write_2x2x2_uo2_target(target)
     incar.write_text("MAGMOM = " + " ".join(f"{moment:g}" for moment in moments) + "\n", encoding="utf-8")
+    (tmp_path / "KPOINTS").write_text("Gamma\n", encoding="utf-8")
+    (tmp_path / "POTCAR").write_text("fake-potcar\n", encoding="utf-8")
 
     project_main(
         [
@@ -725,6 +727,9 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(
     assert projected.species.counts == [2, 6, 15]
     assert len(expanded_magmom_values(out / "INCAR")) == projected.species.total_atoms
     plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    assert sorted(Path(path).name for path in plan["copied_static_vasp_inputs"]) == ["KPOINTS", "POTCAR"]
+    assert (out / "KPOINTS").read_text(encoding="utf-8") == "Gamma\n"
+    assert (out / "POTCAR").read_text(encoding="utf-8") == "fake-potcar\n"
     assert plan["anion_vacancy_summary"]["removed_anion_counts"] == {"O": 1}
     assert plan["anion_vacancy_summary"]["output_anion_counts"] == {"O": 15}
     locality = plan["anion_vacancy_summary"]["removed_anion_nearest_cations"]
@@ -776,6 +781,10 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(
         assert candidate["charge_summary"]["neutrality_ok"] is True
         assert candidate["stability_rank"]["status"] == "ok"
         assert len(expanded_magmom_values(Path(candidate["incar"]))) == candidate_poscar.species.total_atoms
+        candidate_dir = Path(candidate["run_dir"])
+        assert (candidate_dir / "KPOINTS").read_text(encoding="utf-8") == "Gamma\n"
+        assert (candidate_dir / "POTCAR").read_text(encoding="utf-8") == "fake-potcar\n"
+        assert sorted(Path(path).name for path in candidate["copied_static_vasp_inputs"]) == ["KPOINTS", "POTCAR"]
     captured = capsys.readouterr().out
     assert "Worst cation matches:" in captured
     assert "Removed anion vacancy locality:" in captured
