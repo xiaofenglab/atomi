@@ -637,6 +637,12 @@ def build_parser() -> argparse.ArgumentParser:
         )
         vasp_project_poscar.add_argument("project_poscar_args", nargs=argparse.REMAINDER)
 
+    listvasp = subparsers.add_parser(
+        "listvasp",
+        help="Find folders containing POSCAR and write a runlist.txt.",
+    )
+    listvasp.add_argument("listvasp_args", nargs=argparse.REMAINDER)
+
     vasp_md_snapshot_candidates = subparsers.add_parser(
         "vasp-md-snapshot-candidates",
         help="Harvest successful md-engine LAMMPS frames into VASP-ready folders.",
@@ -1150,6 +1156,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.poscar_project import main as vasp_project_poscar_main
 
         vasp_project_poscar_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "listvasp":
+        from atomi.vasp.runlist import main as listvasp_main
+
+        listvasp_main(raw_args[1:])
         return
     if raw_args and raw_args[0] == "vasp-md-snapshot-candidates":
         from atomi.vasp.md_snapshots import main as vasp_md_snapshot_candidates_main
