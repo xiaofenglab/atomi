@@ -15,6 +15,7 @@ from pathlib import Path
 from atomi.vasp.magmom import (
     PoscarSpecies,
     PoscarStructure,
+    existing_magmom_values,
     expand_magmom_tokens,
     find_magmom_line,
     format_magmom_line,
@@ -54,6 +55,7 @@ class ProjectionResult:
     guest_cation_distance_summary: dict[str, object]
     direct_candidate_summary: dict[str, object]
     randomized_candidate_summary: dict[str, object]
+    initial_spin_candidate_summary: dict[str, object]
     warnings: list[str]
 
 
@@ -439,6 +441,13 @@ def project_poscar_elements(
         mcsqs_max_steps=randomize_mcsqs_max_steps,
         static_vasp_input_dirs=static_vasp_input_dirs,
     )
+    initial_spin_candidate_summary = write_initial_spin_candidate_mirrors(
+        output_poscar.parent,
+        cation_set,
+        magmom_oxidation_states or {},
+        magmom_decimals=magmom_decimals,
+        enabled=candidate_folder_mode,
+    )
     write_match_csv(match_csv, matches, source_symbols, target_symbols, source_for_matching, target)
     write_plan_json(
         plan_json,
@@ -473,6 +482,7 @@ def project_poscar_elements(
             "guest_cation_distance_summary": guest_cation_distance_summary,
             "direct_candidate_summary": direct_candidate_summary,
             "randomized_candidate_summary": randomized_candidate_summary,
+            "initial_spin_candidate_summary": initial_spin_candidate_summary,
             "strict_magmom_preservation": strict_magmom_preservation,
             "magmom_preservation_ok": not magmom_warnings,
             "magmom_preservation_warnings": magmom_warnings,
@@ -510,6 +520,7 @@ def project_poscar_elements(
         guest_cation_distance_summary=guest_cation_distance_summary,
         direct_candidate_summary=direct_candidate_summary,
         randomized_candidate_summary=randomized_candidate_summary,
+        initial_spin_candidate_summary=initial_spin_candidate_summary,
         warnings=warnings,
     )
 
@@ -568,8 +579,12 @@ def cation_magmom_preservation_warnings(comparison: dict[str, dict[str, object]]
 
 
 def atom_symbols(structure: PoscarStructure) -> list[str]:
+    return species_atom_symbols(structure.species)
+
+
+def species_atom_symbols(species: PoscarSpecies) -> list[str]:
     symbols: list[str] = []
-    for symbol, count in zip(structure.species.symbols, structure.species.counts):
+    for symbol, count in zip(species.symbols, species.counts):
         symbols.extend([symbol] * count)
     return symbols
 
@@ -2744,6 +2759,205 @@ def write_direct_projected_candidate_folder(
     }
 
 
+def write_initial_spin_candidate_mirrors(
+    outdir: Path,
+    cation_elements: set[str],
+    magmom_oxidation_states: dict[str, list[tuple[float, float]]],
+    *,
+    magmom_decimals: int,
+    enabled: bool,
+) -> dict[str, object]:
+    source_root = outdir / "candidates"
+    if not enabled or not source_root.is_dir():
+        return {"enabled": False, "candidate_count": 0}
+    multi_valence_elements = sorted(
+        symbol
+        for symbol in cation_elements
+        if len({round(moment, 6) for moment, _charge in magmom_oxidation_states.get(symbol, [])}) > 1
+    )
+    if not multi_valence_elements:
+        return {"enabled": False, "candidate_count": 0, "reason": "No cation element has multiple MAGMOM oxidation families."}
+
+    mirror_root = outdir / "candidates_i"
+    rows: list[dict[str, object]] = []
+    runlist: list[str] = []
+    for run_dir in sorted(path for path in source_root.iterdir() if path.is_dir()):
+        source_poscar = run_dir / "POSCAR"
+        source_incar = run_dir / "INCAR"
+        if not source_poscar.is_file() or not source_incar.is_file():
+            continue
+        structure = read_poscar_structure(source_poscar)
+        moments = existing_magmom_values(source_incar, structure.species.total_atoms)
+        if moments is None:
+            continue
+        adjusted_moments, change_summary = initial_spin_reference_moments(
+            structure.species,
+            moments,
+            cation_elements,
+            magmom_oxidation_states,
+        )
+        if int(change_summary.get("changed_count", 0)) <= 0:
+            continue
+        mirror_dir = mirror_root / run_dir.name
+        mirror_dir.mkdir(parents=True, exist_ok=True)
+        copied_files = copy_named_files(run_dir, mirror_dir, ("POSCAR", "KPOINTS", "POTCAR"))
+        incar_text = source_incar.read_text(encoding="utf-8", errors="replace")
+        selected = species_with_nonzero_moments(structure.species, adjusted_moments)
+        magmom_line = format_magmom_line(
+            structure.species,
+            adjusted_moments,
+            selected_elements=selected,
+            decimals=magmom_decimals,
+            compact_zero=True,
+        )
+        validate_magmom_line_count(
+            magmom_line,
+            structure.species.total_atoms,
+            context=f"initial-spin INCAR mirror for {mirror_dir / 'INCAR'}",
+        )
+        (mirror_dir / "INCAR").write_text(replace_or_append_magmom_text(incar_text, magmom_line), encoding="utf-8")
+        row = {
+            "candidate_id": run_dir.name,
+            "source_run_dir": str(run_dir.resolve()),
+            "run_dir": str(mirror_dir.resolve()),
+            "poscar": str((mirror_dir / "POSCAR").resolve()),
+            "incar": str((mirror_dir / "INCAR").resolve()),
+            "copied_files": [str(path) for path in copied_files],
+            "changed_count": change_summary["changed_count"],
+            "changed_by_element": change_summary["changed_by_element"],
+            "majority_families": change_summary["majority_families"],
+            "changed_atoms_1based": change_summary["changed_atoms_1based"],
+        }
+        rows.append(row)
+        runlist.append(str(mirror_dir.resolve()))
+    if not rows:
+        return {
+            "enabled": False,
+            "candidate_count": 0,
+            "reason": "No minority MAGMOM oxidation families were present in candidate INCAR files.",
+            "multi_valence_elements": multi_valence_elements,
+        }
+    index_path = outdir / "candidates_i_index.csv"
+    runlist_path = outdir / "candidates_i_runlist.txt"
+    write_initial_spin_candidate_index(index_path, rows)
+    runlist_path.write_text("\n".join(runlist) + "\n", encoding="utf-8")
+    return {
+        "enabled": True,
+        "mode": "majority_host_initial_spin_mirror",
+        "candidate_count": len(rows),
+        "multi_valence_elements": multi_valence_elements,
+        "candidates_dir": str(mirror_root.resolve()),
+        "candidate_index": str(index_path.resolve()),
+        "runlist": str(runlist_path.resolve()),
+        "notes": [
+            "POSCAR/KPOINTS/POTCAR mirror candidates/* exactly.",
+            "INCAR MAGMOM values for minority cation valence families are shifted to the majority host-spin family while preserving sign and local moment offset.",
+        ],
+        "candidates": rows,
+    }
+
+
+def copy_named_files(source_dir: Path, destination_dir: Path, names: tuple[str, ...]) -> list[Path]:
+    copied: list[Path] = []
+    for name in names:
+        source = source_dir / name
+        if source.is_file():
+            target = destination_dir / name
+            shutil.copy2(source, target)
+            copied.append(target.resolve())
+    return copied
+
+
+def initial_spin_reference_moments(
+    species: PoscarSpecies,
+    moments: list[float],
+    cation_elements: set[str],
+    magmom_oxidation_states: dict[str, list[tuple[float, float]]],
+) -> tuple[list[float], dict[str, object]]:
+    adjusted = list(moments)
+    symbols = species_atom_symbols(species)
+    changed_by_element: Counter[str] = Counter()
+    majority_families: dict[str, dict[str, object]] = {}
+    changed_atoms: list[int] = []
+    for symbol in sorted(cation_elements):
+        family_targets = sorted({float(moment) for moment, _charge in magmom_oxidation_states.get(symbol, [])})
+        if len(family_targets) < 2:
+            continue
+        classified: list[tuple[int, float, float]] = []
+        for index, (site_symbol, moment) in enumerate(zip(symbols, moments)):
+            if site_symbol != symbol:
+                continue
+            family = nearest_moment_family(abs(moment), family_targets)
+            if family is None:
+                continue
+            classified.append((index, moment, family))
+        family_counts = Counter(family for _index, _moment, family in classified)
+        if len(family_counts) < 2:
+            continue
+        most_common = family_counts.most_common()
+        if len(most_common) > 1 and most_common[0][1] == most_common[1][1]:
+            continue
+        majority_family = float(most_common[0][0])
+        majority_families[symbol] = {
+            "majority_abs_moment": majority_family,
+            "family_counts": {f"{family:g}": int(count) for family, count in sorted(family_counts.items())},
+        }
+        for index, moment, family in classified:
+            if abs(family - majority_family) <= 1.0e-12:
+                continue
+            sign = -1.0 if moment < 0 else 1.0
+            residual = abs(moment) - family
+            adjusted_abs = max(0.0, majority_family + residual)
+            adjusted[index] = sign * adjusted_abs
+            changed_by_element[symbol] += 1
+            changed_atoms.append(index + 1)
+    return adjusted, {
+        "changed_count": int(sum(changed_by_element.values())),
+        "changed_by_element": dict(sorted(changed_by_element.items())),
+        "majority_families": majority_families,
+        "changed_atoms_1based": changed_atoms,
+    }
+
+
+def nearest_moment_family(moment_abs: float, family_targets: list[float]) -> float | None:
+    if not family_targets:
+        return None
+    family = min(family_targets, key=lambda value: abs(moment_abs - value))
+    return family if abs(moment_abs - family) <= MOMENT_FAMILY_TOLERANCE else None
+
+
+def write_initial_spin_candidate_index(path: Path, rows: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fields = [
+        "candidate_id",
+        "source_run_dir",
+        "run_dir",
+        "poscar",
+        "incar",
+        "changed_count",
+        "changed_by_element_json",
+        "majority_families_json",
+        "changed_atoms_1based",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    "candidate_id": row.get("candidate_id", ""),
+                    "source_run_dir": row.get("source_run_dir", ""),
+                    "run_dir": row.get("run_dir", ""),
+                    "poscar": row.get("poscar", ""),
+                    "incar": row.get("incar", ""),
+                    "changed_count": row.get("changed_count", ""),
+                    "changed_by_element_json": json.dumps(row.get("changed_by_element", {}), sort_keys=True),
+                    "majority_families_json": json.dumps(row.get("majority_families", {}), sort_keys=True),
+                    "changed_atoms_1based": " ".join(str(item) for item in row.get("changed_atoms_1based", [])),
+                }
+            )
+
+
 def strip_internal_candidate_fields(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     stripped: list[dict[str, object]] = []
     for row in rows:
@@ -3771,6 +3985,11 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  ATAT rndstr: {result.randomized_candidate_summary.get('atat_rndstr')}")
         print(f"  ATAT run   : {result.randomized_candidate_summary.get('atat_run_script')}")
         print(f"  ATAT sbatch: {result.randomized_candidate_summary.get('atat_submit_script')}")
+    if result.initial_spin_candidate_summary.get("enabled"):
+        print(f"Initial-spin mirrors: {result.initial_spin_candidate_summary.get('candidate_count', 0)}")
+        print(f"  Candidates : {result.initial_spin_candidate_summary.get('candidates_dir')}")
+        print(f"  Index      : {result.initial_spin_candidate_summary.get('candidate_index')}")
+        print(f"  Runlist    : {result.initial_spin_candidate_summary.get('runlist')}")
     for operation in json.loads(result.plan_json.read_text(encoding="utf-8")).get("source_operations", []):
         if operation.get("kind") == "source_representative_reduce":
             print(

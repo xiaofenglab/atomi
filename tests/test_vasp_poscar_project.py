@@ -943,6 +943,99 @@ def test_project_poscar_reduction_preserves_noisy_charge_coupled_host(tmp_path: 
     assert operation["cation_abs_moment_selected_counts"]["U|negative|1"] == 1
 
 
+def test_project_poscar_writes_initial_spin_mirror_candidates_for_multivalent_hosts(tmp_path: Path) -> None:
+    source = tmp_path / "A_2Gd_2U5_POSCAR"
+    target = tmp_path / "B_2x2x2_UO2_POSCAR"
+    incar = tmp_path / "A_INCAR"
+    out = tmp_path / "projected_2gd_2u5_random"
+    write_2x2x2_uo2_target(target)
+    cations = [
+        ((i + 0.5) / 2, (j + 0.5) / 2, (k + 0.5) / 2)
+        for i in range(2)
+        for j in range(2)
+        for k in range(2)
+    ]
+    anions = []
+    for i in range(2):
+        for j in range(2):
+            for k in range(2):
+                anions.append(((i + 0.25) / 2, (j + 0.25) / 2, (k + 0.25) / 2))
+                anions.append(((i + 0.75) / 2, (j + 0.75) / 2, (k + 0.75) / 2))
+    gd_positions = cations[:2]
+    u_positions = cations[2:]
+    u_moments = [1.07, -1.14, 2.01, -2.02, 1.99, -1.98]
+    moments = [7.071, -7.070, *u_moments, *([0.0] * len(anions))]
+    source.write_text(
+        "A 2Gd 2U5 charge-balanced UO2 cell\n"
+        "1.0\n"
+        "2.0 0.0 0.0\n"
+        "0.0 2.0 0.0\n"
+        "0.0 0.0 2.0\n"
+        "Gd U O\n"
+        "2 6 16\n"
+        "Direct\n"
+        + "".join(f"{x:.10f} {y:.10f} {z:.10f}\n" for x, y, z in [*gd_positions, *u_positions, *anions]),
+        encoding="utf-8",
+    )
+    incar.write_text("MAGMOM = " + " ".join(f"{moment:g}" for moment in moments) + "\n", encoding="utf-8")
+    (tmp_path / "KPOINTS").write_text("Gamma\n", encoding="utf-8")
+    (tmp_path / "POTCAR").write_text("fake-potcar\n", encoding="utf-8")
+
+    project_main(
+        [
+            "--element-poscar",
+            str(source),
+            "--structure-poscar",
+            str(target),
+            "--incar-a",
+            str(incar),
+            "--outdir",
+            str(out),
+            "--cation-elements",
+            "Gd,U",
+            "--anion-elements",
+            "O",
+            "--oxidation-state",
+            "Gd=3,U=4,O=-2",
+            "--magmom-oxidation",
+            "U:1=5,U:2=4,Gd:7=3",
+            "--randomize-sublattice",
+            "cation",
+            "--randomize-candidates",
+            "2",
+            "--randomize-pool-size",
+            "4",
+            "--randomize-seed",
+            "23",
+        ]
+    )
+
+    plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    mirror = plan["initial_spin_candidate_summary"]
+    assert mirror["enabled"] is True
+    assert mirror["candidate_count"] == 3
+    assert Path(mirror["candidates_dir"]).name == "candidates_i"
+    assert Path(mirror["candidate_index"]).is_file()
+    assert Path(mirror["runlist"]).is_file()
+    assert "direct_projected" in (out / "candidates_i_runlist.txt").read_text(encoding="utf-8")
+
+    for candidate in mirror["candidates"]:
+        source_dir = Path(candidate["source_run_dir"])
+        mirror_dir = Path(candidate["run_dir"])
+        assert (mirror_dir / "POSCAR").read_text(encoding="utf-8") == (source_dir / "POSCAR").read_text(encoding="utf-8")
+        assert (mirror_dir / "KPOINTS").read_text(encoding="utf-8") == "Gamma\n"
+        assert (mirror_dir / "POTCAR").read_text(encoding="utf-8") == "fake-potcar\n"
+        source_poscar = read_poscar_structure(source_dir / "POSCAR")
+        source_moments = existing_magmom_values(source_dir / "INCAR", source_poscar.species.total_atoms)
+        mirror_moments = existing_magmom_values(mirror_dir / "INCAR", source_poscar.species.total_atoms)
+        assert source_moments is not None
+        assert mirror_moments is not None
+        assert sum(1 for moment in source_moments if 0.8 < abs(moment) < 1.3) == 2
+        assert sum(1 for moment in mirror_moments if 0.8 < abs(moment) < 1.3) == 0
+        assert sum(1 for moment in mirror_moments if 1.7 < abs(moment) < 2.4) == 6
+        assert any(abs(abs(new) - abs(old) - 1.0) < 1.0e-8 for old, new in zip(source_moments, mirror_moments))
+
+
 def test_project_poscar_crop_repairs_relaxed_boundary_cation_count(tmp_path: Path) -> None:
     source = tmp_path / "A_2x3x3_POSCAR"
     target = tmp_path / "B_2x2x2_POSCAR"
