@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import itertools
 import json
 import math
@@ -139,7 +140,7 @@ def _all_ints(values: list[str]) -> bool:
 
 
 def final_outcar_magnetization(outcar: Path, expected_atoms: int) -> list[float]:
-    lines = outcar.read_text(encoding="utf-8", errors="replace").splitlines()
+    lines = read_outcar_lines(outcar)
     block_start = None
     for index, line in enumerate(lines):
         if "magnetization" in line.lower() and "(x)" in line.lower():
@@ -178,6 +179,20 @@ def final_outcar_magnetization(outcar: Path, expected_atoms: int) -> list[float]
             f"but POSCAR expects {expected_atoms} atoms."
         )
     return moments
+
+
+def read_outcar_lines(outcar: Path) -> list[str]:
+    opener = gzip.open if outcar.suffix == ".gz" else open
+    with opener(outcar, "rt", encoding="utf-8", errors="replace") as handle:
+        return handle.read().splitlines()
+
+
+def default_outcar_path() -> Path:
+    for name in ("OUTCAR", "OUTCAR.gz"):
+        path = Path(name)
+        if path.is_file():
+            return path
+    return Path("OUTCAR")
 
 
 def expand_magmom_tokens(tokens: list[str]) -> list[float]:
@@ -798,7 +813,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Update INCAR MAGMOM from final OUTCAR moments for selected POSCAR elements.",
     )
     parser.add_argument("elements", nargs="+", help="Elements to update, e.g. Gd U.")
-    parser.add_argument("--outcar", type=Path, default=Path("OUTCAR"))
+    parser.add_argument("--outcar", type=Path, default=default_outcar_path())
     parser.add_argument("--poscar", type=Path, default=Path("POSCAR"))
     parser.add_argument("--incar", type=Path, default=Path("INCAR"))
     parser.add_argument("--decimals", type=int, default=3)
