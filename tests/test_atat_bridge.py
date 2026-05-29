@@ -14,6 +14,55 @@ def rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def write_partial_gd2o3_cif(path: Path) -> None:
+    path.write_text(
+        "data_demo\n"
+        "_symmetry_space_group_name_H-M   P1\n"
+        "_cell_length_a 5\n"
+        "_cell_length_b 5\n"
+        "_cell_length_c 5\n"
+        "_cell_angle_alpha 90\n"
+        "_cell_angle_beta 90\n"
+        "_cell_angle_gamma 90\n"
+        "_symmetry_Int_Tables_number 1\n"
+        "loop_\n"
+        "_space_group_symop_operation_xyz\n"
+        "x,y,z\n"
+        "loop_\n"
+        "_atom_site_label\n"
+        "_atom_site_type_symbol\n"
+        "_atom_site_fract_x\n"
+        "_atom_site_fract_y\n"
+        "_atom_site_fract_z\n"
+        "_atom_site_occupancy\n"
+        "Gd1 Gd 0 0 0 1\n"
+        "Gd2 Gd 0.5 0.5 0.5 1\n"
+        "O1 O 0.25 0.25 0.25 1\n"
+        "O2 O 0.75 0.75 0.75 0.2(1)\n",
+        encoding="utf-8",
+    )
+
+
+def write_uo2_parent_poscar(path: Path) -> None:
+    path.write_text(
+        "UO2 parent\n"
+        "1.0\n"
+        "5 0 0\n"
+        "0 5 0\n"
+        "0 0 5\n"
+        "U O\n"
+        "2 4\n"
+        "Direct\n"
+        "0 0 0\n"
+        "0.5 0.5 0.5\n"
+        "0.25 0.25 0.25\n"
+        "0.75 0.75 0.75\n"
+        "0.25 0.75 0.25\n"
+        "0.75 0.25 0.75\n",
+        encoding="utf-8",
+    )
+
+
 def test_atat_status_detects_fake_tools(tmp_path: Path, monkeypatch) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -388,13 +437,58 @@ def test_materials_opt_vacancy_cif_writes_explicit_poscars_and_atat_input(tmp_pa
     assert "O=0.2,Va=0.8" in rndstr
     assert rndstr.count("O=0.2,Va=0.8") == 5
     assert (out / "atat" / "run_mcsqs.sh").exists()
+    run_mcsqs = (out / "atat" / "run_mcsqs.sh").read_text(encoding="utf-8")
+    assert "tail_log mcsqs.err" in run_mcsqs
+    assert "ATAT mcsqs search failed" in run_mcsqs
     sbatch = (out / "atat" / "submit_mcsqs.sbatch").read_text(encoding="utf-8")
     assert "#SBATCH --job-name=atat_test" in sbatch
     assert "#SBATCH --time=00:30:00" in sbatch
     assert "#SBATCH --cpus-per-task=2" in sbatch
+    assert f"WORKDIR={out / 'atat'}" in sbatch
     assert "bash run_mcsqs.sh" in sbatch
     assert "ATOMI_ATAT_BIN=/opt/atat/src" in sbatch
     assert len((out / "runlist.txt").read_text(encoding="utf-8").splitlines()) == 3
+
+
+def test_materials_opt_vacancy_cif_ranks_random_pool(tmp_path: Path) -> None:
+    cif = tmp_path / "partial_gd2o3.cif"
+    write_partial_gd2o3_cif(cif)
+    out = tmp_path / "vacancy_ranked"
+
+    atomi_main(
+        [
+            "materials-opt",
+            "vacancy-cif",
+            "--cif",
+            str(cif),
+            "--outdir",
+            str(out),
+            "--engine",
+            "direct",
+            "--supercell",
+            "1x1x5",
+            "--random-pool-size",
+            "7",
+            "--random-candidates",
+            "2",
+        ]
+    )
+
+    index = rows(out / "vacancy_candidate_index.csv")
+    assert len(index) == 4
+    random_rows = [row for row in index if row["kind"] == "random"]
+    assert [row["rank"] for row in random_rows] == ["1", "2"]
+    assert all(row["pool_index"] for row in random_rows)
+    assert all(row["stability_score"] for row in index)
+    assert all((out / "candidates" / row["candidate_id"] / "POSCAR").exists() for row in index)
+    pool = rows(out / "random_pool_rankings.csv")
+    assert len(pool) == 7
+    assert [row["rank"] for row in pool[:3]] == ["1", "2", "3"]
+    pool_scores = [float(row["stability_score"]) for row in pool]
+    assert pool_scores == sorted(pool_scores, reverse=True)
+    plan = json.loads((out / "vacancy_cif_plan.json").read_text(encoding="utf-8"))
+    assert plan["random_pool"]["pool_size"] == 7
+    assert plan["outputs"]["random_pool_rankings"].endswith("random_pool_rankings.csv")
 
 
 def test_materials_opt_vacancy_cif_run_mcsqs_converts_bestsqs_to_poscar(tmp_path: Path, monkeypatch) -> None:
@@ -813,6 +907,53 @@ def test_materials_opt_parent_defect_charge_compensates_and_scales(tmp_path: Pat
     assert "Va=0.25" not in rndstr
     assert "U=Gd" not in rndstr
     assert "Gd" in (out / "candidates" / "01_ordered" / "POSCAR").read_text(encoding="utf-8")
+
+
+def test_materials_opt_parent_defect_ranks_random_pool(tmp_path: Path) -> None:
+    poscar = tmp_path / "POSCAR"
+    write_uo2_parent_poscar(poscar)
+    out = tmp_path / "parent_defect_ranked"
+
+    atomi_main(
+        [
+            "materials-opt",
+            "parent-defect",
+            "--poscar",
+            str(poscar),
+            "--outdir",
+            str(out),
+            "--engine",
+            "direct",
+            "--substitute",
+            "U=Gd",
+            "--charge",
+            "U=4",
+            "--charge",
+            "Gd=3",
+            "--charge",
+            "O=-2",
+            "--vacancy-element",
+            "O",
+            "--random-pool-size",
+            "6",
+            "--random-candidates",
+            "2",
+        ]
+    )
+
+    index = rows(out / "parent_defect_candidate_index.csv")
+    assert len(index) == 4
+    assert {row["kind"] for row in index[:2]} == {"ordered", "clustered"}
+    random_rows = [row for row in index if row["kind"] == "random"]
+    assert [row["rank"] for row in random_rows] == ["1", "2"]
+    assert all(row["charge_after_vacancy"] == "0" for row in index)
+    assert all((out / "candidates" / row["candidate_id"] / "POSCAR").exists() for row in index)
+    pool = rows(out / "random_pool_rankings.csv")
+    assert len(pool) == 6
+    assert [row["rank"] for row in pool[:3]] == ["1", "2", "3"]
+    plan = json.loads((out / "parent_defect_plan.json").read_text(encoding="utf-8"))
+    assert plan["random_pool"]["pool_size"] == 6
+    assert plan["outputs"]["random_pool_rankings"].endswith("random_pool_rankings.csv")
 
 
 def test_materials_opt_parent_defect_auto_repeats_for_integer_vacancy(tmp_path: Path) -> None:

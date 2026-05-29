@@ -128,6 +128,11 @@ RELAX_SUMMARY_FIELDS = RELAX_INDEX_FIELDS + [
 VACANCY_CANDIDATE_FIELDS = [
     "candidate_id",
     "kind",
+    "rank",
+    "pool_index",
+    "stability_score",
+    "stability_status",
+    "stability_notes",
     "poscar",
     "n_Gd",
     "n_O",
@@ -167,6 +172,11 @@ SUPERCELL_ANALYSIS_FIELDS = [
 PARENT_DEFECT_FIELDS = [
     "candidate_id",
     "kind",
+    "rank",
+    "pool_index",
+    "stability_score",
+    "stability_status",
+    "stability_notes",
     "poscar",
     "repeat",
     "linear_scale",
@@ -2010,6 +2020,54 @@ def assignment_counts(assignments: dict[int, str]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def stability_rank_value(row: dict[str, Any]) -> tuple[float, float, int]:
+    try:
+        score = float(row.get("stability_score", 0.0))
+    except (TypeError, ValueError):
+        score = 0.0
+    try:
+        min_distance = float(row.get("min_vacancy_distance_A") or 0.0)
+    except (TypeError, ValueError):
+        min_distance = 0.0
+    try:
+        pool_index = int(row.get("pool_index") or 0)
+    except (TypeError, ValueError):
+        pool_index = 0
+    return (-score, -min_distance, pool_index)
+
+
+def vacancy_stability_fields(
+    guard_report: VacancyGuardReport,
+    min_distance: float | None,
+    *,
+    charge_after_vacancy: float | None = None,
+) -> dict[str, str]:
+    ok_statuses = {"OK", "SKIP", "OFF"}
+    charge_penalty = abs(charge_after_vacancy) if charge_after_vacancy is not None else 0.0
+    score = 100.0
+    if guard_report.status not in ok_statuses:
+        score -= 50.0 + 25.0 * guard_report.bad_centers + 10.0 * guard_report.max_missing
+    if min_distance is not None:
+        score += float(min_distance)
+    if charge_after_vacancy is not None:
+        score -= 100.0 * charge_penalty
+    notes: list[str] = []
+    if charge_after_vacancy is not None and charge_penalty > 1.0e-8:
+        notes.append(f"nonneutral charge after vacancies: {charge_after_vacancy:.6g}")
+    if guard_report.notes:
+        notes.append(guard_report.notes)
+    if min_distance is None:
+        notes.append("no vacancy pair distance")
+    status = "ok"
+    if guard_report.status not in ok_statuses or charge_penalty > 1.0e-8:
+        status = "warn"
+    return {
+        "stability_score": f"{score:.8g}",
+        "stability_status": status,
+        "stability_notes": "; ".join(notes),
+    }
+
+
 def choose_occupations_by_group(
     atoms: Any,
     groups: list[dict[str, Any]],
@@ -2259,6 +2317,7 @@ def shell_export_line(key: str, value: str) -> str:
 
 
 def write_atat_mcsqs_sbatch(atat_dir: Path, args: argparse.Namespace) -> Path:
+    workdir = atat_dir.expanduser().resolve()
     config, config_path = load_atat_hpc_config(args)
     profiles = config.get("profiles", {}) if isinstance(config, dict) else {}
     profile = profiles.get("atat_sqs") or profiles.get("atat", {})
@@ -2303,7 +2362,7 @@ def write_atat_mcsqs_sbatch(atat_dir: Path, args: argparse.Namespace) -> Path:
             "",
             "set -euo pipefail",
             "",
-            'WORKDIR="${SLURM_SUBMIT_DIR:-$(pwd)}"',
+            f"WORKDIR={shlex.quote(str(workdir))}",
             'cd "$WORKDIR"',
             "",
             "# Apply private Atomi HPC config when available.",
@@ -2366,23 +2425,46 @@ def write_atat_vacancy_scripts(atat_dir: Path, args: argparse.Namespace) -> None
         template_args = f" --vasp-template {shlex.quote(str(Path(template).expanduser().resolve()))}"
     mcsqs_lines = []
     if cluster_parts:
+        cluster_command = " ".join(cluster_parts)
         mcsqs_lines.extend(
             [
                 "# First generate ATAT clusters.out from the requested pair/triplet cutoffs.",
-                " ".join(cluster_parts) + " > mcsqs_clusters.out 2> mcsqs_clusters.err",
+                "set +e",
+                f"{cluster_command} > mcsqs_clusters.out 2> mcsqs_clusters.err",
+                "cluster_status=$?",
+                "set -e",
+                "if [ \"$cluster_status\" -ne 0 ]; then",
+                "  echo \"ERROR: ATAT cluster generation failed with exit status ${cluster_status}.\" >&2",
+                "  tail_log mcsqs_clusters.out",
+                "  tail_log mcsqs_clusters.err",
+                "  exit \"$cluster_status\"",
+                "fi",
             ]
         )
     else:
         mcsqs_lines.extend(
             [
                 "# Cluster generation disabled; this assumes a compatible clusters.out already exists.",
-                "test -f clusters.out",
+                "if [ ! -f clusters.out ]; then",
+                "  echo \"ERROR: clusters.out is required when cluster generation is disabled.\" >&2",
+                "  exit 2",
+                "fi",
             ]
         )
+    search_command = " ".join(search_parts)
     mcsqs_lines.extend(
         [
             "# Then run the SQS search using the generated clusters.out.",
-            " ".join(search_parts) + " > mcsqs.out 2> mcsqs.err",
+            "set +e",
+            f"{search_command} > mcsqs.out 2> mcsqs.err",
+            "search_status=$?",
+            "set -e",
+            "if [ \"$search_status\" -ne 0 ]; then",
+            "  echo \"ERROR: ATAT mcsqs search failed with exit status ${search_status}.\" >&2",
+            "  tail_log mcsqs.out",
+            "  tail_log mcsqs.err",
+            "  exit \"$search_status\"",
+            "fi",
         ]
     )
     script = [
@@ -2391,6 +2473,14 @@ def write_atat_vacancy_scripts(atat_dir: Path, args: argparse.Namespace) -> None
         "",
         "# Run this inside the ATAT handoff directory.",
         "# bestsqs.out still contains the vacancy pseudo-species; convert/remove Vac/Va before VASP.",
+        "tail_log() {",
+        "  local file=\"$1\"",
+        "  if [ -s \"$file\" ]; then",
+        "    echo \"----- tail ${file} -----\" >&2",
+        "    tail -80 \"$file\" >&2 || true",
+        "  fi",
+        "}",
+        "",
         *mcsqs_lines,
         "if [ -f bestsqs.out ]; then",
         "  if command -v materials-opt >/dev/null 2>&1; then",
@@ -2403,6 +2493,11 @@ def write_atat_vacancy_scripts(atat_dir: Path, args: argparse.Namespace) -> None
         "  else",
         f"    echo 'bestsqs.out written. Run: materials-opt atat-poscar --input bestsqs.out --outdir vasp_from_atat{template_args}'",
         "  fi",
+        "else",
+        "  echo 'ERROR: ATAT mcsqs finished without writing bestsqs.out.' >&2",
+        "  tail_log mcsqs.out",
+        "  tail_log mcsqs.err",
+        "  exit 2",
         "fi",
     ]
     path = atat_dir / "run_mcsqs.sh"
@@ -2814,6 +2909,17 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--vasp-template", type=Path, help="Optional VASP template copied beside each POSCAR.")
     parser.add_argument("--seed", type=int, default=20260520)
+    parser.add_argument(
+        "--random-pool-size",
+        type=int,
+        help="Generate and rank this many guarded random direct candidates; selected candidates are written to POSCAR folders.",
+    )
+    parser.add_argument(
+        "--random-candidates",
+        type=int,
+        default=3,
+        help="Number of top ranked random direct candidates to write when --random-pool-size is used.",
+    )
     parser.add_argument("--vacancy-guard", choices=("on", "off"), default="on", help="Keep random vacancy candidates from over-emptying local coordination shells.")
     parser.add_argument(
         "--coordination-center-element",
@@ -2841,6 +2947,10 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.run_mcsqs and args.submit_mcsqs:
         raise ValueError("--run-mcsqs and --submit-mcsqs are mutually exclusive.")
+    if args.random_pool_size is not None and args.random_pool_size < 1:
+        raise ValueError("--random-pool-size must be positive when supplied.")
+    if args.random_candidates < 0:
+        raise ValueError("--random-candidates must be nonnegative.")
 
     if args.target_occupancy is not None and not (0.0 < args.target_occupancy <= 1.0):
         raise ValueError("--target-occupancy must be in (0, 1].")
@@ -2954,67 +3064,138 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
             args.atat_atoms = len(atoms)
         write_atat_vacancy_scripts(atat_dir, args)
 
-    occupation_sets = {
-        "vacancy_separated": choose_occupations_by_group(atoms, occupation_groups, "vacancy_separated", args.seed, args.vacancy_label),
-        "vacancy_clustered": choose_occupations_by_group(atoms, occupation_groups, "vacancy_clustered", args.seed, args.vacancy_label),
-        "sqs_random_like": choose_occupations_by_group(atoms, occupation_groups, "sqs_random_like", args.seed, args.vacancy_label, vacancy_guard),
-    }
     rows: list[dict[str, Any]] = []
+    random_pool_rows: list[dict[str, Any]] = []
     runlist: list[str] = []
     if args.engine in {"both", "direct"}:
-        for index, (kind, assignments) in enumerate(occupation_sets.items(), start=1):
-            case_id = f"{index:02d}_{kind}"
-            run_dir = candidates_dir / case_id
-            run_dir.mkdir(parents=True, exist_ok=True)
+        all_partial_indices = sorted({index for group in occupation_groups for index in group["indices"]})
+        guard_ligand_indices = [idx for idx, atom in enumerate(atoms) if atom.symbol in guard_ligands] or all_partial_indices
+        selected_real_species = {
+            symbol
+            for group in occupation_groups
+            for symbol in group["species"]
+            if symbol != args.vacancy_label
+        }
+
+        def vacancy_row(
+            case_id: str,
+            kind: str,
+            assignments: dict[int, str],
+            *,
+            rank: int | str = "",
+            pool_index: int | str = "",
+            run_dir: Path | None = None,
+        ) -> dict[str, Any]:
             final_atoms = atoms_with_occupational_assignments(atoms, assignments, args.vacancy_label)
-            write(run_dir / "POSCAR", final_atoms, format="vasp", direct=True, vasp5=True, sort=False)
-            copy_vasp_template_for_vacancy(args.vasp_template.expanduser().resolve() if args.vasp_template else None, run_dir)
-            all_partial_indices = sorted({index for group in occupation_groups for index in group["indices"]})
+            if run_dir is not None:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                write(run_dir / "POSCAR", final_atoms, format="vasp", direct=True, vasp5=True, sort=False)
+                copy_vasp_template_for_vacancy(args.vasp_template.expanduser().resolve() if args.vasp_template else None, run_dir)
             vacancies = sorted(index for index, symbol in assignments.items() if symbol == args.vacancy_label)
             kept = sorted(set(all_partial_indices) - set(vacancies))
             min_vv = min_pair_distance(atoms, vacancies)
-            guard_ligand_indices = [idx for idx, atom in enumerate(atoms) if atom.symbol in guard_ligands] or all_partial_indices
             guard_report = vacancy_guard_report(atoms, vacancies, guard_ligand_indices, vacancy_guard)
             vacancy_fraction = len(vacancies) / len(all_partial_indices) if all_partial_indices else 0.0
             reasonable = len(vacancies) == vacancy_total
             count_symbols = final_atoms.get_chemical_symbols()
             counts = {symbol: count_symbols.count(symbol) for symbol in sorted(set(count_symbols))}
             assigned_counts = assignment_counts(assignments)
-            selected_real_species = {
-                symbol
-                for group in occupation_groups
-                for symbol in group["species"]
-                if symbol != args.vacancy_label
+            notes = "Occupational species made explicit and vacancy pseudo-atoms removed; use ISYM=0 for VASP relaxation."
+            if guard_report.notes:
+                notes = f"Occupational species made explicit and vacancy pseudo-atoms removed; {guard_report.notes}; use ISYM=0 for VASP relaxation."
+            return {
+                "candidate_id": case_id,
+                "kind": kind,
+                "rank": rank,
+                "pool_index": pool_index,
+                **vacancy_stability_fields(guard_report, min_vv),
+                "poscar": "" if run_dir is None else str((run_dir / "POSCAR").resolve()),
+                "n_Gd": count_symbols.count("Gd"),
+                "n_O": count_symbols.count("O"),
+                "n_Va": len(vacancies),
+                "n_partial_element": sum(count_symbols.count(element) for element in (partial_elements or selected_real_species)),
+                "species_counts_json": json.dumps(counts, sort_keys=True),
+                "site_label": ",".join(selected_labels),
+                "vacancy_fraction": f"{vacancy_fraction:.12g}",
+                "min_vacancy_distance_A": "" if min_vv is None else f"{min_vv:.8f}",
+                "stoichiometry": composition_string(final_atoms),
+                "reasonable_stoichiometry": "true" if reasonable else "false",
+                "assigned_site_species_json": json.dumps(assigned_counts, sort_keys=True),
+                "removed_partial_site_indices": " ".join(str(item + 1) for item in vacancies),
+                "kept_partial_site_indices": " ".join(str(item + 1) for item in kept),
+                **guard_report.row(),
+                "notes": notes,
             }
-            rows.append(
-                {
-                    "candidate_id": case_id,
-                    "kind": kind,
-                    "poscar": str((run_dir / "POSCAR").resolve()),
-                    "n_Gd": count_symbols.count("Gd"),
-                    "n_O": count_symbols.count("O"),
-                    "n_Va": len(vacancies),
-                    "n_partial_element": sum(count_symbols.count(element) for element in (partial_elements or selected_real_species)),
-                    "species_counts_json": json.dumps(counts, sort_keys=True),
-                    "site_label": ",".join(selected_labels),
-                    "vacancy_fraction": f"{vacancy_fraction:.12g}",
-                    "min_vacancy_distance_A": "" if min_vv is None else f"{min_vv:.8f}",
-                    "stoichiometry": composition_string(final_atoms),
-                    "reasonable_stoichiometry": "true" if reasonable else "false",
-                    "assigned_site_species_json": json.dumps(assigned_counts, sort_keys=True),
-                    "removed_partial_site_indices": " ".join(str(item + 1) for item in vacancies),
-                    "kept_partial_site_indices": " ".join(str(item + 1) for item in kept),
-                    **guard_report.row(),
-                    "notes": (
-                        "Occupational species made explicit and vacancy pseudo-atoms removed; use ISYM=0 for VASP relaxation."
-                        if not guard_report.notes
-                        else f"Occupational species made explicit and vacancy pseudo-atoms removed; {guard_report.notes}; use ISYM=0 for VASP relaxation."
+
+        direct_sets = [
+            (
+                "vacancy_separated",
+                choose_occupations_by_group(atoms, occupation_groups, "vacancy_separated", args.seed, args.vacancy_label),
+            ),
+            (
+                "vacancy_clustered",
+                choose_occupations_by_group(atoms, occupation_groups, "vacancy_clustered", args.seed, args.vacancy_label),
+            ),
+        ]
+        if args.random_pool_size is None:
+            direct_sets.append(
+                (
+                    "sqs_random_like",
+                    choose_occupations_by_group(
+                        atoms,
+                        occupation_groups,
+                        "sqs_random_like",
+                        args.seed,
+                        args.vacancy_label,
+                        vacancy_guard,
                     ),
-                }
+                )
             )
+        for index, (kind, assignments) in enumerate(direct_sets, start=1):
+            case_id = f"{index:02d}_{kind}"
+            run_dir = candidates_dir / case_id
+            rows.append(vacancy_row(case_id, kind, assignments, run_dir=run_dir))
             runlist.append(str(run_dir.resolve()))
+        if args.random_pool_size is not None:
+            pool: list[tuple[dict[str, Any], dict[int, str]]] = []
+            for pool_index in range(1, args.random_pool_size + 1):
+                assignments = choose_occupations_by_group(
+                    atoms,
+                    occupation_groups,
+                    "sqs_random_like",
+                    args.seed + 10000 + pool_index,
+                    args.vacancy_label,
+                    vacancy_guard,
+                )
+                row = vacancy_row(
+                    f"pool_{pool_index:04d}",
+                    "random_pool",
+                    assignments,
+                    pool_index=pool_index,
+                )
+                pool.append((row, assignments))
+            ranked_pool = sorted(pool, key=lambda item: stability_rank_value(item[0]))
+            for rank, (pool_row, _assignments) in enumerate(ranked_pool, start=1):
+                pool_row["rank"] = rank
+                random_pool_rows.append(pool_row)
+            for rank, (pool_row, assignments) in enumerate(ranked_pool[: args.random_candidates], start=1):
+                case_id = f"{len(rows) + 1:02d}_random_{rank:03d}"
+                run_dir = candidates_dir / case_id
+                rows.append(
+                    vacancy_row(
+                        case_id,
+                        "random",
+                        assignments,
+                        rank=rank,
+                        pool_index=pool_row["pool_index"],
+                        run_dir=run_dir,
+                    )
+                )
+                runlist.append(str(run_dir.resolve()))
 
     write_csv(root / "vacancy_candidate_index.csv", rows, VACANCY_CANDIDATE_FIELDS)
+    if random_pool_rows:
+        write_csv(root / "random_pool_rankings.csv", random_pool_rows, VACANCY_CANDIDATE_FIELDS)
     (root / "runlist.txt").write_text(("\n".join(runlist) + "\n") if runlist else "", encoding="utf-8")
     atat_vasp_outdir = args.atat_poscar_outdir.expanduser().resolve() if args.atat_poscar_outdir else root / "atat_vasp"
     mcsqs_status = "not_requested"
@@ -3068,6 +3249,12 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
             "n_partial_sites": sum(len(group["indices"]) for group in occupation_groups),
             "n_keep_partial_element": keep_total,
             "n_vacancy": vacancy_total,
+            "random_pool": {
+                "requested": args.random_pool_size is not None,
+                "pool_size": args.random_pool_size or 0,
+                "selected_candidates": min(args.random_candidates, args.random_pool_size or 0),
+                "ranking": str(root / "random_pool_rankings.csv") if random_pool_rows else "",
+            },
             "mcsqs": {
                 "requested": bool(args.run_mcsqs),
                 "status": mcsqs_status,
@@ -3126,6 +3313,7 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
                 "submit_mcsqs": str(atat_dir / args.mcsqs_sbatch_script) if args.engine in {"both", "atat"} else "",
                 "atat_vasp": str(atat_vasp_outdir) if args.engine in {"both", "atat"} else "",
                 "candidate_index": str(root / "vacancy_candidate_index.csv"),
+                "random_pool_rankings": str(root / "random_pool_rankings.csv") if random_pool_rows else "",
                 "runlist": str(root / "runlist.txt"),
             },
             "notes": [
@@ -3423,6 +3611,17 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--engine", choices=("both", "direct", "atat"), default="both")
     parser.add_argument("--vasp-template", type=Path)
     parser.add_argument("--seed", type=int, default=20260520)
+    parser.add_argument(
+        "--random-pool-size",
+        type=int,
+        help="Generate and rank this many guarded random direct candidates; selected candidates are written to POSCAR folders.",
+    )
+    parser.add_argument(
+        "--random-candidates",
+        type=int,
+        default=3,
+        help="Number of top ranked random direct candidates to write when --random-pool-size is used.",
+    )
     parser.add_argument("--vacancy-guard", choices=("on", "off"), default="on", help="Keep random vacancy candidates from over-emptying local coordination shells.")
     parser.add_argument(
         "--coordination-center-element",
@@ -3451,6 +3650,10 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.run_mcsqs and args.submit_mcsqs:
         raise ValueError("--run-mcsqs and --submit-mcsqs are mutually exclusive.")
+    if args.random_pool_size is not None and args.random_pool_size < 1:
+        raise ValueError("--random-pool-size must be positive when supplied.")
+    if args.random_candidates < 0:
+        raise ValueError("--random-candidates must be nonnegative.")
 
     read, write = import_ase_atoms()
     atoms0 = read(args.poscar.expanduser().resolve(), format="vasp")
@@ -3517,52 +3720,101 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
     root.mkdir(parents=True, exist_ok=True)
     write_csv(root / "supercell_candidate_analysis.csv", analysis_rows, SUPERCELL_ANALYSIS_FIELDS)
     rows: list[dict[str, Any]] = []
+    random_pool_rows: list[dict[str, Any]] = []
     runlist: list[str] = []
-    modes = ["ordered", "random", "clustered"]
     if args.engine in {"both", "direct"}:
         candidates_dir = root / "candidates"
         candidates_dir.mkdir(exist_ok=True)
-        for idx, mode in enumerate(modes, start=1):
+
+        def parent_row(
+            case_id: str,
+            mode: str,
+            *,
+            seed: int,
+            rank: int | str = "",
+            pool_index: int | str = "",
+            run_dir: Path | None = None,
+        ) -> dict[str, Any]:
             final_atoms, sub_counts, vacancies, guard_report = apply_parent_defect_assignments(
                 atoms,
                 substitutions,
                 args.vacancy_element,
                 int(info["n_vacancy"]),
                 mode,
-                args.seed + idx,
+                seed,
                 vacancy_guard,
             )
-            run_dir = candidates_dir / f"{idx:02d}_{mode}"
-            run_dir.mkdir(parents=True, exist_ok=True)
-            write(run_dir / "POSCAR", final_atoms, format="vasp", direct=True, vasp5=True, sort=False)
-            copy_vasp_template_for_vacancy(args.vasp_template.expanduser().resolve() if args.vasp_template else None, run_dir)
+            if run_dir is not None:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                write(run_dir / "POSCAR", final_atoms, format="vasp", direct=True, vasp5=True, sort=False)
+                copy_vasp_template_for_vacancy(args.vasp_template.expanduser().resolve() if args.vasp_template else None, run_dir)
             symbols = final_atoms.get_chemical_symbols()
             counts = {symbol: symbols.count(symbol) for symbol in sorted(set(symbols))}
             min_vv = min_pair_distance(atoms, vacancies)
-            rows.append(
-                {
-                    "candidate_id": f"{idx:02d}_{mode}",
-                    "kind": mode,
-                    "poscar": str((run_dir / "POSCAR").resolve()),
-                    "repeat": repeat_text(repeat),
-                    "linear_scale": f"{linear_scale:.12g}",
-                    "vacancy_element": args.vacancy_element or "",
-                    "n_vacancy": info["n_vacancy"],
-                    "substitutions_json": json.dumps(sub_counts, sort_keys=True),
-                    "species_counts_json": json.dumps(counts, sort_keys=True),
-                    "stoichiometry": composition_string(final_atoms),
-                    "charge_before_vacancy": f"{info['charge_before_vacancy']:.12g}",
-                    "charge_after_vacancy": f"{info['charge_after_vacancy']:.12g}",
-                    "min_vacancy_distance_A": "" if min_vv is None else f"{min_vv:.8f}",
-                    **guard_report.row(),
-                    "notes": (
-                        "Parent POSCAR substitution/vacancy route; use ISYM=0 for VASP relaxation."
-                        if not guard_report.notes
-                        else f"Parent POSCAR substitution/vacancy route; {guard_report.notes}; use ISYM=0 for VASP relaxation."
-                    ),
-                }
-            )
+            notes = "Parent POSCAR substitution/vacancy route; use ISYM=0 for VASP relaxation."
+            if guard_report.notes:
+                notes = f"Parent POSCAR substitution/vacancy route; {guard_report.notes}; use ISYM=0 for VASP relaxation."
+            return {
+                "candidate_id": case_id,
+                "kind": mode,
+                "rank": rank,
+                "pool_index": pool_index,
+                **vacancy_stability_fields(
+                    guard_report,
+                    min_vv,
+                    charge_after_vacancy=float(info["charge_after_vacancy"]),
+                ),
+                "poscar": "" if run_dir is None else str((run_dir / "POSCAR").resolve()),
+                "repeat": repeat_text(repeat),
+                "linear_scale": f"{linear_scale:.12g}",
+                "vacancy_element": args.vacancy_element or "",
+                "n_vacancy": info["n_vacancy"],
+                "substitutions_json": json.dumps(sub_counts, sort_keys=True),
+                "species_counts_json": json.dumps(counts, sort_keys=True),
+                "stoichiometry": composition_string(final_atoms),
+                "charge_before_vacancy": f"{info['charge_before_vacancy']:.12g}",
+                "charge_after_vacancy": f"{info['charge_after_vacancy']:.12g}",
+                "min_vacancy_distance_A": "" if min_vv is None else f"{min_vv:.8f}",
+                **guard_report.row(),
+                "notes": notes,
+            }
+
+        modes = ["ordered", "clustered"]
+        if args.random_pool_size is None:
+            modes.insert(1, "random")
+        for idx, mode in enumerate(modes, start=1):
+            run_dir = candidates_dir / f"{idx:02d}_{mode}"
+            rows.append(parent_row(f"{idx:02d}_{mode}", mode, seed=args.seed + idx, run_dir=run_dir))
             runlist.append(str(run_dir.resolve()))
+        if args.random_pool_size is not None:
+            pool: list[dict[str, Any]] = []
+            for pool_index in range(1, args.random_pool_size + 1):
+                pool.append(
+                    parent_row(
+                        f"pool_{pool_index:04d}",
+                        "random",
+                        seed=args.seed + 10000 + pool_index,
+                        pool_index=pool_index,
+                    )
+                )
+            ranked_pool = sorted(pool, key=stability_rank_value)
+            for rank, pool_row in enumerate(ranked_pool, start=1):
+                pool_row["rank"] = rank
+                random_pool_rows.append(pool_row)
+            for rank, pool_row in enumerate(ranked_pool[: args.random_candidates], start=1):
+                case_id = f"{len(rows) + 1:02d}_random_{rank:03d}"
+                run_dir = candidates_dir / case_id
+                rows.append(
+                    parent_row(
+                        case_id,
+                        "random",
+                        seed=args.seed + 10000 + int(pool_row["pool_index"]),
+                        rank=rank,
+                        pool_index=pool_row["pool_index"],
+                        run_dir=run_dir,
+                    )
+                )
+                runlist.append(str(run_dir.resolve()))
     if args.engine in {"both", "atat"}:
         atat_dir = root / "atat"
         vacancy_fraction = 0.0
@@ -3633,6 +3885,8 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
                 raise RuntimeError(mcsqs_message)
 
     write_csv(root / "parent_defect_candidate_index.csv", rows, PARENT_DEFECT_FIELDS)
+    if random_pool_rows:
+        write_csv(root / "random_pool_rankings.csv", random_pool_rows, PARENT_DEFECT_FIELDS)
     (root / "runlist.txt").write_text(("\n".join(runlist) + "\n") if runlist else "", encoding="utf-8")
     write_json(
         root / "parent_defect_plan.json",
@@ -3650,6 +3904,12 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
             "charge_after_vacancy": info["charge_after_vacancy"],
             "engine": args.engine,
             "atat_vacancy_label": args.atat_vacancy_label,
+            "random_pool": {
+                "requested": args.random_pool_size is not None,
+                "pool_size": args.random_pool_size or 0,
+                "selected_candidates": min(args.random_candidates, args.random_pool_size or 0),
+                "ranking": str(root / "random_pool_rankings.csv") if random_pool_rows else "",
+            },
             "mcsqs": {
                 "requested": bool(args.run_mcsqs),
                 "status": mcsqs_status,
@@ -3670,6 +3930,7 @@ def parent_defect_main(argv: list[str] | None = None) -> None:
             "outputs": {
                 "supercell_analysis": str(root / "supercell_candidate_analysis.csv"),
                 "candidate_index": str(root / "parent_defect_candidate_index.csv"),
+                "random_pool_rankings": str(root / "random_pool_rankings.csv") if random_pool_rows else "",
                 "runlist": str(root / "runlist.txt"),
                 "atat_rndstr": str(root / "atat" / "rndstr.in") if args.engine in {"both", "atat"} else "",
                 "submit_mcsqs": str(root / "atat" / args.mcsqs_sbatch_script) if args.engine in {"both", "atat"} else "",
