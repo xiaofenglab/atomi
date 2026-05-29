@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
 
@@ -64,6 +65,159 @@ def write_lammps_run(root: Path) -> None:
                 "100 305 2 -99 1001",
                 "Loop time of 1.0 on 1 procs for 100 steps",
             ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_transport_run(root: Path) -> None:
+    root.mkdir()
+    (root / "config_gk_test.json").write_text(
+        json.dumps(
+            {
+                "runtime_profile": "lammps_gk_mliap",
+                "pair_style_backend": "mliap",
+                "model_file": "models/uo2.model-mliap_lammps.pt",
+                "model_elements": ["O", "U"],
+                "temperatures_K": [300, 900, 1500],
+                "n_seeds": 3,
+                "timestep_ps": 0.0005,
+                "heat_flux_suffix": "kk",
+                "nvt_preequilibration_ps": 10,
+                "nve_time_ps": 50,
+                "sample_interval_ps": 0.01,
+                "correlation_time_ps": 5,
+                "plateau_window_ps": 1,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "gk_plan.json").write_text(
+        json.dumps(
+            {
+                "n_temperatures": 3,
+                "n_seeds_per_temperature": 3,
+                "n_stages": 9,
+                "temperatures_K": [300, 900, 1500],
+                "runtime_estimate": {
+                    "timestep_ps": 0.0005,
+                    "timestep_fs": 0.5,
+                    "nvt_time_ps_per_stage": 10,
+                    "nve_time_ps_per_stage": 50,
+                    "estimated_steps_per_hour": 7752,
+                    "estimated_walltime_hours_per_stage": 23.2,
+                    "estimated_elapsed_hours_at_array_limit": 46.4,
+                    "array_limit": 6,
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "gk_seed_summary.csv").write_text(
+        "\n".join(
+            [
+                "temperature_K,seed,k_W_mK,status",
+                "300,1,5.8,ok",
+                "300,2,6.0,ok",
+                "900,1,2.7,ok",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "thermal_conductivity_T.csv").write_text(
+        "\n".join(
+            [
+                "temperature_K,k_W_mK,ok_seed_count,seed_count,axis_spread_fraction,seed_cv_fraction,late_drift_fraction,status",
+                "300,5.9,3,3,0.07,0.05,0.12,ok",
+                "900,2.8,3,3,0.18,0.09,0.15,ok",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "gk_validation_summary.json").write_text(
+        json.dumps(
+            {
+                "reports": [
+                    {
+                        "temperature_K": 300,
+                        "status": "ok",
+                        "k_W_mK": 5.9,
+                        "ok_seed_count": 3,
+                        "seed_count": 3,
+                        "axis_spread_fraction": 0.07,
+                        "seed_cv_fraction": 0.05,
+                        "late_drift_fraction": 0.12,
+                    }
+                ]
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "config_rnemd_test.json").write_text(
+        json.dumps(
+            {
+                "pair_style_backend": "mace",
+                "temperatures_K": [300, 900, 1500],
+                "n_seeds": 3,
+                "timestep_ps": 0.0005,
+                "run_time_ps": 50,
+                "replicate": "1x1x3",
+                "direction": "z",
+                "nbin": 20,
+                "swap_every": 100,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "rnemd_plan.json").write_text(
+        json.dumps(
+            {
+                "n_temperatures": 3,
+                "n_seeds_per_temperature": 3,
+                "n_stages": 9,
+                "runtime_estimate": {
+                    "replicate": "1x1x3",
+                    "run_steps_per_stage": 100000,
+                    "estimated_steps_per_hour": 7752,
+                    "estimated_walltime_hours_per_stage": 19.4,
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "thermal_conductivity_rnemd_T.csv").write_text(
+        "temperature_K,k_W_mK,ok_seed_count,seed_count,slope_disagreement_fraction,status\n1200,2.6,1,1,0.316,warn\n",
+        encoding="utf-8",
+    )
+    (root / "rnemd_validation_summary.json").write_text(
+        json.dumps(
+            {
+                "reports": [
+                    {
+                        "temperature_K": 1200,
+                        "status": "warn",
+                        "k_W_mK": 2.605,
+                        "ok_seed_count": 1,
+                        "seed_count": 1,
+                        "slope_disagreement_fraction": 0.316,
+                        "warnings": ["inspect profile linearity"],
+                    }
+                ]
+            },
+            indent=2,
         )
         + "\n",
         encoding="utf-8",
@@ -251,6 +405,72 @@ def test_paper_draft_style_note_includes_format_rules(tmp_path: Path) -> None:
     assert "DFT: State the physical target" in text
     assert "MD: Report potential/model source" in text
     assert "MLIP: Report training-data provenance" in text
+
+
+def test_paper_draft_describes_transport_and_writes_llm_metadata(tmp_path: Path) -> None:
+    transport = tmp_path / "transport"
+    write_transport_run(transport)
+    document = tmp_path / "draft.md"
+    evidence = tmp_path / "evidence.json"
+    metadata = tmp_path / "llm_metadata.json"
+
+    paper_draft.main(
+        [
+            "--used",
+            "transport",
+            "--run",
+            str(transport),
+            "--document",
+            str(document),
+            "--evidence-json",
+            str(evidence),
+            "--llm-metadata-json",
+            str(metadata),
+            "--mode",
+            "overwrite",
+            "--style-note",
+            "--title",
+            "Thermal transport draft",
+            "--material",
+            "UO2",
+        ]
+    )
+
+    text = document.read_text(encoding="utf-8")
+    assert "Requested modules: TRANSPORT" in text
+    assert "Thermal-conductivity calculations" in text
+    assert "Green-Kubo" in text
+    assert "reverse NEMD" in text
+    assert "timestep_ps=0.0005" in text
+    assert "correlation_time_ps=5" in text
+    assert "replicate=1x1x3" in text
+    assert "Green-Kubo validation reported T=300 K k=5.9 W/m/K status=ok" in text
+    assert "reverse NEMD validation reported T=1200 K k=2.605 W/m/K status=warn" in text
+
+    parsed = json.loads(evidence.read_text(encoding="utf-8"))
+    assert parsed[0]["detected_modules"] == ["MD", "TRANSPORT"]
+    assert parsed[0]["facts"]["gk_config"]["settings"]["heat_flux_suffix"] == "kk"
+    assert parsed[0]["facts"]["rnemd_config"]["settings"]["direction"] == "z"
+
+    packet = json.loads(metadata.read_text(encoding="utf-8"))
+    assert packet["schema"] == "atomi.paper_draft.llm_metadata.v1"
+    assert "UN_thermal_transport_style" in packet["paper_lessons"]
+    assert "TRANSPORT" in packet["extraction_targets"]
+    assert packet["runs"][0]["facts"]["gk_plan"]["runtime_estimate"]["array_limit"] == 6
+
+
+def test_paper_draft_reads_gzipped_outcar(tmp_path: Path) -> None:
+    vasp = tmp_path / "vasp_gz"
+    write_vasp_run(vasp)
+    outcar_text = (vasp / "OUTCAR").read_text(encoding="utf-8")
+    (vasp / "OUTCAR").unlink()
+    with gzip.open(vasp / "OUTCAR.gz", "wt", encoding="utf-8") as handle:
+        handle.write(outcar_text)
+
+    evidence = paper_draft.scan_run(vasp, ["DFT"])
+
+    assert evidence.files["outcar"] == ["OUTCAR.gz"]
+    assert evidence.facts["dft_outcar"]["final_energy_eV"] == -25.125
 
 
 def test_paper_draft_describes_vasp_defect_candidate_generation(tmp_path: Path) -> None:

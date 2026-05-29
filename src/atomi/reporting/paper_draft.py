@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import json
 import re
 from dataclasses import dataclass, field
@@ -46,6 +47,22 @@ MODULE_ALIASES = {
     },
     "AIMD": {"AIMD", "CP2K", "AB_INITIO_MD", "AB-INITIO-MD"},
     "MD": {"MD", "LAMMPS", "MOLECULAR_DYNAMICS", "MOLECULAR-DYNAMICS"},
+    "TRANSPORT": {
+        "TRANSPORT",
+        "THERMAL",
+        "THERMAL_TRANSPORT",
+        "THERMAL-TRANSPORT",
+        "THERMAL_CONDUCTIVITY",
+        "THERMAL-CONDUCTIVITY",
+        "GK",
+        "GREEN_KUBO",
+        "GREEN-KUBO",
+        "GREENKUBO",
+        "RNEMD",
+        "REVERSE_NEMD",
+        "REVERSE-NEMD",
+        "NEMD",
+    },
     "MLIP": {"MLIP", "MACE", "ML", "MACHINE_LEARNING_POTENTIAL", "MACHINE-LEARNING-POTENTIAL"},
     "CALPHAD": {"CALPHAD", "TDB", "THERMODYNAMIC_DATABASE"},
     "MOOSE": {"MOOSE", "MULTIPHYSICS"},
@@ -97,6 +114,11 @@ METHOD_FORMAT_RULES = {
     "MD": [
         "Report potential/model source, supercell size, timestep, ensemble sequence, temperature grid, equilibration criteria, production length, uncertainty/blocking method, and normalization basis.",
         "When extracting elastic or thermal properties, state the deformation or fluctuation formula, averaging window, finite-size checks, and comparison reference.",
+    ],
+    "TRANSPORT": [
+        "For Green-Kubo, report the equilibrated structure source, ML/LAMMPS binary/profile, pair style, suffix, timestep, NVT/NPT pre-equilibration length, NVE production length, heat-current sampling interval, HCACF correlation time, plateau window, seed count, and unit conversion.",
+        "For rNEMD/NEMD, report the equilibrated structure source, replicate/slab geometry, heat-flow direction, bin count, swap interval or imposed flux, timestep, production length, gradient-fit windows, mirrored-slope agreement, seed count, and finite-size/gradient checks.",
+        "For results, tabulate k(T) with per-axis/per-seed diagnostics, seed coefficient of variation, anisotropy or slope mismatch, late-plateau drift, validation status, and a comparison against literature/benchmark values before interpreting mechanisms.",
     ],
     "MLIP": [
         "Report training-data provenance, train/validation/test split, motif or temperature coverage, model architecture/descriptor, loss weights, active-learning or outlier rules, and validation metrics.",
@@ -151,7 +173,11 @@ def _safe_relative(path: Path, root: Path) -> str:
 
 
 def _read_text(path: Path, limit: int = 2_000_000) -> str:
-    data = path.read_bytes()
+    if path.name.lower().endswith(".gz"):
+        with gzip.open(path, "rb") as handle:
+            data = handle.read()
+    else:
+        data = path.read_bytes()
     if len(data) > limit:
         data = data[-limit:]
     return data.decode("utf-8", errors="replace")
@@ -394,17 +420,337 @@ def parse_lammps_log(path: Path) -> dict[str, object]:
 
 
 def parse_csv_summary(path: Path) -> dict[str, object]:
-    with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
-        reader = csv.DictReader(handle)
-        rows = list(reader)
-    info: dict[str, object] = {"rows": len(rows), "columns": reader.fieldnames or []}
-    temp_key = next((key for key in ("T_K", "temperature_K", "temperature", "T") if key in info["columns"]), None)
+    rows, fieldnames = _read_csv_dicts(path)
+    info: dict[str, object] = {"rows": len(rows), "columns": fieldnames}
+    temp_key = next((key for key in ("T_K", "temperature_K", "temperature", "T") if key in fieldnames), None)
     if temp_key and rows:
         values = [float(row[temp_key]) for row in rows if row.get(temp_key) and _is_number(row[temp_key])]
         if values:
             info["T_min_K"] = min(values)
             info["T_max_K"] = max(values)
     return info
+
+
+def _read_csv_dicts(path: Path) -> tuple[list[dict[str, str]], list[str]]:
+    if path.name.lower().endswith(".gz"):
+        handle = gzip.open(path, "rt", encoding="utf-8", errors="replace", newline="")
+    else:
+        handle = path.open("r", encoding="utf-8", errors="replace", newline="")
+    with handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+        return rows, reader.fieldnames or []
+
+
+def _load_json(path: Path) -> object:
+    return json.loads(_read_text(path))
+
+
+def _find_first_key(payload: object, keys: Iterable[str]) -> object | None:
+    wanted = {key.lower() for key in keys}
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if str(key).lower() in wanted:
+                return value
+        for value in payload.values():
+            found = _find_first_key(value, wanted)
+            if found is not None:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = _find_first_key(item, wanted)
+            if found is not None:
+                return found
+    return None
+
+
+def _number_or_none(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    if _is_number(str(value)):
+        return float(str(value))
+    return None
+
+
+def _int_or_none(value: object) -> int | None:
+    number = _number_or_none(value)
+    if number is None:
+        return None
+    return int(number)
+
+
+def _list_numbers(value: object) -> list[float]:
+    if isinstance(value, list | tuple):
+        numbers = [_number_or_none(item) for item in value]
+        return [number for number in numbers if number is not None]
+    number = _number_or_none(value)
+    return [] if number is None else [number]
+
+
+def _temperature_values(payload: object) -> list[float]:
+    for key in ("temperatures_K", "temperature_grid_K", "temperature_grid", "temperatures", "T_values", "T_grid"):
+        values = _list_numbers(_find_first_key(payload, [key]))
+        if values:
+            return sorted(set(values))
+    values: list[float] = []
+
+    def collect(obj: object) -> None:
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                key_lower = str(key).lower()
+                if key_lower in {"temperature_k", "t_k"} or key_lower.endswith("_temperature_k"):
+                    number = _number_or_none(value)
+                    if number is not None:
+                        values.append(number)
+                collect(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                collect(item)
+
+    collect(payload)
+    return sorted(set(values))
+
+
+def _selected_runtime_estimate(payload: object) -> dict[str, object]:
+    runtime = _find_first_key(payload, ["runtime_estimate"])
+    if not isinstance(runtime, dict):
+        return {}
+    keep = (
+        "timestep_ps",
+        "timestep_fs",
+        "run_steps_per_stage",
+        "nvt_steps_per_stage",
+        "nve_steps_per_stage",
+        "run_time_ps_per_stage",
+        "nvt_time_ps_per_stage",
+        "nve_time_ps_per_stage",
+        "estimated_steps_per_hour",
+        "walltime_safety_factor",
+        "estimated_walltime_hours_per_stage",
+        "estimated_gpu_hours_all_stages",
+        "estimated_elapsed_hours_at_array_limit",
+        "array_limit",
+        "replicate",
+        "replicate_factor",
+        "throughput_source",
+    )
+    return {key: runtime[key] for key in keep if key in runtime}
+
+
+def parse_transport_config(path: Path, route: str) -> dict[str, object]:
+    payload = _load_json(path)
+    common = {
+        "runtime_profile": _find_first_key(payload, ["runtime_profile"]),
+        "pair_style_backend": _find_first_key(payload, ["pair_style_backend"]),
+        "model_file": _find_first_key(payload, ["model_file"]),
+        "model_elements": _find_first_key(payload, ["model_elements"]),
+        "timestep_ps": _number_or_none(_find_first_key(payload, ["timestep_ps"])),
+        "n_seeds": _int_or_none(_find_first_key(payload, ["n_seeds", "n_seeds_per_temperature"])),
+        "array_limit": _int_or_none(_find_first_key(payload, ["array_limit"])),
+    }
+    route_keys: dict[str, object]
+    if route == "gk":
+        route_keys = {
+            "heat_flux_suffix": _find_first_key(payload, ["heat_flux_suffix"]),
+            "nvt_preequilibration_ps": _number_or_none(_find_first_key(payload, ["nvt_preequilibration_ps"])),
+            "nve_time_ps": _number_or_none(_find_first_key(payload, ["nve_time_ps"])),
+            "sample_interval_ps": _number_or_none(_find_first_key(payload, ["sample_interval_ps"])),
+            "correlation_time_ps": _number_or_none(_find_first_key(payload, ["correlation_time_ps"])),
+            "plateau_window_ps": _number_or_none(_find_first_key(payload, ["plateau_window_ps"])),
+        }
+    else:
+        route_keys = {
+            "run_time_ps": _number_or_none(_find_first_key(payload, ["run_time_ps"])),
+            "replicate": _find_first_key(payload, ["replicate"]),
+            "direction": _find_first_key(payload, ["direction"]),
+            "nbin": _int_or_none(_find_first_key(payload, ["nbin"])),
+            "swap_every": _int_or_none(_find_first_key(payload, ["swap_every"])),
+        }
+    settings = {key: value for key, value in {**common, **route_keys}.items() if value not in (None, "", [], {})}
+    temperatures = _temperature_values(payload)
+    return {
+        "route": route,
+        "file": path.name,
+        "settings": settings,
+        "temperatures_K": temperatures,
+        "n_temperatures": len(temperatures) or None,
+    }
+
+
+def parse_transport_plan(path: Path, route: str) -> dict[str, object]:
+    payload = _load_json(path)
+    if not isinstance(payload, dict):
+        return {"route": route, "file": path.name}
+    temperatures = _temperature_values(payload)
+    return {
+        "route": route,
+        "file": path.name,
+        "root": payload.get("root", ""),
+        "n_temperatures": payload.get("n_temperatures") or len(temperatures) or None,
+        "n_seeds_per_temperature": payload.get("n_seeds_per_temperature"),
+        "n_stages": payload.get("n_stages"),
+        "temperatures_K": temperatures,
+        "runtime_estimate": _selected_runtime_estimate(payload),
+    }
+
+
+def _mean(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _sample_stdev(values: list[float]) -> float | None:
+    if len(values) < 2:
+        return None
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    return variance**0.5
+
+
+def _csv_temperature_key(fieldnames: list[str]) -> str | None:
+    return next((key for key in ("T_K", "temperature_K", "temperature", "T") if key in fieldnames), None)
+
+
+def _csv_k_key(fieldnames: list[str]) -> str | None:
+    candidates = (
+        "k_W_mK",
+        "k_mean_W_mK",
+        "k_iso_W_mK",
+        "thermal_conductivity_W_mK",
+        "kappa_W_mK",
+        "k",
+    )
+    return next((key for key in candidates if key in fieldnames), None)
+
+
+def parse_transport_temperature_table(path: Path, route: str) -> dict[str, object]:
+    rows, fieldnames = _read_csv_dicts(path)
+    temp_key = _csv_temperature_key(fieldnames)
+    k_key = _csv_k_key(fieldnames)
+    compact_rows: list[dict[str, object]] = []
+    by_temperature: dict[float, list[float]] = {}
+    for row in rows:
+        temperature = _number_or_none(row.get(temp_key, "") if temp_key else None)
+        conductivity = _number_or_none(row.get(k_key, "") if k_key else None)
+        compact: dict[str, object] = {}
+        if temperature is not None:
+            compact["temperature_K"] = temperature
+        if conductivity is not None:
+            compact["k_W_mK"] = conductivity
+        for key in (
+            "status",
+            "ok_seed_count",
+            "seed_count",
+            "axis_spread_fraction",
+            "seed_cv_fraction",
+            "late_drift_fraction",
+            "slope_disagreement_fraction",
+        ):
+            if key in row and row[key] not in ("", None):
+                compact[key] = row[key]
+        if compact:
+            compact_rows.append(compact)
+        if temperature is not None and conductivity is not None:
+            by_temperature.setdefault(temperature, []).append(conductivity)
+    return {
+        "route": route,
+        "file": path.name,
+        "rows": len(rows),
+        "columns": fieldnames,
+        "temperature_key": temp_key,
+        "conductivity_key": k_key,
+        "temperatures_K": sorted(by_temperature),
+        "records": compact_rows[:50],
+    }
+
+
+def parse_transport_seed_summary(path: Path, route: str) -> dict[str, object]:
+    rows, fieldnames = _read_csv_dicts(path)
+    temp_key = _csv_temperature_key(fieldnames)
+    k_key = _csv_k_key(fieldnames)
+    by_temperature: dict[float, list[float]] = {}
+    statuses: dict[str, int] = {}
+    for row in rows:
+        status = row.get("status") or row.get("fit_status") or ""
+        if status:
+            statuses[status] = statuses.get(status, 0) + 1
+        temperature = _number_or_none(row.get(temp_key, "") if temp_key else None)
+        conductivity = _number_or_none(row.get(k_key, "") if k_key else None)
+        if temperature is not None and conductivity is not None:
+            by_temperature.setdefault(temperature, []).append(conductivity)
+    temperature_summary = []
+    for temperature, values in sorted(by_temperature.items()):
+        mean = _mean(values)
+        stdev = _sample_stdev(values)
+        temperature_summary.append(
+            {
+                "temperature_K": temperature,
+                "seed_count": len(values),
+                "k_mean_W_mK": mean,
+                "k_stdev_W_mK": stdev,
+                "k_cv_fraction": None if mean in (None, 0) or stdev is None else abs(stdev / mean),
+            }
+        )
+    return {
+        "route": route,
+        "file": path.name,
+        "rows": len(rows),
+        "columns": fieldnames,
+        "status_counts": statuses,
+        "temperature_summary": temperature_summary,
+    }
+
+
+def _percent_like(report: dict[str, object], *keys: str) -> float | None:
+    for key in keys:
+        value = _number_or_none(report.get(key))
+        if value is not None:
+            if key.endswith("_percent") or abs(value) > 2:
+                return value
+            return 100.0 * value
+    return None
+
+
+def parse_transport_validation(path: Path, route: str) -> dict[str, object]:
+    payload = _load_json(path)
+    reports = payload.get("reports", []) if isinstance(payload, dict) else []
+    if not isinstance(reports, list):
+        reports = []
+    compact_reports: list[dict[str, object]] = []
+    status_counts: dict[str, int] = {}
+    for raw in reports:
+        if not isinstance(raw, dict):
+            continue
+        status = str(raw.get("status", ""))
+        if status:
+            status_counts[status] = status_counts.get(status, 0) + 1
+        compact = {
+            "temperature_K": _number_or_none(raw.get("temperature_K")),
+            "status": status,
+            "k_W_mK": _number_or_none(raw.get("k_W_mK")),
+            "ok_seed_count": _int_or_none(raw.get("ok_seed_count")),
+            "seed_count": _int_or_none(raw.get("seed_count")),
+            "seed_cv_percent": _percent_like(raw, "seed_cv_fraction", "seed_cv_percent"),
+            "axis_spread_percent": _percent_like(raw, "axis_spread_fraction", "axis_spread_percent"),
+            "late_drift_percent": _percent_like(raw, "late_drift_fraction", "late_drift_percent"),
+            "slope_mismatch_percent": _percent_like(
+                raw,
+                "slope_disagreement_fraction",
+                "slope_mismatch_fraction",
+                "slope_mismatch_percent",
+            ),
+            "warnings": raw.get("warnings", []),
+        }
+        compact_reports.append({key: value for key, value in compact.items() if value not in (None, "", [], {})})
+    return {
+        "route": route,
+        "file": path.name,
+        "reports": compact_reports,
+        "status_counts": status_counts,
+    }
 
 
 def parse_runlist(path: Path) -> dict[str, object]:
@@ -688,7 +1034,7 @@ def scan_run(path: Path, requested_modules: list[str], max_files: int = 5000) ->
     incars = _by_name(files, "INCAR")
     kpoints = _by_name(files, "KPOINTS")
     potcars = _by_name(files, "POTCAR")
-    outcars = _by_name(files, "OUTCAR")
+    outcars = _by_name(files, "OUTCAR", "OUTCAR.gz")
     if poscars or incars or outcars:
         evidence.add_module("DFT")
         for item in poscars[:5]:
@@ -752,6 +1098,107 @@ def scan_run(path: Path, requested_modules: list[str], max_files: int = 5000) ->
                 evidence.facts["md_config"] = json.loads(lammps_configs[0].read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 evidence.warnings.append(f"Could not parse JSON config: {lammps_configs[0]}")
+
+    json_files = _by_suffix(files, ".json")
+    gk_configs = [
+        item
+        for item in json_files
+        if "config" in item.name.lower() and ("gk" in item.name.lower() or "green" in item.name.lower())
+    ]
+    gk_plans = _by_name(files, "gk_plan.json")
+    gk_validations = _by_name(files, "gk_validation_summary.json")
+    gk_seed_summaries = _by_name(files, "gk_seed_summary.csv")
+    gk_temperature_tables = _by_name(files, "thermal_conductivity_T.csv")
+    gk_manifests = _by_name(files, "gk_manifest.csv")
+    gk_hcacf = _by_name(files, "heatflux_hcacf.dat")
+    rnemd_configs = [
+        item
+        for item in json_files
+        if "config" in item.name.lower() and ("rnemd" in item.name.lower() or "nemd" in item.name.lower())
+    ]
+    rnemd_plans = _by_name(files, "rnemd_plan.json")
+    rnemd_validations = _by_name(files, "rnemd_validation_summary.json")
+    rnemd_seed_summaries = _by_name(files, "rnemd_seed_summary.csv")
+    rnemd_temperature_tables = _by_name(files, "thermal_conductivity_rnemd_T.csv")
+    rnemd_profiles = _by_name(files, "rnemd_temperature_profiles.csv")
+    rnemd_manifests = _by_name(files, "rnemd_manifest.tsv")
+    if (
+        gk_configs
+        or gk_plans
+        or gk_validations
+        or gk_seed_summaries
+        or gk_temperature_tables
+        or gk_hcacf
+        or rnemd_configs
+        or rnemd_plans
+        or rnemd_validations
+        or rnemd_seed_summaries
+        or rnemd_temperature_tables
+        or rnemd_profiles
+    ):
+        evidence.add_module("MD")
+        evidence.add_module("TRANSPORT")
+        for key, items in (
+            ("gk_config", gk_configs),
+            ("gk_plan", gk_plans),
+            ("gk_validation", gk_validations),
+            ("gk_seed_summary", gk_seed_summaries),
+            ("gk_temperature_table", gk_temperature_tables),
+            ("gk_manifest", gk_manifests),
+            ("gk_hcacf", gk_hcacf),
+            ("rnemd_config", rnemd_configs),
+            ("rnemd_plan", rnemd_plans),
+            ("rnemd_validation", rnemd_validations),
+            ("rnemd_seed_summary", rnemd_seed_summaries),
+            ("rnemd_temperature_table", rnemd_temperature_tables),
+            ("rnemd_profile_summary", rnemd_profiles),
+            ("rnemd_manifest", rnemd_manifests),
+        ):
+            for item in items[:5]:
+                evidence.add_file(key, item)
+        if gk_configs:
+            try:
+                evidence.facts["gk_config"] = parse_transport_config(gk_configs[0], "gk")
+            except (json.JSONDecodeError, OSError) as exc:
+                evidence.warnings.append(f"Could not parse GK config: {exc}")
+        if gk_plans:
+            try:
+                evidence.facts["gk_plan"] = parse_transport_plan(gk_plans[0], "gk")
+            except (json.JSONDecodeError, OSError) as exc:
+                evidence.warnings.append(f"Could not parse GK plan: {exc}")
+        if gk_seed_summaries:
+            evidence.facts["gk_seed_summary"] = parse_transport_seed_summary(gk_seed_summaries[0], "gk")
+        if gk_temperature_tables:
+            evidence.facts["gk_temperature_table"] = parse_transport_temperature_table(gk_temperature_tables[0], "gk")
+        if gk_validations:
+            try:
+                evidence.facts["gk_validation"] = parse_transport_validation(gk_validations[0], "gk")
+            except (json.JSONDecodeError, OSError) as exc:
+                evidence.warnings.append(f"Could not parse GK validation: {exc}")
+        if rnemd_configs:
+            try:
+                evidence.facts["rnemd_config"] = parse_transport_config(rnemd_configs[0], "rnemd")
+            except (json.JSONDecodeError, OSError) as exc:
+                evidence.warnings.append(f"Could not parse rNEMD config: {exc}")
+        if rnemd_plans:
+            try:
+                evidence.facts["rnemd_plan"] = parse_transport_plan(rnemd_plans[0], "rnemd")
+            except (json.JSONDecodeError, OSError) as exc:
+                evidence.warnings.append(f"Could not parse rNEMD plan: {exc}")
+        if rnemd_seed_summaries:
+            evidence.facts["rnemd_seed_summary"] = parse_transport_seed_summary(rnemd_seed_summaries[0], "rnemd")
+        if rnemd_temperature_tables:
+            evidence.facts["rnemd_temperature_table"] = parse_transport_temperature_table(
+                rnemd_temperature_tables[0],
+                "rnemd",
+            )
+        if rnemd_profiles:
+            evidence.facts["rnemd_profile_summary"] = parse_csv_summary(rnemd_profiles[0])
+        if rnemd_validations:
+            try:
+                evidence.facts["rnemd_validation"] = parse_transport_validation(rnemd_validations[0], "rnemd")
+            except (json.JSONDecodeError, OSError) as exc:
+                evidence.warnings.append(f"Could not parse rNEMD validation: {exc}")
 
     extxyz = _by_suffix(files, ".extxyz")
     model_files = _by_suffix(files, ".model", ".pt")
@@ -958,6 +1405,95 @@ def hpc_profile_summary(
     return f"{label}: " + "; ".join(bits)
 
 
+def _transport_settings_sentence(label: str, config: object, plan: object) -> str:
+    if not isinstance(config, dict) and not isinstance(plan, dict):
+        return ""
+    settings = config.get("settings", {}) if isinstance(config, dict) else {}
+    runtime = plan.get("runtime_estimate", {}) if isinstance(plan, dict) else {}
+    bits: list[str] = []
+    if isinstance(config, dict):
+        temperatures = config.get("temperatures_K") or []
+        if isinstance(temperatures, list) and temperatures:
+            bits.append("temperatures " + ", ".join(f"{float(temp):g} K" for temp in temperatures[:12]))
+    if isinstance(settings, dict):
+        for key in (
+            "pair_style_backend",
+            "runtime_profile",
+            "heat_flux_suffix",
+            "timestep_ps",
+            "nvt_preequilibration_ps",
+            "nve_time_ps",
+            "sample_interval_ps",
+            "correlation_time_ps",
+            "plateau_window_ps",
+            "run_time_ps",
+            "replicate",
+            "direction",
+            "nbin",
+            "swap_every",
+            "n_seeds",
+        ):
+            if key in settings:
+                bits.append(f"{key}={_format_value(settings[key])}")
+    if isinstance(plan, dict):
+        if plan.get("n_stages") is not None:
+            bits.append(f"stages={plan['n_stages']}")
+        if plan.get("n_seeds_per_temperature") is not None:
+            bits.append(f"seeds_per_T={plan['n_seeds_per_temperature']}")
+    if isinstance(runtime, dict):
+        for key in ("estimated_steps_per_hour", "estimated_walltime_hours_per_stage", "estimated_elapsed_hours_at_array_limit"):
+            if key in runtime:
+                bits.append(f"{key}={_format_value(runtime[key])}")
+    return f"{label}: " + "; ".join(bits) if bits else ""
+
+
+def _transport_result_sentences(label: str, table: object, validation: object) -> list[str]:
+    lines: list[str] = []
+    if isinstance(table, dict) and table.get("records"):
+        records = table["records"]
+        if isinstance(records, list):
+            pieces = []
+            for record in records[:6]:
+                if not isinstance(record, dict):
+                    continue
+                temperature = record.get("temperature_K")
+                conductivity = record.get("k_W_mK")
+                if temperature is not None and conductivity is not None:
+                    pieces.append(f"T={float(temperature):g} K k={float(conductivity):.4g} W/m/K")
+            if pieces:
+                lines.append(f"{label} k(T) table contained " + "; ".join(pieces) + ".")
+    if isinstance(validation, dict) and validation.get("reports"):
+        reports = validation["reports"]
+        if isinstance(reports, list):
+            pieces = []
+            for report in reports[:6]:
+                if not isinstance(report, dict):
+                    continue
+                temperature = report.get("temperature_K")
+                status = report.get("status")
+                conductivity = report.get("k_W_mK")
+                metrics = []
+                for key, name in (
+                    ("axis_spread_percent", "axis spread"),
+                    ("seed_cv_percent", "seed CV"),
+                    ("late_drift_percent", "late drift"),
+                    ("slope_mismatch_percent", "slope mismatch"),
+                ):
+                    if report.get(key) is not None:
+                        metrics.append(f"{name}={float(report[key]):.1f}%")
+                head = []
+                if temperature is not None:
+                    head.append(f"T={float(temperature):g} K")
+                if conductivity is not None:
+                    head.append(f"k={float(conductivity):.4g} W/m/K")
+                if status:
+                    head.append(f"status={status}")
+                pieces.append(" ".join(head + metrics))
+            if pieces:
+                lines.append(f"{label} validation reported " + "; ".join(pieces) + ".")
+    return lines
+
+
 def build_hpc_context(path: Path | None, *, show_private: bool) -> dict[str, Any]:
     config_path = find_config_path(path)
     if config_path is None:
@@ -970,6 +1506,7 @@ def build_hpc_context(path: Path | None, *, show_private: bool) -> dict[str, Any
         "profiles": {
             "vasp": hpc_profile_summary(config, "vasp_cpu", label="VASP", show_private=show_private),
             "lammps": hpc_profile_summary(config, "lammps_md_engine", label="MD engine", show_private=show_private),
+            "lammps_gk": hpc_profile_summary(config, "lammps_gk_mliap", label="GK ML-IAP", show_private=show_private),
             "cp2k": hpc_profile_summary(config, "cp2k", label="AIMD", show_private=show_private),
             "phonopy": hpc_profile_summary(config, "phonopy", label="QHA", show_private=show_private),
         },
@@ -985,8 +1522,10 @@ def hpc_methods_paragraph(modules: list[str], hpc_context: dict[str, Any] | None
     profile_keys = []
     if {"DFT", "VASP_SPIN", "VASP_PREP"} & modules_to_write:
         profile_keys.append("vasp")
-    if "MD" in modules_to_write:
+    if {"MD", "TRANSPORT"} & modules_to_write:
         profile_keys.append("lammps")
+    if "TRANSPORT" in modules_to_write:
+        profile_keys.append("lammps_gk")
     if "AIMD" in modules_to_write:
         profile_keys.append("cp2k")
     if "QHA" in modules_to_write:
@@ -1184,6 +1723,33 @@ def methods_paragraphs(
             "estimation procedure."
         )
 
+    if "TRANSPORT" in modules_to_write:
+        gk_config = _first_fact(evidences, "gk_config", {})
+        gk_plan = _first_fact(evidences, "gk_plan", {})
+        rnemd_config = _first_fact(evidences, "rnemd_config", {})
+        rnemd_plan = _first_fact(evidences, "rnemd_plan", {})
+        details = [
+            detail
+            for detail in (
+                _transport_settings_sentence("Green-Kubo", gk_config, gk_plan),
+                _transport_settings_sentence("reverse NEMD", rnemd_config, rnemd_plan),
+            )
+            if detail
+        ]
+        paragraphs.append(
+            "Thermal-conductivity calculations were inventoried as finite-temperature "
+            "LAMMPS workflows rather than generic MD logs. Green-Kubo runs should be "
+            "reported through the equilibrated-cell source, ensemble sequence, heat-current "
+            "definition, HCACF sampling/correlation window, plateau-selection rule, seed "
+            "averaging, and validation metrics. Reverse-NEMD runs should be reported through "
+            "the replicated slab geometry, heat-flow direction, binning, swap interval, "
+            "gradient-fit windows, imposed-flux convention, and mirrored-slope consistency. "
+            + (_sentence_join(details) + ". " if details else "")
+            + "Following the UN thermal-transport workflow, the manuscript should compare "
+            "Green-Kubo and non-equilibrium or mode-analysis estimates before assigning a "
+            "mechanism to phonon-like, defect-limited, or strongly anharmonic transport."
+        )
+
     if "MLIP" in modules_to_write:
         frame_count = _first_fact(evidences, "extxyz_frames", None)
         manifest = _first_fact(evidences, "dataset_manifest", {})
@@ -1341,6 +1907,20 @@ def result_lines(evidences: list[RunEvidence]) -> list[str]:
         lammps = evidence.facts.get("lammps_log")
         if isinstance(lammps, dict) and lammps:
             lines.append("The MD thermo summary was " + _format_value(lammps) + ".")
+        lines.extend(
+            _transport_result_sentences(
+                "Green-Kubo",
+                evidence.facts.get("gk_temperature_table"),
+                evidence.facts.get("gk_validation"),
+            )
+        )
+        lines.extend(
+            _transport_result_sentences(
+                "reverse NEMD",
+                evidence.facts.get("rnemd_temperature_table"),
+                evidence.facts.get("rnemd_validation"),
+            )
+        )
         thermo = evidence.facts.get("thermo_csv")
         if isinstance(thermo, dict) and thermo:
             lines.append("The thermodynamic table summary was " + _format_value(thermo) + ".")
@@ -1455,6 +2035,82 @@ def evidences_to_json(evidences: list[RunEvidence]) -> list[dict[str, object]]:
     ]
 
 
+def llm_metadata_json(
+    evidences: list[RunEvidence],
+    modules: list[str],
+    *,
+    title: str,
+    material: str,
+    study_label: str,
+    notes: list[str],
+    hpc_context: dict[str, Any] | None = None,
+) -> dict[str, object]:
+    detected_modules = sorted({module for evidence in evidences for module in evidence.detected_modules})
+    active_modules = modules or detected_modules
+    return {
+        "schema": "atomi.paper_draft.llm_metadata.v1",
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "manuscript_context": {
+            "title": title,
+            "material": material,
+            "study_label": study_label,
+            "user_notes": notes,
+            "requested_modules": modules,
+            "detected_modules": detected_modules,
+        },
+        "paper_lessons": {
+            "USi_elastic_RUS_style": [
+                "Tie every property result to the exact reference structure, supercell, finite-temperature sampling protocol, and property-extraction equation.",
+                "Report convergence and validation before interpreting trends: ground-state structure, elastic constants, phonon/MD stability, and comparison with experiment or prior calculations.",
+                "Keep Methods layered: DFT reference, ML-assisted sampling if used, finite-temperature MD, post-processing formulae, uncertainty, and data availability.",
+            ],
+            "UN_thermal_transport_style": [
+                "Stable MLIP-MD is a prerequisite, not the conclusion; thermal transport needs route-specific validation.",
+                "For Green-Kubo, extract timestep, ensemble history, NVE length, heat-current sampling interval, HCACF correlation time, plateau window, seed count, per-axis k, seed CV, and late-drift diagnostics.",
+                "For non-equilibrium or normal-mode routes, extract slab/replicate geometry, heat-flow direction, binning/gradient windows, imposed flux or modal lifetime protocol, finite-size checks, and agreement/disagreement with GK.",
+                "Compare GK, rNEMD/NEMD, NMA, and benchmark values cautiously; mismatches can indicate finite-size effects, poor gradient linearity, defect disorder, anharmonicity, coherent/off-diagonal transport, or MLIP-domain issues.",
+            ],
+        },
+        "extraction_targets": {
+            "DFT": [
+                "structure/composition",
+                "VASP version",
+                "INCAR convergence and spin tags",
+                "KPOINTS mesh",
+                "POTCAR titles",
+                "final energy/volume/NIONS",
+            ],
+            "VASP_PREP": [
+                "motif provenance",
+                "defect/cloud/candidate counts",
+                "random seeds",
+                "charge/spin labels",
+                "runlist entries",
+            ],
+            "TRANSPORT": [
+                "GK config/plan/validation/seed-summary/k(T) tables",
+                "rNEMD config/plan/validation/profile/k(T) tables",
+                "timestep, ensemble lengths, sampling/correlation/plateau windows",
+                "replicate geometry, heat-flow direction, bins, swap interval",
+                "seed count, per-axis spread, seed CV, late drift, slope mismatch, validation status",
+                "runtime and array estimates from plans/HPC config when available",
+            ],
+            "MLIP": ["model file", "training manifest", "dataset frame count", "validation/outlier notes"],
+            "MOOSE": ["material-property table columns", "temperature range", "unit/interpolation details"],
+        },
+        "writing_checklist": format_rule_lines(active_modules),
+        "verification_items": [
+            "Fill in any missing software versions, citations, units, and private-path redactions before manuscript submission.",
+            "Verify that all thermal-conductivity unit conversions and normalization conventions match the equations used in the manuscript.",
+            "For GK, inspect HCACF decay and running-integral plateau for every temperature/seed before trusting k(T).",
+            "For rNEMD/NEMD, inspect temperature-profile linearity, excluded hot/cold bins, and mirrored-slope agreement.",
+            "For U/actinide systems, verify magnetic/valence state labels and whether the selected potential/model was validated for that chemistry and temperature range.",
+        ],
+        "hpc_context": hpc_context or {},
+        "runs": evidences_to_json(evidences),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="paper-draft",
@@ -1467,7 +2123,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         action="append",
         default=[],
-        help="Workflow keywords used in this entry, e.g. DFT VASP_PREP VASP_SPIN MLIP AIMD MD CALPHAD MOOSE.",
+        help="Workflow keywords used in this entry, e.g. DFT VASP_PREP VASP_SPIN MLIP AIMD MD TRANSPORT CALPHAD MOOSE.",
     )
     parser.add_argument(
         "--run",
@@ -1487,6 +2143,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--fragment-out", type=Path, help="Also write this entry to a standalone file.")
     parser.add_argument("--evidence-json", type=Path, help="Write parsed evidence as JSON.")
+    parser.add_argument(
+        "--llm-metadata-json",
+        "--metadata-json",
+        type=Path,
+        help="Write a richer LLM-readable metadata packet for manuscript drafting.",
+    )
     parser.add_argument("--title", default="Atomi Draft Entry", help="Section heading for this entry.")
     parser.add_argument("--study-label", default="", help="Short label for this calculation set.")
     parser.add_argument("--material", default="", help="Material or chemical system label.")
@@ -1495,7 +2157,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode",
         choices=("append", "overwrite", "fragment"),
         default="append",
-        help="How to write --document. Fragment writes only --fragment-out and evidence JSON.",
+        help="How to write --document. Fragment writes only --fragment-out and JSON metadata outputs.",
     )
     parser.add_argument("--max-files", type=int, default=5000, help="Maximum files to scan per run folder.")
     parser.add_argument("--hpc-config", type=Path, help="Optional private Atomi HPC config JSON. Defaults to ATOMI_HPC_CONFIG when set.")
@@ -1546,6 +2208,27 @@ def main(argv: list[str] | None = None) -> None:
             encoding="utf-8",
         )
         print(f"Wrote evidence JSON: {args.evidence_json}")
+
+    if args.llm_metadata_json:
+        args.llm_metadata_json.parent.mkdir(parents=True, exist_ok=True)
+        args.llm_metadata_json.write_text(
+            json.dumps(
+                llm_metadata_json(
+                    evidences,
+                    modules,
+                    title=args.title,
+                    material=args.material,
+                    study_label=args.study_label,
+                    notes=args.note,
+                    hpc_context=hpc_context,
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        print(f"Wrote LLM metadata JSON: {args.llm_metadata_json}")
 
     if args.mode != "fragment":
         args.document.parent.mkdir(parents=True, exist_ok=True)
