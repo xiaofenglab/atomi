@@ -57,6 +57,7 @@ class ProjectionResult:
     direct_candidate_summary: dict[str, object]
     randomized_candidate_summary: dict[str, object]
     initial_spin_candidate_summary: dict[str, object]
+    chemistry_spin_summary: dict[str, object]
     warnings: list[str]
 
 
@@ -297,6 +298,7 @@ def project_poscar_elements(
         species_order or default_order,
         [symbol for index, symbol in enumerate(projected_symbols) if index not in removed_anion_targets],
     )
+    prepared_source_species: PoscarSpecies | None = None
     if prepared_source_poscar is not None:
         prepared_source_order = complete_species_order(output_order, source_symbols)
         prepared_source_species, prepared_source_indices = grouped_species_and_indices(
@@ -404,6 +406,16 @@ def project_poscar_elements(
         output_species.symbols,
         magmom_decimals,
     )
+    chemistry_spin_summary = build_chemistry_spin_summary(
+        output_species,
+        prepared_source_species,
+        output_moments_grouped,
+        cation_set,
+        anion_set,
+        oxidation_states or {},
+        magmom_oxidation_states or {},
+        magmom_decimals,
+    )
     magmom_warnings = cation_magmom_preservation_warnings(cation_magmom_comparison)
     warnings.extend(magmom_warnings)
     guest_cation_distance_summary = summarize_guest_cation_distances(
@@ -486,6 +498,7 @@ def project_poscar_elements(
             "cation_magmom_comparison": cation_magmom_comparison,
             "anion_vacancy_summary": anion_vacancy_summary,
             "charge_summary": charge_summary,
+            "chemistry_spin_summary": chemistry_spin_summary,
             "guest_cation_distance_summary": guest_cation_distance_summary,
             "direct_candidate_summary": direct_candidate_summary,
             "randomized_candidate_summary": randomized_candidate_summary,
@@ -528,6 +541,7 @@ def project_poscar_elements(
         direct_candidate_summary=direct_candidate_summary,
         randomized_candidate_summary=randomized_candidate_summary,
         initial_spin_candidate_summary=initial_spin_candidate_summary,
+        chemistry_spin_summary=chemistry_spin_summary,
         warnings=warnings,
     )
 
@@ -1528,6 +1542,134 @@ def format_cation_magmom_summary(summary: dict[str, dict[str, object]]) -> list[
             f"sum={float(entry.get('sum', 0.0)):g} mean={float(entry.get('mean', 0.0)):g} "
             f"abs=[{abs_text}]"
         )
+    return lines
+
+
+def all_species_magmom_summary(
+    species: PoscarSpecies,
+    moments: list[float] | None,
+    decimals: int,
+) -> dict[str, dict[str, object]]:
+    if moments is None:
+        return {}
+    summary: dict[str, dict[str, object]] = {}
+    cursor = 0
+    for symbol, count in zip(species.symbols, species.counts):
+        values = moments[cursor : cursor + count]
+        cursor += count
+        histogram: dict[str, int] = {}
+        for value in values:
+            key = f"{round(value, decimals):g}"
+            histogram[key] = histogram.get(key, 0) + 1
+        unique_abs = sorted({round(abs(value), decimals) for value in values})
+        signs = Counter(moment_sign(value) for value in values)
+        summary[symbol] = {
+            "count": count,
+            "positive": signs.get("positive", 0),
+            "negative": signs.get("negative", 0),
+            "zero": signs.get("zero", 0),
+            "sum": round(sum(values), decimals),
+            "mean": round(sum(values) / count, decimals) if count else 0.0,
+            "unique_abs_moments": unique_abs,
+            "moment_histogram": histogram,
+        }
+    return summary
+
+
+def oxidation_family_summary(
+    species: PoscarSpecies,
+    moments: list[float] | None,
+    oxidation_states: dict[str, float],
+    magmom_oxidation_states: dict[str, list[tuple[float, float]]],
+) -> dict[str, dict[str, object]]:
+    if not (oxidation_states or magmom_oxidation_states):
+        return {}
+    summary: dict[str, dict[str, object]] = {}
+    cursor = 0
+    for symbol, count in zip(species.symbols, species.counts):
+        values = moments[cursor : cursor + count] if moments is not None else [None] * count
+        cursor += count
+        oxidation_counts: Counter[str] = Counter()
+        unknown_count = 0
+        for value in values:
+            oxidation = oxidation_for_symbol(symbol, value, oxidation_states, magmom_oxidation_states)
+            if oxidation is None:
+                unknown_count += 1
+            else:
+                oxidation_counts[f"{oxidation:g}"] += 1
+        summary[symbol] = {
+            "count": count,
+            "oxidation_counts": dict(sorted(oxidation_counts.items())),
+            "unknown_count": unknown_count,
+        }
+    return summary
+
+
+def cations_before_anions(
+    species: PoscarSpecies,
+    cation_elements: set[str],
+    anion_elements: set[str],
+) -> bool:
+    seen_anion = False
+    for symbol in species.symbols:
+        if symbol in anion_elements:
+            seen_anion = True
+        elif symbol in cation_elements and seen_anion:
+            return False
+    return True
+
+
+def build_chemistry_spin_summary(
+    output_species: PoscarSpecies,
+    prepared_source_species: PoscarSpecies | None,
+    output_moments: list[float] | None,
+    cation_elements: set[str],
+    anion_elements: set[str],
+    oxidation_states: dict[str, float],
+    magmom_oxidation_states: dict[str, list[tuple[float, float]]],
+    decimals: int,
+) -> dict[str, object]:
+    magmom_count = len(output_moments) if output_moments is not None else None
+    expected_count = output_species.total_atoms
+    return {
+        "output_species_order": output_species.symbols,
+        "output_species_counts": dict(zip(output_species.symbols, output_species.counts)),
+        "prepared_source_species_order": [] if prepared_source_species is None else prepared_source_species.symbols,
+        "prepared_source_species_counts": (
+            {}
+            if prepared_source_species is None
+            else dict(zip(prepared_source_species.symbols, prepared_source_species.counts))
+        ),
+        "anion_after_cations_ok": cations_before_anions(output_species, cation_elements, anion_elements),
+        "magmom_count": magmom_count,
+        "expected_magmom_count": expected_count,
+        "magmom_count_ok": magmom_count is None or magmom_count == expected_count,
+        "spin_by_element": all_species_magmom_summary(output_species, output_moments, decimals),
+        "oxidation_by_element": oxidation_family_summary(
+            output_species,
+            output_moments,
+            oxidation_states,
+            magmom_oxidation_states,
+        ),
+    }
+
+
+def format_spin_summary(summary: dict[str, dict[str, object]]) -> list[str]:
+    return format_cation_magmom_summary(summary)
+
+
+def format_oxidation_family_summary(summary: dict[str, dict[str, object]]) -> list[str]:
+    lines: list[str] = []
+    for symbol, entry in summary.items():
+        counts = entry.get("oxidation_counts", {})
+        if isinstance(counts, dict) and counts:
+            text = " ".join(f"{charge}:{count}" for charge, count in counts.items())
+        else:
+            text = "none"
+        unknown = int(entry.get("unknown_count", 0))
+        if unknown:
+            text += f" unknown:{unknown}"
+        lines.append(f"{symbol}: {text}")
     return lines
 
 
@@ -3940,6 +4082,39 @@ def main(argv: list[str] | None = None) -> None:
         "Output species   : "
         + " ".join(f"{symbol}:{count}" for symbol, count in zip(result.output_species.symbols, result.output_species.counts))
     )
+    chemistry = result.chemistry_spin_summary
+    if chemistry:
+        print("Chemistry/spin check:")
+        print(
+            "  POSCAR         : "
+            + " ".join(
+                f"{symbol}:{count}"
+                for symbol, count in chemistry.get("output_species_counts", {}).items()
+            )
+        )
+        prepared_counts = chemistry.get("prepared_source_species_counts", {})
+        if isinstance(prepared_counts, dict) and prepared_counts:
+            print(
+                "  POSCAR_A_prep  : "
+                + " ".join(f"{symbol}:{count}" for symbol, count in prepared_counts.items())
+            )
+        if chemistry.get("magmom_count") is not None:
+            print(
+                "  MAGMOM count   : "
+                f"{chemistry.get('magmom_count')}/{chemistry.get('expected_magmom_count')} "
+                f"ok={chemistry.get('magmom_count_ok')}"
+            )
+        print(f"  Anions last    : {chemistry.get('anion_after_cations_ok')}")
+        spin_summary = chemistry.get("spin_by_element", {})
+        if isinstance(spin_summary, dict) and spin_summary:
+            print("  Spin families  :")
+            for line in format_spin_summary(spin_summary):
+                print(f"    {line}")
+        oxidation_summary = chemistry.get("oxidation_by_element", {})
+        if isinstance(oxidation_summary, dict) and oxidation_summary:
+            print("  Oxidation tags :")
+            for line in format_oxidation_family_summary(oxidation_summary):
+                print(f"    {line}")
     removed_counts = result.anion_vacancy_summary.get("removed_anion_counts", {})
     if removed_counts:
         print(

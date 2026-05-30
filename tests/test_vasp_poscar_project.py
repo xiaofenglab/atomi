@@ -574,6 +574,10 @@ def test_project_poscar_uses_cation_elements_order_for_output_cations(tmp_path: 
             str(out),
             "--cation-elements",
             "Gd,U",
+            "--oxidation-state",
+            "Gd=3,U=4,O=-2",
+            "--magmom-oxidation",
+            "Gd:7=3,U:2=5",
         ]
     )
 
@@ -588,6 +592,17 @@ def test_project_poscar_uses_cation_elements_order_for_output_cations(tmp_path: 
     plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
     assert plan["cation_elements"] == ["Gd", "U"]
     assert plan["species_order"] == ["Gd", "U", "O"]
+    sanity = plan["chemistry_spin_summary"]
+    assert sanity["output_species_counts"] == {"Gd": 1, "U": 1, "O": 3}
+    assert sanity["magmom_count"] == 5
+    assert sanity["magmom_count_ok"] is True
+    assert sanity["anion_after_cations_ok"] is True
+    assert sanity["spin_by_element"]["Gd"]["unique_abs_moments"] == [7]
+    assert sanity["spin_by_element"]["U"]["unique_abs_moments"] == [2]
+    assert sanity["spin_by_element"]["O"]["unique_abs_moments"] == [0]
+    assert sanity["oxidation_by_element"]["Gd"]["oxidation_counts"] == {"3": 1}
+    assert sanity["oxidation_by_element"]["U"]["oxidation_counts"] == {"5": 1}
+    assert sanity["oxidation_by_element"]["O"]["oxidation_counts"] == {"-2": 3}
 
 
 def test_project_poscar_moves_anions_after_requested_cation_order(tmp_path: Path) -> None:
