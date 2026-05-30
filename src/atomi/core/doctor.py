@@ -222,7 +222,10 @@ def find_config_path(explicit: Path | None = None) -> Path | None:
     env_path = os.environ.get(CONFIG_ENV_VAR)
     if env_path:
         candidates.append(Path(env_path).expanduser())
-    candidates.extend([LOCAL_CONFIG, USER_CONFIG])
+    candidates.append(LOCAL_CONFIG)
+    for pattern in LOCAL_CONFIG_PATTERNS:
+        candidates.extend(sorted(Path(".").glob(pattern)))
+    candidates.append(USER_CONFIG)
     for path in candidates:
         if path.is_file():
             return path
@@ -349,10 +352,38 @@ def build_hpc_config_template(site: str = "") -> dict[str, Any]:
             },
             "mace_training_gpu": {
                 "scheduler": "slurm",
-                "partition": "",
-                "gres": "",
+                "job_name": "mace_train",
+                "partition": "gpu",
+                "gres": "gpu:1",
+                "nodes": 1,
+                "ntasks": 1,
+                "cpus_per_task": 8,
+                "mem": "32G",
+                "time": "16:00:00",
+                "output": "logs/mace_%j.out",
+                "error": "logs/mace_%j.err",
                 "env_path": "",
                 "command": "mace_run_train",
+                "default_training_parameters": {
+                    "epochs": 200,
+                    "batch_size": 16,
+                    "lr": 0.001,
+                    "energy_weight": 1.0,
+                    "forces_weight": 10.0,
+                    "stress_weight": 10.0,
+                    "seed": 7,
+                    "num_workers": 2,
+                    "model_name": "MACE",
+                    "energy_key": "REF_energy",
+                    "forces_key": "REF_forces",
+                    "stress_key": "REF_stress",
+                    "loss": "weighted",
+                    "ema_decay": 0.99,
+                },
+                "hidden_irreps_defaults": {
+                    "use_2e_yes": "128x0e + 128x1o + 128x2e",
+                    "use_2e_no": "128x0e + 128x1o",
+                },
                 "environment": {
                     "ATOMI_MACE_TRAIN_ENV": "",
                 },

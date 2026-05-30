@@ -12,6 +12,7 @@ from atomi.viz.lammps import format_summary, plot_lammps_live, read_thermo_rows,
 from atomi.viz.mace import plot_mace_live
 from atomi.viz.vasp_live import plot_vasp_live, plot_vasp_live4
 from atomi.ml.mace.datasets import main as mace_build_dataset_main
+from atomi.ml.mace.train import main as mace_train_main
 
 
 SUPPORTED_CODES = ("vasp", "cp2k", "lammps", "turbomole", "molcas", "moose", "calphad")
@@ -681,6 +682,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mace_build_dataset.add_argument("dataset_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("mace-dataset", "build-mace-dataset"):
+        mace_dataset_alias = subparsers.add_parser(
+            command_name,
+            help="Compatibility alias for mace-build-dataset.",
+        )
+        mace_dataset_alias.add_argument("dataset_args", nargs=argparse.REMAINDER)
+
     mace_energy_outliers = subparsers.add_parser(
         "mace-energy-outliers",
         help="Find high energy-error outliers for a MACE model.",
@@ -705,6 +713,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mace_vasp2extxyz.add_argument("convert_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("vasp2extxyz", "mace-vasp"):
+        mace_vasp_alias = subparsers.add_parser(
+            command_name,
+            help="Compatibility alias for mace-vasp2extxyz.",
+        )
+        mace_vasp_alias.add_argument("convert_args", nargs=argparse.REMAINDER)
+
+    for command_name in ("mace-train", "mace-train-submit"):
+        mace_train = subparsers.add_parser(
+            command_name,
+            help="Write or submit a Slurm MACE training/retraining job.",
+        )
+        mace_train.add_argument("train_args", nargs=argparse.REMAINDER)
+
     for command_name in ("lammps2extxyz", "lammps-to-extxyz", "lammps-dump-extxyz"):
         lammps_dump_extxyz = subparsers.add_parser(
             command_name,
@@ -723,7 +745,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     raw_args = sys.argv[1:] if argv is None else argv
-    if raw_args and raw_args[0] == "mace-build-dataset":
+    if raw_args and raw_args[0] in ("mace-build-dataset", "mace-dataset", "build-mace-dataset"):
         mace_build_dataset_main(raw_args[1:])
         return
     if raw_args and raw_args[0] == "mace-energy-outliers":
@@ -741,10 +763,16 @@ def main(argv: list[str] | None = None) -> None:
 
         mace_check_extxyz_main(raw_args[1:])
         return
-    if raw_args and raw_args[0] == "mace-vasp2extxyz":
+    if raw_args and raw_args[0] in ("mace-vasp2extxyz", "vasp2extxyz", "mace-vasp"):
         from atomi.ml.mace.vasp2extxyz import main as mace_vasp2extxyz_main
 
         mace_vasp2extxyz_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in ("mace-train", "mace-train-submit"):
+        train_args = raw_args[1:]
+        if raw_args[0] == "mace-train-submit" and (not train_args or train_args[0] != "submit"):
+            train_args = ["submit", *train_args]
+        mace_train_main(train_args)
         return
     if raw_args and raw_args[0] in ("lammps2extxyz", "lammps-to-extxyz", "lammps-dump-extxyz"):
         from atomi.lammps.dump_extxyz import main as lammps_dump_extxyz_main
@@ -1734,7 +1762,7 @@ def main(argv: list[str] | None = None) -> None:
         vasp_defect_cloud_main(args.defect_cloud_args)
         return
 
-    if args.subcommand == "mace-build-dataset":
+    if args.subcommand in ("mace-build-dataset", "mace-dataset", "build-mace-dataset"):
         mace_build_dataset_main(args.dataset_args)
         return
 
@@ -1774,10 +1802,17 @@ def main(argv: list[str] | None = None) -> None:
         mace_check_extxyz_main(args.check_args)
         return
 
-    if args.subcommand == "mace-vasp2extxyz":
+    if args.subcommand in ("mace-vasp2extxyz", "vasp2extxyz", "mace-vasp"):
         from atomi.ml.mace.vasp2extxyz import main as mace_vasp2extxyz_main
 
         mace_vasp2extxyz_main(args.convert_args)
+        return
+
+    if args.subcommand in ("mace-train", "mace-train-submit"):
+        train_args = args.train_args
+        if args.subcommand == "mace-train-submit" and (not train_args or train_args[0] != "submit"):
+            train_args = ["submit", *train_args]
+        mace_train_main(train_args)
         return
 
     if args.subcommand in ("lammps2extxyz", "lammps-to-extxyz", "lammps-dump-extxyz"):
