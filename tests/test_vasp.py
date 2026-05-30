@@ -82,6 +82,16 @@ def test_vasp_live4_gnuplot_uses_block_if_syntax() -> None:
     assert offenders == []
 
 
+def test_vasp_live4_header_uses_multiline_panel_titles() -> None:
+    script = files("atomi").joinpath("viz", "gnuplot", "vasp_live4.gp")
+    text = script.read_text(encoding="utf-8")
+
+    assert "DAV time: latest %s, mean %s" in text
+    assert text.count("set title sprintf(\"%s\\nE: %s    dE: %s\\nDAV time: latest %s, mean %s\"") == 4
+    assert "set label 1 sprintf(\"E:" not in text
+    assert "set term dumb ansi 160 56" in text
+
+
 def test_update_dav_timing_excludes_initialization_and_batches_new_dav_steps(tmp_path: Path) -> None:
     output = tmp_path / "vasp.out"
     output.write_text(

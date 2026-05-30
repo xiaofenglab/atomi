@@ -27,7 +27,7 @@ if (!exists("timefile4")) {
     timefile4 = ""
 }
 
-set term dumb ansi 160 48
+set term dumb ansi 160 56
 set multiplot layout 2,2 title sprintf("VASP SCF Monitor (log10|dE| + Energy + observed DAV time, window=%d)", int(win))
 
 # ---------- panel 1 ----------
@@ -68,10 +68,7 @@ if (nfiles >= 1) {
     set autoscale y
     set autoscale y2
 
-    set title sprintf("%s", fname)
-    set label 1 sprintf("E: %s", latest_E)   at screen 0.11,0.965 left textcolor rgb "cyan"
-    set label 2 sprintf("dE: %s", latest_de) at screen 0.24,0.965 left textcolor rgb "red"
-    set label 3 sprintf("dt: %s mean: %s", latest_dt, mean_dt) at screen 0.11,0.94 left textcolor rgb "green"
+    set title sprintf("%s\nE: %s    dE: %s\nDAV time: latest %s, mean %s", fname, latest_E, latest_de, latest_dt, mean_dt)
 
     set xlabel ""
     set ylabel "log10(|dE|)" textcolor rgb "red"
@@ -126,10 +123,7 @@ if (nfiles >= 2) {
     set autoscale y
     set autoscale y2
 
-    set title sprintf("%s", fname)
-    set label 1 sprintf("E: %s", latest_E)   at screen 0.61,0.965 left textcolor rgb "cyan"
-    set label 2 sprintf("dE: %s", latest_de) at screen 0.74,0.965 left textcolor rgb "red"
-    set label 3 sprintf("dt: %s mean: %s", latest_dt, mean_dt) at screen 0.61,0.94 left textcolor rgb "green"
+    set title sprintf("%s\nE: %s    dE: %s\nDAV time: latest %s, mean %s", fname, latest_E, latest_de, latest_dt, mean_dt)
 
     set xlabel ""
     set ylabel "log10(|dE|)" textcolor rgb "red"
@@ -184,10 +178,7 @@ if (nfiles >= 3) {
     set autoscale y
     set autoscale y2
 
-    set title sprintf("%s", fname)
-    set label 1 sprintf("E: %s", latest_E)   at screen 0.11,0.485 left textcolor rgb "cyan"
-    set label 2 sprintf("dE: %s", latest_de) at screen 0.24,0.485 left textcolor rgb "red"
-    set label 3 sprintf("dt: %s mean: %s", latest_dt, mean_dt) at screen 0.11,0.46 left textcolor rgb "green"
+    set title sprintf("%s\nE: %s    dE: %s\nDAV time: latest %s, mean %s", fname, latest_E, latest_de, latest_dt, mean_dt)
 
     set xlabel "DAV iteration"
     set ylabel "log10(|dE|)" textcolor rgb "red"
@@ -242,10 +233,7 @@ if (nfiles >= 4) {
     set autoscale y
     set autoscale y2
 
-    set title sprintf("%s", fname)
-    set label 1 sprintf("E: %s", latest_E)   at screen 0.61,0.485 left textcolor rgb "cyan"
-    set label 2 sprintf("dE: %s", latest_de) at screen 0.74,0.485 left textcolor rgb "red"
-    set label 3 sprintf("dt: %s mean: %s", latest_dt, mean_dt) at screen 0.61,0.46 left textcolor rgb "green"
+    set title sprintf("%s\nE: %s    dE: %s\nDAV time: latest %s, mean %s", fname, latest_E, latest_de, latest_dt, mean_dt)
 
     set xlabel "DAV iteration"
     set ylabel "log10(|dE|)" textcolor rgb "red"
