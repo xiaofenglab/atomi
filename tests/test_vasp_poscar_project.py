@@ -55,6 +55,26 @@ def write_weird_order_source_poscar(path: Path) -> None:
     )
 
 
+def write_u_o_gd_source_poscar(path: Path) -> None:
+    path.write_text(
+        "A element reference in U O Gd order\n"
+        "1.0\n"
+        "4.0 0.0 0.0\n"
+        "0.0 4.0 0.0\n"
+        "0.0 0.0 4.0\n"
+        "U O Gd\n"
+        "1 4 1\n"
+        "Direct\n"
+        "0.52 0.50 0.50\n"
+        "0.25 0.25 0.25\n"
+        "0.75 0.75 0.75\n"
+        "0.25 0.75 0.25\n"
+        "0.75 0.25 0.75\n"
+        "0.01 0.02 0.00\n",
+        encoding="utf-8",
+    )
+
+
 def write_relaxed_target_poscar(path: Path) -> None:
     path.write_text(
         "B relaxed structure with one O vacancy\n"
@@ -567,6 +587,35 @@ def test_project_poscar_uses_cation_elements_order_for_output_cations(tmp_path: 
     assert "LDAUJ = 0 0 0" in incar_text
     plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
     assert plan["cation_elements"] == ["Gd", "U"]
+    assert plan["species_order"] == ["Gd", "U", "O"]
+
+
+def test_project_poscar_moves_anions_after_requested_cation_order(tmp_path: Path) -> None:
+    source = tmp_path / "A_POSCAR"
+    target = tmp_path / "B_POSCAR"
+    out = tmp_path / "projected_u_o_gd"
+    write_u_o_gd_source_poscar(source)
+    write_relaxed_target_poscar(target)
+
+    project_main(
+        [
+            "--element-poscar",
+            str(source),
+            "--structure-poscar",
+            str(target),
+            "--outdir",
+            str(out),
+            "--cation-elements",
+            "Gd,U",
+            "--anion-elements",
+            "O",
+        ]
+    )
+
+    projected = read_poscar_structure(out / "POSCAR")
+    assert projected.species.symbols == ["Gd", "U", "O"]
+    assert projected.species.counts == [1, 1, 3]
+    plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
     assert plan["species_order"] == ["Gd", "U", "O"]
 
 
