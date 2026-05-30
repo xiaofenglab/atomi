@@ -252,13 +252,14 @@ def selected_atom_indices(species: PoscarSpecies, selected_elements: set[str]) -
 
 
 def element_atom_indices(species: PoscarSpecies, element: str) -> list[int]:
+    indices: list[int] = []
     atom_start = 0
     for symbol, count in zip(species.symbols, species.counts):
         atom_end = atom_start + count
         if symbol == element:
-            return list(range(atom_start, atom_end))
+            indices.extend(range(atom_start, atom_end))
         atom_start = atom_end
-    return []
+    return indices
 
 
 def element_for_atom(species: PoscarSpecies, atom_index: int) -> str:

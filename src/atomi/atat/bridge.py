@@ -497,11 +497,27 @@ def replace_or_append_incar_tag(text: str, tag: str, value: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def comment_incar_tag(text: str, tag: str) -> str:
+    pattern = re.compile(rf"^(\s*)({re.escape(tag)}\s*=.*)$", re.IGNORECASE)
+    lines = text.splitlines()
+    changed = False
+    for index, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith(("#", "!")):
+            continue
+        match = pattern.match(line)
+        if match:
+            lines[index] = f"{match.group(1)}#{match.group(2)}"
+            changed = True
+    return "\n".join(lines) + ("\n" if text.endswith("\n") or changed else "")
+
+
 def template_incar_with_tags(template: Path, magmom_line: str, isif: int) -> str:
     incar = template / "INCAR"
     if not incar.is_file():
         raise FileNotFoundError(f"Missing template file: {incar}")
     text = incar.read_text(encoding="utf-8", errors="replace")
+    text = comment_incar_tag(text, "NUPDOWN")
     text = replace_or_append_incar_tag(text, "MAGMOM", magmom_line.split("=", 1)[1].strip())
     text = replace_or_append_incar_tag(text, "ISPIN", "2")
     text = replace_or_append_incar_tag(text, "ISIF", str(isif))
@@ -556,6 +572,30 @@ def seed_moments(
             moments[atom_index] = magnitude * sign
         pattern_tokens.append(f"{element}:{' '.join(format_number(magnitude * sign) for sign in signs)}")
     return moments, "; ".join(pattern_tokens)
+
+
+def normalize_duplicate_poscar_species(structure: Any) -> Any:
+    if len(set(structure.species.symbols)) == len(structure.species.symbols):
+        return structure
+    from atomi.vasp.magmom import PoscarSpecies, PoscarStructure
+
+    positions_by_symbol: dict[str, list[list[float]]] = {}
+    order: list[str] = []
+    atom_start = 0
+    for symbol, count in zip(structure.species.symbols, structure.species.counts):
+        if symbol not in positions_by_symbol:
+            positions_by_symbol[symbol] = []
+            order.append(symbol)
+        atom_end = atom_start + count
+        positions_by_symbol[symbol].extend(structure.scaled_positions[atom_start:atom_end])
+        atom_start = atom_end
+    counts = [len(positions_by_symbol[symbol]) for symbol in order]
+    positions = [position for symbol in order for position in positions_by_symbol[symbol]]
+    return PoscarStructure(
+        species=PoscarSpecies(symbols=order, counts=counts),
+        cell=structure.cell,
+        scaled_positions=positions,
+    )
 
 
 def safe_float_label(value: float) -> str:
@@ -4152,7 +4192,7 @@ def relax_seeds_main(argv: list[str] | None = None) -> None:
     template = args.template.expanduser().resolve()
     if not template.is_dir():
         raise FileNotFoundError(f"VASP template directory not found: {template}")
-    structure = read_poscar_structure(args.poscar.expanduser().resolve())
+    structure = normalize_duplicate_poscar_species(read_poscar_structure(args.poscar.expanduser().resolve()))
     species = structure.species
     moment_specs = parse_moment_specs(args.moment)
     magnetic_elements = split_items(args.magnetic_element)
@@ -4184,7 +4224,7 @@ def relax_seeds_main(argv: list[str] | None = None) -> None:
         magmom_line = format_magmom_line(
             species,
             moments,
-            selected_elements=magnetic_elements + nonmagnetic_elements,
+            selected_elements=magnetic_elements,
             decimals=args.decimals,
             compact_zero=True,
         )

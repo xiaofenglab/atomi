@@ -1224,3 +1224,73 @@ def test_materials_opt_relax_seeds_prepares_volume_scan(tmp_path: Path, capsys) 
     summary = rows(out / "SUMMARY_volume_isif2.csv")
     assert len(summary) == 4
     assert (out / "04_summary" / "volume_isif2" / "spin_energy_run_summary.csv").exists()
+
+
+def test_materials_opt_relax_seeds_handles_repeated_duplicate_species_blocks(tmp_path: Path) -> None:
+    template = tmp_path / "VASP_TEMPLATE"
+    template.mkdir()
+    poscar = tmp_path / "POSCAR_2x1x1_duplicate_blocks"
+    poscar.write_text(
+        "UC2 duplicate species blocks from ASE repeat\n"
+        "1.0\n"
+        "4 0 0\n"
+        "0 1 0\n"
+        "0 0 1\n"
+        "U C U C\n"
+        "2 4 2 4\n"
+        "Direct\n"
+        "0 0 0\n"
+        "0.25 0 0\n"
+        "0.1 0 0\n"
+        "0.2 0 0\n"
+        "0.3 0 0\n"
+        "0.4 0 0\n"
+        "0.5 0 0\n"
+        "0.75 0 0\n"
+        "0.6 0 0\n"
+        "0.7 0 0\n"
+        "0.8 0 0\n"
+        "0.9 0 0\n",
+        encoding="utf-8",
+    )
+    for name, text in {
+        "INCAR": "ENCUT = 520\nNUPDOWN = 0\nMAGMOM = 2 -2 10*0\n",
+        "KPOINTS": "Gamma\n",
+        "POTCAR": "fake\n",
+    }.items():
+        (template / name).write_text(text, encoding="utf-8")
+    out = tmp_path / "uc2_relax"
+
+    atomi_main(
+        [
+            "materials-opt",
+            "relax-seeds",
+            "--system",
+            "UC2",
+            "--formula",
+            "UC2",
+            "--poscar",
+            str(poscar),
+            "--template",
+            str(template),
+            "--outdir",
+            str(out),
+            "--magnetic-element",
+            "U",
+            "--nonmagnetic-element",
+            "C",
+            "--moment",
+            "U=2",
+            "--seed-spins",
+            "afm",
+            "--volume-scale",
+            "1.00",
+        ]
+    )
+
+    incar = (out / "02_volume_isif2" / "run_0001_afm_v1" / "INCAR").read_text(encoding="utf-8")
+    poscar_text = (out / "02_volume_isif2" / "run_0001_afm_v1" / "POSCAR").read_text(encoding="utf-8")
+    assert "#NUPDOWN = 0" in incar
+    assert "MAGMOM = 2 -2 2 -2 8*0" in incar
+    assert "U  C" in poscar_text
+    assert "4  8" in poscar_text

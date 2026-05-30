@@ -73,10 +73,13 @@ def test_repeat_poscar_writes_supercell_and_metadata(tmp_path: Path) -> None:
     repeat_poscar_main([str(poscar), "--repeat", "2x1x1", "--outdir", str(outdir), "--copy-inputs"])
 
     repeated = read(outdir / "POSCAR", format="vasp")
+    poscar_lines = (outdir / "POSCAR").read_text(encoding="utf-8").splitlines()
     assert len(repeated) == 6
     assert repeated.cell.lengths()[0] == pytest.approx(6.0)
     assert repeated.cell.lengths()[1] == pytest.approx(4.0)
     assert repeated.cell.lengths()[2] == pytest.approx(5.0)
+    assert poscar_lines[5].split() == ["U", "C"]
+    assert poscar_lines[6].split() == ["2", "4"]
     assert (outdir / "INCAR").read_text(encoding="utf-8") == "MAGMOM = 2 0 0\n"
     metadata = json.loads((outdir / "POSCAR.repeat_metadata.json").read_text(encoding="utf-8"))
     assert metadata["repeat"] == [2, 1, 1]
