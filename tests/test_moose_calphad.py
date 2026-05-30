@@ -12,6 +12,7 @@ from atomi.moose.material_sources import (
     resolve_materials_project_api_key,
     screen_main,
     screen_plan,
+    select_materials_project_doc,
     source_main,
 )
 from atomi.moose.workflow import (
@@ -572,6 +573,49 @@ def test_moose_material_source_loads_materials_project_key_json(tmp_path: Path, 
     resolved, resolved_source = resolve_materials_project_api_key(args)
     assert resolved == "secret-key"
     assert resolved_source == f"json:{key_json}"
+
+
+def test_materials_project_formula_selection_prefers_requested_phase() -> None:
+    args = type(
+        "Args",
+        (),
+        {
+            "material": "UO2",
+            "phase": None,
+            "spacegroup_number": 225,
+            "spacegroup_symbol": "Fm-3m",
+            "no_prefer_stable": False,
+        },
+    )()
+    docs = [
+        {
+            "material_id": "mp-soft",
+            "formula_pretty": "UO2",
+            "k_vrh": 120,
+            "g_vrh": 45,
+            "homogeneous_poisson": 0.33,
+            "symmetry": {"symbol": "Ia-3", "number": 206, "crystal_system": "cubic"},
+            "energy_above_hull": 0.0,
+            "is_stable": True,
+        },
+        {
+            "material_id": "mp-fluorite",
+            "formula_pretty": "UO2",
+            "k_vrh": 190,
+            "g_vrh": 70,
+            "homogeneous_poisson": 0.32,
+            "symmetry": {"symbol": "Fm-3m", "number": 225, "crystal_system": "cubic"},
+            "energy_above_hull": 0.01,
+            "is_stable": False,
+        },
+    ]
+
+    selected, selection = select_materials_project_doc(docs, args)
+
+    assert selected["material_id"] == "mp-fluorite"
+    assert selection["candidate_count"] == 2
+    assert selection["warnings"] == []
+    assert selection["selected"]["symmetry_symbol"] == "Fm-3m"
 
 
 def test_moose_material_compare_writes_table_and_plots_optional(tmp_path: Path) -> None:

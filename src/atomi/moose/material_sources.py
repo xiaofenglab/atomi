@@ -595,6 +595,149 @@ def elastic_row_from_kg(
     return row
 
 
+def doc_value(doc: Any, key: str, default: Any = None) -> Any:
+    if isinstance(doc, dict):
+        return doc.get(key, default)
+    return getattr(doc, key, default)
+
+
+def nested_value(obj: Any, key: str, default: Any = None) -> Any:
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def normalize_phase_token(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def materials_project_symmetry(doc: Any) -> dict[str, Any]:
+    symmetry = doc_value(doc, "symmetry", {}) or {}
+    return {
+        "symbol": nested_value(symmetry, "symbol", "") or nested_value(symmetry, "space_group_symbol", ""),
+        "number": nested_value(symmetry, "number", None) or nested_value(symmetry, "space_group_number", None),
+        "crystal_system": nested_value(symmetry, "crystal_system", ""),
+    }
+
+
+def materials_project_candidate_summary(doc: Any) -> dict[str, Any]:
+    symmetry = materials_project_symmetry(doc)
+    return {
+        "material_id": str(doc_value(doc, "material_id", "")),
+        "formula_pretty": doc_value(doc, "formula_pretty", ""),
+        "k_vrh": doc_value(doc, "k_vrh", None),
+        "g_vrh": doc_value(doc, "g_vrh", None),
+        "homogeneous_poisson": doc_value(doc, "homogeneous_poisson", None),
+        "symmetry_symbol": symmetry["symbol"],
+        "symmetry_number": symmetry["number"],
+        "crystal_system": symmetry["crystal_system"],
+        "energy_above_hull": doc_value(doc, "energy_above_hull", None),
+        "is_stable": doc_value(doc, "is_stable", None),
+    }
+
+
+def materials_project_phase_match(doc: Any, args: argparse.Namespace) -> bool:
+    symmetry = materials_project_symmetry(doc)
+    phase_tokens = [
+        doc_value(doc, "material_id", ""),
+        doc_value(doc, "formula_pretty", ""),
+        symmetry["symbol"],
+        symmetry["crystal_system"],
+    ]
+    requested_phase = normalize_phase_token(getattr(args, "phase", "") or "")
+    requested_symbol = normalize_phase_token(getattr(args, "spacegroup_symbol", "") or "")
+    if requested_phase and any(requested_phase == normalize_phase_token(token) for token in phase_tokens):
+        return True
+    if requested_symbol and requested_symbol == normalize_phase_token(symmetry["symbol"]):
+        return True
+    requested_number = getattr(args, "spacegroup_number", None)
+    if requested_number is not None:
+        try:
+            if int(symmetry["number"]) == int(requested_number):
+                return True
+        except (TypeError, ValueError):
+            return False
+    return not (requested_phase or requested_symbol or requested_number is not None)
+
+
+def materials_project_doc_score(doc: Any, args: argparse.Namespace) -> tuple[Any, ...]:
+    symmetry = materials_project_symmetry(doc)
+    requested_phase = normalize_phase_token(getattr(args, "phase", "") or "")
+    requested_symbol = normalize_phase_token(getattr(args, "spacegroup_symbol", "") or "")
+    requested_number = getattr(args, "spacegroup_number", None)
+    phase_mismatch = 0
+    if requested_phase:
+        phase_tokens = [
+            doc_value(doc, "material_id", ""),
+            doc_value(doc, "formula_pretty", ""),
+            symmetry["symbol"],
+            symmetry["crystal_system"],
+        ]
+        phase_mismatch = 0 if any(requested_phase == normalize_phase_token(token) for token in phase_tokens) else 1
+    symbol_mismatch = 0
+    if requested_symbol:
+        symbol_mismatch = 0 if requested_symbol == normalize_phase_token(symmetry["symbol"]) else 1
+    number_mismatch = 0
+    if requested_number is not None:
+        try:
+            number_mismatch = 0 if int(symmetry["number"]) == int(requested_number) else 1
+        except (TypeError, ValueError):
+            number_mismatch = 1
+    missing_elastic = int(
+        finite_float(doc_value(doc, "k_vrh")) is None or finite_float(doc_value(doc, "g_vrh")) is None
+    )
+    prefer_stable = not getattr(args, "no_prefer_stable", False)
+    unstable = 0
+    if prefer_stable:
+        is_stable = doc_value(doc, "is_stable", None)
+        unstable = 0 if is_stable is True else 1 if is_stable is False else 0
+    hull = finite_float(doc_value(doc, "energy_above_hull"))
+    hull_score = hull if hull is not None else 1.0e9
+    return (
+        phase_mismatch,
+        symbol_mismatch,
+        number_mismatch,
+        missing_elastic,
+        unstable,
+        hull_score,
+        str(doc_value(doc, "material_id", "")),
+    )
+
+
+def select_materials_project_doc(docs: list[Any], args: argparse.Namespace) -> tuple[Any, dict[str, Any]]:
+    if not docs:
+        raise SystemExit(f"No Materials Project summary results for {args.material!r}")
+    ranked = sorted(docs, key=lambda doc: materials_project_doc_score(doc, args))
+    selected = ranked[0]
+    exact_phase_matches = [doc for doc in docs if materials_project_phase_match(doc, args)]
+    warnings: list[str] = []
+    if (
+        getattr(args, "phase", None)
+        or getattr(args, "spacegroup_symbol", None)
+        or getattr(args, "spacegroup_number", None) is not None
+    ) and not exact_phase_matches:
+        warnings.append(
+            "No exact Materials Project phase/space-group match was found; "
+            "selected the best scored formula match. Inspect candidate_summaries."
+        )
+    if finite_float(doc_value(selected, "k_vrh")) is None or finite_float(doc_value(selected, "g_vrh")) is None:
+        warnings.append("Selected Materials Project entry does not contain both k_vrh and g_vrh.")
+    selection = {
+        "candidate_count": len(docs),
+        "selected": materials_project_candidate_summary(selected),
+        "candidate_summaries": [materials_project_candidate_summary(doc) for doc in ranked[:25]],
+        "warnings": warnings,
+        "selection_rules": [
+            "prefer requested phase/space-group text or number",
+            "prefer entries with k_vrh and g_vrh elastic summaries",
+            "prefer stable / lower energy_above_hull entries unless --no-prefer-stable is set",
+        ],
+    }
+    return selected, selection
+
+
 def fetch_materials_project(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     try:
         from mp_api.client import MPRester  # type: ignore
@@ -611,16 +754,18 @@ def fetch_materials_project(args: argparse.Namespace) -> tuple[list[dict[str, An
         "k_vrh",
         "g_vrh",
         "homogeneous_poisson",
+        "symmetry",
+        "energy_above_hull",
+        "is_stable",
     ]
     with MPRester(api_key) as mpr:
         if material_ids:
             docs = mpr.materials.summary.search(material_ids=material_ids, fields=fields)
         else:
             docs = mpr.materials.summary.search(formula=args.material, fields=fields)
-    if not docs:
-        raise SystemExit(f"No Materials Project summary results for {args.material!r}")
-    doc = docs[0]
+    doc, selection = select_materials_project_doc(list(docs), args)
     get = doc.get if isinstance(doc, dict) else lambda key, default=None: getattr(doc, key, default)
+    symmetry = materials_project_symmetry(doc)
     row = elastic_row_from_kg(
         provider="materials-project",
         material=args.material,
@@ -636,6 +781,11 @@ def fetch_materials_project(args: argparse.Namespace) -> tuple[list[dict[str, An
         "material": args.material,
         "material_id": row["material_id"],
         "fields": ["k_vrh", "g_vrh", "homogeneous_poisson"],
+        "requested_phase": getattr(args, "phase", None),
+        "requested_spacegroup_number": getattr(args, "spacegroup_number", None),
+        "requested_spacegroup_symbol": getattr(args, "spacegroup_symbol", None),
+        "selected_symmetry": symmetry,
+        "selection": selection,
         "api_key_source": api_key_source,
         "source_url": "https://docs.materialsproject.org/",
     }
@@ -717,6 +867,20 @@ def source_main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--material", default="UO2")
     parser.add_argument("--material-id", help="Provider-specific material id, e.g. mp-1234.")
+    parser.add_argument(
+        "--phase",
+        help=(
+            "Optional Materials Project phase hint. Matched loosely against material id, "
+            "formula, symmetry symbol, or crystal system; use --spacegroup-* for stricter selection."
+        ),
+    )
+    parser.add_argument("--spacegroup-number", type=int, help="Prefer this Materials Project space-group number.")
+    parser.add_argument("--spacegroup-symbol", help="Prefer this Materials Project space-group symbol, e.g. Fm-3m.")
+    parser.add_argument(
+        "--no-prefer-stable",
+        action="store_true",
+        help="Do not prefer stable / lower-energy-above-hull Materials Project entries during formula lookup.",
+    )
     parser.add_argument("--input", type=Path, help="Curated CSV for provider=user-csv.")
     parser.add_argument("--out-csv", type=Path, default=Path("material_source_properties.csv"))
     parser.add_argument("--out-meta", type=Path, default=Path("material_source_properties.meta.json"))

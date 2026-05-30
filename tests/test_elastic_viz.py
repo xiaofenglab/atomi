@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from atomi.elastic.derived import complete_thermophysical_derived, formula_atom_count
 from atomi.elastic.viz import main
@@ -113,6 +114,74 @@ def test_elastic_viz_reads_lammps_tensor_payload(tmp_path: Path, capsys) -> None
     assert "Bulk modulus K (GPa): Voigt upper=" in captured
     assert "Shear modulus G (GPa): Voigt upper=" in captured
     assert "Elastic moduli vs temperature" in captured
+
+
+def test_elastic_viz_writes_benchmark_corrected_outputs(tmp_path: Path) -> None:
+    c = cubic_tensor()
+    moduli = voigt_reuss_hill(c)
+    elastic_dir = tmp_path / "fit"
+    elastic_dir.mkdir()
+    (elastic_dir / "elastic_tensors.json").write_text(
+        json.dumps(
+            {
+                "300.0": {
+                    "temperature_K": 300.0,
+                    "symmetry": "cubic",
+                    "C_symmetry_reduced_GPa": c.tolist(),
+                    "moduli": moduli,
+                    "md_box": {"volume_A3_mean": 1310.0},
+                },
+                "600.0": {
+                    "temperature_K": 600.0,
+                    "symmetry": "cubic",
+                    "C_symmetry_reduced_GPa": (0.9 * c).tolist(),
+                    "moduli": voigt_reuss_hill(0.9 * c),
+                    "md_box": {"volume_A3_mean": 1310.0},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with (elastic_dir / "elastic_moduli_T.csv").open("w", newline="", encoding="utf-8") as handle:
+        fields = ["temperature_K", "V_mean_A3", *tensor_components(c).keys(), *moduli.keys()]
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerow({"temperature_K": 300.0, "V_mean_A3": 1310.0, **tensor_components(c), **moduli})
+    benchmark = tmp_path / "benchmark.csv"
+    benchmark.write_text(
+        "T_K,K_GPa,G_GPa,E_GPa,nu\n"
+        f"300,{1.25 * moduli['K_H_GPa']},{1.25 * moduli['G_H_GPa']},{1.25 * moduli['E_H_GPa']},{moduli['nu_H']}\n",
+        encoding="utf-8",
+    )
+    outdir = tmp_path / "viz"
+
+    main(
+        [
+            "--elastic-dir",
+            str(elastic_dir),
+            "--outdir",
+            str(outdir),
+            "--formula",
+            "UO2",
+            "--formula-units",
+            "32",
+            "--benchmark-elastic-csv",
+            str(benchmark),
+            "--benchmark-correction-mode",
+            "scalar-ratio",
+            "--benchmark-anchor-T",
+            "300",
+        ]
+    )
+
+    corrected = list(csv.DictReader((outdir / "elastic_thermophysical_summary_corrected.csv").open(encoding="utf-8")))
+    raw = list(csv.DictReader((outdir / "elastic_thermophysical_summary.csv").open(encoding="utf-8")))
+    assert len(corrected) == 2
+    assert float(corrected[0]["E_H_GPa"]) == pytest.approx(1.25 * float(raw[0]["E_H_GPa"]))
+    assert (outdir / "elastic_tensors_corrected.json").exists()
+    assert (outdir / "elastic_benchmark_correction.json").exists()
+    series, _, _ = load_external_properties([outdir / "moose_elastic_properties_corrected.csv"], [], [])
+    assert {"E_Pa", "nu", "K_Pa", "G_Pa", "rho_kg_m3"}.issubset(series)
 
 
 def test_elastic_viz_reads_vasp_tensor_payload(tmp_path: Path) -> None:

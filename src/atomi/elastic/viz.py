@@ -8,6 +8,7 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 import numpy as np
@@ -20,7 +21,7 @@ from atomi.elastic.derived import (
     formula_atom_count,
     fracture_toughness_from_fracture_energy,
 )
-from atomi.lammps.elastic import tensor_components
+from atomi.lammps.elastic import tensor_components, voigt_reuss_hill
 
 
 VOIGT_MAT = ((0, 5, 4), (5, 1, 3), (4, 3, 2))
@@ -264,6 +265,349 @@ def moose_elastic_property_rows(rows: list[dict[str, Any]]) -> list[dict[str, An
             continue
         out.append({field: row.get(field) for field in MOOSE_ELASTIC_PROPERTY_FIELDS})
     return out
+
+
+def first_finite_scaled(row: dict[str, Any], candidates: list[tuple[str, float]]) -> float | None:
+    for key, scale in candidates:
+        value = float_or_none(row.get(key))
+        if value is not None:
+            return value * scale
+    return None
+
+
+def benchmark_scalar_moduli_GPa(row: dict[str, Any]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    specs = {
+        "K": [
+            ("K_H_GPa", 1.0),
+            ("K_GPa", 1.0),
+            ("K_VRH_GPa", 1.0),
+            ("K_Pa", 1.0e-9),
+            ("K_H_Pa", 1.0e-9),
+        ],
+        "G": [
+            ("G_H_GPa", 1.0),
+            ("G_GPa", 1.0),
+            ("G_VRH_GPa", 1.0),
+            ("G_Pa", 1.0e-9),
+            ("G_H_Pa", 1.0e-9),
+        ],
+        "E": [
+            ("E_H_GPa", 1.0),
+            ("E_GPa", 1.0),
+            ("E_Pa", 1.0e-9),
+            ("E_H_Pa", 1.0e-9),
+        ],
+        "nu": [("nu_H", 1.0), ("nu", 1.0), ("poisson_ratio", 1.0)],
+    }
+    for label, candidates in specs.items():
+        value = first_finite_scaled(row, candidates)
+        if value is not None:
+            out[label] = value
+    return out
+
+
+def benchmark_tensor_GPa(row: dict[str, Any]) -> np.ndarray | None:
+    c = np.full((6, 6), np.nan, dtype=float)
+    found = 0
+    for i in range(6):
+        for j in range(i, 6):
+            key = f"C{i + 1}{j + 1}"
+            value = first_finite_scaled(row, [(f"{key}_GPa", 1.0), (f"{key}_Pa", 1.0e-9)])
+            if value is None:
+                continue
+            c[i, j] = value
+            c[j, i] = value
+            found += 1
+    if found >= 21:
+        return c
+    compact = ["C11", "C22", "C33", "C44", "C55", "C66", "C12", "C13", "C23"]
+    if all(
+        first_finite_scaled(row, [(f"{name}_GPa", 1.0), (f"{name}_Pa", 1.0e-9)]) is not None
+        for name in compact
+    ):
+        c = np.zeros((6, 6), dtype=float)
+        for index, name in enumerate(("C11", "C22", "C33", "C44", "C55", "C66")):
+            c[index, index] = first_finite_scaled(row, [(f"{name}_GPa", 1.0), (f"{name}_Pa", 1.0e-9)]) or 0.0
+        for (i, j), name in [((0, 1), "C12"), ((0, 2), "C13"), ((1, 2), "C23")]:
+            value = first_finite_scaled(row, [(f"{name}_GPa", 1.0), (f"{name}_Pa", 1.0e-9)]) or 0.0
+            c[i, j] = c[j, i] = value
+        return c
+    return None
+
+
+def source_rows_from_benchmark_provider(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    provider = args.benchmark_provider
+    if provider == "materials-project":
+        from atomi.moose.material_sources import fetch_materials_project
+
+        return fetch_materials_project(
+            SimpleNamespace(
+                material=args.benchmark_material or args.formula or "UO2",
+                material_id=args.benchmark_material_id,
+                phase=args.benchmark_phase,
+                spacegroup_number=args.benchmark_spacegroup_number,
+                spacegroup_symbol=args.benchmark_spacegroup_symbol,
+                no_prefer_stable=args.benchmark_no_prefer_stable,
+                api_key_env=args.benchmark_api_key_env,
+                api_key_json=args.benchmark_api_key_json,
+            )
+        )
+    if provider == "aflow":
+        from atomi.moose.material_sources import fetch_aflow
+
+        return fetch_aflow(
+            SimpleNamespace(
+                material=args.benchmark_material or args.formula or "UO2",
+                timeout=args.benchmark_timeout,
+            )
+        )
+    return [], {"provider": provider}
+
+
+def load_benchmark_rows(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if args.benchmark_elastic_csv:
+        rows = [dict(row) for row in read_csv_rows(args.benchmark_elastic_csv)]
+        return rows, {"provider": "csv", "path": str(args.benchmark_elastic_csv)}
+    if args.benchmark_provider != "none":
+        return source_rows_from_benchmark_provider(args)
+    return [], {"provider": "none"}
+
+
+def row_temperature(row: dict[str, Any]) -> float | None:
+    for key in ("T_K", "temperature_K", "temperature"):
+        value = float_or_none(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def closest_benchmark_row(rows: list[dict[str, Any]], anchor_T: float) -> tuple[dict[str, Any], float | None]:
+    if not rows:
+        raise ValueError("No benchmark rows available for elastic correction.")
+    with_t = [(row, row_temperature(row)) for row in rows]
+    finite = [(row, temp) for row, temp in with_t if temp is not None]
+    if finite:
+        row, temp = min(finite, key=lambda item: abs((item[1] or 0.0) - anchor_T))
+        return row, temp
+    return rows[0], None
+
+
+def closest_record(records: list[ElasticRecord], anchor_T: float) -> ElasticRecord:
+    finite = [record for record in records if record.temperature_K is not None]
+    if finite:
+        return min(finite, key=lambda record: abs((record.temperature_K or 0.0) - anchor_T))
+    return records[0]
+
+
+def scalar_tensor_scale(anchor_moduli: dict[str, Any], benchmark_scalars: dict[str, float]) -> tuple[float, list[dict[str, float]]]:
+    ratios: list[dict[str, float]] = []
+    mapping = {"K": "K_H_GPa", "G": "G_H_GPa", "E": "E_H_GPa"}
+    for label, md_key in mapping.items():
+        benchmark = benchmark_scalars.get(label)
+        md_value = float_or_none(anchor_moduli.get(md_key))
+        if benchmark is not None and md_value is not None and md_value > 0:
+            ratios.append({"modulus": label, "benchmark_GPa": benchmark, "md_anchor_GPa": md_value, "ratio": benchmark / md_value})
+    if not ratios:
+        raise ValueError("Benchmark correction needs K, G, or E in the benchmark source.")
+    return float(sum(item["ratio"] for item in ratios) / len(ratios)), ratios
+
+
+def corrected_tensors(
+    records: list[ElasticRecord],
+    *,
+    mode: str,
+    benchmark_row: dict[str, Any],
+    anchor_record: ElasticRecord,
+) -> tuple[list[np.ndarray], dict[str, Any]]:
+    benchmark_scalars = benchmark_scalar_moduli_GPa(benchmark_row)
+    benchmark_tensor = benchmark_tensor_GPa(benchmark_row)
+    anchor_moduli = voigt_reuss_hill(anchor_record.tensor_GPa)
+    effective_mode = "scalar-ratio" if mode == "auto" and benchmark_tensor is None else mode
+    effective_mode = "tensor-ratio" if effective_mode == "auto" else effective_mode
+    metadata: dict[str, Any] = {
+        "requested_mode": mode,
+        "effective_mode": effective_mode,
+        "benchmark_scalars_GPa": benchmark_scalars,
+        "anchor_label": anchor_record.label,
+        "anchor_temperature_K": anchor_record.temperature_K,
+        "anchor_moduli_GPa": anchor_moduli,
+    }
+    if effective_mode == "scalar-ratio":
+        scale, ratios = scalar_tensor_scale(anchor_moduli, benchmark_scalars)
+        metadata.update({"uniform_tensor_scale": scale, "scalar_ratios": ratios})
+        return [record.tensor_GPa * scale for record in records], metadata
+    if benchmark_tensor is None:
+        raise ValueError(f"Benchmark correction mode {effective_mode!r} requires Cij tensor columns.")
+    if effective_mode == "tensor-ratio":
+        factors = np.ones((6, 6), dtype=float)
+        mask = np.abs(anchor_record.tensor_GPa) > 1.0e-12
+        factors[mask] = benchmark_tensor[mask] / anchor_record.tensor_GPa[mask]
+        factors = 0.5 * (factors + factors.T)
+        metadata["component_scale_tensor"] = factors
+        return [record.tensor_GPa * factors for record in records], metadata
+    if effective_mode == "tensor-offset":
+        delta = benchmark_tensor - anchor_record.tensor_GPa
+        metadata["component_offset_tensor_GPa"] = delta
+        return [record.tensor_GPa + delta for record in records], metadata
+    raise ValueError(f"Unknown benchmark correction mode: {effective_mode}")
+
+
+def corrected_summary_rows(
+    records: list[ElasticRecord],
+    tensors: list[np.ndarray],
+    *,
+    args: argparse.Namespace,
+    formula_units: float | None,
+    density: float | None,
+    atoms_per_formula_unit: float | None,
+    cell_meta: dict[str, Any],
+    correction_metadata: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rows: list[dict[str, Any]] = []
+    tensor_payload: list[dict[str, Any]] = []
+    for record, tensor in zip(records, tensors):
+        moduli = voigt_reuss_hill(tensor)
+        row = dict(record.row)
+        row.update({"label": record.label, "source": f"{record.source} benchmark-corrected"})
+        if record.temperature_K is not None:
+            row["temperature_K"] = record.temperature_K
+            row["T_K"] = record.temperature_K
+        row.update(tensor_components(tensor))
+        row.update(moduli)
+        row.update(complete_elastic_derived(row, tensor))
+        row.update(
+            complete_thermophysical_derived(
+                row,
+                formula=args.formula,
+                formula_units=formula_units,
+                density_kg_m3=density,
+                molar_mass_g_mol=args.molar_mass_g_mol,
+                atoms_per_formula_unit=atoms_per_formula_unit,
+            )
+        )
+        row.update(
+            {
+                "formula": cell_meta["formula"],
+                "natoms": cell_meta["natoms"],
+                "atoms_per_formula_unit": cell_meta["atoms_per_formula_unit"],
+                "n_formula_units": cell_meta["n_formula_units"],
+                "target_z_formula_units": cell_meta["target_z_formula_units"],
+                "normalization_basis": cell_meta["normalization_basis"],
+                "cell_role": cell_meta["cell_role"],
+                "correction_mode": correction_metadata["effective_mode"],
+                "benchmark_anchor_label": correction_metadata["anchor_label"],
+                "benchmark_anchor_T_K": correction_metadata["anchor_temperature_K"],
+                "source_tag": safe_label(f"{row.get('source', 'elastic')}_corrected"),
+            }
+        )
+        rows.append(row)
+        tensor_payload.append(
+            {
+                "label": f"{record.label}_benchmark_corrected",
+                "temperature_K": record.temperature_K,
+                "source": row["source"],
+                "symmetry": row.get("symmetry", ""),
+                "symmetry_reduced_tensor_GPa": tensor,
+                "moduli": moduli,
+                "correction": {
+                    "mode": correction_metadata["effective_mode"],
+                    "anchor_label": correction_metadata["anchor_label"],
+                    "anchor_temperature_K": correction_metadata["anchor_temperature_K"],
+                },
+            }
+        )
+    return rows, tensor_payload
+
+
+def maybe_write_benchmark_correction(
+    *,
+    args: argparse.Namespace,
+    outdir: Path,
+    records: list[ElasticRecord],
+    formula_units: float | None,
+    density: float | None,
+    atoms_per_formula_unit: float | None,
+    cell_meta: dict[str, Any],
+) -> dict[str, Any]:
+    if args.benchmark_correction_mode == "none" and args.benchmark_provider == "none" and not args.benchmark_elastic_csv:
+        return {"enabled": False}
+    rows, source_metadata = load_benchmark_rows(args)
+    benchmark_row, benchmark_T = closest_benchmark_row(rows, args.benchmark_anchor_T)
+    anchor_record = closest_record(records, args.benchmark_anchor_T)
+    mode = args.benchmark_correction_mode
+    if mode == "none":
+        mode = "auto"
+    tensors, correction = corrected_tensors(
+        records,
+        mode=mode,
+        benchmark_row=benchmark_row,
+        anchor_record=anchor_record,
+    )
+    corrected_rows, tensor_payload = corrected_summary_rows(
+        records,
+        tensors,
+        args=args,
+        formula_units=formula_units,
+        density=density,
+        atoms_per_formula_unit=atoms_per_formula_unit,
+        cell_meta=cell_meta,
+        correction_metadata=correction,
+    )
+    corrected_summary = outdir / "elastic_thermophysical_summary_corrected.csv"
+    corrected_moduli = outdir / "elastic_moduli_corrected_T.csv"
+    corrected_tensors_json = outdir / "elastic_tensors_corrected.json"
+    corrected_moose = outdir / "moose_elastic_properties_corrected.csv"
+    correction_json = outdir / "elastic_benchmark_correction.json"
+    write_csv(corrected_summary, corrected_rows)
+    corrected_moduli_fields = [
+        "label",
+        "temperature_K",
+        "T_K",
+        "source",
+        "correction_mode",
+        "K_H_GPa",
+        "G_H_GPa",
+        "E_H_GPa",
+        "nu_H",
+        *tensor_components(np.zeros((6, 6))).keys(),
+    ]
+    write_csv(
+        corrected_moduli,
+        [{field: row.get(field) for field in corrected_moduli_fields} for row in corrected_rows],
+        corrected_moduli_fields,
+    )
+    write_json(
+        corrected_tensors_json,
+        {
+            "schema": "atomi.elastic.corrected.v1",
+            "unit": "GPa",
+            "benchmark_source": source_metadata,
+            "correction": correction,
+            "tensors": tensor_payload,
+        },
+    )
+    write_csv(corrected_moose, moose_elastic_property_rows(corrected_rows), MOOSE_ELASTIC_PROPERTY_FIELDS)
+    report = {
+        "enabled": True,
+        "benchmark_source": source_metadata,
+        "benchmark_row": benchmark_row,
+        "benchmark_temperature_K": benchmark_T,
+        "correction": correction,
+        "outputs": {
+            "corrected_summary_csv": str(corrected_summary),
+            "corrected_moduli_csv": str(corrected_moduli),
+            "corrected_tensors_json": str(corrected_tensors_json),
+            "corrected_moose_elastic_properties_csv": str(corrected_moose),
+        },
+        "notes": [
+            "Materials Project and AFLOW elastic values are 0 K DFT-derived summaries; use curated finite-T benchmarks when available.",
+            "scalar-ratio applies one tensor scale to preserve anisotropy and temperature trend, so it is a calibration aid rather than a substitute for measured finite-T tensors.",
+        ],
+    }
+    write_json(correction_json, report)
+    report["outputs"]["correction_json"] = str(correction_json)
+    return report
 
 
 def surface_arrays(
@@ -542,6 +886,43 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write Debye Cv/H/S/F tables using derived theta_D.",
     )
+    parser.add_argument(
+        "--benchmark-elastic-csv",
+        type=Path,
+        help=(
+            "Optional benchmark elastic CSV. Accepts K/G/E in Pa or GPa and, when present, "
+            "Cij tensor columns such as C11_GPa or C12_Pa."
+        ),
+    )
+    parser.add_argument(
+        "--benchmark-provider",
+        choices=("none", "materials-project", "aflow"),
+        default="none",
+        help="Fetch a formula/material-id benchmark from an external provider.",
+    )
+    parser.add_argument("--benchmark-material", help="Formula for provider benchmark lookup, e.g. UO2.")
+    parser.add_argument("--benchmark-material-id", help="Provider material id, e.g. mp-1234.")
+    parser.add_argument("--benchmark-phase", help="Optional Materials Project phase hint, e.g. cubic or Fm-3m.")
+    parser.add_argument("--benchmark-spacegroup-number", type=int, help="Prefer this Materials Project space-group number.")
+    parser.add_argument("--benchmark-spacegroup-symbol", help="Prefer this Materials Project space-group symbol, e.g. Fm-3m.")
+    parser.add_argument(
+        "--benchmark-no-prefer-stable",
+        action="store_true",
+        help="Do not prefer stable / low energy-above-hull Materials Project entries during formula lookup.",
+    )
+    parser.add_argument("--benchmark-api-key-env", default="MP_API_KEY")
+    parser.add_argument("--benchmark-api-key-json", type=Path)
+    parser.add_argument("--benchmark-timeout", type=float, default=30.0)
+    parser.add_argument("--benchmark-anchor-T", type=float, default=300.0)
+    parser.add_argument(
+        "--benchmark-correction-mode",
+        choices=("none", "auto", "scalar-ratio", "tensor-ratio", "tensor-offset"),
+        default="none",
+        help=(
+            "Write benchmark-corrected elastic tensors/tables. If a benchmark source is "
+            "provided with mode=none, Atomi uses auto."
+        ),
+    )
     parser.add_argument("--debye-T-min", type=float, default=0.0)
     parser.add_argument("--debye-T-max", type=float, default=1500.0)
     parser.add_argument("--debye-T-step", type=float, default=10.0)
@@ -685,6 +1066,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         write_csv(debye_path, debye_rows)
         debye_csv = str(debye_path)
     line_plots = maybe_plot_lines(outdir, summary_rows)
+    benchmark_correction = maybe_write_benchmark_correction(
+        args=args,
+        outdir=outdir,
+        records=records,
+        formula_units=formula_units,
+        density=density,
+        atoms_per_formula_unit=atoms_per_formula_unit,
+        cell_meta=cell_meta,
+    )
     metadata = {
         "inputs": {
             "elastic_tensors": str(tensors_path),
@@ -730,6 +1120,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "debye_thermal_csv": debye_csv,
             "line_plots": line_plots,
         },
+        "benchmark_correction": benchmark_correction,
     }
     write_json(outdir / "elastic_viz_metadata.json", metadata)
     print(f"Wrote elastic thermophysical summary: {summary_csv}")
@@ -737,6 +1128,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         print(f"Wrote MOOSE elastic property CSV: {moose_elastic_csv}")
     if line_plots:
         print(f"Wrote {len(line_plots)} summary plots.")
+    if benchmark_correction.get("enabled"):
+        print(
+            "Wrote benchmark-corrected elastic outputs: "
+            f"{benchmark_correction['outputs']['corrected_summary_csv']}"
+        )
     if surface_outputs:
         print(f"Wrote {len(surface_outputs)} ELATE-style 3D HTML surfaces.")
     return metadata
