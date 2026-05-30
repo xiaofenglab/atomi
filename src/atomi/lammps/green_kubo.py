@@ -26,6 +26,7 @@ from atomi.lammps.elastic import (
     select_temperature_records,
     temperature_label,
 )
+from atomi.lammps.elements import copy_mass_keys, element_masses, lammps_mass_lines
 from atomi.lammps.thermal_conductivity import green_kubo_rows, write_csv, write_json
 from atomi.lammps.workflow import (
     SBATCH_RESOURCE_ENV,
@@ -230,8 +231,8 @@ def copy_gk_base_config(template: dict[str, Any], args: argparse.Namespace) -> d
         "lammps_pair_coeff",
         "timestep",
         "timestep_ps",
-        "mass_O",
-        "mass_U",
+        "element_masses",
+        "masses",
         "velocity_seed",
         "poll_seconds",
         "thermostat",
@@ -243,6 +244,8 @@ def copy_gk_base_config(template: dict[str, Any], args: argparse.Namespace) -> d
         "instability_rules",
     ]
     cfg = {key: template[key] for key in keys if key in template}
+    copy_mass_keys(template, cfg)
+    cfg["element_masses"] = element_masses(cfg)
     timestep_ps = float(args.timestep_ps if args.timestep_ps is not None else template.get("timestep", 0.0001))
     run_steps = int(round(float(args.nve_time_ps) / timestep_ps))
     cfg["timestep"] = timestep_ps
@@ -418,6 +421,7 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
         for item in args.model_elements:
             elements.extend(part.strip() for part in str(item).replace(",", " ").split() if part.strip())
         cfg["model_elements"] = elements
+    cfg["element_masses"] = element_masses(cfg)
     if cfg.get("pair_style_backend") == "mliap":
         cfg["runtime_profile"] = "lammps_gk_mliap"
         args.keep_accelerated_suffix_for_heat_flux = True
@@ -518,8 +522,7 @@ newton          on
 
 {probe_read_command(input_structure)}
 
-mass            1 {cfg["mass_O"]}
-mass            2 {cfg["mass_U"]}
+{lammps_mass_lines(cfg)}
 
 {probe_suffix_command(suffix)}{pair_text}
 

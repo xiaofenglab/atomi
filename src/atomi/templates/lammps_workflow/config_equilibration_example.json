@@ -2,6 +2,11 @@
   "wrapper_script": "run_lammps_gpu.sh",
   "initial_structure": "structures/uo2.data",
   "model_file": "models/uo2_lr1e3_v4_r4.model-lammps.pt",
+  "model_elements": ["O", "U"],
+  "element_masses": {
+    "O": 15.999,
+    "U": 238.0289
+  },
   "timestep": 0.0001,
   "mass_O": 15.999,
   "mass_U": 238.0289,

@@ -25,6 +25,7 @@ import shutil
 from importlib.resources import files
 
 from atomi.lammps.box import format_box_summary, summarize_lammps_box_arrays
+from atomi.lammps.elements import copy_mass_keys, element_masses, lammps_mass_lines, model_elements
 
 
 ROOT = Path.cwd()
@@ -72,13 +73,6 @@ def _resolve_project_path(path):
 
 def path_for_lammps(p):
     return str(Path(p).resolve())
-
-
-def model_elements(cfg):
-    elements = cfg.get("model_elements", ["O", "U"])
-    if isinstance(elements, str):
-        elements = [part.strip() for part in re.split(r"[,\s]+", elements) if part.strip()]
-    return [str(item) for item in elements]
 
 
 def lammps_pair_lines(cfg):
@@ -827,8 +821,7 @@ newton          on
 
 {read_cmd}
 
-mass            1 {cfg["mass_O"]}
-mass            2 {cfg["mass_U"]}
+{lammps_mass_lines(cfg)}
 
 {pair_text}
 
@@ -1093,8 +1086,7 @@ newton          on
 
 {read_cmd}
 
-mass            1 {cfg["mass_O"]}
-mass            2 {cfg["mass_U"]}
+{lammps_mass_lines(cfg)}
 
 {suffix_text}\
 {pair_text}
@@ -1453,6 +1445,7 @@ def write_production_config_from_equilibration(
         )
         return None
 
+    masses = element_masses(cfg)
     production_cfg = {
         "generated_by": "atomi md-engine",
         "source_config": _relative_to_root(Path(cfg["_config_path"])),
@@ -1463,10 +1456,9 @@ def write_production_config_from_equilibration(
         "wrapper_script": _relative_to_root(Path(cfg["wrapper_script"])),
         "model_file": _relative_to_root(Path(cfg["model_file"])),
         "pair_style_backend": cfg.get("pair_style_backend", "mace"),
-        "model_elements": cfg.get("model_elements", ["O", "U"]),
+        "model_elements": model_elements(cfg),
         "timestep": cfg.get("timestep", timestep_ps),
-        "mass_O": cfg["mass_O"],
-        "mass_U": cfg["mass_U"],
+        "element_masses": masses,
         "velocity_seed": cfg.get("velocity_seed", 12345),
         "poll_seconds": cfg.get("poll_seconds", 10),
         "thermostat": cfg.get("thermostat", {}),
@@ -1492,6 +1484,7 @@ def write_production_config_from_equilibration(
         },
         "instability_rules": cfg.get("instability_rules", {}),
     }
+    copy_mass_keys(cfg, production_cfg)
 
     output = _resolve_project_path(output_path)
     output.write_text(json.dumps(production_cfg, indent=2) + "\n")

@@ -140,6 +140,51 @@ def test_reverse_nemd_prepare_writes_replicated_inputs_and_array(tmp_path, monke
     assert "./run_stage.sh" in array_script
 
 
+def test_reverse_nemd_prepare_uses_configured_model_element_masses(tmp_path):
+    cfg = base_cfg(tmp_path)
+    cfg["model_elements"] = ["C", "U"]
+    cfg["mass_C"] = 12.011
+    cfg.pop("mass_O")
+    config = write_completed_npt(tmp_path, cfg)
+    set_project_root(tmp_path)
+
+    reverse_nemd.main(
+        [
+            "prepare",
+            "--config",
+            str(config),
+            "--outdir",
+            "analysis/rnemd_uc2",
+            "--config-out",
+            "config_rnemd_uc2.json",
+            "--T-min",
+            "300",
+            "--T-max",
+            "300",
+            "--n-seeds",
+            "1",
+            "--run-time-ps",
+            "1",
+            "--model-elements",
+            "C",
+            "U",
+            "--rnemd-steps-per-hour",
+            "3000",
+            "--array-limit",
+            "1",
+        ]
+    )
+
+    generated = json.loads((tmp_path / "config_rnemd_uc2.json").read_text(encoding="utf-8"))
+    chunk = tmp_path / "analysis" / "rnemd_uc2" / "rnemd_T300K_s01" / "chunk_rnemd"
+    input_text = (chunk / "in.rnemd_T300K_s01_production").read_text(encoding="utf-8")
+    assert generated["model_elements"] == ["C", "U"]
+    assert generated["element_masses"] == {"C": 12.011, "U": 238.029}
+    assert "mass            1 12.011" in input_text
+    assert "mass            2 238.029" in input_text
+    assert f"pair_coeff      * * {cfg['model_file']} C U" in input_text
+
+
 def test_reverse_nemd_prepare_scales_template_timing_by_replicated_atoms(tmp_path):
     cfg = base_cfg(tmp_path)
     cfg["performance"] = {"reference_atoms": 768, "steps_per_hour": 23256}

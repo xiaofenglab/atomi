@@ -61,6 +61,50 @@ def test_green_kubo_stage_generates_nve_heat_flux_input(tmp_path):
     assert "v_atomi_Jx v_atomi_Jy v_atomi_Jz" in text
 
 
+def test_lammps_inputs_use_configured_model_element_masses(tmp_path):
+    cfg = base_cfg(tmp_path)
+    cfg["model_elements"] = ["C", "U"]
+    cfg["mass_C"] = 12.011
+    cfg.pop("mass_O")
+    data = tmp_path / "start.data"
+    data.write_text("data\n", encoding="utf-8")
+    stage = {
+        "name": "prod_T1200K_s01",
+        "type": "nve",
+        "temperature": 1200,
+        "fixed_steps": 100,
+        "production_run": True,
+    }
+
+    text, _data, _restart, steps = generate_production_input(cfg, stage, data, "uc2_test")
+
+    assert steps == 100
+    assert "mass            1 12.011" in text
+    assert "mass            2 238.029" in text
+    assert f"pair_coeff      * * {cfg['model_file']} C U" in text
+
+
+def test_gk_probe_uses_configured_model_element_masses(tmp_path):
+    cfg = base_cfg(tmp_path)
+    cfg["model_elements"] = ["C", "U"]
+    cfg["mass_C"] = 12.011
+    cfg.pop("mass_O")
+    input_structure = tmp_path / "start.data"
+    input_structure.write_text("data\n", encoding="utf-8")
+
+    text = green_kubo.build_heat_flux_probe_input(
+        cfg,
+        root=tmp_path,
+        input_structure=input_structure,
+        temperature=1200,
+        suffix="kk",
+    )
+
+    assert "mass            1 12.011" in text
+    assert "mass            2 238.029" in text
+    assert f"pair_coeff      * * {cfg['model_file']} C U" in text
+
+
 def test_green_kubo_settings_rounds_sampling_to_timestep(tmp_path):
     settings = green_kubo_settings(
         {},

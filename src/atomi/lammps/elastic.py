@@ -6,14 +6,13 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
-import re
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
 from atomi.lammps.box import format_box_summary, summarize_lammps_box_arrays
+from atomi.lammps.elements import copy_mass_keys, element_masses
 from atomi.lammps.thermo_series import (
     collect_config_paths,
     discover_npt_records_from_md_root,
@@ -188,9 +187,13 @@ def copy_elastic_base_config(template: dict, root: Path, args: argparse.Namespac
     keys = [
         "wrapper_script",
         "model_file",
+        "pair_style_backend",
+        "model_elements",
+        "lammps_pair_style",
+        "lammps_pair_coeff",
         "timestep",
-        "mass_O",
-        "mass_U",
+        "element_masses",
+        "masses",
         "velocity_seed",
         "poll_seconds",
         "thermostat",
@@ -201,6 +204,8 @@ def copy_elastic_base_config(template: dict, root: Path, args: argparse.Namespac
         "instability_rules",
     ]
     cfg = {key: template[key] for key in keys if key in template}
+    copy_mass_keys(template, cfg)
+    cfg["element_masses"] = element_masses(cfg)
     cfg.setdefault("velocity_seed", 12345)
     cfg.setdefault("poll_seconds", 10)
     cfg.setdefault("thermostat", {"tdamp": 0.8})

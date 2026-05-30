@@ -401,6 +401,19 @@ def test_qha_cp_can_generate_thermo_anchor_values(tmp_path) -> None:
     assert anchor["S_J_mol_formula_K"] == 25.0
 
 
+def test_thermo_density_uses_requested_formula_mass() -> None:
+    data = {
+        "press_bar": np.array([0.0]),
+        "etot": np.array([-1.0]),
+        "vol_A3": np.array([100.0]),
+    }
+
+    uo2 = thermo_series.add_derived_series(data, natoms=3, atoms_per_formula_unit=3, formula="UO2")
+    uc2 = thermo_series.add_derived_series(data, natoms=3, atoms_per_formula_unit=3, formula="UC2")
+
+    assert uc2["density_g_cm3"][0] < uo2["density_g_cm3"][0]
+
+
 def test_qha_anchor_fills_only_missing_manual_values(tmp_path) -> None:
     qha = tmp_path / "qha"
     qha.mkdir()

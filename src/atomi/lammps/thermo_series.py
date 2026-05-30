@@ -143,15 +143,16 @@ _mpl_cache.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(_mpl_cache))
 os.environ.setdefault("XDG_CACHE_HOME", str(_mpl_cache))
 
-import matplotlib
+import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: E402
 
-from atomi.core.archive import archive_output_dir
-from atomi.core.cell import cell_metadata
-from atomi.lammps.box import flatten_box_summary, format_box_summary, summarize_lammps_box_arrays
-from atomi.thermo_db import jaea_anchor
+from atomi.core.archive import archive_output_dir  # noqa: E402
+from atomi.core.cell import cell_metadata  # noqa: E402
+from atomi.elastic.derived import formula_molar_mass_g_mol  # noqa: E402
+from atomi.lammps.box import flatten_box_summary, format_box_summary, summarize_lammps_box_arrays  # noqa: E402
+from atomi.thermo_db import jaea_anchor  # noqa: E402
 
 
 # -----------------------------
@@ -164,9 +165,6 @@ NA = 6.02214076e23
 BAR_A3_TO_EV = 6.241509074e-7
 EV_A3_TO_GPA = 160.21766208
 EV_CELL_TO_KJ_PER_MOL_UO2 = EV_TO_J * NA / 1000.0  # multiply by eV_cell/n_formula_units
-
-# approximate molar mass UO2 in g/mol
-MOLAR_MASS_UO2_G_MOL = 238.0289 + 2.0 * 15.999
 
 THERMO_RE = re.compile(
     r"^\s*(\d+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)(?:\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+))?"
@@ -289,7 +287,7 @@ def percentile_band(samples: np.ndarray, low: float = 16.0, high: float = 84.0) 
 
 def fit_eval_functions(T: np.ndarray, V: np.ndarray, a: np.ndarray, H_eV: np.ndarray, Cp: np.ndarray,
                        T_grid: np.ndarray, fit_degree: int, cp_source: str,
-                       nfu: float, anchor_zero: bool) -> dict[str, np.ndarray]:
+                       nfu: float, anchor_zero: bool, formula: str = "UO2") -> dict[str, np.ndarray]:
     deg_fit = min(fit_degree, max(len(T) - 1, 1))
 
     pV = np.poly1d(np.polyfit(T, V, deg_fit))
@@ -302,7 +300,6 @@ def fit_eval_functions(T: np.ndarray, V: np.ndarray, a: np.ndarray, H_eV: np.nda
     V_grid = pV(T_grid)
     a_grid = pa(T_grid)
     H_grid_eV = pH(T_grid)
-    H_abs_kJ_per_mol_UO2_grid = H_grid_eV * EV_CELL_TO_KJ_PER_MOL_UO2 / nfu
 
     alpha_V_grid = dpV(T_grid) / V_grid
     alpha_L_grid = dpa(T_grid) / a_grid
@@ -332,7 +329,7 @@ def fit_eval_functions(T: np.ndarray, V: np.ndarray, a: np.ndarray, H_eV: np.nda
     S_rel = trapz_cumulative(T_grid, Cp_over_T)
     G_rel = H_rel - T_grid * S_rel
 
-    mass_g = nfu * MOLAR_MASS_UO2_G_MOL / NA
+    mass_g = nfu * formula_molar_mass_g_mol(formula) / NA
     rho_grid = mass_g / (V_grid * 1.0e-24)
 
     return {
@@ -357,7 +354,7 @@ def bootstrap_temperature_functions(T: np.ndarray, V: np.ndarray, V_sem: np.ndar
                                     Cp: np.ndarray, Cp_sem: np.ndarray,
                                     T_grid: np.ndarray, fit_degree: int,
                                     cp_source: str, nfu: float, anchor_zero: bool,
-                                    n_boot: int, seed: int) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+                                    n_boot: int, seed: int, formula: str = "UO2") -> dict[str, tuple[np.ndarray, np.ndarray]]:
     rng = np.random.default_rng(seed)
     samples: dict[str, list[np.ndarray]] = {}
 
@@ -380,7 +377,7 @@ def bootstrap_temperature_functions(T: np.ndarray, V: np.ndarray, V_sem: np.ndar
         Hb = rng.normal(H, sigH)
         Cpb = rng.normal(Cp, sigCp)
         try:
-            funcs = fit_eval_functions(T, Vb, ab, Hb, Cpb, T_grid, fit_degree, cp_source, nfu, anchor_zero)
+            funcs = fit_eval_functions(T, Vb, ab, Hb, Cpb, T_grid, fit_degree, cp_source, nfu, anchor_zero, formula=formula)
         except Exception:
             continue
         for k, v in funcs.items():
@@ -612,14 +609,19 @@ def parse_lammps_thermo(log_path: Path) -> dict[str, np.ndarray]:
     }
 
 
-def add_derived_series(data: dict[str, np.ndarray], natoms: int, atoms_per_formula_unit: int) -> dict[str, np.ndarray]:
+def add_derived_series(
+    data: dict[str, np.ndarray],
+    natoms: int,
+    atoms_per_formula_unit: int,
+    formula: str = "UO2",
+) -> dict[str, np.ndarray]:
     nfu = natoms / atoms_per_formula_unit
     out = dict(data)
     out["press_GPa"] = out["press_bar"] * 1.0e-4
     out["enthalpy_eV"] = out["etot"] + out["press_bar"] * out["vol_A3"] * BAR_A3_TO_EV
     out["a_proxy_A"] = (4.0 * out["vol_A3"] / nfu) ** (1.0 / 3.0)
     # density g/cm3: mass = nfu*M g/mol / NA; volume A3 = 1e-24 cm3
-    mass_g = nfu * MOLAR_MASS_UO2_G_MOL / NA
+    mass_g = nfu * formula_molar_mass_g_mol(formula) / NA
     out["density_g_cm3"] = mass_g / (out["vol_A3"] * 1.0e-24)
     return out
 
@@ -1459,12 +1461,14 @@ def collect_config_paths(configs: list[str] | None, config_dir: str | None, conf
     if config_dir:
         paths.extend(sorted(Path(config_dir).resolve().glob(config_glob)))
     # de-duplicate
-    out=[]; seen=set()
+    out = []
+    seen = set()
     for x in paths:
         if not x.exists():
             raise FileNotFoundError(f"Config not found: {x}")
         if x not in seen:
-            out.append(x); seen.add(x)
+            out.append(x)
+            seen.add(x)
     if not out:
         raise RuntimeError("No config files provided. Use --config and/or --config-dir.")
     return out
@@ -1621,6 +1625,7 @@ def process_records(records: list[dict],
                     outdir: Path,
                     natoms: int,
                     atoms_per_formula_unit: int,
+                    formula: str,
                     min_window_ps: float,
                     window_ps: Optional[float],
                     window_mode: str,
@@ -1633,14 +1638,13 @@ def process_records(records: list[dict],
                     skip_combined_MD_plot: bool = False,
                     skip_selected_timeseries: bool = False,
                     raw_decimate: int = 1) -> list[dict]:
-    summaries=[]
-    diagnostic_records=[]
+    summaries = []
+    diagnostic_records = []
 
     for rec in records:
-        stage=rec["stage"]
-        name=rec["stage_name"]
-        T=float(rec["temperature"])
-        log_path=rec["log_path"]
+        name = rec["stage_name"]
+        T = float(rec["temperature"])
+        log_path = rec["log_path"]
         timestep_ps = float(timestep_override_ps) if timestep_override_ps is not None else float(rec.get("timestep_ps", 0.0001))
         config_path = rec.get("config_path")
         config_label = config_path.name if isinstance(config_path, Path) else "md-root"
@@ -1651,7 +1655,7 @@ def process_records(records: list[dict],
         stage_out.mkdir(parents=True, exist_ok=True)
 
         data = parse_lammps_thermo(log_path)
-        data = add_derived_series(data, natoms, atoms_per_formula_unit)
+        data = add_derived_series(data, natoms, atoms_per_formula_unit, formula=formula)
 
         if window_mode == "tail":
             sel_mask, sel_metrics, window_table = select_tail_window(
@@ -1749,6 +1753,7 @@ def process_from_config(config_path: Path,
                         outdir: Path,
                         natoms: int,
                         atoms_per_formula_unit: int,
+                        formula: str,
                         min_window_ps: float,
                         window_ps: Optional[float],
                         window_stride_ps: float,
@@ -1761,6 +1766,7 @@ def process_from_config(config_path: Path,
         outdir,
         natoms,
         atoms_per_formula_unit,
+        formula,
         min_window_ps,
         window_ps,
         "tail",
@@ -2851,10 +2857,8 @@ def build_combined_thermo(summaries: list[dict],
         cp_deg = min(3, finite.sum() - 1)
         coeff_Cp = np.polyfit(T_for_Cp_fit[finite], Cp_for_Cp_fit[finite], cp_deg)
         pCp = np.poly1d(coeff_Cp)
-        Cp_smooth = pCp(T)
         Cp_grid = pCp(T_grid)
     else:
-        Cp_smooth = Cp_for_integral_data
         Cp_grid = np.interp(T_grid, T_for_Cp_fit, Cp_for_Cp_fit)
 
     # Optional physical anchor at 0 K for integrals: Cp(0)=0, S(0)=0, H_rel(0)=0, G_rel(0)=0.
@@ -3218,7 +3222,7 @@ def build_combined_thermo(summaries: list[dict],
             H=H_eV, H_sem=H_sem, Cp=Cp_fluct, Cp_sem=Cp_sem,
             T_grid=T_grid, fit_degree=fit_degree, cp_source=cp_source,
             nfu=nfu, anchor_zero=anchor_zero,
-            n_boot=n_bootstrap, seed=bootstrap_seed,
+            n_boot=n_bootstrap, seed=bootstrap_seed, formula=formula,
         )
     if qha_splice_metadata.get("enabled") and "Cp_grid" in uq_bands:
         lo, hi = uq_bands["Cp_grid"]
@@ -3267,7 +3271,7 @@ def build_combined_thermo(summaries: list[dict],
 
     grid_rows = []
     # Density on grid from V_grid.
-    mass_g = nfu * MOLAR_MASS_UO2_G_MOL / NA
+    mass_g = nfu * formula_molar_mass_g_mol(formula) / NA
     rho_grid = mass_g / (V_grid * 1.0e-24)
     for i in range(len(T_grid)):
         grid_rows.append({
@@ -4043,6 +4047,7 @@ def main(argv: list[str] | None = None) -> None:
             outdir=outdir / "per_T_analysis",
             natoms=args.natoms,
             atoms_per_formula_unit=args.atoms_per_formula_unit,
+            formula=args.formula,
             min_window_ps=args.min_window_ps,
             window_ps=args.window_ps,
             window_mode=args.window_mode,
@@ -4089,6 +4094,7 @@ def main(argv: list[str] | None = None) -> None:
             outdir=outdir / "per_T_analysis",
             natoms=args.natoms,
             atoms_per_formula_unit=args.atoms_per_formula_unit,
+            formula=args.formula,
             min_window_ps=args.min_window_ps,
             window_ps=args.window_ps,
             window_mode=args.window_mode,

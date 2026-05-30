@@ -26,6 +26,7 @@ from atomi.lammps.elastic import (
     select_temperature_records,
     temperature_label,
 )
+from atomi.lammps.elements import copy_mass_keys, element_masses, lammps_mass_lines
 from atomi.lammps.thermal_conductivity import write_json
 from atomi.lammps.workflow import (
     SBATCH_RESOURCE_ENV,
@@ -275,8 +276,8 @@ def copy_rnemd_base_config(template: dict[str, Any], args: argparse.Namespace, r
         "lammps_pair_coeff",
         "timestep",
         "timestep_ps",
-        "mass_O",
-        "mass_U",
+        "element_masses",
+        "masses",
         "velocity_seed",
         "poll_seconds",
         "thermostat",
@@ -288,6 +289,8 @@ def copy_rnemd_base_config(template: dict[str, Any], args: argparse.Namespace, r
         "instability_rules",
     ]
     cfg = {key: template[key] for key in keys if key in template}
+    copy_mass_keys(template, cfg)
+    cfg["element_masses"] = element_masses(cfg)
     if "wrapper_script" in cfg:
         cfg["wrapper_script"] = str(resolve_root_path(Path(cfg["wrapper_script"]), root))
     timestep_ps = float(args.timestep_ps)
@@ -419,8 +422,7 @@ newton          on
 {_read_command(input_structure)}
 replicate       {repeat[0]} {repeat[1]} {repeat[2]}
 
-mass            1 {cfg["mass_O"]}
-mass            2 {cfg["mass_U"]}
+{lammps_mass_lines(cfg)}
 
 {_suffix_command(args.suffix)}{pair_text}
 
@@ -761,6 +763,7 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
     elements = _split_elements(args.model_elements)
     if elements is not None:
         cfg["model_elements"] = elements
+    cfg["element_masses"] = element_masses(cfg)
 
     stages, manifest = build_rnemd_runs(cfg, records, root, outdir, template, args)
     cfg["stages"] = stages

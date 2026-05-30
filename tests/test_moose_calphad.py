@@ -8,6 +8,7 @@ from atomi.moose.env import inspect_moose_environment
 from atomi.moose.material_export import main as moose_material_main
 from atomi.moose.material_sources import (
     compare_main,
+    formula_to_aflow_compound,
     load_api_key_json,
     resolve_materials_project_api_key,
     screen_main,
@@ -616,6 +617,10 @@ def test_materials_project_formula_selection_prefers_requested_phase() -> None:
     assert selection["candidate_count"] == 2
     assert selection["warnings"] == []
     assert selection["selected"]["symmetry_symbol"] == "Fm-3m"
+
+
+def test_aflow_formula_query_is_not_uo2_specific() -> None:
+    assert formula_to_aflow_compound("UC2") == "C2U1"
 
 
 def test_moose_material_compare_writes_table_and_plots_optional(tmp_path: Path) -> None:

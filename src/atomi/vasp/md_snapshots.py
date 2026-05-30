@@ -83,14 +83,16 @@ def infer_atom_type_map(cfg: dict, cli_items: list[str] | None) -> dict[int, str
 
     if "species_order" in cfg:
         return {index + 1: species for index, species in enumerate(cfg["species_order"])}
+    if "model_elements" in cfg:
+        return {index + 1: species for index, species in enumerate(cfg["model_elements"])}
 
     # Backward-compatible default for the current md-engine U/O input writer.
     if "mass_O" in cfg and "mass_U" in cfg:
         return {1: "O", 2: "U"}
 
     raise ValueError(
-        "Could not infer LAMMPS atom types. Add --atom-type-map 1=O 2=U "
-        "or put atom_type_map in the md-engine JSON."
+        "Could not infer LAMMPS atom types. Add --atom-type-map 1=C 2=U "
+        "or put atom_type_map/model_elements in the md-engine JSON."
     )
 
 
