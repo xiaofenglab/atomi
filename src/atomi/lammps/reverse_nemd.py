@@ -1267,13 +1267,35 @@ def analyze_main(args: argparse.Namespace) -> dict[str, Any]:
     outdir = resolve_root_path(args.outdir, root)
     stage_rows: list[dict[str, Any]] = []
     profile_rows: list[dict[str, Any]] = []
+    skipped_rows: list[dict[str, Any]] = []
     for stage in cfg.get("stages", []):
         if not stage.get("rnemd_run", False):
             continue
-        row = analyze_stage(cfg, stage, root, args)
+        try:
+            row = analyze_stage(cfg, stage, root, args)
+        except FileNotFoundError as exc:
+            if args.strict_missing:
+                raise
+            chunk_dir = resolve_root_path(Path(stage["chunk_dir"]), root)
+            skipped = {
+                "stage_name": stage.get("name", ""),
+                "temperature_K": float(stage.get("temperature", math.nan)),
+                "seed": int(stage.get("velocity_seed", 0)),
+                "chunk_dir": str(chunk_dir),
+                "reason": str(exc),
+            }
+            skipped_rows.append(skipped)
+            print(f"WARNING: skipping incomplete rNEMD stage {skipped['stage_name']}: {exc}")
+            continue
         profile_rows.extend(row.pop("profile_rows"))
         stage_rows.append(row)
     if not stage_rows:
+        if skipped_rows:
+            raise RuntimeError(
+                f"No completed rNEMD stages were analyzed from {config}; "
+                f"skipped {len(skipped_rows)} incomplete stage(s). "
+                f"First skipped stage: {skipped_rows[0]['stage_name']} ({skipped_rows[0]['reason']})"
+            )
         raise RuntimeError(f"No rNEMD stages were found in {config}")
 
     seed_fields = [
@@ -1300,6 +1322,15 @@ def analyze_main(args: argparse.Namespace) -> dict[str, Any]:
         profile_rows,
         ["stage_name", "chunk", "coord_reduced", "temperature_K", "count"],
     )
+    skipped_csv: str | None = None
+    if skipped_rows:
+        skipped_path = outdir / "rnemd_skipped_stages.csv"
+        _write_csv(
+            skipped_path,
+            skipped_rows,
+            ["stage_name", "temperature_K", "seed", "chunk_dir", "reason"],
+        )
+        skipped_csv = str(skipped_path)
     temperatures = sorted({float(row["temperature_K"]) for row in stage_rows})
     summary_rows: list[dict[str, Any]] = []
     for temp in temperatures:
@@ -1345,12 +1376,17 @@ def analyze_main(args: argparse.Namespace) -> dict[str, Any]:
         "seed_summary": str(outdir / "rnemd_seed_summary.csv"),
         "temperature_summary": str(outdir / "thermal_conductivity_rnemd_T.csv"),
         "profile_summary": str(outdir / "rnemd_temperature_profiles.csv"),
+        "skipped_stages_csv": skipped_csv,
         "n_stages": len(stage_rows),
+        "skipped_stage_count": len(skipped_rows),
         "n_temperatures": len(summary_rows),
     }
     write_json(outdir / "rnemd_analysis_summary.json", result)
     print(f"Wrote rNEMD seed summary: {result['seed_summary']}")
     print(f"Wrote rNEMD k(T): {result['temperature_summary']}")
+    if skipped_rows:
+        print(f"Skipped incomplete rNEMD stage(s): {len(skipped_rows)}")
+        print(f"Wrote skipped-stage report: {skipped_csv}")
     for row in summary_rows:
         print(
             f"T={row['temperature_K']:g} K  k={row['k_mean_W_mK']:.4g} W/m/K  "
@@ -1531,6 +1567,11 @@ def build_parser() -> argparse.ArgumentParser:
     ana.add_argument("--outdir", type=Path, default=Path("analysis/rnemd_lammps/fit"))
     ana.add_argument("--profile-tail-fraction", type=float, default=0.5)
     ana.add_argument("--thermo-tail-fraction", type=float, default=0.5)
+    ana.add_argument(
+        "--strict-missing",
+        action="store_true",
+        help="Fail if any configured rNEMD stage is missing output files. Default skips incomplete stages.",
+    )
 
     val = sub.add_parser("validate", help="Summarize rNEMD fit quality and decision-rule warnings.")
     val.add_argument("--fit-dir", type=Path, default=Path("analysis/rnemd_lammps/fit"))

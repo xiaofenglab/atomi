@@ -338,3 +338,76 @@ def test_reverse_nemd_analyze_and_validate_outputs(tmp_path):
     report = json.loads((tmp_path / "analysis" / "rnemd_fit" / "fit" / "validate.json").read_text(encoding="utf-8"))
     assert report["reports"][0]["status"] == "pass"
     assert report["reports"][0]["k_W_mK"] > 0
+
+
+def test_reverse_nemd_analyze_skips_incomplete_stages_by_default(tmp_path):
+    cfg = base_cfg(tmp_path)
+    config = write_completed_npt(tmp_path, cfg)
+    set_project_root(tmp_path)
+    reverse_nemd.main(
+        [
+            "prepare",
+            "--config",
+            str(config),
+            "--outdir",
+            "analysis/rnemd_partial",
+            "--config-out",
+            "config_rnemd_partial.json",
+            "--T-min",
+            "300",
+            "--T-max",
+            "300",
+            "--n-seeds",
+            "1",
+            "--run-time-ps",
+            "3",
+            "--rnemd-steps-per-hour",
+            "3000",
+            "--array-limit",
+            "1",
+        ]
+    )
+    generated_config = tmp_path / "config_rnemd_partial.json"
+    data = json.loads(generated_config.read_text(encoding="utf-8"))
+    data["stages"].append(
+        {
+            "name": "rnemd_T1500K_s01",
+            "temperature": 1500.0,
+            "velocity_seed": 71001,
+            "rnemd_run": True,
+            "chunk_dir": "analysis/rnemd_partial/rnemd_T1500K_s01/chunk_rnemd",
+            "input_file": "in.rnemd_T1500K_s01_production",
+        }
+    )
+    generated_config.write_text(json.dumps(data), encoding="utf-8")
+    chunk = tmp_path / "analysis" / "rnemd_partial" / "rnemd_T300K_s01" / "chunk_rnemd"
+    write_synthetic_rnemd_outputs(chunk)
+
+    reverse_nemd.main(
+        [
+            "analyze",
+            "--config",
+            str(generated_config),
+            "--outdir",
+            str(tmp_path / "analysis" / "rnemd_partial" / "fit"),
+        ]
+    )
+
+    fit_dir = tmp_path / "analysis" / "rnemd_partial" / "fit"
+    seed_summary = (fit_dir / "rnemd_seed_summary.csv").read_text(encoding="utf-8")
+    skipped_summary = (fit_dir / "rnemd_skipped_stages.csv").read_text(encoding="utf-8")
+    assert "rnemd_T300K_s01" in seed_summary
+    assert "rnemd_T1500K_s01" in skipped_summary
+    assert "Missing rNEMD temperature profile" in skipped_summary
+
+    with pytest.raises(FileNotFoundError):
+        reverse_nemd.main(
+            [
+                "analyze",
+                "--config",
+                str(generated_config),
+                "--outdir",
+                str(tmp_path / "analysis" / "rnemd_partial" / "fit_strict"),
+                "--strict-missing",
+            ]
+        )
