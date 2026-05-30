@@ -14,6 +14,8 @@ from atomi.vasp.magmom import (
     expand_magmom_tokens,
     find_magmom_line,
     format_magmom_line,
+    read_poscar_species,
+    reorder_incar_species_tags,
     strip_incar_comment,
 )
 
@@ -146,6 +148,7 @@ def write_repeated_incar(
     incar: Path,
     output_incar: Path,
     source_moments: list[float],
+    source_species: PoscarSpecies,
     repeated: object,
     output_indices: list[int],
     output_symbols: list[str],
@@ -161,7 +164,13 @@ def write_repeated_incar(
         decimals=decimals,
         compact_zero=False,
     )
-    text = replace_or_append_magmom_text(incar.read_text(encoding="utf-8", errors="replace"), magmom_line)
+    output_species = PoscarSpecies(output_symbols, output_counts)
+    text = reorder_incar_species_tags(
+        incar.read_text(encoding="utf-8", errors="replace"),
+        source_species,
+        output_species,
+    )
+    text = replace_or_append_magmom_text(text, magmom_line)
     output_incar.write_text(text, encoding="utf-8")
     return {
         "incar": str(incar),
@@ -196,6 +205,7 @@ def repeat_poscar(
         raise FileExistsError(f"Output already exists: {output_path}. Pass --overwrite to replace it.")
 
     atoms = read(input_path, format="vasp")
+    input_species = read_poscar_species(input_path)
     atoms.new_array("atomi_source_index", np.arange(len(atoms), dtype=int))
     input_atoms = len(atoms)
     input_cell = atoms.cell.array.tolist()
@@ -212,8 +222,17 @@ def repeat_poscar(
             source = source_dir / name
             target = output_path.parent / name
             if source.is_file() and source.resolve() != target.resolve():
-                shutil.copy2(source, target)
-                copied.append(name)
+                if name == "INCAR":
+                    text = reorder_incar_species_tags(
+                        source.read_text(encoding="utf-8", errors="replace"),
+                        input_species,
+                        PoscarSpecies(output_symbols, output_counts),
+                    )
+                    target.write_text(text, encoding="utf-8")
+                    copied.append("INCAR(species tags)")
+                else:
+                    shutil.copy2(source, target)
+                    copied.append(name)
     magmom_report: dict[str, object] | None = None
     if repeat_magmom:
         source_incar = resolve_incar_path(input_path, template_dir, incar)
@@ -222,6 +241,7 @@ def repeat_poscar(
             source_incar,
             output_path.parent / "INCAR",
             source_moments,
+            input_species,
             repeated,
             output_indices,
             output_symbols,

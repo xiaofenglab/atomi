@@ -129,6 +129,47 @@ def test_repeat_poscar_expands_template_magmom_in_output_order(tmp_path: Path) -
     assert metadata["magmom"]["magmom_line"] == "MAGMOM = 2 2 0.1 -0.1 0.1 -0.1"
 
 
+def test_repeat_poscar_reorders_ldau_species_arrays_when_species_order_changes(tmp_path: Path) -> None:
+    poscar = tmp_path / "POSCAR"
+    atoms = Atoms(
+        ["U", "C"],
+        scaled_positions=[(0.0, 0.0, 0.0), (0.5, 0.5, 0.5)],
+        cell=[3.0, 4.0, 5.0],
+        pbc=True,
+    )
+    write(poscar, atoms, format="vasp", direct=True, sort=False, vasp5=True)
+    template = tmp_path / "template"
+    template.mkdir()
+    (template / "INCAR").write_text(
+        "ENCUT = 520\nLDAU = .TRUE.\nLDAUL = 3 -1\nLDAUU = 4.0 0.0\nLDAUJ = 0 0\n",
+        encoding="utf-8",
+    )
+    (template / "KPOINTS").write_text("Gamma\n", encoding="utf-8")
+    (template / "POTCAR").write_text("fake\n", encoding="utf-8")
+    outdir = tmp_path / "sorted"
+
+    repeat_poscar_main(
+        [
+            str(poscar),
+            "--repeat",
+            "1x1x1",
+            "--outdir",
+            str(outdir),
+            "--template",
+            str(template),
+            "--copy-inputs",
+            "--sort",
+        ]
+    )
+
+    poscar_lines = (outdir / "POSCAR").read_text(encoding="utf-8").splitlines()
+    incar = (outdir / "INCAR").read_text(encoding="utf-8")
+    assert poscar_lines[5].split() == ["C", "U"]
+    assert "LDAUL = -1 3" in incar
+    assert "LDAUU = 0.0 4.0" in incar
+    assert "LDAUJ = 0 0" in incar
+
+
 def test_repeat_poscar_atomi_alias_accepts_three_repeat_values(tmp_path: Path) -> None:
     poscar = tmp_path / "POSCAR"
     atoms = Atoms(

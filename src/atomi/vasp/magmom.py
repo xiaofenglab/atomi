@@ -240,6 +240,101 @@ def find_magmom_line(lines: list[str]) -> tuple[int | None, str | None]:
     return None, None
 
 
+SPECIES_ORDERED_INCAR_TAGS = ("LDAUL", "LDAUU", "LDAUJ")
+
+
+def expand_incar_value_tokens(tokens: list[str]) -> list[str]:
+    """Expand VASP-style n*value tokens while preserving the value text."""
+    values: list[str] = []
+    for token in tokens:
+        text = token.strip()
+        if not text:
+            continue
+        if "*" in text:
+            left, right = text.split("*", 1)
+            values.extend([right] * int(left))
+        else:
+            values.append(text)
+    return values
+
+
+def find_incar_tag_line(lines: list[str], tag: str) -> tuple[int | None, str | None]:
+    pattern = re.compile(rf"^\s*{re.escape(tag)}\s*=", re.IGNORECASE)
+    for index, line in enumerate(lines):
+        if pattern.match(line):
+            return index, line
+    return None, None
+
+
+def split_incar_value_comment(line: str) -> tuple[str, str]:
+    cut = len(line)
+    for marker in ("!", "#"):
+        index = line.find(marker)
+        if index >= 0:
+            cut = min(cut, index)
+    return line[:cut], line[cut:]
+
+
+def _source_species_tag_map(
+    tag: str,
+    values: list[str],
+    source_species: PoscarSpecies,
+) -> dict[str, str]:
+    if len(values) != len(source_species.symbols):
+        raise ValueError(
+            f"{tag} has {len(values)} species values, but source POSCAR order has "
+            f"{len(source_species.symbols)} species: {source_species.symbols}."
+        )
+    mapped: dict[str, str] = {}
+    for symbol, value in zip(source_species.symbols, values):
+        if symbol in mapped and mapped[symbol] != value:
+            raise ValueError(
+                f"{tag} assigns conflicting values to repeated species {symbol!r}: "
+                f"{mapped[symbol]!r} and {value!r}."
+            )
+        mapped[symbol] = value
+    return mapped
+
+
+def reorder_incar_species_tags(
+    text: str,
+    source_species: PoscarSpecies,
+    target_species: PoscarSpecies,
+    *,
+    tags: tuple[str, ...] = SPECIES_ORDERED_INCAR_TAGS,
+) -> str:
+    """Reorder species-indexed INCAR tags such as LDAUL/LDAUU/LDAUJ.
+
+    VASP interprets these arrays in POSCAR species order, not atom order.  When
+    Atomi rewrites POSCAR species order, these tags must be remapped by element
+    name alongside MAGMOM.
+    """
+    lines = text.splitlines()
+    changed = False
+    for tag in tags:
+        line_index, line = find_incar_tag_line(lines, tag)
+        if line_index is None or line is None:
+            continue
+        value_part, comment = split_incar_value_comment(line)
+        prefix, body = value_part.split("=", 1)
+        values = expand_incar_value_tokens(body.split())
+        mapped = _source_species_tag_map(tag.upper(), values, source_species)
+        missing = [symbol for symbol in target_species.symbols if symbol not in mapped]
+        if missing:
+            raise ValueError(
+                f"{tag.upper()} cannot be remapped because target POSCAR species "
+                f"{missing} were not present in source POSCAR order {source_species.symbols}."
+            )
+        reordered = [mapped[symbol] for symbol in target_species.symbols]
+        lines[line_index] = f"{prefix.rstrip()} = {' '.join(reordered)}"
+        if comment:
+            lines[line_index] += f" {comment.strip()}"
+        changed = True
+    if not lines and not text:
+        return text
+    return "\n".join(lines) + ("\n" if text.endswith("\n") or changed else "")
+
+
 def selected_atom_indices(species: PoscarSpecies, selected_elements: set[str]) -> set[int]:
     selected = set()
     atom_start = 0

@@ -1289,7 +1289,29 @@ def test_materials_opt_relax_seeds_handles_repeated_duplicate_species_blocks(tmp
         encoding="utf-8",
     )
     for name, text in {
-        "INCAR": "ENCUT = 520\nNUPDOWN = 0\nMAGMOM = 2 -2 10*0\n",
+        "POSCAR": (
+            "UC2 template in C U order\n"
+            "1.0\n"
+            "4 0 0\n"
+            "0 1 0\n"
+            "0 0 1\n"
+            "C U\n"
+            "8 4\n"
+            "Direct\n"
+            "0.1 0 0\n"
+            "0.2 0 0\n"
+            "0.3 0 0\n"
+            "0.4 0 0\n"
+            "0.6 0 0\n"
+            "0.7 0 0\n"
+            "0.8 0 0\n"
+            "0.9 0 0\n"
+            "0 0 0\n"
+            "0.25 0 0\n"
+            "0.5 0 0\n"
+            "0.75 0 0\n"
+        ),
+        "INCAR": "ENCUT = 520\nLDAUL = -1 3\nLDAUU = 0.0 4.0\nLDAUJ = 0 0\nNUPDOWN = 0\nMAGMOM = 2 -2 10*0\n",
         "KPOINTS": "Gamma\n",
         "POTCAR": "fake\n",
     }.items():
@@ -1327,5 +1349,8 @@ def test_materials_opt_relax_seeds_handles_repeated_duplicate_species_blocks(tmp
     poscar_text = (out / "02_volume_isif2" / "run_0001_afm_v1" / "POSCAR").read_text(encoding="utf-8")
     assert "#NUPDOWN = 0" in incar
     assert "MAGMOM = 2 -2 2 -2 8*0" in incar
+    assert "LDAUL = 3 -1" in incar
+    assert "LDAUU = 4.0 0.0" in incar
+    assert "LDAUJ = 0 0" in incar
     assert "U  C" in poscar_text
     assert "4  8" in poscar_text

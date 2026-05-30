@@ -21,6 +21,7 @@ from atomi.vasp.magmom import (
     format_magmom_line,
     parse_element_list,
     read_poscar_structure,
+    reorder_incar_species_tags,
     strip_incar_comment,
 )
 
@@ -340,6 +341,7 @@ def project_poscar_elements(
             anion_set,
         )
         incar_text = source_incar.read_text(encoding="utf-8", errors="replace")
+        incar_text = reorder_incar_species_tags(incar_text, source_raw.species, output_species)
         if output_moments is not None:
             output_moments_grouped = [output_moments[index] for index in output_indices]
             selected = species_with_nonzero_moments(output_species, output_moments_grouped)
@@ -419,6 +421,7 @@ def project_poscar_elements(
         output_order,
         output_moments,
         source_incar,
+        source_raw.species,
         cation_set,
         anion_set,
         oxidation_states or {},
@@ -2134,6 +2137,7 @@ def write_randomized_projection_candidates(
     output_order: list[str],
     output_moments: list[float] | None,
     source_incar: Path | None,
+    source_species: PoscarSpecies,
     cation_elements: set[str],
     anion_elements: set[str],
     oxidation_states: dict[str, float],
@@ -2341,7 +2345,8 @@ def write_randomized_projection_candidates(
                 context=f"randomized projected INCAR for {poscar_path}",
             )
             incar_path = str((run_dir / "INCAR").resolve())
-            (run_dir / "INCAR").write_text(replace_or_append_magmom_text(base_incar_text, magmom_line), encoding="utf-8")
+            candidate_incar_text = reorder_incar_species_tags(base_incar_text, source_species, candidate_species)
+            (run_dir / "INCAR").write_text(replace_or_append_magmom_text(candidate_incar_text, magmom_line), encoding="utf-8")
 
         row["candidate_id"] = candidate_id
         row["run_dir"] = str(run_dir.resolve())

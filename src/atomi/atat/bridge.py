@@ -513,11 +513,29 @@ def comment_incar_tag(text: str, tag: str) -> str:
     return "\n".join(lines) + ("\n" if text.endswith("\n") or changed else "")
 
 
-def template_incar_with_tags(template: Path, magmom_line: str, isif: int) -> str:
+def reorder_template_incar_species_tags(text: str, template: Path, output_species: Any | None) -> str:
+    if output_species is None:
+        return text
+    template_poscar = template / "POSCAR"
+    if not template_poscar.is_file():
+        return text
+    from atomi.vasp.magmom import read_poscar_structure, reorder_incar_species_tags
+
+    source = normalize_duplicate_poscar_species(read_poscar_structure(template_poscar))
+    return reorder_incar_species_tags(text, source.species, output_species)
+
+
+def template_incar_with_tags(
+    template: Path,
+    magmom_line: str,
+    isif: int,
+    output_species: Any | None = None,
+) -> str:
     incar = template / "INCAR"
     if not incar.is_file():
         raise FileNotFoundError(f"Missing template file: {incar}")
     text = incar.read_text(encoding="utf-8", errors="replace")
+    text = reorder_template_incar_species_tags(text, template, output_species)
     text = comment_incar_tag(text, "NUPDOWN")
     text = replace_or_append_incar_tag(text, "MAGMOM", magmom_line.split("=", 1)[1].strip())
     text = replace_or_append_incar_tag(text, "ISPIN", "2")
@@ -2270,7 +2288,18 @@ def copy_vasp_template_for_vacancy(template: Path | None, run_dir: Path) -> None
                 shutil.rmtree(target)
             shutil.copytree(item, target)
         else:
-            shutil.copy2(item, target)
+            if item.name == "INCAR" and (run_dir / "POSCAR").is_file():
+                from atomi.vasp.magmom import read_poscar_structure
+
+                target_structure = read_poscar_structure(run_dir / "POSCAR")
+                text = reorder_template_incar_species_tags(
+                    item.read_text(encoding="utf-8", errors="replace"),
+                    template,
+                    target_structure.species,
+                )
+                target.write_text(text, encoding="utf-8")
+            else:
+                shutil.copy2(item, target)
     incar = run_dir / "INCAR"
     if incar.is_file():
         incar.write_text(ensure_isym_zero(incar.read_text(encoding="utf-8")), encoding="utf-8")
@@ -4279,7 +4308,7 @@ def relax_seeds_main(argv: list[str] | None = None) -> None:
             structure.cell,
             structure.scaled_positions,
         )
-        seed_incar = template_incar_with_tags(template, magmom_line, args.isif_volume)
+        seed_incar = template_incar_with_tags(template, magmom_line, args.isif_volume, species)
         copy_relax_vasp_files(template, seed_root / seed, seed_poscar, seed_incar)
 
         for volume_scale in args.volume_scale:
@@ -4295,7 +4324,7 @@ def relax_seeds_main(argv: list[str] | None = None) -> None:
                 new_cell,
                 structure.scaled_positions,
             )
-            incar_text = template_incar_with_tags(template, magmom_line, args.isif_volume)
+            incar_text = template_incar_with_tags(template, magmom_line, args.isif_volume, species)
             copy_relax_vasp_files(template, run_dir, poscar_text, incar_text)
             run_dirs.append(run_dir)
             rows.append(
