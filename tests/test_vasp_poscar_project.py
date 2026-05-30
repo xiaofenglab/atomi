@@ -74,6 +74,39 @@ def write_relaxed_target_poscar(path: Path) -> None:
     )
 
 
+def write_uc_source_with_carbon_vacancy(path: Path) -> None:
+    path.write_text(
+        "A UC source with one C vacancy\n"
+        "1.0\n"
+        "4.0 0.0 0.0\n"
+        "0.0 4.0 0.0\n"
+        "0.0 0.0 4.0\n"
+        "U C\n"
+        "1 1\n"
+        "Direct\n"
+        "0.00 0.00 0.00\n"
+        "0.25 0.25 0.25\n",
+        encoding="utf-8",
+    )
+
+
+def write_uc2_target(path: Path) -> None:
+    path.write_text(
+        "B relaxed UC2 target\n"
+        "1.0\n"
+        "4.1 0.0 0.0\n"
+        "0.0 4.1 0.0\n"
+        "0.0 0.0 4.1\n"
+        "U C\n"
+        "1 2\n"
+        "Direct\n"
+        "0.01 0.00 0.00\n"
+        "0.24 0.25 0.25\n"
+        "0.76 0.75 0.75\n",
+        encoding="utf-8",
+    )
+
+
 def expanded_magmom_values(incar: Path) -> list[float]:
     _line_index, line = find_magmom_line(incar.read_text(encoding="utf-8", errors="replace").splitlines())
     assert line is not None
@@ -810,6 +843,45 @@ def test_project_poscar_crop_preserves_oxygen_vacancy_and_charge_neutrality(
     assert "Randomized candidates: 3" in captured
     assert "Pool       : 8" in captured
     assert "ATAT sbatch:" in captured
+
+
+def test_project_poscar_preserves_requested_carbon_anion_vacancy(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = tmp_path / "A_uc_vc_POSCAR"
+    target = tmp_path / "B_uc2_POSCAR"
+    out = tmp_path / "projected_uc_vc"
+    write_uc_source_with_carbon_vacancy(source)
+    write_uc2_target(target)
+
+    project_main(
+        [
+            "--element-poscar",
+            str(source),
+            "--structure-poscar",
+            str(target),
+            "--outdir",
+            str(out),
+            "--cation-elements",
+            "U",
+            "--anion-elements",
+            "C",
+            "--oxidation-state",
+            "U=2,C=-2",
+        ]
+    )
+
+    projected = read_poscar_structure(out / "POSCAR")
+    assert projected.species.symbols == ["U", "C"]
+    assert projected.species.counts == [1, 1]
+    plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    assert plan["anion_elements"] == ["C"]
+    assert plan["anion_vacancy_summary"]["removed_anion_counts"] == {"C": 1}
+    assert plan["anion_vacancy_summary"]["output_anion_counts"] == {"C": 1}
+    assert plan["charge_summary"]["neutrality_ok"] is True
+    captured = capsys.readouterr().out
+    assert "Anion vacancies : C:1 target site(s) removed" in captured
 
 
 def test_project_poscar_equal_cation_counts_use_regular_origin_crop(tmp_path: Path) -> None:

@@ -134,9 +134,10 @@ VACANCY_CANDIDATE_FIELDS = [
     "stability_status",
     "stability_notes",
     "poscar",
-    "n_Gd",
-    "n_O",
-    "n_Va",
+    "vacancy_label",
+    "n_vacancy",
+    "vacancy_site_species_counts_json",
+    "tracked_species_counts_json",
     "n_partial_element",
     "species_counts_json",
     "site_label",
@@ -799,7 +800,7 @@ def default_pseudo_species(args: argparse.Namespace) -> list[PseudoSpecies]:
     rows: list[PseudoSpecies] = []
     host = args.host
     dopants = args.dopant or []
-    oxygen = args.oxygen
+    anion = args.anion_element
     if host:
         if host == "U":
             rows.extend(
@@ -842,9 +843,30 @@ def default_pseudo_species(args: argparse.Namespace) -> list[PseudoSpecies]:
         else:
             label = safe_name(dopant)
             rows.append(PseudoSpecies(label, dopant, "dopant_ionic_state", "", "", "cation"))
-    if oxygen:
-        rows.append(PseudoSpecies(oxygen, oxygen, "anion", "0", "2-", "anion", f"{oxygen}=0@0.25"))
-        rows.append(PseudoSpecies(args.vacancy_label, oxygen, "vacancy", "0", "", "anion", "", "oxygen vacancy"))
+    if anion:
+        rows.append(
+            PseudoSpecies(
+                safe_name(anion),
+                anion,
+                "anion",
+                "0",
+                args.anion_charge_state,
+                "anion",
+                args.anion_moment_guard or f"{anion}=0@0.25",
+            )
+        )
+        rows.append(
+            PseudoSpecies(
+                args.vacancy_label,
+                anion,
+                "vacancy",
+                "0",
+                "",
+                "anion",
+                "",
+                notes=f"{anion} vacancy",
+            )
+        )
     return rows
 
 
@@ -907,8 +929,11 @@ def init_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--system", default="(Gd,U)O2-x")
     parser.add_argument("--host", default="U")
     parser.add_argument("--dopant", action="append", default=["Gd"])
-    parser.add_argument("--oxygen", default="O")
-    parser.add_argument("--vacancy-label", default="V_O")
+    parser.add_argument("--anion-element", default=None, help="Primary anion/ligand element for pseudo-species defaults, e.g. O or C.")
+    parser.add_argument("--oxygen", default=None, help="Deprecated alias for --anion-element; kept for UO2 workflows.")
+    parser.add_argument("--anion-charge-state", default="2-", help="Text charge label for the default anion pseudo-species. Default: 2-.")
+    parser.add_argument("--anion-moment-guard", default=None, help="Moment guard for the default anion pseudo-species. Default: ELEMENT=0@0.25.")
+    parser.add_argument("--vacancy-label", default=None)
     parser.add_argument(
         "--pseudo-species",
         action="append",
@@ -916,6 +941,9 @@ def init_main(argv: list[str] | None = None) -> None:
         help="Add/override pseudo species: LABEL=element,role,state,charge,sublattice,guard,notes.",
     )
     args = parser.parse_args(argv)
+    args.anion_element = args.anion_element or args.oxygen or "O"
+    args.oxygen = args.anion_element
+    args.vacancy_label = args.vacancy_label or f"V_{safe_name(args.anion_element)}"
     root = args.outdir.resolve()
     for stage in WORKFLOW_STAGES:
         (root / stage["stage_id"]).mkdir(parents=True, exist_ok=True)
@@ -929,7 +957,9 @@ def init_main(argv: list[str] | None = None) -> None:
             "system": args.system,
             "host": args.host,
             "dopants": args.dopant,
+            "anion_element": args.anion_element,
             "oxygen": args.oxygen,
+            "anion_charge_state": args.anion_charge_state,
             "vacancy_label": args.vacancy_label,
             "workflow_stages": WORKFLOW_STAGES,
             "pseudo_species": species_rows,
@@ -3150,9 +3180,23 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
                 "pool_index": pool_index,
                 **vacancy_stability_fields(guard_report, min_vv),
                 "poscar": "" if run_dir is None else str((run_dir / "POSCAR").resolve()),
-                "n_Gd": count_symbols.count("Gd"),
-                "n_O": count_symbols.count("O"),
-                "n_Va": len(vacancies),
+                "vacancy_label": args.vacancy_label,
+                "n_vacancy": len(vacancies),
+                "vacancy_site_species_counts_json": json.dumps(
+                    {
+                        element: count
+                        for element, count in sorted(assigned_counts.items())
+                        if element != args.vacancy_label
+                    },
+                    sort_keys=True,
+                ),
+                "tracked_species_counts_json": json.dumps(
+                    {
+                        element: count_symbols.count(element)
+                        for element in sorted(set(partial_elements or []) | set(selected_real_species))
+                    },
+                    sort_keys=True,
+                ),
                 "n_partial_element": sum(count_symbols.count(element) for element in (partial_elements or selected_real_species)),
                 "species_counts_json": json.dumps(counts, sort_keys=True),
                 "site_label": ",".join(selected_labels),
@@ -3394,7 +3438,7 @@ def vacancy_candidate_main(argv: list[str] | None = None) -> None:
     for row in rows:
         print(
             f"  {row['candidate_id']:>18s}  {row['stoichiometry']}  "
-            f"Va={row['n_Va']}  min Va-Va={row['min_vacancy_distance_A'] or 'n/a'} A"
+            f"{args.vacancy_label}={row['n_vacancy']}  min vacancy-vacancy={row['min_vacancy_distance_A'] or 'n/a'} A"
         )
     print(f"Candidate index       : {root / 'vacancy_candidate_index.csv'}")
     print(f"Runlist               : {root / 'runlist.txt'}")

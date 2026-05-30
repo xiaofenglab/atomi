@@ -98,6 +98,39 @@ def test_atat_bridge_init_writes_stage_and_species_maps(tmp_path: Path) -> None:
     assert (out / "ATAT_ATOMI_BRIDGE_NOTES.md").exists()
 
 
+def test_atat_bridge_init_uses_requested_anion_element(tmp_path: Path) -> None:
+    out = tmp_path / "atat_uc2"
+
+    atomi_main(
+        [
+            "atat-bridge",
+            "init",
+            "--outdir",
+            str(out),
+            "--system",
+            "UC2",
+            "--host",
+            "U",
+            "--anion-element",
+            "C",
+        ]
+    )
+
+    species = rows(out / "pseudo_species_map.csv")
+    by_label = {row["pseudo_species"]: row for row in species}
+    assert "C" in by_label
+    assert "V_C" in by_label
+    assert "O" not in by_label
+    assert by_label["C"]["element"] == "C"
+    assert by_label["C"]["sublattice"] == "anion"
+    assert by_label["C"]["moment_guard"] == "C=0@0.25"
+    assert by_label["V_C"]["element"] == "C"
+    assert by_label["V_C"]["notes"] == "C vacancy"
+    plan = json.loads((out / "atat_bridge_plan.json").read_text(encoding="utf-8"))
+    assert plan["anion_element"] == "C"
+    assert plan["vacancy_label"] == "V_C"
+
+
 def test_atat_bridge_index_collects_candidate_files(tmp_path: Path) -> None:
     root = tmp_path / "atat_runs"
     (root / "sqs").mkdir(parents=True)
@@ -425,7 +458,9 @@ def test_materials_opt_vacancy_cif_writes_explicit_poscars_and_atat_input(tmp_pa
         "vacancy_separated",
         "sqs_random_like",
     }
-    assert all(row["n_Va"] == "4" for row in index)
+    assert all(row["n_vacancy"] == "4" for row in index)
+    assert all(row["vacancy_label"] == "Va" for row in index)
+    assert all(json.loads(row["vacancy_site_species_counts_json"]) == {"O": 1} for row in index)
     assert all(row["site_label"] == "O2" for row in index)
     assert all(row["reasonable_stoichiometry"] == "true" for row in index)
     supercells = rows(out / "supercell_candidate_analysis.csv")
@@ -630,7 +665,7 @@ def test_materials_opt_vacancy_cif_auto_uses_multiple_vacancy_sites(tmp_path: Pa
     assert "Gd=0.5,Va=0.5" in rndstr
     assert "O=0.5,Va=0.5" in rndstr
     index = rows(out / "vacancy_candidate_index.csv")
-    assert all(row["n_Va"] == "2" for row in index)
+    assert all(row["n_vacancy"] == "2" for row in index)
     assert all(row["site_label"] == "Gd2,O2" for row in index)
 
     filtered = tmp_path / "vacancy_o_only"
@@ -699,7 +734,7 @@ def test_materials_opt_vacancy_cif_materializes_mixed_species_site(tmp_path: Pat
     rndstr = (out / "atat" / "rndstr.in").read_text(encoding="utf-8")
     assert "Gd=0.5,U=0.5" in rndstr
     index = rows(out / "vacancy_candidate_index.csv")
-    assert all(row["n_Va"] == "0" for row in index)
+    assert all(row["n_vacancy"] == "0" for row in index)
     assert any('"U": 1' in row["assigned_site_species_json"] for row in index)
     poscar_text = (out / "candidates" / "03_sqs_random_like" / "POSCAR").read_text(encoding="utf-8")
     assert "Va" not in poscar_text

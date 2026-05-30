@@ -2402,7 +2402,7 @@ def write_randomized_projection_candidates(
         "notes": [
             "Direct candidates preserve the projected B cell/coordinates but shuffle occupation labels across selected sublattices.",
             "Cation shuffling moves element and MAGMOM decorations together, so valence/spin counts are preserved.",
-            "Anion shuffling moves O/vacancy decorations together; vacancy pseudo-atoms are not written to VASP POSCARs.",
+            "Anion shuffling moves anion/vacancy decorations together; vacancy pseudo-atoms are not written to VASP POSCARs.",
             "When --randomize-pool-size is larger than --randomize-candidates, Atomi scores the pool and writes only the top ranked structures.",
             "Ranking is a heuristic screen, not a substitute for VASP relaxation: neutral structures are required when oxidation data is present, guest-guest separation is rewarded, and guest-vacancy locality is kept near the projected reference when possible.",
             "rndstr.in is an ATAT/SQS handoff with pseudo-species labels for valence/spin/vacancy states.",
@@ -3672,7 +3672,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--match-csv", type=Path)
     parser.add_argument("--plan-json", type=Path)
     parser.add_argument("--cation-elements", action="append", default=[], help="Projected sublattice elements, e.g. U,Gd. Default: all non-anion elements.")
-    parser.add_argument("--anion-elements", action="append", default=["O"], help="Elements to leave on the anion/non-projected sublattice. Default: O.")
+    parser.add_argument("--anion-elements", action="append", default=[], help="Elements to leave on the anion/non-projected sublattice. Default: O.")
     parser.add_argument("--species-order", action="append", default=[], help="Output POSCAR species order, comma-separated or repeatable.")
     parser.add_argument("--source-repeat", help="Repeat POSCAR A before projection, e.g. 2x2x2.")
     parser.add_argument("--target-repeat", help="Repeat POSCAR B before projection/output, e.g. 1x2x2.")
@@ -3751,7 +3751,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help=(
             "Write this many randomized occupation candidates on the projected B lattice. "
-            "Cation element/MAGMOM decorations and O/vacancy decorations are shuffled within their sublattices."
+            "Cation element/MAGMOM decorations and anion/vacancy decorations are shuffled within their sublattices."
         ),
     )
     parser.add_argument(
