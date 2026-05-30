@@ -640,6 +640,38 @@ def test_project_poscar_crops_2x3x3_source_to_2x2x2_target(tmp_path: Path) -> No
     assert plan["source_operations"][0]["keep_cells"] == [2, 2, 2]
 
 
+def test_project_poscar_prepared_source_uses_projected_species_order(tmp_path: Path) -> None:
+    source = tmp_path / "A_2x3x3_POSCAR"
+    target = tmp_path / "B_2x2x2_POSCAR"
+    out = tmp_path / "projected_crop_ordered"
+    write_2x3x3_cation_source(source)
+    write_2x2x2_cation_target(target)
+
+    project_main(
+        [
+            "--element-poscar",
+            str(source),
+            "--structure-poscar",
+            str(target),
+            "--outdir",
+            str(out),
+            "--source-supercell",
+            "2x3x3",
+            "--source-keep-cells",
+            "2x2x2",
+            "--cation-elements",
+            "Gd,U",
+        ]
+    )
+
+    projected = read_poscar_structure(out / "POSCAR")
+    prepared = read_poscar_structure(out / "POSCAR_A_prepared")
+    assert projected.species.symbols == ["Gd", "U"]
+    assert projected.species.counts == [1, 7]
+    assert prepared.species.symbols == ["Gd", "U"]
+    assert prepared.species.counts == [1, 7]
+
+
 def test_project_poscar_crop_prefers_minority_and_charge_coupled_cations(tmp_path: Path) -> None:
     source = tmp_path / "A_2x3x3_POSCAR"
     target = tmp_path / "B_2x2x2_POSCAR"

@@ -175,16 +175,6 @@ def project_poscar_elements(
         if source_prepared.operations
         else None
     )
-    if prepared_source_poscar is not None:
-        source_text = write_poscar_text(
-            f"Prepared source {source_poscar.name} used for projection",
-            source.species,
-            source.cell,
-            source.scaled_positions,
-        )
-        prepared_source_poscar.parent.mkdir(parents=True, exist_ok=True)
-        prepared_source_poscar.write_text(source_text, encoding="utf-8")
-
     source_symbols = atom_symbols(source)
     source_cations = selected_cation_indices(source_symbols, cation_set, anion_set)
     if len(source_cations) != len(target_cations):
@@ -307,6 +297,20 @@ def project_poscar_elements(
         species_order or default_order,
         [symbol for index, symbol in enumerate(projected_symbols) if index not in removed_anion_targets],
     )
+    if prepared_source_poscar is not None:
+        prepared_source_order = complete_species_order(output_order, source_symbols)
+        prepared_source_species, prepared_source_indices = grouped_species_and_indices(
+            source_symbols,
+            prepared_source_order,
+        )
+        source_text = write_poscar_text(
+            f"Prepared source {source_poscar.name} used for projection",
+            prepared_source_species,
+            source.cell,
+            [source.scaled_positions[index] for index in prepared_source_indices],
+        )
+        prepared_source_poscar.parent.mkdir(parents=True, exist_ok=True)
+        prepared_source_poscar.write_text(source_text, encoding="utf-8")
     output_species, output_indices = grouped_species_and_indices(
         projected_symbols,
         output_order,
