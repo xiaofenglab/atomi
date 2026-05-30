@@ -82,13 +82,15 @@ def test_vasp_live4_gnuplot_uses_block_if_syntax() -> None:
     assert offenders == []
 
 
-def test_vasp_live4_header_uses_multiline_panel_titles() -> None:
+def test_vasp_live4_header_uses_colored_panel_captions() -> None:
     script = files("atomi").joinpath("viz", "gnuplot", "vasp_live4.gp")
     text = script.read_text(encoding="utf-8")
 
     assert "DAV time: latest %s, mean %s" in text
-    assert text.count("set title sprintf(\"%s\\nE: %s    dE: %s\\nDAV time: latest %s, mean %s\"") == 4
-    assert "set label 1 sprintf(\"E:" not in text
+    assert text.count('set title sprintf("%s", fname)') == 4
+    assert text.count('set label 1 sprintf("E: %s", latest_E) at graph 0.02,1.12 left textcolor rgb "cyan"') == 4
+    assert text.count('set label 2 sprintf("dE: %s", latest_de) at graph 0.40,1.12 left textcolor rgb "red"') == 4
+    assert text.count('set label 3 sprintf("DAV time: latest %s, mean %s", latest_dt, mean_dt) at graph 0.02,1.04 left textcolor rgb "green"') == 4
     assert "set term dumb ansi 160 56" in text
 
 

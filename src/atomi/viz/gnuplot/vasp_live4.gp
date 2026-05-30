@@ -68,7 +68,10 @@ if (nfiles >= 1) {
     set autoscale y
     set autoscale y2
 
-    set title sprintf("%s\nE: %s    dE: %s\nDAV time: latest %s, mean %s", fname, latest_E, latest_de, latest_dt, mean_dt)
+    set title sprintf("%s", fname)
+    set label 1 sprintf("E: %s", latest_E) at graph 0.02,1.12 left textcolor rgb "cyan"
+    set label 2 sprintf("dE: %s", latest_de) at graph 0.40,1.12 left textcolor rgb "red"
+    set label 3 sprintf("DAV time: latest %s, mean %s", latest_dt, mean_dt) at graph 0.02,1.04 left textcolor rgb "green"
 
     set xlabel ""
     set ylabel "log10(|dE|)" textcolor rgb "red"
@@ -123,7 +126,10 @@ if (nfiles >= 2) {
     set autoscale y
     set autoscale y2
 
-    set title sprintf("%s\nE: %s    dE: %s\nDAV time: latest %s, mean %s", fname, latest_E, latest_de, latest_dt, mean_dt)
+    set title sprintf("%s", fname)
+    set label 1 sprintf("E: %s", latest_E) at graph 0.02,1.12 left textcolor rgb "cyan"
+    set label 2 sprintf("dE: %s", latest_de) at graph 0.40,1.12 left textcolor rgb "red"
+    set label 3 sprintf("DAV time: latest %s, mean %s", latest_dt, mean_dt) at graph 0.02,1.04 left textcolor rgb "green"
 
     set xlabel ""
     set ylabel "log10(|dE|)" textcolor rgb "red"
@@ -178,7 +184,10 @@ if (nfiles >= 3) {
     set autoscale y
     set autoscale y2
 
-    set title sprintf("%s\nE: %s    dE: %s\nDAV time: latest %s, mean %s", fname, latest_E, latest_de, latest_dt, mean_dt)
+    set title sprintf("%s", fname)
+    set label 1 sprintf("E: %s", latest_E) at graph 0.02,1.12 left textcolor rgb "cyan"
+    set label 2 sprintf("dE: %s", latest_de) at graph 0.40,1.12 left textcolor rgb "red"
+    set label 3 sprintf("DAV time: latest %s, mean %s", latest_dt, mean_dt) at graph 0.02,1.04 left textcolor rgb "green"
 
     set xlabel "DAV iteration"
     set ylabel "log10(|dE|)" textcolor rgb "red"
@@ -233,7 +242,10 @@ if (nfiles >= 4) {
     set autoscale y
     set autoscale y2
 
-    set title sprintf("%s\nE: %s    dE: %s\nDAV time: latest %s, mean %s", fname, latest_E, latest_de, latest_dt, mean_dt)
+    set title sprintf("%s", fname)
+    set label 1 sprintf("E: %s", latest_E) at graph 0.02,1.12 left textcolor rgb "cyan"
+    set label 2 sprintf("dE: %s", latest_de) at graph 0.40,1.12 left textcolor rgb "red"
+    set label 3 sprintf("DAV time: latest %s, mean %s", latest_dt, mean_dt) at graph 0.02,1.04 left textcolor rgb "green"
 
     set xlabel "DAV iteration"
     set ylabel "log10(|dE|)" textcolor rgb "red"
