@@ -643,6 +643,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     listvasp.add_argument("listvasp_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("vasp-repeat-poscar", "poscar-repeat", "repeat-poscar"):
+        vasp_repeat_poscar = subparsers.add_parser(
+            command_name,
+            help="Replicate a VASP POSCAR/CONTCAR by an integer supercell repeat.",
+        )
+        vasp_repeat_poscar.add_argument("repeat_poscar_args", nargs=argparse.REMAINDER)
+
     vasp_md_snapshot_candidates = subparsers.add_parser(
         "vasp-md-snapshot-candidates",
         help="Harvest successful md-engine LAMMPS frames into VASP-ready folders.",
@@ -1161,6 +1168,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.runlist import main as listvasp_main
 
         listvasp_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in ("vasp-repeat-poscar", "poscar-repeat", "repeat-poscar"):
+        from atomi.vasp.poscar_repeat import main as vasp_repeat_poscar_main
+
+        vasp_repeat_poscar_main(raw_args[1:])
         return
     if raw_args and raw_args[0] == "vasp-md-snapshot-candidates":
         from atomi.vasp.md_snapshots import main as vasp_md_snapshot_candidates_main

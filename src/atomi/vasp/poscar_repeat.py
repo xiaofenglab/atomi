@@ -1,0 +1,153 @@
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+from pathlib import Path
+from typing import Sequence
+
+from ase.io import read, write
+
+
+DEFAULT_COPY_FILES = ("INCAR", "KPOINTS", "POTCAR")
+
+
+def parse_repeat(values: Sequence[str]) -> tuple[int, int, int]:
+    if len(values) == 1:
+        parts = values[0].replace(",", "x").replace("X", "x").split("x")
+    else:
+        parts = list(values)
+    if len(parts) != 3:
+        raise ValueError("Repeat must have three positive integers, e.g. 2x1x1 or 2 1 1.")
+    try:
+        repeat = tuple(int(part.strip()) for part in parts)
+    except ValueError as exc:
+        raise ValueError("Repeat must have three positive integers, e.g. 2x1x1 or 2 1 1.") from exc
+    if any(value <= 0 for value in repeat):
+        raise ValueError("Repeat values must be positive integers.")
+    return repeat  # type: ignore[return-value]
+
+
+def repeat_label(repeat: tuple[int, int, int]) -> str:
+    return f"{repeat[0]}x{repeat[1]}x{repeat[2]}"
+
+
+def resolve_output(input_path: Path, repeat: tuple[int, int, int], output: Path | None, outdir: Path | None) -> Path:
+    if output is not None and outdir is not None:
+        raise ValueError("Use either --output or --outdir, not both.")
+    if outdir is not None:
+        return outdir.expanduser() / "POSCAR"
+    if output is not None:
+        return output.expanduser()
+    return input_path.parent / f"POSCAR_{repeat_label(repeat)}"
+
+
+def repeat_poscar(
+    input_path: Path,
+    output_path: Path,
+    repeat: tuple[int, int, int],
+    *,
+    overwrite: bool = False,
+    direct: bool = True,
+    sort: bool = False,
+    copy_inputs: bool = False,
+    metadata: bool = True,
+) -> dict[str, object]:
+    input_path = input_path.expanduser().resolve()
+    output_path = output_path.expanduser().resolve()
+    if not input_path.is_file():
+        raise FileNotFoundError(f"Input POSCAR/CONTCAR not found: {input_path}")
+    if output_path.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output_path}. Pass --overwrite to replace it.")
+
+    atoms = read(input_path, format="vasp")
+    input_atoms = len(atoms)
+    input_cell = atoms.cell.array.tolist()
+    repeated = atoms.repeat(repeat)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write(output_path, repeated, format="vasp", direct=direct, sort=sort, vasp5=True)
+    copied: list[str] = []
+    if copy_inputs:
+        for name in DEFAULT_COPY_FILES:
+            source = input_path.parent / name
+            target = output_path.parent / name
+            if source.is_file() and source.resolve() != target.resolve():
+                shutil.copy2(source, target)
+                copied.append(name)
+
+    report: dict[str, object] = {
+        "schema": "atomi.vasp.poscar_repeat.v1",
+        "input": str(input_path),
+        "output": str(output_path),
+        "repeat": list(repeat),
+        "repeat_label": repeat_label(repeat),
+        "input_atoms": input_atoms,
+        "output_atoms": len(repeated),
+        "input_cell_A": input_cell,
+        "output_cell_A": repeated.cell.array.tolist(),
+        "direct": direct,
+        "sort": sort,
+        "copied_inputs": copied,
+    }
+    if metadata:
+        metadata_path = output_path.parent / f"{output_path.name}.repeat_metadata.json"
+        metadata_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        report["metadata"] = str(metadata_path)
+    return report
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="vasp-repeat-poscar",
+        description="Replicate a VASP POSCAR/CONTCAR by an integer supercell repeat.",
+    )
+    parser.add_argument("input", nargs="?", type=Path, default=Path("POSCAR"), help="Input POSCAR/CONTCAR. Default: POSCAR.")
+    parser.add_argument(
+        "--repeat",
+        nargs="+",
+        required=True,
+        help="Repeat as AxBxC or three integers, e.g. --repeat 2x1x1 or --repeat 2 1 1.",
+    )
+    parser.add_argument("--output", type=Path, help="Output POSCAR path. Default: POSCAR_<repeat> beside input.")
+    parser.add_argument("--outdir", type=Path, help="Output directory; writes POSCAR inside it.")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing output POSCAR.")
+    parser.add_argument("--cartesian", action="store_true", help="Write Cartesian coordinates. Default writes Direct.")
+    parser.add_argument("--sort", action="store_true", help="Sort atoms by species when writing. Default preserves atom order.")
+    parser.add_argument(
+        "--copy-inputs",
+        action="store_true",
+        help="Copy INCAR, KPOINTS, and POTCAR from the input folder into the output folder when present.",
+    )
+    parser.add_argument("--no-metadata", action="store_true", help="Do not write POSCAR.repeat_metadata.json.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> dict[str, object]:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    repeat = parse_repeat(args.repeat)
+    input_path = args.input.expanduser()
+    output = resolve_output(input_path, repeat, args.output, args.outdir)
+    report = repeat_poscar(
+        input_path,
+        output,
+        repeat,
+        overwrite=args.overwrite,
+        direct=not args.cartesian,
+        sort=args.sort,
+        copy_inputs=args.copy_inputs,
+        metadata=not args.no_metadata,
+    )
+    print(f"Wrote repeated POSCAR : {report['output']}")
+    print(f"Repeat               : {report['repeat_label']}")
+    print(f"Atoms                : {report['input_atoms']} -> {report['output_atoms']}")
+    if report.get("copied_inputs"):
+        print(f"Copied inputs        : {', '.join(str(item) for item in report['copied_inputs'])}")
+    if report.get("metadata"):
+        print(f"Metadata             : {report['metadata']}")
+    return report
+
+
+if __name__ == "__main__":
+    main()

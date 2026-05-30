@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
+from ase import Atoms
+from ase.io import read, write
+
 from atomi.cli.main import main as atomi_main
+from atomi.vasp.poscar_repeat import main as repeat_poscar_main
 from atomi.vasp.runlist import main as listvasp_main
 
 
@@ -50,3 +56,49 @@ def test_listvasp_can_include_hidden_and_limit_depth(tmp_path: Path) -> None:
     listvasp_main([str(tmp_path), "--include-hidden", "--max-depth", "1", "-o", str(runlist), "--quiet"])
 
     assert runlist.read_text(encoding="utf-8").splitlines() == [".hidden"]
+
+
+def test_repeat_poscar_writes_supercell_and_metadata(tmp_path: Path) -> None:
+    poscar = tmp_path / "POSCAR"
+    atoms = Atoms(
+        ["U", "C", "C"],
+        scaled_positions=[(0.0, 0.0, 0.0), (0.25, 0.25, 0.25), (0.75, 0.75, 0.75)],
+        cell=[3.0, 4.0, 5.0],
+        pbc=True,
+    )
+    write(poscar, atoms, format="vasp", direct=True, sort=False, vasp5=True)
+    (tmp_path / "INCAR").write_text("MAGMOM = 2 0 0\n", encoding="utf-8")
+    outdir = tmp_path / "UC2_2x1x1"
+
+    repeat_poscar_main([str(poscar), "--repeat", "2x1x1", "--outdir", str(outdir), "--copy-inputs"])
+
+    repeated = read(outdir / "POSCAR", format="vasp")
+    assert len(repeated) == 6
+    assert repeated.cell.lengths()[0] == pytest.approx(6.0)
+    assert repeated.cell.lengths()[1] == pytest.approx(4.0)
+    assert repeated.cell.lengths()[2] == pytest.approx(5.0)
+    assert (outdir / "INCAR").read_text(encoding="utf-8") == "MAGMOM = 2 0 0\n"
+    metadata = json.loads((outdir / "POSCAR.repeat_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["repeat"] == [2, 1, 1]
+    assert metadata["input_atoms"] == 3
+    assert metadata["output_atoms"] == 6
+
+
+def test_repeat_poscar_atomi_alias_accepts_three_repeat_values(tmp_path: Path) -> None:
+    poscar = tmp_path / "POSCAR"
+    atoms = Atoms(
+        ["U", "C", "C"],
+        scaled_positions=[(0.0, 0.0, 0.0), (0.25, 0.25, 0.25), (0.75, 0.75, 0.75)],
+        cell=[3.0, 4.0, 5.0],
+        pbc=True,
+    )
+    write(poscar, atoms, format="vasp", direct=True, sort=False, vasp5=True)
+    output = tmp_path / "POSCAR_1x2x1"
+
+    atomi_main(["poscar-repeat", str(poscar), "--repeat", "1", "2", "1", "--output", str(output)])
+
+    repeated = read(output, format="vasp")
+    assert len(repeated) == 6
+    assert repeated.cell.lengths()[0] == pytest.approx(3.0)
+    assert repeated.cell.lengths()[1] == pytest.approx(8.0)
+    assert repeated.cell.lengths()[2] == pytest.approx(5.0)
