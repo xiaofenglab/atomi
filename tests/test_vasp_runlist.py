@@ -87,6 +87,48 @@ def test_repeat_poscar_writes_supercell_and_metadata(tmp_path: Path) -> None:
     assert metadata["output_atoms"] == 6
 
 
+def test_repeat_poscar_expands_template_magmom_in_output_order(tmp_path: Path) -> None:
+    poscar = tmp_path / "POSCAR"
+    atoms = Atoms(
+        ["U", "C", "C"],
+        scaled_positions=[(0.0, 0.0, 0.0), (0.25, 0.25, 0.25), (0.75, 0.75, 0.75)],
+        cell=[3.0, 4.0, 5.0],
+        pbc=True,
+    )
+    write(poscar, atoms, format="vasp", direct=True, sort=False, vasp5=True)
+    template = tmp_path / "template"
+    template.mkdir()
+    (template / "INCAR").write_text("ENCUT = 520\nMAGMOM = 2 0.1 -0.1\n", encoding="utf-8")
+    (template / "KPOINTS").write_text("Gamma\n", encoding="utf-8")
+    (template / "POTCAR").write_text("fake\n", encoding="utf-8")
+    outdir = tmp_path / "UC2_2x1x1"
+
+    repeat_poscar_main(
+        [
+            str(poscar),
+            "--repeat",
+            "2x1x1",
+            "--outdir",
+            str(outdir),
+            "--template",
+            str(template),
+            "--copy-inputs",
+            "--repeat-magmom",
+        ]
+    )
+
+    poscar_lines = (outdir / "POSCAR").read_text(encoding="utf-8").splitlines()
+    assert poscar_lines[5].split() == ["U", "C"]
+    assert poscar_lines[6].split() == ["2", "4"]
+    assert (outdir / "INCAR").read_text(encoding="utf-8") == "ENCUT = 520\nMAGMOM = 2 2 0.1 -0.1 0.1 -0.1\n"
+    assert (outdir / "KPOINTS").read_text(encoding="utf-8") == "Gamma\n"
+    assert (outdir / "POTCAR").read_text(encoding="utf-8") == "fake\n"
+    metadata = json.loads((outdir / "POSCAR.repeat_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["magmom"]["input_magmom_count"] == 3
+    assert metadata["magmom"]["output_magmom_count"] == 6
+    assert metadata["magmom"]["magmom_line"] == "MAGMOM = 2 2 0.1 -0.1 0.1 -0.1"
+
+
 def test_repeat_poscar_atomi_alias_accepts_three_repeat_values(tmp_path: Path) -> None:
     poscar = tmp_path / "POSCAR"
     atoms = Atoms(

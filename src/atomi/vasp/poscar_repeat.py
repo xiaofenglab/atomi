@@ -6,7 +6,16 @@ import shutil
 from pathlib import Path
 from typing import Sequence
 
+import numpy as np
 from ase.io import read
+
+from atomi.vasp.magmom import (
+    PoscarSpecies,
+    expand_magmom_tokens,
+    find_magmom_line,
+    format_magmom_line,
+    strip_incar_comment,
+)
 
 
 DEFAULT_COPY_FILES = ("INCAR", "KPOINTS", "POTCAR")
@@ -42,7 +51,7 @@ def ordered_species(symbols: list[str], *, sort: bool = False) -> list[str]:
     return order
 
 
-def write_grouped_vasp(path: Path, atoms: object, *, direct: bool, sort: bool) -> tuple[list[str], list[int]]:
+def write_grouped_vasp(path: Path, atoms: object, *, direct: bool, sort: bool) -> tuple[list[str], list[int], list[int]]:
     symbols = list(atoms.get_chemical_symbols())
     species = ordered_species(symbols, sort=sort)
     indices = [index for symbol in species for index, atom_symbol in enumerate(symbols) if atom_symbol == symbol]
@@ -58,7 +67,7 @@ def write_grouped_vasp(path: Path, atoms: object, *, direct: bool, sort: bool) -
     for index in indices:
         lines.append("  " + "  ".join(f"{float(value): .16f}" for value in positions[index]))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return species, counts
+    return species, counts, indices
 
 
 def resolve_output(input_path: Path, repeat: tuple[int, int, int], output: Path | None, outdir: Path | None) -> Path:
@@ -71,6 +80,98 @@ def resolve_output(input_path: Path, repeat: tuple[int, int, int], output: Path 
     return input_path.parent / f"POSCAR_{repeat_label(repeat)}"
 
 
+def resolve_template_dir(template: Path | None) -> Path | None:
+    if template is None:
+        return None
+    path = template.expanduser().resolve()
+    if not path.is_dir():
+        raise FileNotFoundError(f"VASP template folder not found: {path}")
+    return path
+
+
+def resolve_incar_path(input_path: Path, template_dir: Path | None, incar: Path | None) -> Path:
+    if incar is not None:
+        path = incar.expanduser().resolve()
+    elif template_dir is not None:
+        path = template_dir / "INCAR"
+    else:
+        path = input_path.parent / "INCAR"
+    if not path.is_file():
+        raise FileNotFoundError(f"INCAR with source MAGMOM not found: {path}")
+    return path
+
+
+def source_input_dir(input_path: Path, template_dir: Path | None) -> Path:
+    return template_dir if template_dir is not None else input_path.parent
+
+
+def magmom_values_from_incar(incar: Path, expected_atoms: int) -> list[float]:
+    lines = incar.read_text(encoding="utf-8", errors="replace").splitlines()
+    _line_index, line = find_magmom_line(lines)
+    if line is None:
+        raise ValueError(f"No MAGMOM line found in {incar}")
+    body = strip_incar_comment(line).split("=", 1)[-1]
+    values = expand_magmom_tokens(body.split())
+    if len(values) != expected_atoms:
+        raise ValueError(
+            f"MAGMOM in {incar} expands to {len(values)} values, "
+            f"but input POSCAR has {expected_atoms} atoms."
+        )
+    return values
+
+
+def replace_or_append_magmom_text(incar_text: str, magmom_line: str) -> str:
+    lines = incar_text.splitlines()
+    line_index, _line = find_magmom_line(lines)
+    if line_index is None:
+        lines.append(magmom_line)
+    else:
+        lines[line_index] = magmom_line
+    return "\n".join(lines) + "\n"
+
+
+def repeat_magmom_values(
+    source_moments: list[float],
+    repeated: object,
+    output_indices: list[int],
+) -> list[float]:
+    source_indices = repeated.arrays.get("atomi_source_index")
+    if source_indices is None:
+        raise ValueError("Internal error: repeated structure does not carry source atom indices.")
+    repeated_moments = [source_moments[int(source_indices[index])] for index in range(len(repeated))]
+    return [repeated_moments[index] for index in output_indices]
+
+
+def write_repeated_incar(
+    incar: Path,
+    output_incar: Path,
+    source_moments: list[float],
+    repeated: object,
+    output_indices: list[int],
+    output_symbols: list[str],
+    output_counts: list[int],
+    *,
+    decimals: int,
+) -> dict[str, object]:
+    output_moments = repeat_magmom_values(source_moments, repeated, output_indices)
+    magmom_line = format_magmom_line(
+        PoscarSpecies(output_symbols, output_counts),
+        output_moments,
+        selected_elements=output_symbols,
+        decimals=decimals,
+        compact_zero=False,
+    )
+    text = replace_or_append_magmom_text(incar.read_text(encoding="utf-8", errors="replace"), magmom_line)
+    output_incar.write_text(text, encoding="utf-8")
+    return {
+        "incar": str(incar),
+        "output_incar": str(output_incar),
+        "input_magmom_count": len(source_moments),
+        "output_magmom_count": len(output_moments),
+        "magmom_line": magmom_line,
+    }
+
+
 def repeat_poscar(
     input_path: Path,
     output_path: Path,
@@ -80,35 +181,60 @@ def repeat_poscar(
     direct: bool = True,
     sort: bool = False,
     copy_inputs: bool = False,
+    template: Path | None = None,
+    incar: Path | None = None,
+    repeat_magmom: bool = False,
+    magmom_decimals: int = 3,
     metadata: bool = True,
 ) -> dict[str, object]:
     input_path = input_path.expanduser().resolve()
     output_path = output_path.expanduser().resolve()
+    template_dir = resolve_template_dir(template)
     if not input_path.is_file():
         raise FileNotFoundError(f"Input POSCAR/CONTCAR not found: {input_path}")
     if output_path.exists() and not overwrite:
         raise FileExistsError(f"Output already exists: {output_path}. Pass --overwrite to replace it.")
 
     atoms = read(input_path, format="vasp")
+    atoms.new_array("atomi_source_index", np.arange(len(atoms), dtype=int))
     input_atoms = len(atoms)
     input_cell = atoms.cell.array.tolist()
     repeated = atoms.repeat(repeat)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_symbols, output_counts = write_grouped_vasp(output_path, repeated, direct=direct, sort=sort)
+    output_symbols, output_counts, output_indices = write_grouped_vasp(output_path, repeated, direct=direct, sort=sort)
     copied: list[str] = []
     if copy_inputs:
+        source_dir = source_input_dir(input_path, template_dir)
         for name in DEFAULT_COPY_FILES:
-            source = input_path.parent / name
+            if repeat_magmom and name == "INCAR":
+                continue
+            source = source_dir / name
             target = output_path.parent / name
             if source.is_file() and source.resolve() != target.resolve():
                 shutil.copy2(source, target)
                 copied.append(name)
+    magmom_report: dict[str, object] | None = None
+    if repeat_magmom:
+        source_incar = resolve_incar_path(input_path, template_dir, incar)
+        source_moments = magmom_values_from_incar(source_incar, input_atoms)
+        magmom_report = write_repeated_incar(
+            source_incar,
+            output_path.parent / "INCAR",
+            source_moments,
+            repeated,
+            output_indices,
+            output_symbols,
+            output_counts,
+            decimals=magmom_decimals,
+        )
+        copied.append("INCAR(expanded MAGMOM)")
 
     report: dict[str, object] = {
         "schema": "atomi.vasp.poscar_repeat.v1",
         "input": str(input_path),
         "output": str(output_path),
+        "template": str(template_dir) if template_dir is not None else "",
         "repeat": list(repeat),
         "repeat_label": repeat_label(repeat),
         "input_atoms": input_atoms,
@@ -120,6 +246,7 @@ def repeat_poscar(
         "direct": direct,
         "sort": sort,
         "copied_inputs": copied,
+        "magmom": magmom_report,
     }
     if metadata:
         metadata_path = output_path.parent / f"{output_path.name}.repeat_metadata.json"
@@ -143,6 +270,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, help="Output POSCAR path. Default: POSCAR_<repeat> beside input.")
     parser.add_argument("--outdir", type=Path, help="Output directory; writes POSCAR inside it.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing output POSCAR.")
+    parser.add_argument("--template", type=Path, help="Template folder with INCAR/KPOINTS/POTCAR for the repeated VASP run.")
+    parser.add_argument(
+        "--incar",
+        type=Path,
+        help="INCAR whose MAGMOM matches the input POSCAR. Overrides --template/INCAR and input-folder INCAR.",
+    )
+    parser.add_argument(
+        "--repeat-magmom",
+        action="store_true",
+        help="Rewrite output INCAR with the input MAGMOM repeated and reordered to match the output POSCAR.",
+    )
+    parser.add_argument("--magmom-decimals", type=int, default=3, help="Decimal places for the expanded MAGMOM line.")
     parser.add_argument("--cartesian", action="store_true", help="Write Cartesian coordinates. Default writes Direct.")
     parser.add_argument(
         "--sort",
@@ -172,6 +311,10 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
         direct=not args.cartesian,
         sort=args.sort,
         copy_inputs=args.copy_inputs,
+        template=args.template,
+        incar=args.incar,
+        repeat_magmom=args.repeat_magmom,
+        magmom_decimals=args.magmom_decimals,
         metadata=not args.no_metadata,
     )
     print(f"Wrote repeated POSCAR : {report['output']}")
@@ -179,6 +322,10 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
     print(f"Atoms                : {report['input_atoms']} -> {report['output_atoms']}")
     if report.get("copied_inputs"):
         print(f"Copied inputs        : {', '.join(str(item) for item in report['copied_inputs'])}")
+    magmom = report.get("magmom")
+    if isinstance(magmom, dict):
+        print(f"Expanded MAGMOM     : {magmom['input_magmom_count']} -> {magmom['output_magmom_count']}")
+        print(f"Wrote INCAR         : {magmom['output_incar']}")
     if report.get("metadata"):
         print(f"Metadata             : {report['metadata']}")
     return report
