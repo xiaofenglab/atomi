@@ -1460,6 +1460,29 @@ def test_crop_boundary_repair_prefers_protected_cations() -> None:
     assert len(repaired) == 2
 
 
+def test_crop_boundary_repair_skips_folded_cation_overlap_when_possible() -> None:
+    repaired = repaired_crop_cation_indices(
+        positions=[
+            [0.10, 0.10, 0.10],
+            [0.1005, 0.10, 0.10],
+            [0.30, 0.30, 0.30],
+        ],
+        symbols=["Gd", "Gd", "Gd"],
+        cation_indices=[0, 1, 2],
+        ranges=((0.0, 0.5), (0.0, 0.5), (0.0, 0.5)),
+        expected_count=2,
+        protected_indices={0, 1},
+        cell=[
+            [4.0, 0.0, 0.0],
+            [0.0, 4.0, 0.0],
+            [0.0, 0.0, 4.0],
+        ],
+        min_distance_A=0.2,
+    )
+
+    assert repaired == [0, 2]
+
+
 def test_project_poscar_can_scale_target_volume_to_prepared_source(tmp_path: Path) -> None:
     source = tmp_path / "A_2x3x3_POSCAR"
     target = tmp_path / "B_large_POSCAR"

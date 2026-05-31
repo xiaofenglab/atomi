@@ -782,6 +782,7 @@ def prepare_structure(
                 cation_elements=cation_elements or set(),
                 anion_elements=anion_elements or {"O"},
                 source_moments=source_moments,
+                min_generated_distance_A=min_generated_distance_A,
             )
         elif crop_policy == "defect_preserving":
             candidates = defect_preserving_crop_candidates(
@@ -1531,6 +1532,7 @@ def choose_feasible_source_crop(
                 cation_elements=cation_elements,
                 anion_elements=anion_elements,
                 source_moments=source_moments,
+                min_generated_distance_A=min_generated_distance_A,
             )
         except ValueError as exc:
             rejected.append(
@@ -1956,6 +1958,7 @@ def crop_structure_fraction(
     cation_elements: set[str] | None = None,
     anion_elements: set[str] | None = None,
     source_moments: list[float] | None = None,
+    min_generated_distance_A: float | None = None,
 ) -> tuple[PoscarStructure, list[int], dict[str, object]]:
     for lower, upper in ranges:
         if not (0.0 <= lower < upper <= 1.0):
@@ -1985,10 +1988,14 @@ def crop_structure_fraction(
                 expected_cation_count,
                 cation_count_targets,
                 protected_indices=protected_cation_indices,
+                cell=structure.cell,
+                min_distance_A=min_generated_distance_A,
             )
             kept_indices = (kept_indices - set(cation_indices)) | set(repaired_cations)
             repair_meta = {
                 "cation_boundary_repair": True,
+                "geometry_aware_cation_repair": min_generated_distance_A is not None,
+                "cation_repair_min_distance_A": min_generated_distance_A,
                 "cation_count_before_repair": len(kept_cations),
                 "cation_count_after_repair": len(repaired_cations),
                 "expected_cation_count": expected_cation_count,
@@ -2014,19 +2021,11 @@ def crop_structure_fraction(
     for atom_index, (symbol, position) in enumerate(zip(symbols, structure.scaled_positions)):
         if atom_index in kept_indices:
             kept_symbols.append(symbol)
-            kept_positions.append(
-                [
-                    ((position[axis] - ranges[axis][0]) / (ranges[axis][1] - ranges[axis][0])) % 1.0
-                    for axis in range(3)
-                ]
-            )
+            kept_positions.append(crop_fractional_position(position, ranges))
             kept_origins.append(origin_indices[atom_index])
     if not kept_symbols:
         raise ValueError(f"Source crop {ranges} removed all atoms.")
-    cell = [
-        [value * (ranges[axis][1] - ranges[axis][0]) for value in vector]
-        for axis, vector in enumerate(structure.cell)
-    ]
+    cell = crop_cell_from_ranges(structure.cell, ranges)
     prepared, prepared_origins = grouped_structure(kept_symbols, kept_positions, kept_origins, cell, structure.species.symbols)
     return prepared, prepared_origins, repair_meta
 
@@ -2040,26 +2039,39 @@ def repaired_crop_cation_indices(
     species_target_counts: dict[str, int] | None = None,
     *,
     protected_indices: set[int] | None = None,
+    cell: list[list[float]] | None = None,
+    min_distance_A: float | None = None,
 ) -> list[int]:
     if expected_count > len(cation_indices):
         raise ValueError(f"Cannot repair crop to {expected_count} cations; source has only {len(cation_indices)} cations.")
     protected_indices = protected_indices or set()
+    crop_cell = crop_cell_from_ranges(cell, ranges) if cell is not None and min_distance_A is not None else None
     if species_target_counts:
         repaired: list[int] = []
         for symbol, count in species_target_counts.items():
             species_indices = [index for index in cation_indices if symbols[index] == symbol]
             if count > len(species_indices):
                 raise ValueError(f"Cannot repair crop to {count} {symbol} cations; source has only {len(species_indices)}.")
-            repaired.extend(
-                sorted(
-                    species_indices,
-                    key=lambda index: (
-                        0 if index in protected_indices else 1,
-                        distance_to_fraction_box(positions[index], ranges),
-                        index,
-                    ),
-                )[:count]
+            ranked_species = sorted(
+                species_indices,
+                key=lambda index: (
+                    0 if index in protected_indices else 1,
+                    distance_to_fraction_box(positions[index], ranges),
+                    index,
+                ),
             )
+            selected_species = geometry_aware_repair_selection(
+                ranked_species,
+                count,
+                repaired,
+                positions,
+                ranges,
+                crop_cell,
+                min_distance_A,
+            )
+            if selected_species is None:
+                selected_species = ranked_species[:count]
+            repaired.extend(selected_species)
         if len(repaired) == expected_count:
             return sorted(repaired)
     ranked = sorted(
@@ -2070,7 +2082,63 @@ def repaired_crop_cation_indices(
             index,
         ),
     )
-    return sorted(ranked[:expected_count])
+    selected = geometry_aware_repair_selection(
+        ranked,
+        expected_count,
+        [],
+        positions,
+        ranges,
+        crop_cell,
+        min_distance_A,
+    )
+    return sorted(selected if selected is not None else ranked[:expected_count])
+
+
+def geometry_aware_repair_selection(
+    ranked_indices: list[int],
+    count: int,
+    already_selected: list[int],
+    positions: list[list[float]],
+    ranges: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
+    crop_cell: list[list[float]] | None,
+    min_distance_A: float | None,
+) -> list[int] | None:
+    if crop_cell is None or min_distance_A is None:
+        return None
+    selected: list[int] = []
+    for index in ranked_indices:
+        if len(selected) == count:
+            break
+        folded = crop_fractional_position(positions[index], ranges)
+        if all(
+            fractional_distance_A(folded, crop_fractional_position(positions[other], ranges), crop_cell)
+            >= min_distance_A
+            for other in [*already_selected, *selected]
+        ):
+            selected.append(index)
+    if len(selected) != count:
+        return None
+    return selected
+
+
+def crop_fractional_position(
+    position: list[float],
+    ranges: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
+) -> list[float]:
+    return [
+        ((position[axis] - ranges[axis][0]) / (ranges[axis][1] - ranges[axis][0])) % 1.0
+        for axis in range(3)
+    ]
+
+
+def crop_cell_from_ranges(
+    cell: list[list[float]],
+    ranges: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
+) -> list[list[float]]:
+    return [
+        [value * (ranges[axis][1] - ranges[axis][0]) for value in vector]
+        for axis, vector in enumerate(cell)
+    ]
 
 
 def balanced_cation_count_targets(
