@@ -224,18 +224,24 @@ def iter_xyz_frames(path: Path):
             yield comment, symbols, coords
 
 
-def xyz_frame_summary(path: Path) -> dict[str, object]:
+def xyz_frame_summary(path: Path, *, max_frames: int | None = None) -> dict[str, object]:
     count = 0
     atom_count = None
     symbols_counter: Counter[str] = Counter()
     last_comment = ""
+    truncated = False
     for comment, symbols, _coords in iter_xyz_frames(path):
         count += 1
         atom_count = len(symbols)
         symbols_counter = Counter(symbols)
         last_comment = comment
+        if max_frames is not None and count >= max_frames:
+            truncated = True
+            break
     return {
         "frame_count": count,
+        "frame_count_truncated": truncated,
+        "frame_count_limit": max_frames,
         "atom_count": atom_count,
         "composition": dict(symbols_counter),
         "last_comment": last_comment,

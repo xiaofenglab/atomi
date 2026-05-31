@@ -150,6 +150,10 @@ def test_cp2k_aimd_status_extracts_progress_and_restraints(tmp_path: Path) -> No
     assert summary["input"]["restraints"][1]["target_A"] == 3.0
     assert summary["trajectory"]["composition"] == {"Cl": 1, "Ga": 1, "H": 2, "O": 1}
 
+    quick = summarize_run(run, max_trajectory_frames=2)
+    assert quick["trajectory"]["frame_count"] == 2
+    assert quick["trajectory"]["frame_count_truncated"] is True
+
 
 def test_ligand_exchange_summary_labels_product_state(tmp_path: Path) -> None:
     run = tmp_path / "win"

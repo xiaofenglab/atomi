@@ -46,7 +46,7 @@ def _find_slurm(run_dir: Path) -> Path | None:
     return _latest(list(run_dir.glob("slurm.*.out")))
 
 
-def summarize_run(run_dir: Path) -> dict[str, object]:
+def summarize_run(run_dir: Path, *, max_trajectory_frames: int | None = 500) -> dict[str, object]:
     run_dir = run_dir.resolve()
     input_path = _find_input(run_dir)
     log_path = _find_log(run_dir)
@@ -57,7 +57,11 @@ def summarize_run(run_dir: Path) -> dict[str, object]:
     input_info = parse_cp2k_input(input_path) if input_path else {}
     energy_info = parse_energy_file(energy_path) if energy_path else {}
     log_info = scan_cp2k_log(log_path) if log_path else {}
-    trajectory_info = xyz_frame_summary(trajectory_path) if trajectory_path else {}
+    trajectory_info = (
+        xyz_frame_summary(trajectory_path, max_frames=max_trajectory_frames)
+        if trajectory_path
+        else {}
+    )
 
     target_steps = input_info.get("steps")
     latest_step = energy_info.get("latest_step") or log_info.get("last_step")
@@ -145,7 +149,12 @@ def print_summary(summary: dict[str, object]) -> None:
         print(f"latest T     : {float(energy['latest_temperature_K']):.3g} K")
     trajectory = summary.get("trajectory", {})
     if isinstance(trajectory, dict) and trajectory.get("frame_count") is not None:
-        print(f"frames       : {trajectory.get('frame_count')} saved")
+        frame_text = str(trajectory.get("frame_count"))
+        if trajectory.get("frame_count_truncated"):
+            frame_text = f">={frame_text} saved (count stopped at scan limit)"
+        else:
+            frame_text = f"{frame_text} saved"
+        print(f"frames       : {frame_text}")
     log = summary.get("log", {})
     if isinstance(log, dict):
         print(
@@ -164,9 +173,16 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("run_dir", type=Path, nargs="?", default=Path("."))
     parser.add_argument("--json-out", type=Path, help="Write machine-readable status JSON.")
+    parser.add_argument(
+        "--max-trajectory-frames",
+        type=int,
+        default=500,
+        help="Maximum XYZ frames to scan for status; use 0 to scan all frames.",
+    )
     args = parser.parse_args(argv)
 
-    summary = summarize_run(args.run_dir)
+    max_frames = args.max_trajectory_frames if args.max_trajectory_frames > 0 else None
+    summary = summarize_run(args.run_dir, max_trajectory_frames=max_frames)
     print_summary(summary)
     if args.json_out:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
