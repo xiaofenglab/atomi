@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
+from atomi.cp2k.aimd_common import mean as mean_or_none
+from atomi.cp2k.aimd_common import parse_cp2k_input as parse_cp2k_input_detailed
 from atomi.core.doctor import find_config_path, load_hpc_config
 
 
@@ -46,6 +48,21 @@ MODULE_ALIASES = {
         "MAGMOM-SCREENING",
     },
     "AIMD": {"AIMD", "CP2K", "AB_INITIO_MD", "AB-INITIO-MD"},
+    "AIMD_REACTION": {
+        "AIMD_REACTION",
+        "AIMD-REACTION",
+        "CP2K_REACTION",
+        "CP2K-REACTION",
+        "GACL4",
+        "GA_CL4",
+        "WATER_ASSISTED_DISSOCIATION",
+        "WATER-ASSISTED-DISSOCIATION",
+        "LIGAND_EXCHANGE",
+        "LIGAND-EXCHANGE",
+        "STABILITY_CONSTANT",
+        "STABILITY-CONSTANT",
+        "STABILITY",
+    },
     "MD": {"MD", "LAMMPS", "MOLECULAR_DYNAMICS", "MOLECULAR-DYNAMICS"},
     "TRANSPORT": {
         "TRANSPORT",
@@ -110,6 +127,11 @@ METHOD_FORMAT_RULES = {
     "AIMD": [
         "Report ensemble, temperature/pressure schedule, timestep, thermostat/barostat, restraint or collective-variable definitions, equilibration window, production length, and frame-selection rule.",
         "For results, summarize trajectory stability, reaction-coordinate or bond statistics, and representative-frame selection before mechanistic interpretation.",
+    ],
+    "AIMD_REACTION": [
+        "Report the reactive species, charge/proton accounting, water model or explicit-solvent composition, constrained collective variables, restraint force constants, window targets, equilibration discard, and trajectory-frame stride.",
+        "For blue-moon or umbrella-style analysis, state whether mean forces came from CP2K Lagrange multipliers or harmonic-restraint offsets, the integration direction, standard-state correction, and the sign convention connecting PMF differences to log K.",
+        "For results, separate path evidence (bond exchange and coordination) from thermodynamic evidence (converged PMF, uncertainty, standard-state/speciation correction, and competing hydrolysis/proton-transfer states).",
     ],
     "MD": [
         "Report potential/model source, supercell size, timestep, ensemble sequence, temperature grid, equilibration criteria, production length, uncertainty/blocking method, and normalization basis.",
@@ -330,27 +352,11 @@ def parse_outcar(path: Path) -> dict[str, object]:
 
 
 def parse_cp2k_input(path: Path) -> dict[str, object]:
-    text = _read_text(path)
-    info: dict[str, object] = {}
-    patterns = {
-        "project": r"^\s*PROJECT\s+(\S+)",
-        "run_type": r"^\s*RUN_TYPE\s+(\S+)",
-        "ensemble": r"^\s*ENSEMBLE\s+(\S+)",
-        "steps": r"^\s*STEPS\s+(\d+)",
-        "timestep_fs": r"^\s*TIMESTEP\s+([-+0-9.Ee]+)",
-        "temperature_K": r"^\s*TEMPERATURE\s+([-+0-9.Ee]+)",
+    info = {
+        key: value
+        for key, value in parse_cp2k_input_detailed(path).items()
+        if value not in (None, [], {})
     }
-    for key, pattern in patterns.items():
-        matches = re.findall(pattern, text, flags=re.MULTILINE | re.IGNORECASE)
-        if not matches:
-            continue
-        value = matches[-1]
-        if key in {"steps"}:
-            info[key] = int(value)
-        elif key in {"timestep_fs", "temperature_K"}:
-            info[key] = float(value)
-        else:
-            info[key] = value
     return info
 
 
@@ -429,6 +435,59 @@ def parse_csv_summary(path: Path) -> dict[str, object]:
             info["T_min_K"] = min(values)
             info["T_max_K"] = max(values)
     return info
+
+
+def parse_cp2k_bond_summary(path: Path) -> dict[str, object]:
+    rows, fieldnames = _read_csv_dicts(path)
+    tracked_symbols = _count_values(rows, "tracked_symbol") if "tracked_symbol" in fieldnames else {}
+    product_counts = (
+        _count_values(rows, "product_state_label")
+        if "product_state_label" in fieldnames
+        else {}
+    )
+
+    tail_by_symbol: dict[str, list[float]] = {}
+    for row in rows:
+        symbol = row.get("tracked_symbol") or ""
+        value = _float_or_none(row.get("tracked_mean_tail", ""))
+        if symbol and value is not None:
+            tail_by_symbol.setdefault(symbol, []).append(value)
+
+    leaving_tail = [
+        value
+        for row in rows
+        if (value := _float_or_none(row.get("leaving_tail_mean_A", ""))) is not None
+    ]
+    entering_tail = [
+        value
+        for row in rows
+        if (value := _float_or_none(row.get("entering_tail_mean_A", ""))) is not None
+    ]
+    cl_tails = tail_by_symbol.get("Cl", [])
+    o_tails = tail_by_symbol.get("O", [])
+    dissociated_cl = any(value >= 3.0 for value in cl_tails + leaving_tail)
+    water_bound_o = any(value <= 2.5 for value in o_tails + entering_tail)
+
+    tail_means = {symbol: mean_or_none(values) for symbol, values in tail_by_symbol.items()}
+    tail_ranges = {
+        symbol: [min(values), max(values)]
+        for symbol, values in tail_by_symbol.items()
+        if values
+    }
+    return {
+        "rows": len(rows),
+        "columns": fieldnames,
+        "tracked_symbols": tracked_symbols,
+        "tracked_tail_mean_A": tail_means,
+        "tracked_tail_range_A": tail_ranges,
+        "leaving_tail_mean_range_A": [min(leaving_tail), max(leaving_tail)] if leaving_tail else None,
+        "entering_tail_mean_range_A": [min(entering_tail), max(entering_tail)] if entering_tail else None,
+        "product_state_counts": product_counts,
+        "water_assisted_exchange_evidence": bool(
+            (dissociated_cl and water_bound_o)
+            or product_counts.get("water-bound/chloride-dissociated")
+        ),
+    }
 
 
 def _read_csv_dicts(path: Path) -> tuple[list[dict[str, str]], list[str]]:
@@ -1064,6 +1123,11 @@ def scan_run(path: Path, requested_modules: list[str], max_files: int = 5000) ->
     cp2k_logs = [item for item in _by_suffix(files, ".log", ".out") if "cp2k" in item.name.lower() or cp2k_inputs]
     xyz_files = _by_suffix(files, ".xyz")
     pos_xyz = [item for item in xyz_files if item.name.lower().endswith("-pos.xyz")]
+    cp2k_bond_csvs = [
+        item
+        for item in _by_suffix(files, ".csv")
+        if "bond" in item.name.lower() or "ligand" in item.name.lower()
+    ]
     if cp2k_inputs or pos_xyz or cp2k_logs:
         evidence.add_module("AIMD")
         for item in cp2k_inputs[:5]:
@@ -1074,6 +1138,9 @@ def scan_run(path: Path, requested_modules: list[str], max_files: int = 5000) ->
             evidence.add_file("trajectory_xyz", item)
         if cp2k_inputs:
             evidence.facts["cp2k_input"] = parse_cp2k_input(cp2k_inputs[0])
+            cp2k_info = evidence.facts["cp2k_input"]
+            if isinstance(cp2k_info, dict) and (cp2k_info.get("colvars") or cp2k_info.get("restraints")):
+                evidence.add_module("AIMD_REACTION")
         if cp2k_logs:
             evidence.facts["cp2k_log"] = parse_cp2k_log(cp2k_logs[0])
         traj = (pos_xyz or xyz_files)[:1]
@@ -1082,6 +1149,15 @@ def scan_run(path: Path, requested_modules: list[str], max_files: int = 5000) ->
                 evidence.facts["xyz_frames"] = count_xyz_frames(traj[0])
             except OSError as exc:
                 evidence.warnings.append(f"Could not count XYZ frames in {traj[0]}: {exc}")
+    if cp2k_bond_csvs:
+        evidence.add_module("AIMD")
+        evidence.add_module("AIMD_REACTION")
+        for item in cp2k_bond_csvs[:5]:
+            evidence.add_file("cp2k_bond_summary", item)
+        try:
+            evidence.facts["cp2k_bond_summary"] = parse_cp2k_bond_summary(cp2k_bond_csvs[0])
+        except (csv.Error, OSError) as exc:
+            evidence.warnings.append(f"Could not parse CP2K bond summary: {exc}")
 
     lammps_logs = [item for item in _by_glob_name(files, r"(^log\.|\.lammps$|lammps.*\.log$)")]
     lammps_configs = [item for item in _by_suffix(files, ".json") if "config" in item.name.lower()]
@@ -1526,7 +1602,7 @@ def hpc_methods_paragraph(modules: list[str], hpc_context: dict[str, Any] | None
         profile_keys.append("lammps")
     if "TRANSPORT" in modules_to_write:
         profile_keys.append("lammps_gk")
-    if "AIMD" in modules_to_write:
+    if {"AIMD", "AIMD_REACTION"} & modules_to_write:
         profile_keys.append("cp2k")
     if "QHA" in modules_to_write:
         profile_keys.append("phonopy")
@@ -1709,6 +1785,38 @@ def methods_paragraphs(
             + "The final Methods text should state ensemble, timestep, thermostat or "
             "barostat choices, total simulated time, equilibration protocol, and any "
             "collective variables or restraints."
+        )
+
+    if "AIMD_REACTION" in modules_to_write:
+        cp2k_info = _first_fact(evidences, "cp2k_input", {})
+        bond_summary = _first_fact(evidences, "cp2k_bond_summary", {})
+        details = []
+        if isinstance(cp2k_info, dict) and cp2k_info:
+            if cp2k_info.get("charge") is not None:
+                details.append(f"total charge {cp2k_info['charge']}")
+            if cp2k_info.get("cell_abc_A") is not None:
+                details.append(f"cell ABC {_format_value(cp2k_info['cell_abc_A'])} A")
+            if cp2k_info.get("colvars"):
+                details.append("collective variables " + _format_value(cp2k_info["colvars"]))
+            if cp2k_info.get("restraints"):
+                details.append("restraints " + _format_value(cp2k_info["restraints"]))
+        if isinstance(bond_summary, dict) and bond_summary:
+            if bond_summary.get("rows") is not None:
+                details.append(f"{bond_summary['rows']} bond-summary rows")
+            if bond_summary.get("tracked_tail_mean_A"):
+                details.append("tail bond means " + _format_value(bond_summary["tracked_tail_mean_A"]))
+            if bond_summary.get("product_state_counts"):
+                details.append("product labels " + _format_value(bond_summary["product_state_counts"]))
+        paragraphs.append(
+            "Reactive AIMD windows were treated as a constrained ligand-exchange workflow, "
+            "not only as generic trajectory sampling. The draft should identify the "
+            "starting complex, explicit-solvent composition, atom-index definitions of "
+            "the leaving and entering ligands, and the collective-variable targets used "
+            "to connect reactant-like, intermediate, and product-like windows. "
+            + (_sentence_join(details) + ". " if details else "")
+            + "For stability constants, the current trajectory evidence should be paired "
+            "with a PMF or blue-moon integration, uncertainty from window/block analysis, "
+            "standard-state correction, and a separate check of proton and charge balance."
         )
 
     if "MD" in modules_to_write:
@@ -1904,6 +2012,30 @@ def result_lines(evidences: list[RunEvidence]) -> list[str]:
         cp2k = evidence.facts.get("cp2k_log")
         if isinstance(cp2k, dict) and cp2k:
             lines.append("The AIMD log summary was " + _format_value(cp2k) + ".")
+        cp2k_input = evidence.facts.get("cp2k_input")
+        if isinstance(cp2k_input, dict) and (cp2k_input.get("colvars") or cp2k_input.get("restraints")):
+            bits = []
+            if cp2k_input.get("project"):
+                bits.append(f"project {cp2k_input['project']}")
+            if cp2k_input.get("colvars"):
+                bits.append("COLVARs " + _format_value(cp2k_input["colvars"]))
+            if cp2k_input.get("restraints"):
+                bits.append("restraints " + _format_value(cp2k_input["restraints"]))
+            if bits:
+                lines.append("The CP2K reaction-coordinate input contained " + "; ".join(bits) + ".")
+        cp2k_bonds = evidence.facts.get("cp2k_bond_summary")
+        if isinstance(cp2k_bonds, dict) and cp2k_bonds:
+            bits = []
+            if cp2k_bonds.get("rows") is not None:
+                bits.append(f"{cp2k_bonds['rows']} tracked-bond rows")
+            if cp2k_bonds.get("tracked_tail_mean_A"):
+                bits.append("tail means " + _format_value(cp2k_bonds["tracked_tail_mean_A"]))
+            if cp2k_bonds.get("product_state_counts"):
+                bits.append("product labels " + _format_value(cp2k_bonds["product_state_counts"]))
+            if cp2k_bonds.get("water_assisted_exchange_evidence"):
+                bits.append("water-assisted exchange evidence detected")
+            if bits:
+                lines.append("The CP2K ligand-exchange summary reported " + "; ".join(bits) + ".")
         lammps = evidence.facts.get("lammps_log")
         if isinstance(lammps, dict) and lammps:
             lines.append("The MD thermo summary was " + _format_value(lammps) + ".")
@@ -2070,6 +2202,11 @@ def llm_metadata_json(
                 "For non-equilibrium or normal-mode routes, extract slab/replicate geometry, heat-flow direction, binning/gradient windows, imposed flux or modal lifetime protocol, finite-size checks, and agreement/disagreement with GK.",
                 "Compare GK, rNEMD/NEMD, NMA, and benchmark values cautiously; mismatches can indicate finite-size effects, poor gradient linearity, defect disorder, anharmonicity, coherent/off-diagonal transport, or MLIP-domain issues.",
             ],
+            "Ga_complex_AIMD_reaction_style": [
+                "Separate mechanistic trajectory evidence from thermodynamic stability-constant evidence.",
+                "Report constrained CV atom indices, targets, force constants, window ordering, equilibration discard, and whether the entering oxygen remains water-like, hydroxo-like, or ambiguous.",
+                "Convert a water-assisted ligand-exchange path into a stability constant only after PMF integration, uncertainty analysis, standard-state correction, and proton/charge/speciation accounting.",
+            ],
         },
         "extraction_targets": {
             "DFT": [
@@ -2095,6 +2232,12 @@ def llm_metadata_json(
                 "seed count, per-axis spread, seed CV, late drift, slope mismatch, validation status",
                 "runtime and array estimates from plans/HPC config when available",
             ],
+            "AIMD_REACTION": [
+                "CP2K charge, cell, timestep, temperature, CV/restraint definitions",
+                "metal-leaving-ligand and metal-entering-ligand tail distances",
+                "coordination/product labels and water/proton identity checks",
+                "window targets/mean forces/PMF table and standard-state correction",
+            ],
             "MLIP": ["model file", "training manifest", "dataset frame count", "validation/outlier notes"],
             "MOOSE": ["material-property table columns", "temperature range", "unit/interpolation details"],
         },
@@ -2104,6 +2247,7 @@ def llm_metadata_json(
             "Verify that all thermal-conductivity unit conversions and normalization conventions match the equations used in the manuscript.",
             "For GK, inspect HCACF decay and running-integral plateau for every temperature/seed before trusting k(T).",
             "For rNEMD/NEMD, inspect temperature-profile linearity, excluded hot/cold bins, and mirrored-slope agreement.",
+            "For reactive AIMD, verify charge/proton balance and use PMF uncertainty plus standard-state correction before reporting stability constants.",
             "For U/actinide systems, verify magnetic/valence state labels and whether the selected potential/model was validated for that chemistry and temperature range.",
         ],
         "hpc_context": hpc_context or {},

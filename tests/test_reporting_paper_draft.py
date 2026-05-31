@@ -71,6 +71,83 @@ def write_lammps_run(root: Path) -> None:
     )
 
 
+def write_cp2k_reaction_run(root: Path) -> None:
+    root.mkdir()
+    (root / "ga_cl4.inp").write_text(
+        "\n".join(
+            [
+                "&GLOBAL",
+                "  PROJECT ga_cl4_test",
+                "  RUN_TYPE MD",
+                "&END GLOBAL",
+                "&FORCE_EVAL",
+                "  &DFT",
+                "    CHARGE 0",
+                "  &END DFT",
+                "  &SUBSYS",
+                "    &CELL",
+                "      ABC 22 22 22",
+                "    &END CELL",
+                "  &END SUBSYS",
+                "&END FORCE_EVAL",
+                "&MOTION",
+                "  &MD",
+                "    ENSEMBLE NVT",
+                "    STEPS 12000",
+                "    TIMESTEP 0.5",
+                "    TEMPERATURE 300",
+                "  &END MD",
+                "&END MOTION",
+                "&COLVAR",
+                "  &DISTANCE",
+                "    ATOMS 1 7",
+                "  &END DISTANCE",
+                "&END COLVAR",
+                "&COLVAR",
+                "  &DISTANCE",
+                "    ATOMS 1 698",
+                "  &END DISTANCE",
+                "&END COLVAR",
+                "&COLLECTIVE",
+                "  COLVAR 1",
+                "  &RESTRAINT",
+                "    TARGET [angstrom] 3.20",
+                "    K [kcalmol] 50",
+                "  &END RESTRAINT",
+                "&END COLLECTIVE",
+                "&COLLECTIVE",
+                "  COLVAR 2",
+                "  &RESTRAINT",
+                "    TARGET [angstrom] 2.30",
+                "    K [kcalmol] 40",
+                "  &END RESTRAINT",
+                "&END COLLECTIVE",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "ga_cl4.log").write_text(
+        "MD| Step number 12000\nENERGY| Total FORCE_EVAL ( QS ) energy (a.u.): -550.0\nPROGRAM ENDED\n",
+        encoding="utf-8",
+    )
+    (root / "ga_cl4-pos.xyz").write_text(
+        "3\ni = 12000\nGa 0 0 0\nCl 3.20 0 0\nO 2.20 0 0\n",
+        encoding="utf-8",
+    )
+    (root / "ga_cl4_ow_bonds.csv").write_text(
+        "\n".join(
+            [
+                "file,metal,metal_index,tracked_index,tracked_symbol,tracked_mean_all,tracked_mean_tail,tracked_min_tail,tracked_max_tail,shell_mean_all,shell_mean_tail,shell_min_tail,shell_max_tail,nframes_total,tail_nframes",
+                "t6-pos.xyz,Ga,1,7,Cl,2.80,3.20,3.10,3.30,2.75,2.70,2.10,3.30,100,20",
+                "t6-pos.xyz,Ga,1,698,O,2.60,2.20,2.10,2.30,2.75,2.70,2.10,3.30,100,20",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def write_transport_run(root: Path) -> None:
     root.mkdir()
     (root / "config_gk_test.json").write_text(
@@ -601,6 +678,45 @@ def test_paper_draft_describes_vasp_spin_report(tmp_path: Path) -> None:
     assert parsed[0]["facts"]["vasp_spin_atoms"]["physics_bad_by_element"]["U"] == 1
 
 
+def test_paper_draft_detects_cp2k_reactive_aimd_context(tmp_path: Path) -> None:
+    run = tmp_path / "ga_cl4"
+    write_cp2k_reaction_run(run)
+    document = tmp_path / "aimd_reaction.md"
+    evidence = tmp_path / "aimd_reaction.json"
+
+    paper_draft.main(
+        [
+            "--used",
+            "GaCl4 water-assisted-dissociation stability-constant",
+            "--run",
+            str(run),
+            "--document",
+            str(document),
+            "--evidence-json",
+            str(evidence),
+            "--mode",
+            "overwrite",
+            "--no-style-note",
+            "--title",
+            "Ga complex ligand exchange",
+        ]
+    )
+
+    text = document.read_text(encoding="utf-8")
+    assert "Requested modules: AIMD_REACTION" in text
+    assert "Reactive AIMD windows were treated as a constrained ligand-exchange workflow" in text
+    assert "collective variables" in text
+    assert "The CP2K ligand-exchange summary reported" in text
+    assert "water-assisted exchange evidence detected" in text
+    assert "Check before manuscript use: Requested module" not in text
+
+    parsed = json.loads(evidence.read_text(encoding="utf-8"))
+    assert parsed[0]["detected_modules"] == ["AIMD", "AIMD_REACTION"]
+    assert parsed[0]["facts"]["cp2k_input"]["colvars"][0]["atoms"] == [1, 7]
+    assert parsed[0]["facts"]["cp2k_bond_summary"]["tracked_tail_mean_A"]["Cl"] == 3.2
+    assert parsed[0]["facts"]["cp2k_bond_summary"]["water_assisted_exchange_evidence"] is True
+
+
 def test_paper_draft_top_level_cli(tmp_path: Path) -> None:
     vasp = tmp_path / "vasp"
     write_vasp_run(vasp)
@@ -637,3 +753,7 @@ def test_normalize_modules_accepts_defect_cloud_alias() -> None:
 
 def test_normalize_modules_accepts_spin_report_alias() -> None:
     assert paper_draft.normalize_modules(["spin-report"]) == ["VASP_SPIN"]
+
+
+def test_normalize_modules_accepts_reactive_aimd_aliases() -> None:
+    assert paper_draft.normalize_modules(["GaCl4", "stability-constant"]) == ["AIMD_REACTION"]
