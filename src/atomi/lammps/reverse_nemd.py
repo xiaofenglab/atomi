@@ -1602,23 +1602,28 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> Any:
+def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "prepare":
-        return prepare_main(args)
+        prepare_main(args)
+        return None
     if args.command == "analyze":
-        return analyze_main(args)
+        analyze_main(args)
+        return None
     if args.command == "validate":
-        return validate_main(args)
+        validate_main(args)
+        return None
     if args.command == "status":
-        return print_rnemd_summary(args.chunk_dir.resolve(), input_file=args.input, log_file=args.log)
+        print_rnemd_summary(args.chunk_dir.resolve(), input_file=args.input, log_file=args.log)
+        return None
     if args.command == "plot":
-        return plot_rnemd_once(
+        plot_rnemd_once(
             args.chunk_dir,
             window=args.window,
             profile_tail_fraction=args.profile_tail_fraction,
         )
+        return None
     parser.error(f"unknown command {args.command}")
 
 

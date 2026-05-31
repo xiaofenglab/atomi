@@ -310,10 +310,12 @@ def test_reverse_nemd_status_reports_live_progress(tmp_path, capsys):
     chunk = tmp_path / "analysis" / "rnemd_status" / "rnemd_T300K_s01" / "chunk_rnemd"
     write_synthetic_rnemd_outputs(chunk)
 
-    reverse_nemd.main(["status", str(chunk)])
+    assert reverse_nemd.main(["status", str(chunk)]) is None
 
     out = capsys.readouterr().out
     assert "rNEMD run status" in out
+    assert "RNEMDRunPlan" not in out
+    assert "RNEMDStatus" not in out
     assert "current      : 3000/3000 steps = 3/3 ps (100.0%)" in out
     assert "flux energy  : 30" in out
     assert "profile rows : 4 block(s), latest step 3000 = 3 ps" in out
