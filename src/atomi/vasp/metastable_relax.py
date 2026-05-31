@@ -270,6 +270,32 @@ def write_poscar_with_flags(
     output.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def copy_poscar_preserving_target_flags(source: Path, target: Path) -> None:
+    """Copy source coordinates while preserving target selective-dynamics flags."""
+    if not target.is_file():
+        shutil.copy2(source, target)
+        return
+    source_doc = parse_poscar_document(source)
+    target_doc = parse_poscar_document(target)
+    if not target_doc.selective:
+        shutil.copy2(source, target)
+        return
+    if source_doc.species.symbols != target_doc.species.symbols or source_doc.species.counts != target_doc.species.counts:
+        raise ValueError(
+            "Cannot preserve selective-dynamics flags during stage advance because "
+            f"species/counts differ between {source} and {target}."
+        )
+    lines = [source_doc.comment, source_doc.scale, *source_doc.cell_lines]
+    lines.append("  " + "  ".join(source_doc.species.symbols))
+    lines.append("  " + "  ".join(str(value) for value in source_doc.species.counts))
+    lines.append("Selective dynamics")
+    lines.append(source_doc.mode)
+    for coords, tails in zip(source_doc.coordinates, target_doc.tails):
+        flags = tails[:3] if len(tails) >= 3 else ["T", "T", "T"]
+        lines.append("  " + "  ".join(coords) + "   " + " ".join(flags))
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def split_species_csv(text: str | None) -> set[str]:
     if not text:
         return set()
@@ -741,23 +767,26 @@ def advance_stage(args: argparse.Namespace) -> None:
     if not target.is_dir():
         raise FileNotFoundError(f"Missing target stage: {target}")
 
-    actions: list[tuple[Path, Path, str]] = []
+    actions: list[tuple[Path, Path, str, bool]] = []
     chgcar = source / "CHGCAR"
     if nonempty(chgcar):
-        actions.append((chgcar, target / "CHGCAR", "charge density"))
+        actions.append((chgcar, target / "CHGCAR", "charge density", False))
     elif not args.allow_missing_chgcar:
         raise FileNotFoundError(f"Missing non-empty CHGCAR in completed stage: {chgcar}")
 
     contcar = source / "CONTCAR"
     if nonempty(contcar):
-        actions.append((contcar, target / "POSCAR", "next starting structure"))
+        actions.append((contcar, target / "POSCAR", "next starting structure", True))
     elif from_stage != "00_static_scf" and not args.allow_missing_contcar:
         raise FileNotFoundError(f"Missing non-empty CONTCAR in completed stage: {contcar}")
 
-    for src, dst, label in actions:
+    for src, dst, label, preserve_flags in actions:
         print(f"{'DRY-RUN ' if args.dry_run else ''}copy {label}: {src} -> {dst}")
         if not args.dry_run:
-            shutil.copy2(src, dst)
+            if preserve_flags:
+                copy_poscar_preserving_target_flags(src, dst)
+            else:
+                shutil.copy2(src, dst)
 
     if not actions:
         print("No files copied.")

@@ -164,7 +164,26 @@ def test_advance_copies_chgcar_and_contcar_to_next_stage(tmp_path: Path, capsys)
     source = out / "00_static_scf"
     target = out / "01_gentle_relax"
     (source / "CHGCAR").write_text("charge\n", encoding="utf-8")
-    (source / "CONTCAR").write_text((source / "POSCAR").read_text(encoding="utf-8"), encoding="utf-8")
+    (source / "CONTCAR").write_text(
+        "\n".join(
+            [
+                "metastable after static",
+                "1.0",
+                "5.0 0.0 0.0",
+                "0.0 5.0 0.0",
+                "0.0 0.0 5.0",
+                "Gd U O",
+                "1 1 2",
+                "Direct",
+                "0.1 0.0 0.0",
+                "0.5 0.6 0.5",
+                "0.25 0.25 0.25",
+                "0.75 0.75 0.75",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     (source / "OUTCAR").write_text(
         " free  energy   TOTEN  =       -10.000000 eV\n"
         " magnetization (x)\n"
@@ -177,7 +196,10 @@ def test_advance_copies_chgcar_and_contcar_to_next_stage(tmp_path: Path, capsys)
     advance_main([str(out), "--from-stage", "00_static_scf", "--reference", str(root / "POSCAR")])
 
     assert (target / "CHGCAR").read_text(encoding="utf-8") == "charge\n"
-    assert (target / "POSCAR").read_text(encoding="utf-8") == (source / "CONTCAR").read_text(encoding="utf-8")
+    target_poscar = (target / "POSCAR").read_text(encoding="utf-8")
+    assert "Selective dynamics" in target_poscar
+    assert "0.1  0.0  0.0   T T T" in target_poscar
+    assert "0.25  0.25  0.25   F F F" in target_poscar
     text = capsys.readouterr().out
     assert "vasp-spin-report" in text
     assert "vasp-structure-fingerprint" in text
