@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from atomi.vasp.metastable_relax import (
+    advance_main,
     fingerprint_main,
     main,
     selective_main,
@@ -81,6 +82,10 @@ def test_metastable_prepare_preserves_physics_and_uses_conservative_freeze_seque
     assert "MAGMOM = 7 -7 2*0" in static_incar
     assert "IBRION = -1" in static_incar
     assert "ISIF = 2" in static_incar
+    assert "LCHARG = .TRUE." in static_incar
+    assert "LWAVE = .FALSE." in static_incar
+    assert "ISTART = 0" in relax_incar
+    assert "ICHARG = 1" in relax_incar
     assert "IBRION = 2" in relax_incar
     assert "POTIM = 0.05" in relax_incar
     assert "Selective dynamics" in cation_relax_poscar
@@ -149,3 +154,30 @@ def test_ldau_species_order_warning_catches_swapped_u_o(tmp_path: Path) -> None:
 
     assert "U usually expects 3, found -1" in "\n".join(warnings)
     assert "O usually expects -1, found 3" in "\n".join(warnings)
+
+
+def test_advance_copies_chgcar_and_contcar_to_next_stage(tmp_path: Path, capsys) -> None:
+    root = tmp_path / "seed"
+    out = tmp_path / "staged"
+    write_vasp_root(root)
+    main([str(root), "--output", str(out)])
+    source = out / "00_static_scf"
+    target = out / "01_gentle_relax"
+    (source / "CHGCAR").write_text("charge\n", encoding="utf-8")
+    (source / "CONTCAR").write_text((source / "POSCAR").read_text(encoding="utf-8"), encoding="utf-8")
+    (source / "OUTCAR").write_text(
+        " free  energy   TOTEN  =       -10.000000 eV\n"
+        " magnetization (x)\n"
+        " # of ion       s       p       d       f       tot\n"
+        "    1 0.000 0.000 0.000 0.000 7.000000\n"
+        " tot\n",
+        encoding="utf-8",
+    )
+
+    advance_main([str(out), "--from-stage", "00_static_scf", "--reference", str(root / "POSCAR")])
+
+    assert (target / "CHGCAR").read_text(encoding="utf-8") == "charge\n"
+    assert (target / "POSCAR").read_text(encoding="utf-8") == (source / "CONTCAR").read_text(encoding="utf-8")
+    text = capsys.readouterr().out
+    assert "vasp-spin-report" in text
+    assert "vasp-structure-fingerprint" in text

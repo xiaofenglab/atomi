@@ -93,6 +93,8 @@ STAGES = {
             "AMIX_MAG": "0.20",
             "BMIX_MAG": "0.0001",
             "MAXMIX": "80",
+            "LCHARG": ".TRUE.",
+            "LWAVE": ".FALSE.",
         },
     ),
     "01_gentle_relax": StageSpec(
@@ -100,7 +102,7 @@ STAGES = {
         description="Very short fixed-cell relaxation; useful for oxygen-only relaxation.",
         relaxation=True,
         overrides={
-            "ISTART": "1",
+            "ISTART": "0",
             "ICHARG": "1",
             "IBRION": "2",
             "ISIF": "2",
@@ -111,6 +113,8 @@ STAGES = {
             "ISYM": "0",
             "LREAL": ".FALSE.",
             "ALGO": "Normal",
+            "LCHARG": ".TRUE.",
+            "LWAVE": ".FALSE.",
         },
     ),
     "02_continue_relax": StageSpec(
@@ -118,7 +122,7 @@ STAGES = {
         description="Continue fixed-cell relaxation only after the metastable fingerprint survives.",
         relaxation=True,
         overrides={
-            "ISTART": "1",
+            "ISTART": "0",
             "ICHARG": "1",
             "IBRION": "2",
             "ISIF": "2",
@@ -129,6 +133,8 @@ STAGES = {
             "ISYM": "0",
             "LREAL": "Auto",
             "ALGO": "Normal",
+            "LCHARG": ".TRUE.",
+            "LWAVE": ".FALSE.",
         },
     ),
     "03_final_static": StageSpec(
@@ -136,7 +142,7 @@ STAGES = {
         description="Final static energy and charge/magnetization collection.",
         relaxation=False,
         overrides={
-            "ISTART": "1",
+            "ISTART": "0",
             "ICHARG": "1",
             "NSW": "0",
             "IBRION": "-1",
@@ -146,7 +152,7 @@ STAGES = {
             "EDIFF": "1E-7",
             "ALGO": "Normal",
             "LCHARG": ".TRUE.",
-            "LWAVE": ".TRUE.",
+            "LWAVE": ".FALSE.",
             "LORBIT": "11",
             "NEDOS": "4001",
         },
@@ -449,9 +455,9 @@ def prepare_metastable_relax(args: argparse.Namespace) -> None:
 
 def write_stage_readme(stage_dir: Path, spec: StageSpec, *, freeze_mode: str) -> None:
     previous = {
-        "01_gentle_relax": "../00_static_scf/CHGCAR and WAVECAR if available",
-        "02_continue_relax": "../01_gentle_relax/CONTCAR plus charge/wave files if available",
-        "03_final_static": "../02_continue_relax/CONTCAR plus charge/wave files if available",
+        "01_gentle_relax": "../00_static_scf/CHGCAR; CONTCAR copied to POSCAR if present",
+        "02_continue_relax": "../01_gentle_relax/CHGCAR and CONTCAR copied to POSCAR",
+        "03_final_static": "../02_continue_relax/CHGCAR and CONTCAR copied to POSCAR",
     }.get(spec.name, "root POSCAR and fresh charge")
     text = "\n".join(
         [
@@ -461,6 +467,9 @@ def write_stage_readme(stage_dir: Path, spec: StageSpec, *, freeze_mode: str) ->
             "",
             f"Suggested continuation source: {previous}.",
             f"Selective dynamics mode in POSCAR: {freeze_mode}.",
+            "",
+            "This workflow uses ISTART=0 and does not require WAVECAR.",
+            "Use `atomi vasp-metastable-advance` after a stage finishes to copy CHGCAR and POSCAR.",
             "",
             "Before submitting, confirm POSCAR is the intended structure for this stage.",
         ]
@@ -491,11 +500,21 @@ def write_workflow_readme(outdir: Path, root: Path, warnings: list[str], relax_s
         "",
         "Run stages in order and gate each continuation with `vasp-structure-fingerprint`.",
         "The workflow intentionally uses fixed-cell `ISIF=2` by default.",
+        "It uses `ISTART=0`, `ICHARG=1` after the first stage, `LCHARG=.TRUE.`, and `LWAVE=.FALSE.`.",
+        "Advance stages with `vasp-metastable-advance` so `CHGCAR` is copied forward without relying on `WAVECAR`.",
         "",
         "Default conservative sequence:",
         "",
         "- `01_gentle_relax`: freeze oxygen and gently relax cations.",
         "- `02_continue_relax`: freeze cations and gently relax oxygen.",
+        "",
+        "After each completed stage, inspect energy, spin, and structure before continuing:",
+        "",
+        "```bash",
+        "atomi vasp-metastable-status . --reference ../atomi_metastable_relax_input/POSCAR",
+        "atomi vasp-spin-report --outcar 00_static_scf/OUTCAR --species 00_static_scf/CONTCAR --incar 00_static_scf/INCAR --format both --no-plot",
+        "atomi vasp-structure-fingerprint 00_static_scf/CONTCAR --reference ../atomi_metastable_relax_input/POSCAR",
+        "```",
     ]
     if warnings:
         lines.extend(["", "## Preparation Warnings", ""])
@@ -700,6 +719,66 @@ def print_metastable_status(args: argparse.Namespace) -> None:
         )
 
 
+def next_stage_name(stage: str) -> str:
+    try:
+        return STAGE_ORDER[STAGE_ORDER.index(stage) + 1]
+    except (ValueError, IndexError) as exc:
+        raise ValueError(f"No next metastable stage after {stage!r}.") from exc
+
+
+def nonempty(path: Path) -> bool:
+    return path.is_file() and path.stat().st_size > 0
+
+
+def advance_stage(args: argparse.Namespace) -> None:
+    root = args.root.expanduser().resolve()
+    from_stage = args.from_stage
+    to_stage = args.to_stage or next_stage_name(from_stage)
+    source = root / from_stage
+    target = root / to_stage
+    if not source.is_dir():
+        raise FileNotFoundError(f"Missing source stage: {source}")
+    if not target.is_dir():
+        raise FileNotFoundError(f"Missing target stage: {target}")
+
+    actions: list[tuple[Path, Path, str]] = []
+    chgcar = source / "CHGCAR"
+    if nonempty(chgcar):
+        actions.append((chgcar, target / "CHGCAR", "charge density"))
+    elif not args.allow_missing_chgcar:
+        raise FileNotFoundError(f"Missing non-empty CHGCAR in completed stage: {chgcar}")
+
+    contcar = source / "CONTCAR"
+    if nonempty(contcar):
+        actions.append((contcar, target / "POSCAR", "next starting structure"))
+    elif from_stage != "00_static_scf" and not args.allow_missing_contcar:
+        raise FileNotFoundError(f"Missing non-empty CONTCAR in completed stage: {contcar}")
+
+    for src, dst, label in actions:
+        print(f"{'DRY-RUN ' if args.dry_run else ''}copy {label}: {src} -> {dst}")
+        if not args.dry_run:
+            shutil.copy2(src, dst)
+
+    if not actions:
+        print("No files copied.")
+
+    print()
+    print("Recommended checks before submitting the next stage:")
+    outcar = source / "OUTCAR"
+    species = contcar if nonempty(contcar) else source / "POSCAR"
+    if outcar.is_file():
+        print(
+            "atomi vasp-spin-report "
+            f"--outcar {outcar} --species {species} --incar {source / 'INCAR'} --format both --no-plot"
+        )
+    else:
+        print(f"# OUTCAR not found yet for spin report: {outcar}")
+    if nonempty(contcar):
+        reference = args.reference.expanduser().resolve() if args.reference else root.parent / "atomi_metastable_relax_input" / "POSCAR"
+        print(f"atomi vasp-structure-fingerprint {contcar} --reference {reference}")
+    print(f"atomi vasp-metastable-status {root} --reference {args.reference or '../atomi_metastable_relax_input/POSCAR'}")
+
+
 def format_float(value: object, width: int, precision: int) -> str:
     if value is None:
         return "NA".rjust(width)
@@ -781,6 +860,26 @@ def build_status_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_advance_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="vasp-metastable-advance",
+        description="Copy CHGCAR and CONTCAR/POSCAR handoff files between metastable VASP stages.",
+    )
+    parser.add_argument("root", type=Path, nargs="?", default=Path("."), help="Metastable staged workflow root.")
+    parser.add_argument(
+        "--from-stage",
+        choices=STAGE_ORDER[:-1],
+        required=True,
+        help="Completed stage to advance from.",
+    )
+    parser.add_argument("--to-stage", choices=STAGE_ORDER[1:], help="Target stage. Defaults to the next stage.")
+    parser.add_argument("--reference", type=Path, help="Reference POSCAR for printed fingerprint command.")
+    parser.add_argument("--dry-run", action="store_true", help="Print copies without changing files.")
+    parser.add_argument("--allow-missing-chgcar", action="store_true", help="Do not fail if CHGCAR is missing.")
+    parser.add_argument("--allow-missing-contcar", action="store_true", help="Do not fail if CONTCAR is missing.")
+    return parser
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_prepare_parser().parse_args(argv)
     prepare_metastable_relax(args)
@@ -811,6 +910,11 @@ def fingerprint_main(argv: list[str] | None = None) -> None:
 def status_main(argv: list[str] | None = None) -> None:
     args = build_status_parser().parse_args(argv)
     print_metastable_status(args)
+
+
+def advance_main(argv: list[str] | None = None) -> None:
+    args = build_advance_parser().parse_args(argv)
+    advance_stage(args)
 
 
 if __name__ == "__main__":

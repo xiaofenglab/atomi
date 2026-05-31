@@ -596,6 +596,11 @@ def build_parser() -> argparse.ArgumentParser:
             "Summarize staged metastable VASP relaxation folders.",
             "metastable_status_args",
         ),
+        (
+            "vasp-metastable-advance",
+            "Copy CHGCAR and CONTCAR/POSCAR handoff files between metastable stages.",
+            "metastable_advance_args",
+        ),
     ):
         metastable_parser = subparsers.add_parser(command_name, help=help_text)
         metastable_parser.add_argument(arg_name, nargs=argparse.REMAINDER)
@@ -1193,6 +1198,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.metastable_relax import status_main as vasp_metastable_status_main
 
         vasp_metastable_status_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "vasp-metastable-advance":
+        from atomi.vasp.metastable_relax import advance_main as vasp_metastable_advance_main
+
+        vasp_metastable_advance_main(raw_args[1:])
         return
     if raw_args and raw_args[0] in ("vasp-branch-screen", "screen-vasp-branches", "vasp-stage1-screen", "spinscreen"):
         from atomi.vasp.branch_screen import main as vasp_branch_screen_main
@@ -1793,6 +1803,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.metastable_relax import status_main as vasp_metastable_status_main
 
         vasp_metastable_status_main(args.metastable_status_args)
+        return
+
+    if args.subcommand == "vasp-metastable-advance":
+        from atomi.vasp.metastable_relax import advance_main as vasp_metastable_advance_main
+
+        vasp_metastable_advance_main(args.metastable_advance_args)
         return
 
     if args.subcommand in ("vasp-branch-screen", "screen-vasp-branches", "vasp-stage1-screen", "spinscreen"):
