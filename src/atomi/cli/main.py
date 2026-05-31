@@ -638,6 +638,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         vasp_project_poscar.add_argument("project_poscar_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("vasp-assign-spins", "assign-spins"):
+        vasp_assign_spins = subparsers.add_parser(
+            command_name,
+            help="Write a cation-first POSCAR and INCAR MAGMOM from element/range spin rules.",
+        )
+        vasp_assign_spins.add_argument("assign_spin_args", nargs=argparse.REMAINDER)
+
     listvasp = subparsers.add_parser(
         "listvasp",
         help="Find folders containing POSCAR and write a runlist.txt.",
@@ -1191,6 +1198,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.poscar_project import main as vasp_project_poscar_main
 
         vasp_project_poscar_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in ("vasp-assign-spins", "assign-spins"):
+        from atomi.vasp.spin_assign import main as vasp_assign_spins_main
+
+        vasp_assign_spins_main(raw_args[1:])
         return
     if raw_args and raw_args[0] == "listvasp":
         from atomi.vasp.runlist import main as listvasp_main
