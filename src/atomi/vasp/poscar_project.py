@@ -58,6 +58,7 @@ class ProjectionResult:
     randomized_candidate_summary: dict[str, object]
     initial_spin_candidate_summary: dict[str, object]
     chemistry_spin_summary: dict[str, object]
+    geometry_summary: dict[str, object]
     warnings: list[str]
 
 
@@ -124,6 +125,8 @@ def project_poscar_elements(
     randomize_mcsqs_quadruplet_diameter: float | None = None,
     randomize_mcsqs_temperature: float | None = None,
     randomize_mcsqs_max_steps: int | None = None,
+    min_generated_distance_A: float = 0.2,
+    strict_generated_geometry: bool = True,
 ) -> ProjectionResult:
     """Project cation identities and MAGMOMs from source POSCAR A onto structure POSCAR B."""
     source_poscar = source_poscar.expanduser().resolve()
@@ -327,6 +330,67 @@ def project_poscar_elements(
     )
     output_poscar.parent.mkdir(parents=True, exist_ok=True)
     output_poscar.write_text(poscar_text, encoding="utf-8")
+    geometry_summary: dict[str, object] = {
+        "distance_limit_A": min_generated_distance_A,
+        "strict": strict_generated_geometry,
+        "output_poscar": minimum_pair_distance_summary(
+            output_species,
+            target.cell,
+            [target.scaled_positions[index] for index in output_indices],
+        ),
+    }
+    if prepared_source_species is not None:
+        geometry_summary["prepared_source_poscar"] = minimum_pair_distance_summary(
+            prepared_source_species,
+            source.cell,
+            [source.scaled_positions[index] for index in prepared_source_indices],
+        )
+    geometry_warnings = generated_geometry_warnings(
+        geometry_summary,
+        min_distance_A=min_generated_distance_A,
+    )
+    warnings.extend(geometry_warnings)
+    if strict_generated_geometry and geometry_warnings:
+        write_match_csv(match_csv, matches, source_symbols, target_symbols, source_for_matching, target)
+        write_plan_json(
+            plan_json,
+            {
+                "schema": "atomi.vasp.poscar_projection.v1",
+                "status": "failed_generated_geometry_check",
+                "source_poscar": str(source_poscar),
+                "target_poscar": str(target_poscar),
+                "source_incar": str(source_incar) if source_incar else "",
+                "output_poscar": str(output_poscar),
+                "prepared_source_poscar": str(prepared_source_poscar) if prepared_source_poscar else "",
+                "match_csv": str(match_csv),
+                "source_operations": source_prepared.operations,
+                "target_operations": target_prepared.operations,
+                "cation_origin_alignment": cation_origin_alignment,
+                "cation_elements": cation_order or sorted(cation_set),
+                "anion_elements": sorted(anion_set),
+                "source_cation_count": len(source_cations),
+                "target_cation_count": len(target_cations),
+                "max_cation_distance_A": worst,
+                "distance_limit_A": max_cation_distance_A,
+                "species_order": output_species.symbols,
+                "species_counts": dict(zip(output_species.symbols, output_species.counts)),
+                "geometry_summary": geometry_summary,
+                "strict_generated_geometry": strict_generated_geometry,
+                "generated_geometry_ok": False,
+                "generated_geometry_warnings": geometry_warnings,
+                "warnings": warnings,
+                "notes": [
+                    "Generated POSCAR geometry failed before final INCAR/candidate writing.",
+                    "Inspect POSCAR_A_prepared, POSCAR, and this plan JSON before submitting VASP.",
+                ],
+            },
+        )
+        raise ValueError(
+            "Generated POSCAR geometry check failed: "
+            + "; ".join(geometry_warnings)
+            + ". Inspect POSCAR_A_prepared, POSCAR, and the plan JSON. "
+            "Use --allow-small-generated-distance only for diagnostics, not for VASP production."
+        )
     copied_static_inputs = [] if candidate_folder_mode else copy_static_vasp_inputs(output_poscar.parent, static_vasp_input_dirs)
 
     output_moments: list[float] | None = None
@@ -472,7 +536,13 @@ def project_poscar_elements(
         plan_json,
         {
             "schema": "atomi.vasp.poscar_projection.v1",
-            "status": "failed_magmom_preservation_check" if strict_magmom_preservation and magmom_warnings else "ok",
+            "status": (
+                "failed_generated_geometry_check"
+                if strict_generated_geometry and geometry_warnings
+                else "failed_magmom_preservation_check"
+                if strict_magmom_preservation and magmom_warnings
+                else "ok"
+            ),
             "source_poscar": str(source_poscar),
             "target_poscar": str(target_poscar),
             "source_incar": str(source_incar) if source_incar else "",
@@ -499,11 +569,15 @@ def project_poscar_elements(
             "anion_vacancy_summary": anion_vacancy_summary,
             "charge_summary": charge_summary,
             "chemistry_spin_summary": chemistry_spin_summary,
+            "geometry_summary": geometry_summary,
             "guest_cation_distance_summary": guest_cation_distance_summary,
             "direct_candidate_summary": direct_candidate_summary,
             "randomized_candidate_summary": randomized_candidate_summary,
             "initial_spin_candidate_summary": initial_spin_candidate_summary,
+            "strict_generated_geometry": strict_generated_geometry,
             "strict_magmom_preservation": strict_magmom_preservation,
+            "generated_geometry_ok": not geometry_warnings,
+            "generated_geometry_warnings": geometry_warnings,
             "magmom_preservation_ok": not magmom_warnings,
             "magmom_preservation_warnings": magmom_warnings,
             "warnings": warnings,
@@ -542,6 +616,7 @@ def project_poscar_elements(
         randomized_candidate_summary=randomized_candidate_summary,
         initial_spin_candidate_summary=initial_spin_candidate_summary,
         chemistry_spin_summary=chemistry_spin_summary,
+        geometry_summary=geometry_summary,
         warnings=warnings,
     )
 
@@ -2161,6 +2236,73 @@ def pairwise_distances_A(structure: PoscarStructure, indices: list[int]) -> list
                 )
             )
     return sorted(distances)
+
+
+def minimum_pair_distance_summary(
+    species: PoscarSpecies,
+    cell: list[list[float]],
+    scaled_positions: list[list[float]],
+) -> dict[str, object]:
+    symbols = species_atom_symbols(species)
+    if len(symbols) != len(scaled_positions):
+        return {
+            "atom_count": len(scaled_positions),
+            "species_atom_count": len(symbols),
+            "min_distance_A": None,
+            "error": "species/coordinate count mismatch",
+        }
+    best: tuple[float, int, int] | None = None
+    for left_index in range(len(scaled_positions)):
+        for right_index in range(left_index + 1, len(scaled_positions)):
+            distance = fractional_distance_A(
+                scaled_positions[left_index],
+                scaled_positions[right_index],
+                cell,
+            )
+            if best is None or distance < best[0]:
+                best = (distance, left_index, right_index)
+    if best is None:
+        return {
+            "atom_count": len(scaled_positions),
+            "min_distance_A": None,
+        }
+    distance, left_index, right_index = best
+    return {
+        "atom_count": len(scaled_positions),
+        "min_distance_A": distance,
+        "atom_i": left_index + 1,
+        "element_i": symbols[left_index],
+        "atom_j": right_index + 1,
+        "element_j": symbols[right_index],
+    }
+
+
+def generated_geometry_warnings(
+    geometry_summary: dict[str, object],
+    *,
+    min_distance_A: float,
+) -> list[str]:
+    labels = {
+        "output_poscar": "Projected POSCAR",
+        "prepared_source_poscar": "Prepared source POSCAR",
+    }
+    warnings: list[str] = []
+    for key, label in labels.items():
+        entry = geometry_summary.get(key)
+        if not isinstance(entry, dict):
+            continue
+        value = entry.get("min_distance_A")
+        if value is None:
+            continue
+        distance = float(value)
+        if distance < min_distance_A:
+            warnings.append(
+                f"{label} minimum distance is {distance:.4g} A between "
+                f"{entry.get('element_i', '?')}{entry.get('atom_i', '?')} and "
+                f"{entry.get('element_j', '?')}{entry.get('atom_j', '?')}, below "
+                f"--min-generated-distance {min_distance_A:.4g} A"
+            )
+    return warnings
 
 
 def summarize_guest_cation_distances(
@@ -3875,6 +4017,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-cation-distance", type=float, default=1.5, help="Fail if any projected cation match exceeds this distance in Angstrom.")
     parser.add_argument("--allow-large-cation-distance", action="store_true", help="Warn instead of failing when the cation match exceeds the distance limit.")
     parser.add_argument(
+        "--min-generated-distance",
+        type=float,
+        default=0.2,
+        help=(
+            "Fail if the projected POSCAR or prepared source POSCAR contains any periodic atom pair closer "
+            "than this distance in Angstrom. Default: 0.2."
+        ),
+    )
+    parser.add_argument(
+        "--allow-small-generated-distance",
+        action="store_true",
+        help="Warn instead of failing when generated POSCAR geometry has too-close atom pairs. Use only for diagnostics.",
+    )
+    parser.add_argument(
         "--allow-magmom-mismatch",
         action="store_true",
         help="Warn instead of failing if projected cation MAGMOM signs/counts/magnitudes differ from prepared source A.",
@@ -4066,6 +4222,8 @@ def main(argv: list[str] | None = None) -> None:
         randomize_mcsqs_quadruplet_diameter=args.randomize_mcsqs_quadruplet_diameter,
         randomize_mcsqs_temperature=args.randomize_mcsqs_temperature,
         randomize_mcsqs_max_steps=args.randomize_mcsqs_max_steps,
+        min_generated_distance_A=args.min_generated_distance,
+        strict_generated_geometry=not args.allow_small_generated_distance,
     )
     print(f"Projected POSCAR : {result.output_poscar}")
     if result.prepared_source_poscar:
@@ -4082,6 +4240,17 @@ def main(argv: list[str] | None = None) -> None:
         "Output species   : "
         + " ".join(f"{symbol}:{count}" for symbol, count in zip(result.output_species.symbols, result.output_species.counts))
     )
+    if result.geometry_summary:
+        print("Geometry check   :")
+        for key, label in (("output_poscar", "projected"), ("prepared_source_poscar", "prepared A")):
+            entry = result.geometry_summary.get(key)
+            if not isinstance(entry, dict) or entry.get("min_distance_A") is None:
+                continue
+            print(
+                f"  {label}: min {float(entry.get('min_distance_A', 0.0)):g} A "
+                f"between {entry.get('element_i', '?')}{entry.get('atom_i', '?')} and "
+                f"{entry.get('element_j', '?')}{entry.get('atom_j', '?')}"
+            )
     chemistry = result.chemistry_spin_summary
     if chemistry:
         print("Chemistry/spin check:")

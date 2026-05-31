@@ -94,6 +94,38 @@ def write_relaxed_target_poscar(path: Path) -> None:
     )
 
 
+def write_overlapping_cation_source(path: Path) -> None:
+    path.write_text(
+        "A source with overlapping protected cations\n"
+        "1.0\n"
+        "4.0 0.0 0.0\n"
+        "0.0 4.0 0.0\n"
+        "0.0 0.0 4.0\n"
+        "Gd\n"
+        "2\n"
+        "Direct\n"
+        "0.0000000000 0.0000000000 0.0000000000\n"
+        "0.0007500000 0.0000000000 0.0000000000\n",
+        encoding="utf-8",
+    )
+
+
+def write_two_cation_target(path: Path) -> None:
+    path.write_text(
+        "B two-cation target\n"
+        "1.0\n"
+        "4.0 0.0 0.0\n"
+        "0.0 4.0 0.0\n"
+        "0.0 0.0 4.0\n"
+        "U\n"
+        "2\n"
+        "Direct\n"
+        "0.0000000000 0.0000000000 0.0000000000\n"
+        "0.5000000000 0.5000000000 0.5000000000\n",
+        encoding="utf-8",
+    )
+
+
 def write_uc_source_with_carbon_vacancy(path: Path) -> None:
     path.write_text(
         "A UC source with one C vacancy\n"
@@ -734,6 +766,70 @@ def test_project_poscar_prepared_source_uses_projected_species_order(tmp_path: P
     assert projected.species.counts == [1, 7]
     assert prepared.species.symbols == ["Gd", "U"]
     assert prepared.species.counts == [1, 7]
+
+
+def test_project_poscar_fails_fast_on_generated_prepared_source_overlap(tmp_path: Path) -> None:
+    source = tmp_path / "A_overlap_POSCAR"
+    target = tmp_path / "B_two_cation_POSCAR"
+    out = tmp_path / "projected_overlap"
+    write_overlapping_cation_source(source)
+    write_two_cation_target(target)
+
+    with pytest.raises(ValueError, match="Generated POSCAR geometry check failed"):
+        project_main(
+            [
+                "--element-poscar",
+                str(source),
+                "--structure-poscar",
+                str(target),
+                "--outdir",
+                str(out),
+                "--out-source-poscar",
+                str(out / "POSCAR_A_prepared"),
+                "--cation-elements",
+                "Gd,U",
+                "--allow-large-cation-distance",
+            ]
+        )
+
+    plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    assert plan["status"] == "failed_generated_geometry_check"
+    assert plan["generated_geometry_ok"] is False
+    prepared_geometry = plan["geometry_summary"]["prepared_source_poscar"]
+    assert prepared_geometry["min_distance_A"] == pytest.approx(0.003)
+    assert prepared_geometry["element_i"] == "Gd"
+    assert prepared_geometry["element_j"] == "Gd"
+    assert "Prepared source POSCAR minimum distance" in plan["generated_geometry_warnings"][0]
+
+
+def test_project_poscar_can_warn_only_on_generated_overlap_for_diagnostics(tmp_path: Path) -> None:
+    source = tmp_path / "A_overlap_POSCAR"
+    target = tmp_path / "B_two_cation_POSCAR"
+    out = tmp_path / "projected_overlap_warn"
+    write_overlapping_cation_source(source)
+    write_two_cation_target(target)
+
+    project_main(
+        [
+            "--element-poscar",
+            str(source),
+            "--structure-poscar",
+            str(target),
+            "--outdir",
+            str(out),
+            "--out-source-poscar",
+            str(out / "POSCAR_A_prepared"),
+            "--cation-elements",
+            "Gd,U",
+            "--allow-large-cation-distance",
+            "--allow-small-generated-distance",
+        ]
+    )
+
+    plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    assert plan["status"] == "ok"
+    assert plan["generated_geometry_ok"] is False
+    assert read_poscar_structure(out / "POSCAR_A_prepared").species.counts == [2]
 
 
 def test_project_poscar_crop_prefers_minority_and_charge_coupled_cations(tmp_path: Path) -> None:
