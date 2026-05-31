@@ -575,6 +575,31 @@ def build_parser() -> argparse.ArgumentParser:
         )
         vasp_compare_runs.add_argument("compare_args", nargs=argparse.REMAINDER)
 
+    for command_name, help_text, arg_name in (
+        (
+            "vasp-metastable-relax",
+            "Prepare conservative fixed-cell VASP stages for metastable structures.",
+            "metastable_args",
+        ),
+        (
+            "vasp-selective-dynamics",
+            "Apply Selective dynamics flags to a POSCAR/CONTCAR.",
+            "selective_args",
+        ),
+        (
+            "vasp-structure-fingerprint",
+            "Fingerprint a VASP structure and optionally compare to a reference.",
+            "fingerprint_args",
+        ),
+        (
+            "vasp-metastable-status",
+            "Summarize staged metastable VASP relaxation folders.",
+            "metastable_status_args",
+        ),
+    ):
+        metastable_parser = subparsers.add_parser(command_name, help=help_text)
+        metastable_parser.add_argument(arg_name, nargs=argparse.REMAINDER)
+
     for command_name in ("vasp-branch-screen", "screen-vasp-branches", "vasp-stage1-screen", "spinscreen"):
         branch_screen = subparsers.add_parser(
             command_name,
@@ -1148,6 +1173,26 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.compare_runs import main as vasp_compare_runs_main
 
         vasp_compare_runs_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "vasp-metastable-relax":
+        from atomi.vasp.metastable_relax import main as vasp_metastable_relax_main
+
+        vasp_metastable_relax_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "vasp-selective-dynamics":
+        from atomi.vasp.metastable_relax import selective_main as vasp_selective_dynamics_main
+
+        vasp_selective_dynamics_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "vasp-structure-fingerprint":
+        from atomi.vasp.metastable_relax import fingerprint_main as vasp_structure_fingerprint_main
+
+        vasp_structure_fingerprint_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "vasp-metastable-status":
+        from atomi.vasp.metastable_relax import status_main as vasp_metastable_status_main
+
+        vasp_metastable_status_main(raw_args[1:])
         return
     if raw_args and raw_args[0] in ("vasp-branch-screen", "screen-vasp-branches", "vasp-stage1-screen", "spinscreen"):
         from atomi.vasp.branch_screen import main as vasp_branch_screen_main
@@ -1724,6 +1769,30 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.compare_runs import main as vasp_compare_runs_main
 
         vasp_compare_runs_main(args.compare_args)
+        return
+
+    if args.subcommand == "vasp-metastable-relax":
+        from atomi.vasp.metastable_relax import main as vasp_metastable_relax_main
+
+        vasp_metastable_relax_main(args.metastable_args)
+        return
+
+    if args.subcommand == "vasp-selective-dynamics":
+        from atomi.vasp.metastable_relax import selective_main as vasp_selective_dynamics_main
+
+        vasp_selective_dynamics_main(args.selective_args)
+        return
+
+    if args.subcommand == "vasp-structure-fingerprint":
+        from atomi.vasp.metastable_relax import fingerprint_main as vasp_structure_fingerprint_main
+
+        vasp_structure_fingerprint_main(args.fingerprint_args)
+        return
+
+    if args.subcommand == "vasp-metastable-status":
+        from atomi.vasp.metastable_relax import status_main as vasp_metastable_status_main
+
+        vasp_metastable_status_main(args.metastable_status_args)
         return
 
     if args.subcommand in ("vasp-branch-screen", "screen-vasp-branches", "vasp-stage1-screen", "spinscreen"):
