@@ -11,10 +11,42 @@ from pathlib import Path
 
 from atomi.vasp.checks import DONE_MARKER, _latest_vasp_energy
 from atomi.vasp.compare_runs import angle_deg, det3, norm
-from atomi.vasp.magmom import PoscarSpecies, PoscarStructure, read_outcar_lines, read_poscar_structure
+from atomi.vasp.magmom import (
+    PoscarSpecies,
+    PoscarStructure,
+    expand_incar_value_tokens,
+    read_outcar_lines,
+    read_poscar_structure,
+    strip_incar_comment,
+)
 
 
 CATION_DEFAULT_EXCLUDE = {"O", "F", "Cl", "Br", "I", "S", "Se", "Te", "N", "P", "H"}
+F_ELECTRON_LDAU_SPECIES = {
+    "Ce",
+    "Pr",
+    "Nd",
+    "Pm",
+    "Sm",
+    "Eu",
+    "Gd",
+    "Tb",
+    "Dy",
+    "Ho",
+    "Er",
+    "Tm",
+    "Yb",
+    "Lu",
+    "Th",
+    "Pa",
+    "U",
+    "Np",
+    "Pu",
+    "Am",
+    "Cm",
+    "Bk",
+    "Cf",
+}
 STAGE_ORDER = ("00_static_scf", "01_gentle_relax", "02_continue_relax", "03_final_static")
 COPY_INPUT_NAMES = ("POTCAR", "KPOINTS")
 SUBMIT_CANDIDATES = ("submit.sh", "run_vasp.sh", "job.sh", "vasp.sbatch", "*.sbatch")
@@ -325,6 +357,7 @@ def validate_root(root: Path, *, allow_cell_relax: bool) -> list[str]:
     if re.search(r"^\s*ISIF\s*=\s*3\b", incar_text, flags=re.IGNORECASE | re.MULTILINE) and not allow_cell_relax:
         warnings.append("root INCAR contains ISIF=3; staged outputs will force ISIF=2")
     warnings.extend(validate_potcar_order(poscar, potcar))
+    warnings.extend(validate_ldau_species_order(poscar, incar))
     return warnings
 
 
@@ -343,6 +376,32 @@ def validate_potcar_order(poscar: Path, potcar: Path) -> list[str]:
     if titles[: len(species)] != species:
         return [f"POTCAR title order {titles[:len(species)]} does not match POSCAR species {species}"]
     return []
+
+
+def incar_tag_values(incar: Path, tag: str) -> list[str] | None:
+    pattern = re.compile(rf"^\s*{re.escape(tag)}\s*=", re.IGNORECASE)
+    for line in incar.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not pattern.match(line):
+            continue
+        body = strip_incar_comment(line).split("=", 1)[-1]
+        return expand_incar_value_tokens(body.split())
+    return None
+
+
+def validate_ldau_species_order(poscar: Path, incar: Path) -> list[str]:
+    species = read_poscar_structure(poscar).species.symbols
+    ldaul_values = incar_tag_values(incar, "LDAUL")
+    if ldaul_values is None:
+        return []
+    if len(ldaul_values) != len(species):
+        return [f"LDAUL has {len(ldaul_values)} values but POSCAR has {len(species)} species"]
+    warnings: list[str] = []
+    for symbol, value in zip(species, ldaul_values):
+        if symbol in CATION_DEFAULT_EXCLUDE and value != "-1":
+            warnings.append(f"LDAUL species-order check: {symbol} usually expects -1, found {value}")
+        elif symbol in F_ELECTRON_LDAU_SPECIES and value != "3":
+            warnings.append(f"LDAUL species-order check: {symbol} usually expects 3, found {value}")
+    return warnings
 
 
 def prepare_metastable_relax(args: argparse.Namespace) -> None:

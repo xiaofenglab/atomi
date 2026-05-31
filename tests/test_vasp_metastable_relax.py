@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from atomi.vasp.metastable_relax import fingerprint_main, main, selective_main, status_main
+from atomi.vasp.metastable_relax import (
+    fingerprint_main,
+    main,
+    selective_main,
+    status_main,
+    validate_ldau_species_order,
+)
 
 
 def write_vasp_root(root: Path) -> None:
@@ -122,3 +128,24 @@ def test_fingerprint_and_status_print_tables(tmp_path: Path, capsys) -> None:
     assert "Nearest Pair Distances" in text
     assert "VASP Metastable Relaxation Status" in text
     assert "00_static_scf" in text
+
+
+def test_ldau_species_order_warning_catches_swapped_u_o(tmp_path: Path) -> None:
+    root = tmp_path / "seed"
+    write_vasp_root(root)
+    (root / "INCAR").write_text(
+        "\n".join(
+            [
+                "LDAU = .TRUE.",
+                "LDAUL = 3 -1 3",
+                "LDAUU = 6.0 4.0 0.0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    warnings = validate_ldau_species_order(root / "POSCAR", root / "INCAR")
+
+    assert "U usually expects 3, found -1" in "\n".join(warnings)
+    assert "O usually expects -1, found 3" in "\n".join(warnings)
