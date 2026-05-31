@@ -1400,6 +1400,47 @@ def test_project_poscar_boundary_repair_preserves_balanced_cation_counts(tmp_pat
     assert operation["cation_species_target_counts"] == {"Gd": 4, "U": 4}
 
 
+def test_project_poscar_tries_alternate_crop_when_best_origin_overlaps(tmp_path: Path) -> None:
+    source = tmp_path / "A_2x3x3_overlap_origin_POSCAR"
+    target = tmp_path / "B_2x2x2_POSCAR"
+    out = tmp_path / "projected_overlap_origin"
+    write_2x3x3_equal_cation_source(source)
+    write_2x2x2_cation_target(target)
+    lines = source.read_text(encoding="utf-8").splitlines()
+    lines[17] = "0.2500000000 0.1666666667 0.1666666667"
+    lines[18] = "0.2505000000 0.1667000000 0.1667000000"
+    source.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    project_main(
+        [
+            "--element-poscar",
+            str(source),
+            "--structure-poscar",
+            str(target),
+            "--outdir",
+            str(out),
+            "--source-supercell",
+            "2x3x3",
+            "--source-keep-cells",
+            "2x2x2",
+            "--cation-elements",
+            "U,Gd",
+        ]
+    )
+
+    prepared = read_poscar_structure(out / "POSCAR_A_prepared")
+    plan = json.loads((out / "poscar_projection_plan.json").read_text(encoding="utf-8"))
+    operation = plan["source_operations"][0]
+    geometry = operation["prepared_source_geometry"]
+    assert prepared.species.total_atoms == 8
+    assert operation["crop_origin_cells"] != [0, 0, 0]
+    assert operation["crop_origin_rejected_count"] >= 1
+    assert operation["crop_origin_rejections"][0]["crop_origin_cells"] == [0, 0, 0]
+    assert operation["crop_origin_rejections"][0]["reason"] == "prepared_source_min_distance_below_limit"
+    assert geometry["min_distance_A"] >= 0.2
+    assert plan["generated_geometry_ok"] is True
+
+
 def test_crop_boundary_repair_prefers_protected_cations() -> None:
     repaired = repaired_crop_cation_indices(
         positions=[

@@ -163,6 +163,7 @@ def project_poscar_elements(
         cation_elements=cation_set,
         anion_elements=anion_set,
         expected_cation_count=len(target_cations),
+        min_generated_distance_A=min_generated_distance_A,
     )
     source = source_prepared.structure
     if scale_target_volume_to_source:
@@ -739,6 +740,7 @@ def prepare_structure(
     cation_elements: set[str] | None = None,
     anion_elements: set[str] | None = None,
     expected_cation_count: int | None = None,
+    min_generated_distance_A: float = 0.2,
 ) -> PreparedStructure:
     origin_indices = list(range(structure.species.total_atoms))
     operations: list[dict[str, object]] = []
@@ -772,8 +774,17 @@ def prepare_structure(
                 "selection_policy": "origin",
                 "crop_origin_cells": [0, 0, 0],
             }
+            structure, origin_indices, repair_meta = crop_structure_fraction(
+                structure,
+                origin_indices,
+                ranges,
+                expected_cation_count=expected_cation_count,
+                cation_elements=cation_elements or set(),
+                anion_elements=anion_elements or {"O"},
+                source_moments=source_moments,
+            )
         elif crop_policy == "defect_preserving":
-            ranges, crop_meta = choose_defect_preserving_crop_ranges(
+            candidates = defect_preserving_crop_candidates(
                 structure,
                 origin_indices,
                 crop_supercell,
@@ -782,17 +793,18 @@ def prepare_structure(
                 cation_elements=cation_elements or set(),
                 anion_elements=anion_elements or {"O"},
             )
+            structure, origin_indices, ranges, crop_meta, repair_meta = choose_feasible_source_crop(
+                structure,
+                origin_indices,
+                candidates,
+                expected_cation_count=expected_cation_count,
+                cation_elements=cation_elements or set(),
+                anion_elements=anion_elements or {"O"},
+                source_moments=source_moments,
+                min_generated_distance_A=min_generated_distance_A,
+            )
         else:
             raise ValueError(f"Unknown source crop policy {crop_policy!r}.")
-        structure, origin_indices, repair_meta = crop_structure_fraction(
-            structure,
-            origin_indices,
-            ranges,
-            expected_cation_count=expected_cation_count,
-            cation_elements=cation_elements or set(),
-            anion_elements=anion_elements or {"O"},
-            source_moments=source_moments,
-        )
         operations.append(
             {
                 "kind": "source_keep_cells",
@@ -1362,6 +1374,31 @@ def choose_defect_preserving_crop_ranges(
     cation_elements: set[str],
     anion_elements: set[str],
 ) -> tuple[tuple[tuple[float, float], tuple[float, float], tuple[float, float]], dict[str, object]]:
+    candidates = defect_preserving_crop_candidates(
+        structure,
+        origin_indices,
+        supercell,
+        keep_cells,
+        source_moments=source_moments,
+        cation_elements=cation_elements,
+        anion_elements=anion_elements,
+    )
+    if not candidates:
+        raise ValueError(f"Cannot keep {keep_cells} cells from source supercell {supercell}.")
+    _score, ranges, meta = candidates[0]
+    return ranges, meta
+
+
+def defect_preserving_crop_candidates(
+    structure: PoscarStructure,
+    origin_indices: list[int],
+    supercell: tuple[int, int, int],
+    keep_cells: tuple[int, int, int],
+    *,
+    source_moments: list[float] | None,
+    cation_elements: set[str],
+    anion_elements: set[str],
+) -> list[tuple[tuple[int, int, int, int, int, int, int, int], tuple[tuple[float, float], tuple[float, float], tuple[float, float]], dict[str, object]]]:
     candidate_origins = [
         tuple(origin)
         for origin in product(*(range(supercell[axis] - keep_cells[axis] + 1) for axis in range(3)))
@@ -1390,33 +1427,17 @@ def choose_defect_preserving_crop_ranges(
         any(counts.get(symbol, 0) < max_count for symbol, max_count in max_anion_counts.items())
         for counts in candidate_anion_counts.values()
     )
-    if not minority_symbols and not any_anion_deficit:
-        origin = (0, 0, 0)
-        ranges = crop_ranges_from_origin(supercell, keep_cells, origin)
-        kept = candidate_kept[origin]
-        meta = {
-            "selection_policy": "defect_preserving",
-            "selection_reason": "regular_origin_crop_no_minority_cation",
-            "crop_origin_cells": list(origin),
-            "minority_cation_elements": [],
-            "minority_cations_available": 0,
-            "minority_cations_kept": 0,
-            "charge_variant_cations_available": 0,
-            "charge_variant_cations_kept": 0,
-            "anion_vacancy_elements": [],
-            "anion_vacancies_kept": 0,
-            "source_magnetic_signature": magnetic_signature(symbols, cation_indices, origin_indices, source_moments),
-            "crop_magnetic_signature": magnetic_signature(symbols, sorted(kept & set(cation_indices)), origin_indices, source_moments),
-        }
-        return ranges, meta
 
     charge_variant_indices = charge_variant_cation_indices(symbols, cation_indices, origin_indices, source_moments)
     source_magnetic_buckets = magnetic_buckets(symbols, cation_indices, origin_indices, source_moments)
 
-    best_origin = candidate_origins[0]
-    best_ranges = crop_ranges_from_origin(supercell, keep_cells, best_origin)
-    best_score: tuple[int, int, int, int, int, int, int, int] | None = None
-    best_kept: set[int] = set()
+    candidates: list[
+        tuple[
+            tuple[int, int, int, int, int, int, int, int],
+            tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
+            dict[str, object],
+        ]
+    ] = []
     for origin in candidate_origins:
         ranges = crop_ranges_from_origin(supercell, keep_cells, origin)
         kept = candidate_kept[origin]
@@ -1436,41 +1457,130 @@ def choose_defect_preserving_crop_ranges(
             -origin[1],
             -origin[2],
         )
-        if best_score is None or score > best_score:
-            best_origin = origin
-            best_ranges = ranges
-            best_score = score
-            best_kept = kept
+        selection_reason = (
+            "regular_origin_crop_no_minority_cation"
+            if not minority_symbols and not any_anion_deficit
+            else "defect_preserving_ranked_crop"
+        )
+        meta = {
+            "selection_policy": "defect_preserving",
+            "selection_reason": selection_reason,
+            "crop_origin_cells": list(origin),
+            "crop_selection_score": list(score),
+            "minority_cation_elements": sorted(minority_symbols),
+            "minority_cations_available": sum(1 for index in cation_indices if symbols[index] in minority_symbols),
+            "minority_cations_kept": sum(1 for index in kept if symbols[index] in minority_symbols),
+            "charge_variant_cations_available": len(charge_variant_indices),
+            "charge_variant_cations_kept": sum(1 for index in kept if index in charge_variant_indices),
+            "anion_vacancy_elements": sorted(
+                symbol
+                for symbol, max_count in max_anion_counts.items()
+                if candidate_anion_counts[origin].get(symbol, 0) < max_count
+            ),
+            "anion_vacancies_kept": sum(
+                max_count - candidate_anion_counts[origin].get(symbol, 0)
+                for symbol, max_count in max_anion_counts.items()
+            ),
+            "candidate_max_anion_counts": dict(sorted(max_anion_counts.items())),
+            "crop_anion_counts": dict(sorted(candidate_anion_counts[origin].items())),
+            "magnetic_signature_note": "Signs are inferred from INCAR MAGMOM for cations: positive, negative, or zero.",
+            "source_magnetic_signature": magnetic_signature(symbols, cation_indices, origin_indices, source_moments),
+            "crop_magnetic_signature": magnetic_signature(
+                symbols,
+                kept_cations,
+                origin_indices,
+                source_moments,
+            ),
+        }
+        candidates.append((score, ranges, meta))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates
 
-    meta = {
-        "selection_policy": "defect_preserving",
-        "crop_origin_cells": list(best_origin),
-        "minority_cation_elements": sorted(minority_symbols),
-        "minority_cations_available": sum(1 for index in cation_indices if symbols[index] in minority_symbols),
-        "minority_cations_kept": sum(1 for index in best_kept if symbols[index] in minority_symbols),
-        "charge_variant_cations_available": len(charge_variant_indices),
-        "charge_variant_cations_kept": sum(1 for index in best_kept if index in charge_variant_indices),
-        "anion_vacancy_elements": sorted(
-            symbol
-            for symbol, max_count in max_anion_counts.items()
-            if candidate_anion_counts[best_origin].get(symbol, 0) < max_count
-        ),
-        "anion_vacancies_kept": sum(
-            max_count - candidate_anion_counts[best_origin].get(symbol, 0)
-            for symbol, max_count in max_anion_counts.items()
-        ),
-        "candidate_max_anion_counts": dict(sorted(max_anion_counts.items())),
-        "crop_anion_counts": dict(sorted(candidate_anion_counts[best_origin].items())),
-        "magnetic_signature_note": "Signs are inferred from INCAR MAGMOM for cations: positive, negative, or zero.",
-        "source_magnetic_signature": magnetic_signature(symbols, cation_indices, origin_indices, source_moments),
-        "crop_magnetic_signature": magnetic_signature(
-            symbols,
-            sorted(best_kept & set(cation_indices)),
-            origin_indices,
-            source_moments,
-        ),
-    }
-    return best_ranges, meta
+
+def choose_feasible_source_crop(
+    structure: PoscarStructure,
+    origin_indices: list[int],
+    candidates: list[
+        tuple[
+            tuple[int, int, int, int, int, int, int, int],
+            tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
+            dict[str, object],
+        ]
+    ],
+    *,
+    expected_cation_count: int | None,
+    cation_elements: set[str],
+    anion_elements: set[str],
+    source_moments: list[float] | None,
+    min_generated_distance_A: float,
+) -> tuple[
+    PoscarStructure,
+    list[int],
+    tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
+    dict[str, object],
+    dict[str, object],
+]:
+    rejected: list[dict[str, object]] = []
+    for rank, (_score, ranges, crop_meta) in enumerate(candidates, start=1):
+        try:
+            prepared, prepared_origins, repair_meta = crop_structure_fraction(
+                structure,
+                origin_indices,
+                ranges,
+                expected_cation_count=expected_cation_count,
+                cation_elements=cation_elements,
+                anion_elements=anion_elements,
+                source_moments=source_moments,
+            )
+        except ValueError as exc:
+            rejected.append(
+                {
+                    "rank": rank,
+                    "crop_origin_cells": crop_meta.get("crop_origin_cells", []),
+                    "reason": str(exc),
+                }
+            )
+            continue
+        geometry = minimum_pair_distance_summary(
+            prepared.species,
+            prepared.cell,
+            prepared.scaled_positions,
+        )
+        min_distance = geometry.get("min_distance_A")
+        if min_distance is None or float(min_distance) >= min_generated_distance_A:
+            selected_meta = {
+                **crop_meta,
+                "crop_candidate_rank": rank,
+                "crop_origin_candidates_evaluated": len(candidates),
+                "crop_origin_rejected_count": len(rejected),
+                "crop_origin_rejections": rejected[:16],
+                "geometry_filter_min_distance_A": min_generated_distance_A,
+                "prepared_source_geometry": geometry,
+            }
+            if rejected:
+                selected_meta["selection_reason"] = f"{crop_meta.get('selection_reason', 'defect_preserving')}_geometry_fallback"
+            return prepared, prepared_origins, ranges, selected_meta, repair_meta
+        rejected.append(
+            {
+                "rank": rank,
+                "crop_origin_cells": crop_meta.get("crop_origin_cells", []),
+                "reason": "prepared_source_min_distance_below_limit",
+                "min_distance_A": min_distance,
+                "atom_i": geometry.get("atom_i"),
+                "element_i": geometry.get("element_i"),
+                "atom_j": geometry.get("atom_j"),
+                "element_j": geometry.get("element_j"),
+            }
+        )
+    preview = "; ".join(
+        f"origin {entry.get('crop_origin_cells')} {entry.get('reason')}"
+        for entry in rejected[:5]
+    )
+    raise ValueError(
+        "No physically feasible source crop satisfied the geometry guard "
+        f"(--min-generated-distance {min_generated_distance_A:g} A) while preserving the requested crop constraints. "
+        f"Checked {len(candidates)} crop origin(s). {preview}"
+    )
 
 
 def indices_in_fraction_ranges(
