@@ -42,6 +42,27 @@ def write_o_u_poscar(path: Path) -> None:
     )
 
 
+def write_u_o_poscar(path: Path) -> None:
+    positions = [
+        ("U", (0.00, 0.0, 0.0)),
+        ("U", (0.10, 0.0, 0.0)),
+        ("O", (0.11, 0.0, 0.0)),
+        ("O", (0.22, 0.0, 0.0)),
+    ]
+    path.write_text(
+        "U O target\n"
+        "1.0\n"
+        "6 0 0\n"
+        "0 6 0\n"
+        "0 0 6\n"
+        "U O\n"
+        "2 2\n"
+        "Direct\n"
+        + "".join(f"{x:.8f} {y:.8f} {z:.8f}\n" for _symbol, (x, y, z) in positions),
+        encoding="utf-8",
+    )
+
+
 def test_assign_spins_reorders_poscar_and_ldau_species_tags(tmp_path: Path) -> None:
     poscar = tmp_path / "POSCAR"
     incar = tmp_path / "INCAR"
@@ -92,6 +113,50 @@ def test_assign_spins_reorders_poscar_and_ldau_species_tags(tmp_path: Path) -> N
     assert plan["output_species_order"] == ["U", "O"]
     assert plan["moment_summary"]["U"]["unique_abs_moments"] == [1.0, 2.0]
     assert len(plan["special_rule_atoms"]) == 2
+
+
+def test_assign_spins_uses_template_poscar_for_incar_ldau_order(tmp_path: Path) -> None:
+    poscar = tmp_path / "POSCAR"
+    template = tmp_path / "template"
+    template.mkdir()
+    out = tmp_path / "spin_assigned"
+    write_u_o_poscar(poscar)
+    write_o_u_poscar(template / "POSCAR")
+    (template / "INCAR").write_text(
+        "ENCUT = 520\n"
+        "LDAU = .TRUE.\n"
+        "LDAUL = -1 3\n"
+        "LDAUU = 0.0 4.0\n"
+        "LDAUJ = 0 0\n"
+        "MAGMOM = 4*0\n",
+        encoding="utf-8",
+    )
+
+    spin_assign_main(
+        [
+            "--poscar",
+            str(poscar),
+            "--incar",
+            str(template / "INCAR"),
+            "--outdir",
+            str(out),
+            "--cation-elements",
+            "U",
+            "--anion-elements",
+            "O",
+            "--moment",
+            "U=2,O=0",
+        ]
+    )
+
+    incar_text = (out / "INCAR").read_text(encoding="utf-8")
+    assert "LDAUL = 3 -1" in incar_text
+    assert "LDAUU = 4.0 0.0" in incar_text
+    assert "LDAUJ = 0 0" in incar_text
+    plan = json.loads((out / "spin_assignment_plan.json").read_text(encoding="utf-8"))
+    assert plan["source_species_order"] == ["U", "O"]
+    assert plan["source_incar_species_order"] == ["O", "U"]
+    assert plan["output_species_order"] == ["U", "O"]
 
 
 def test_assign_spins_atomi_alias(tmp_path: Path) -> None:

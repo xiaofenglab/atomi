@@ -229,7 +229,7 @@ def comment_incar_tag(text: str, tag: str) -> str:
 
 def write_incar(
     source_incar: Path | None,
-    source_species: PoscarSpecies,
+    incar_species: PoscarSpecies,
     output_species: PoscarSpecies,
     magmom_line: str,
     *,
@@ -237,10 +237,28 @@ def write_incar(
 ) -> str:
     text = source_incar.read_text(encoding="utf-8", errors="replace") if source_incar is not None else ""
     if text:
-        text = reorder_incar_species_tags(text, source_species, output_species)
+        text = reorder_incar_species_tags(text, incar_species, output_species)
     if comment_nupdown and text:
         text = comment_incar_tag(text, "NUPDOWN")
     return replace_or_append_magmom_text(text, magmom_line)
+
+
+def infer_incar_species(
+    source_incar: Path | None,
+    fallback_species: PoscarSpecies,
+    *,
+    incar_poscar: Path | None = None,
+) -> tuple[PoscarSpecies, str]:
+    """Return the POSCAR species order that the source INCAR species tags use."""
+    if source_incar is None:
+        return fallback_species, "no source INCAR; input POSCAR order"
+    if incar_poscar is not None:
+        path = incar_poscar.expanduser().resolve()
+        return read_poscar_structure(path).species, str(path)
+    neighbor = source_incar.parent / "POSCAR"
+    if neighbor.is_file():
+        return read_poscar_structure(neighbor).species, str(neighbor)
+    return fallback_species, "input POSCAR order fallback; no POSCAR beside source INCAR"
 
 
 def summarize_moments(species: PoscarSpecies, moments: list[float]) -> dict[str, dict[str, object]]:
@@ -276,6 +294,7 @@ def assign_spins(
     *,
     outdir: Path,
     incar: Path | None = None,
+    incar_poscar: Path | None = None,
     cation_elements: list[str] | None = None,
     anion_elements: list[str] | None = None,
     species_order: list[str] | None = None,
@@ -328,10 +347,15 @@ def assign_spins(
         encoding="utf-8",
     )
     source_incar = incar if incar is not None else (poscar.parent / "INCAR" if (poscar.parent / "INCAR").is_file() else None)
+    incar_species, incar_species_source = infer_incar_species(
+        source_incar,
+        structure.species,
+        incar_poscar=incar_poscar,
+    )
     output_incar.write_text(
         write_incar(
             source_incar,
-            structure.species,
+            incar_species,
             output_species,
             magmom_line,
             comment_nupdown=comment_nupdown,
@@ -342,6 +366,9 @@ def assign_spins(
     summary = {
         "source_poscar": str(poscar),
         "source_incar": "" if source_incar is None else str(source_incar),
+        "source_incar_species_order_source": incar_species_source,
+        "source_incar_species_order": incar_species.symbols,
+        "source_incar_species_counts": dict(zip(incar_species.symbols, incar_species.counts)),
         "output_poscar": str(output_poscar),
         "output_incar": str(output_incar),
         "source_species_order": structure.species.symbols,
@@ -375,6 +402,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--poscar", type=Path, default=Path("POSCAR"), help="Input POSCAR.")
     parser.add_argument("--incar", type=Path, help="Reference INCAR. Defaults to POSCAR folder INCAR when present.")
+    parser.add_argument(
+        "--incar-poscar",
+        type=Path,
+        help=(
+            "POSCAR whose species order defines source INCAR LDAUL/LDAUU/LDAUJ. "
+            "Defaults to POSCAR beside --incar, then the input --poscar."
+        ),
+    )
     parser.add_argument("--outdir", type=Path, required=True, help="Output folder for POSCAR/INCAR.")
     parser.add_argument("--cation-elements", action="append", default=[], help="Cation order, e.g. U,Gd.")
     parser.add_argument("--anion-elements", action="append", default=[], help="Anion elements. Default: O.")
@@ -404,6 +439,7 @@ def main(argv: list[str] | None = None) -> None:
         args.poscar,
         outdir=args.outdir,
         incar=args.incar,
+        incar_poscar=args.incar_poscar,
         cation_elements=parse_element_list(args.cation_elements),
         anion_elements=parse_element_list(args.anion_elements) or ["O"],
         species_order=parse_element_list(args.species_order),
