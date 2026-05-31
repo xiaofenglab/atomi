@@ -18,6 +18,9 @@ if (!exists("fileshell")) {
 if (!exists("timefileshell")) {
     timefileshell = timefile
 }
+if (!exists("runlabel")) {
+    runlabel = ""
+}
 
 set term dumb ansi 140 56
 set multiplot layout 3,1 title sprintf("VASP SCF Monitor (window=%d)", int(win))
@@ -38,6 +41,7 @@ nsteps_str = system(nstep_cmd)
 latest_dt  = (strlen(timefile) > 0) ? system(latest_dt_cmd) : "NA"
 mean_dt    = (strlen(timefile) > 0) ? system(mean_dt_cmd) : "NA"
 nsteps     = int(nsteps_str)
+display_name = (strlen(runlabel) > 0) ? sprintf("%s | %s", fname, runlabel) : fname
 
 # fixed-width window until win is reached, then sliding last-win window
 xmax = (nsteps > win) ? nsteps : win
@@ -51,7 +55,7 @@ set xrange [xmin:xmax]
 set autoscale y
 set autoscale y2
 
-set label 1 sprintf("file: %s", fname)          at screen 0.02,0.98 left
+set label 1 sprintf("file: %s", display_name)   at screen 0.02,0.98 left
 set label 2 sprintf("latest E: %s", latest_E)   at screen 0.40,0.98 left textcolor rgb "cyan"
 set label 3 sprintf("latest dE: %s", latest_de) at screen 0.72,0.98 left textcolor rgb "red"
 set label 4 sprintf("DAV time: latest %s, mean %s", latest_dt, mean_dt) at screen 0.40,0.945 left textcolor rgb "green"

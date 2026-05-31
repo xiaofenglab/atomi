@@ -19,7 +19,7 @@ from atomi.viz.lammps import (
     summarize_recent_runtime_fraction,
     summarize_thermo,
 )
-from atomi.viz.vasp_live import _run_gnuplot, count_dav_steps, dav_timing_path, update_dav_timing
+from atomi.viz.vasp_live import _run_gnuplot, count_dav_steps, dav_timing_path, poscar_header_for_output, update_dav_timing
 
 
 def test_missing_inputs_reports_absent_files(tmp_path: Path) -> None:
@@ -87,11 +87,33 @@ def test_vasp_live4_header_uses_colored_panel_captions() -> None:
     text = script.read_text(encoding="utf-8")
 
     assert "DAV time: latest %s, mean %s" in text
-    assert text.count('set title sprintf("%s", fname)') == 4
+    assert text.count('set title sprintf("%s", display_name)') == 4
+    assert text.count('display_name = (strlen(runlabel) > 0) ? sprintf("%s | %s", fname, runlabel) : fname') == 4
     assert text.count('set label 1 sprintf("E: %s", latest_E) at graph 0.02,1.12 left textcolor rgb "cyan"') == 4
     assert text.count('set label 2 sprintf("dE: %s", latest_de) at graph 0.40,1.12 left textcolor rgb "red"') == 4
     assert text.count('set label 3 sprintf("DAV time: latest %s, mean %s", latest_dt, mean_dt) at graph 0.02,1.04 left textcolor rgb "green"') == 4
     assert "set term dumb ansi 160 56" in text
+
+
+def test_vasp_live_reads_poscar_header_for_run_label(tmp_path: Path) -> None:
+    output = tmp_path / "vasp.out"
+    output.write_text("running\n", encoding="utf-8")
+    (tmp_path / "POSCAR").write_text("  Gd0.5 U0.5 O2 candidate 01  \n1.0\n", encoding="utf-8")
+
+    assert poscar_header_for_output(output) == "Gd0.5 U0.5 O2 candidate 01"
+    assert poscar_header_for_output(tmp_path / "missing.out") == "Gd0.5 U0.5 O2 candidate 01"
+    assert poscar_header_for_output(tmp_path / "other" / "vasp.out") == ""
+
+
+def test_vasp_live_truncates_long_poscar_header(tmp_path: Path) -> None:
+    output = tmp_path / "vasp.out"
+    output.write_text("running\n", encoding="utf-8")
+    (tmp_path / "POSCAR").write_text("candidate " + "x" * 80 + "\n", encoding="utf-8")
+
+    label = poscar_header_for_output(output, max_length=24)
+
+    assert label == "candidate xxxxxxxxxxx..."
+    assert len(label) == 24
 
 
 def test_update_dav_timing_excludes_initialization_and_batches_new_dav_steps(tmp_path: Path) -> None:

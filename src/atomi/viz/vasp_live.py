@@ -93,6 +93,7 @@ def plot_vasp_live(
                     [
                         f"file='{_gnuplot_quote(output_file)}'",
                         f'fileshell="{_gnuplot_double_quote_shell(output_file)}"',
+                        f"runlabel='{_gnuplot_quote(poscar_header_for_output(output_file))}'",
                         f"timefile='{_gnuplot_quote(timing.timing_file)}'",
                         f'timefileshell="{_gnuplot_double_quote_shell(timing.timing_file)}"',
                         f"win={window}",
@@ -137,6 +138,10 @@ def plot_vasp_live4(
                 )
                 args.extend(
                     f'fileshell{index}="{_gnuplot_double_quote_shell(path)}"'
+                    for index, path in enumerate(output_files, start=1)
+                )
+                args.extend(
+                    f"runlabel{index}='{_gnuplot_quote(poscar_header_for_output(path))}'"
                     for index, path in enumerate(output_files, start=1)
                 )
                 args.extend(
@@ -185,12 +190,27 @@ def _validate_window(window: int) -> None:
         raise ValueError("window must be a positive integer.")
 
 
+def poscar_header_for_output(path: Path, *, max_length: int = 64) -> str:
+    """Read a compact material/run label from the POSCAR next to a VASP output."""
+    poscar = path.parent / "POSCAR"
+    if not poscar.is_file():
+        return ""
+    try:
+        header = poscar.read_text(encoding="utf-8", errors="replace").splitlines()[0]
+    except IndexError:
+        return ""
+    header = " ".join(header.split())
+    if len(header) <= max_length:
+        return header
+    return header[: max(0, max_length - 3)].rstrip() + "..."
+
+
 def _clear_terminal() -> None:
     subprocess.run(["clear"], check=False)
 
 
-def _gnuplot_quote(path: Path) -> str:
-    return str(path).replace("\\", "\\\\").replace("'", "\\'")
+def _gnuplot_quote(value: Path | str) -> str:
+    return str(value).replace("\\", "\\\\").replace("'", "\\'")
 
 
 def _gnuplot_double_quote_shell(path: Path) -> str:

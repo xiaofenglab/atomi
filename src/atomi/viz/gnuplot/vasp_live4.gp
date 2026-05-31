@@ -26,6 +26,18 @@ if (!exists("timefile3")) {
 if (!exists("timefile4")) {
     timefile4 = ""
 }
+if (!exists("runlabel1")) {
+    runlabel1 = ""
+}
+if (!exists("runlabel2")) {
+    runlabel2 = ""
+}
+if (!exists("runlabel3")) {
+    runlabel3 = ""
+}
+if (!exists("runlabel4")) {
+    runlabel4 = ""
+}
 
 set term dumb ansi 160 56
 set multiplot layout 2,2 title sprintf("VASP SCF Monitor (log10|dE| + Energy + observed DAV time, window=%d)", int(win))
@@ -42,6 +54,7 @@ if (nfiles >= 1) {
     }
     fileshell = fileshell1
     timefileshell = timefileshell1
+    runlabel = runlabel1
 
     fname_cmd      = "basename -- " . fileshell
     latest_de_cmd  = "awk '/^[[:space:]]*DAV:/{de=$4} END{print (de!=\"\"?de:\"NA\")}' " . fileshell
@@ -57,6 +70,7 @@ if (nfiles >= 1) {
     latest_dt  = (strlen(timefile) > 0) ? system(latest_dt_cmd) : "NA"
     mean_dt    = (strlen(timefile) > 0) ? system(mean_dt_cmd) : "NA"
     nsteps     = int(nsteps_str)
+    display_name = (strlen(runlabel) > 0) ? sprintf("%s | %s", fname, runlabel) : fname
 
     xmax = (nsteps > win) ? nsteps : win
     xmin = (nsteps > win) ? (nsteps - win + 1) : 1
@@ -68,7 +82,7 @@ if (nfiles >= 1) {
     set autoscale y
     set autoscale y2
 
-    set title sprintf("%s", fname)
+    set title sprintf("%s", display_name)
     set label 1 sprintf("E: %s", latest_E) at graph 0.02,1.12 left textcolor rgb "cyan"
     set label 2 sprintf("dE: %s", latest_de) at graph 0.40,1.12 left textcolor rgb "red"
     set label 3 sprintf("DAV time: latest %s, mean %s", latest_dt, mean_dt) at graph 0.02,1.04 left textcolor rgb "green"
@@ -100,6 +114,7 @@ if (nfiles >= 2) {
     }
     fileshell = fileshell2
     timefileshell = timefileshell2
+    runlabel = runlabel2
 
     fname_cmd      = "basename -- " . fileshell
     latest_de_cmd  = "awk '/^[[:space:]]*DAV:/{de=$4} END{print (de!=\"\"?de:\"NA\")}' " . fileshell
@@ -115,6 +130,7 @@ if (nfiles >= 2) {
     latest_dt  = (strlen(timefile) > 0) ? system(latest_dt_cmd) : "NA"
     mean_dt    = (strlen(timefile) > 0) ? system(mean_dt_cmd) : "NA"
     nsteps     = int(nsteps_str)
+    display_name = (strlen(runlabel) > 0) ? sprintf("%s | %s", fname, runlabel) : fname
 
     xmax = (nsteps > win) ? nsteps : win
     xmin = (nsteps > win) ? (nsteps - win + 1) : 1
@@ -126,7 +142,7 @@ if (nfiles >= 2) {
     set autoscale y
     set autoscale y2
 
-    set title sprintf("%s", fname)
+    set title sprintf("%s", display_name)
     set label 1 sprintf("E: %s", latest_E) at graph 0.02,1.12 left textcolor rgb "cyan"
     set label 2 sprintf("dE: %s", latest_de) at graph 0.40,1.12 left textcolor rgb "red"
     set label 3 sprintf("DAV time: latest %s, mean %s", latest_dt, mean_dt) at graph 0.02,1.04 left textcolor rgb "green"
@@ -158,6 +174,7 @@ if (nfiles >= 3) {
     }
     fileshell = fileshell3
     timefileshell = timefileshell3
+    runlabel = runlabel3
 
     fname_cmd      = "basename -- " . fileshell
     latest_de_cmd  = "awk '/^[[:space:]]*DAV:/{de=$4} END{print (de!=\"\"?de:\"NA\")}' " . fileshell
@@ -173,6 +190,7 @@ if (nfiles >= 3) {
     latest_dt  = (strlen(timefile) > 0) ? system(latest_dt_cmd) : "NA"
     mean_dt    = (strlen(timefile) > 0) ? system(mean_dt_cmd) : "NA"
     nsteps     = int(nsteps_str)
+    display_name = (strlen(runlabel) > 0) ? sprintf("%s | %s", fname, runlabel) : fname
 
     xmax = (nsteps > win) ? nsteps : win
     xmin = (nsteps > win) ? (nsteps - win + 1) : 1
@@ -184,7 +202,7 @@ if (nfiles >= 3) {
     set autoscale y
     set autoscale y2
 
-    set title sprintf("%s", fname)
+    set title sprintf("%s", display_name)
     set label 1 sprintf("E: %s", latest_E) at graph 0.02,1.12 left textcolor rgb "cyan"
     set label 2 sprintf("dE: %s", latest_de) at graph 0.40,1.12 left textcolor rgb "red"
     set label 3 sprintf("DAV time: latest %s, mean %s", latest_dt, mean_dt) at graph 0.02,1.04 left textcolor rgb "green"
@@ -216,6 +234,7 @@ if (nfiles >= 4) {
     }
     fileshell = fileshell4
     timefileshell = timefileshell4
+    runlabel = runlabel4
 
     fname_cmd      = "basename -- " . fileshell
     latest_de_cmd  = "awk '/^[[:space:]]*DAV:/{de=$4} END{print (de!=\"\"?de:\"NA\")}' " . fileshell
@@ -231,6 +250,7 @@ if (nfiles >= 4) {
     latest_dt  = (strlen(timefile) > 0) ? system(latest_dt_cmd) : "NA"
     mean_dt    = (strlen(timefile) > 0) ? system(mean_dt_cmd) : "NA"
     nsteps     = int(nsteps_str)
+    display_name = (strlen(runlabel) > 0) ? sprintf("%s | %s", fname, runlabel) : fname
 
     xmax = (nsteps > win) ? nsteps : win
     xmin = (nsteps > win) ? (nsteps - win + 1) : 1
@@ -242,7 +262,7 @@ if (nfiles >= 4) {
     set autoscale y
     set autoscale y2
 
-    set title sprintf("%s", fname)
+    set title sprintf("%s", display_name)
     set label 1 sprintf("E: %s", latest_E) at graph 0.02,1.12 left textcolor rgb "cyan"
     set label 2 sprintf("dE: %s", latest_de) at graph 0.40,1.12 left textcolor rgb "red"
     set label 3 sprintf("DAV time: latest %s, mean %s", latest_dt, mean_dt) at graph 0.02,1.04 left textcolor rgb "green"
