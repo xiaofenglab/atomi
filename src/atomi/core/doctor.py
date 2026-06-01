@@ -335,6 +335,23 @@ def build_hpc_config_template(site: str = "") -> dict[str, Any]:
                 "gres": "",
                 "time": "00:15:00",
             },
+            "sluschi": {
+                "scheduler": "slurm",
+                "partition": "",
+                "account": "",
+                "root": "",
+                "bin": "",
+                "env_path": "",
+                "mlip_model": "",
+                "mlip_provider": "SuperSalt",
+                "modules": [],
+                "module_commands": [],
+                "environment": {
+                    "ATOMI_SLUSCHI_ROOT": "",
+                    "ATOMI_SLUSCHI_BIN": "",
+                    "ATOMI_SUPERSALT_MODEL": "",
+                },
+            },
             "cp2k": {
                 "modules": [],
                 "cp2k_executable": "",
@@ -815,6 +832,20 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
                     exports[str(key)] = str(value)
         if _nonempty(mace_training.get("env_path")):
             exports.setdefault("ATOMI_MACE_TRAIN_ENV", str(mace_training["env_path"]))
+
+    sluschi = profiles.get("sluschi", {})
+    if isinstance(sluschi, dict):
+        env = sluschi.get("environment", {})
+        if isinstance(env, dict):
+            for key, value in env.items():
+                if _nonempty(value) and str(key).startswith("ATOMI_"):
+                    exports[str(key)] = str(value)
+        if _nonempty(sluschi.get("root")):
+            exports.setdefault("ATOMI_SLUSCHI_ROOT", str(sluschi["root"]))
+        if _nonempty(sluschi.get("bin")):
+            exports.setdefault("ATOMI_SLUSCHI_BIN", str(sluschi["bin"]))
+        if _nonempty(sluschi.get("mlip_model")):
+            exports.setdefault("ATOMI_SUPERSALT_MODEL", str(sluschi["mlip_model"]))
 
     phonopy = profiles.get("phonopy", {})
     if isinstance(phonopy, dict):

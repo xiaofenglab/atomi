@@ -413,6 +413,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         calphad_workflow.add_argument("calphad_workflow_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("sluschi_bridge", "sluschi-bridge"):
+        sluschi_bridge = subparsers.add_parser(
+            command_name,
+            help="Prepare and inspect Atomi handoffs to external SLUSCHI/MLIP melting workflows.",
+        )
+        sluschi_bridge.add_argument("sluschi_args", nargs=argparse.REMAINDER)
+
     for command_name in ("paper-draft", "report-draft", "atomi-paper-draft"):
         paper_draft = subparsers.add_parser(
             command_name,
@@ -1073,6 +1080,11 @@ def main(argv: list[str] | None = None) -> None:
 
         calphad_workflow_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("sluschi_bridge", "sluschi-bridge"):
+        from atomi.sluschi.bridge import main as sluschi_bridge_main
+
+        sluschi_bridge_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] in ("atat-bridge", "atat_bridge"):
         from atomi.atat.bridge import main as atat_bridge_main
 
@@ -1674,6 +1686,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.calphad.workflow import main as calphad_workflow_main
 
         calphad_workflow_main(args.calphad_workflow_args)
+        return
+
+    if args.subcommand in ("sluschi_bridge", "sluschi-bridge"):
+        from atomi.sluschi.bridge import main as sluschi_bridge_main
+
+        sluschi_bridge_main(args.sluschi_args)
         return
 
     if args.subcommand in ("atat-bridge", "atat_bridge"):

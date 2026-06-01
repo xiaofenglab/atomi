@@ -1,0 +1,357 @@
+"""Bridge Atomi CALPHAD/MD/MLIP workflows to external SLUSCHI installs."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import re
+import shutil
+import textwrap
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+SCHEMA_PLAN = "atomi.sluschi.bridge.plan.v1"
+SCHEMA_STATUS = "atomi.sluschi.bridge.status.v1"
+SCHEMA_RESULTS = "atomi.sluschi.bridge.results.v1"
+
+DEFAULT_REPO = "https://github.com/qjhong/SLUSCHI.git"
+DEFAULT_SUPERSALT_REF = "SuperSalt chloride MLIP; install/provide externally, not vendored by Atomi."
+
+
+def write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fields})
+
+
+def parse_csv_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.replace(";", ",").split(",") if item.strip()]
+
+
+def parse_float_list(value: str | None) -> list[float]:
+    return [float(item) for item in parse_csv_list(value)]
+
+
+def parse_composition_states(value: str | None) -> list[str]:
+    if not value:
+        return []
+    if ";" in value:
+        return [item.strip() for item in value.split(";") if item.strip()]
+    if "|" in value:
+        return [item.strip() for item in value.split("|") if item.strip()]
+    return [value.strip()] if value.strip() else []
+
+
+def which_many(names: list[str]) -> dict[str, str | None]:
+    return {name: shutil.which(name) for name in names}
+
+
+def load_hpc_profile(config_path: Path | None, profile_name: str) -> dict[str, Any]:
+    if config_path is None:
+        env_config = os.environ.get("ATOMI_HPC_CONFIG")
+        config_path = Path(env_config).expanduser() if env_config else None
+    if config_path is None or not config_path.exists():
+        return {}
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    profiles = data.get("profiles", {})
+    profile = profiles.get(profile_name, {})
+    return profile if isinstance(profile, dict) else {}
+
+
+def inspect_environment(config_path: Path | None = None, profile_name: str = "sluschi") -> dict[str, Any]:
+    profile = load_hpc_profile(config_path, profile_name)
+    env_root = os.environ.get("ATOMI_SLUSCHI_ROOT")
+    env_bin = os.environ.get("ATOMI_SLUSCHI_BIN")
+    env_mlip = os.environ.get("ATOMI_SUPERSALT_MODEL") or os.environ.get("ATOMI_MLIP_MODEL")
+    root = str(profile.get("root") or env_root or "")
+    bin_dir = str(profile.get("bin") or env_bin or "")
+    model = str(profile.get("mlip_model") or env_mlip or "")
+    executables = which_many(["sluschi", "mds_lmp", "lmp", "lammps", "vasp_std", "sbatch", "python3"])
+    if bin_dir:
+        for exe in ("sluschi", "mds_lmp"):
+            candidate = Path(bin_dir).expanduser() / exe
+            if candidate.exists():
+                executables[exe] = str(candidate)
+    status = {
+        "schema": SCHEMA_STATUS,
+        "profile": profile_name,
+        "config_path": str(config_path) if config_path else "",
+        "root": root,
+        "bin": bin_dir,
+        "mlip_model": model,
+        "executables": executables,
+        "ready_for_bridge": bool(root or bin_dir or executables.get("sluschi") or executables.get("mds_lmp")),
+        "ready_for_lammps_mlip": bool(executables.get("lmp") or executables.get("lammps")) and bool(model),
+        "recommendation": (
+            "Use SLUSCHI as an external dependency. Keep Atomi responsible for input staging, "
+            "MLIP manifest/provenance, parsing, and CALPHAD handoff."
+        ),
+    }
+    return status
+
+
+def write_readme(path: Path, plan: dict[str, Any]) -> None:
+    path.write_text(
+        textwrap.dedent(
+            f"""\
+            # Atomi-SLUSCHI bridge workspace
+
+            System: {plan["system"]}
+            Components: {", ".join(plan["components"])}
+
+            Atomi treats SLUSCHI as an external workflow engine. Keep SLUSCHI and any
+            MLIP package/model in their own environments, then point this workspace at
+            those paths through the HPC JSON or environment variables.
+
+            Suggested order:
+
+            1. Check external tools:
+               `atomi sluschi-bridge status --hpc-config "$HOME/atomi_hpc/atomi_hpc_config.kit.local.json"`
+
+            2. Install or locate SLUSCHI externally:
+               `git clone {DEFAULT_REPO} ~/SLUSCHI`
+
+            3. Provide an MLIP model for MD acceleration. For KCl-LiCl, start with a
+               validated chloride-melt potential such as SuperSalt if you have access,
+               or a LiCl-KCl-specific GAP/DP/MACE model. Record the model path in
+               `mlip/sluschi_mlip_manifest.json`.
+
+            4. Fill SLUSCHI-specific `job.in`, VASP/LAMMPS templates, and scheduler
+               settings in `sluschi_inputs/`.
+
+            5. Run SLUSCHI externally, then parse outputs:
+               `atomi sluschi-bridge parse --root . --outdir results`
+
+            6. Use the resulting CSV/JSON as CALPHAD fitting/check data:
+               melting point, heat of fusion, enthalpy, density/volume, or entropy.
+            """
+        ),
+        encoding="utf-8",
+    )
+
+
+def render_job_in(plan: dict[str, Any]) -> str:
+    temps = plan["temperature_grid_K"]
+    compositions = plan["composition_grid"]
+    return textwrap.dedent(
+        f"""\
+        # Atomi-generated SLUSCHI starter job.in
+        # This is a handoff template, not a guarantee of SLUSCHI-version syntax.
+        # Review against your installed SLUSCHI manual before submission.
+        system = {plan["system"]}
+        engine = {plan["engine"]}
+        components = {",".join(plan["components"])}
+        compositions = {",".join(compositions)}
+        temperatures = {",".join(str(t) for t in temps)}
+        kmesh = -1
+        mlip_manifest = ../mlip/sluschi_mlip_manifest.json
+        """
+    )
+
+
+def default_kcl_licl_compositions() -> list[str]:
+    return ["LiCl=0.00,KCl=1.00", "LiCl=0.25,KCl=0.75", "LiCl=0.50,KCl=0.50", "LiCl=0.75,KCl=0.25", "LiCl=1.00,KCl=0.00"]
+
+
+def build_plan(args: argparse.Namespace) -> dict[str, Any]:
+    components = parse_csv_list(args.components) or ["LiCl", "KCl"]
+    temperatures = parse_float_list(args.temperatures) or [900.0, 1000.0, 1100.0, 1200.0]
+    compositions = parse_composition_states(args.compositions) or default_kcl_licl_compositions()
+    model_path = args.mlip_model or os.environ.get("ATOMI_SUPERSALT_MODEL") or ""
+    return {
+        "schema": SCHEMA_PLAN,
+        "system": args.system,
+        "components": components,
+        "engine": args.engine,
+        "phase_target": args.phase_target,
+        "temperature_grid_K": temperatures,
+        "composition_grid": compositions,
+        "sluschi": {
+            "dependency_mode": "external",
+            "repo": DEFAULT_REPO,
+            "root_env": "ATOMI_SLUSCHI_ROOT",
+            "bin_env": "ATOMI_SLUSCHI_BIN",
+        },
+        "mlip": {
+            "mode": args.mlip_mode,
+            "provider": args.mlip_provider,
+            "model_path": model_path,
+            "note": DEFAULT_SUPERSALT_REF if args.mlip_provider.lower() == "supersalt" else "",
+        },
+        "handoff": {
+            "calphad_observables": ["melting_temperature_K", "heat_of_fusion_J_mol", "enthalpy_J_mol", "density_g_cm3"],
+            "md_observables": ["diffusion", "density", "heat_capacity", "thermal_conductivity_if_requested"],
+        },
+    }
+
+
+def init_workspace(args: argparse.Namespace) -> dict[str, Any]:
+    root = args.outdir.resolve()
+    for folder in ("sluschi_inputs", "mlip", "results", "calphad_handoff", "logs"):
+        (root / folder).mkdir(parents=True, exist_ok=True)
+    plan = build_plan(args)
+    write_json(root / "sluschi_bridge_plan.json", plan)
+    (root / "sluschi_inputs" / "job.in").write_text(render_job_in(plan), encoding="utf-8")
+    mlip_manifest = {
+        "schema": "atomi.sluschi.bridge.mlip_manifest.v1",
+        "system": plan["system"],
+        "provider": plan["mlip"]["provider"],
+        "mode": plan["mlip"]["mode"],
+        "model_path": plan["mlip"]["model_path"],
+        "elements": ["Li", "K", "Cl"] if plan["system"].lower().replace("-", "") in {"kcllicl", "liclkcl"} else [],
+        "validation_required": [
+            "composition coverage includes target LiCl-KCl range",
+            "temperature coverage includes melt/coexistence range",
+            "density/RDF/enthalpy checked against DFT or experiment",
+            "LAMMPS/ASE backend tested on a short NVT melt before SLUSCHI production",
+        ],
+    }
+    write_json(root / "mlip" / "sluschi_mlip_manifest.json", mlip_manifest)
+    write_readme(root / "README_SLUSCHI_ATOMI_BRIDGE.md", plan)
+    print(f"Wrote SLUSCHI bridge workspace: {root}")
+    print(f"Plan                         : {root / 'sluschi_bridge_plan.json'}")
+    print(f"MLIP manifest                : {root / 'mlip' / 'sluschi_mlip_manifest.json'}")
+    print(f"Starter job.in               : {root / 'sluschi_inputs' / 'job.in'}")
+    return {"root": str(root), "plan": str(root / "sluschi_bridge_plan.json")}
+
+
+RESULT_PATTERNS = {
+    "melting_temperature_K": re.compile(r"(?:melting|m\.p\.|tm)[^\n:=]*[:=]?\s*([-+]?\d+(?:\.\d+)?)\s*K?", re.IGNORECASE),
+    "heat_of_fusion_J_mol": re.compile(r"(?:heat\s+of\s+fusion|delta\s*h|dh)[^\n:=]*[:=]?\s*([-+]?\d+(?:\.\d+)?)", re.IGNORECASE),
+    "enthalpy_J_mol": re.compile(r"(?:enthalpy|h)[^\n:=]*[:=]?\s*([-+]?\d+(?:\.\d+)?)", re.IGNORECASE),
+}
+
+
+@dataclass
+class ParsedResult:
+    file: str
+    observable: str
+    value: float
+    line: str
+
+
+def parse_results(root: Path) -> list[ParsedResult]:
+    rows: list[ParsedResult] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in {"", ".out", ".log", ".txt", ".dat"}:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for observable, pattern in RESULT_PATTERNS.items():
+            for match in pattern.finditer(text):
+                line_start = text.rfind("\n", 0, match.start()) + 1
+                line_end = text.find("\n", match.end())
+                if line_end < 0:
+                    line_end = len(text)
+                rows.append(
+                    ParsedResult(
+                        file=str(path),
+                        observable=observable,
+                        value=float(match.group(1)),
+                        line=text[line_start:line_end].strip(),
+                    )
+                )
+    return rows
+
+
+def parse_main(args: argparse.Namespace) -> dict[str, Any]:
+    rows = parse_results(args.root.resolve())
+    outdir = args.outdir.resolve()
+    csv_rows = [row.__dict__ for row in rows]
+    table = outdir / "sluschi_parsed_results.csv"
+    write_csv(table, csv_rows, ["file", "observable", "value", "line"])
+    payload = {
+        "schema": SCHEMA_RESULTS,
+        "root": str(args.root.resolve()),
+        "n_results": len(rows),
+        "outputs": {"csv": str(table)},
+        "results": csv_rows,
+    }
+    write_json(outdir / "sluschi_parsed_results.json", payload)
+    print(f"Parsed SLUSCHI-like outputs: {len(rows)} result(s)")
+    print(f"Wrote CSV                 : {table}")
+    return payload
+
+
+def status_main(args: argparse.Namespace) -> dict[str, Any]:
+    status = inspect_environment(args.hpc_config, args.profile)
+    if args.json:
+        print(json.dumps(status, indent=2, sort_keys=True))
+    else:
+        print("Atomi SLUSCHI bridge status")
+        print("---------------------------")
+        print(f"profile          : {status['profile']}")
+        print(f"SLUSCHI root     : {status['root'] or 'not set'}")
+        print(f"SLUSCHI bin      : {status['bin'] or 'not set'}")
+        print(f"MLIP model       : {status['mlip_model'] or 'not set'}")
+        for name, path in status["executables"].items():
+            print(f"{name:16}: {path or 'not found'}")
+        print(f"bridge ready     : {status['ready_for_bridge']}")
+        print(f"LAMMPS+MLIP ready: {status['ready_for_lammps_mlip']}")
+    return status
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="sluschi-bridge",
+        description="Prepare and inspect Atomi handoffs to external SLUSCHI/MLIP melting workflows.",
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    status = sub.add_parser("status", help="Inspect SLUSCHI, LAMMPS, and MLIP paths.")
+    status.add_argument("--hpc-config", type=Path)
+    status.add_argument("--profile", default="sluschi")
+    status.add_argument("--json", action="store_true")
+
+    init = sub.add_parser("init", help="Create a SLUSCHI bridge workspace.")
+    init.add_argument("--outdir", type=Path, default=Path("sluschi_kcl_licl_bridge"))
+    init.add_argument("--system", default="KCl-LiCl")
+    init.add_argument("--components", default="LiCl,KCl")
+    init.add_argument("--engine", choices=("lammps", "vasp", "external"), default="lammps")
+    init.add_argument("--phase-target", default="solid-liquid-coexistence")
+    init.add_argument("--temperatures", help="Comma-separated temperatures in K.")
+    init.add_argument(
+        "--compositions",
+        help="Composition states separated by semicolons, e.g. 'LiCl=0.25,KCl=0.75;LiCl=0.5,KCl=0.5'.",
+    )
+    init.add_argument("--mlip-mode", choices=("external-model", "train-local", "none"), default="external-model")
+    init.add_argument("--mlip-provider", default="SuperSalt")
+    init.add_argument("--mlip-model", default="")
+
+    parse = sub.add_parser("parse", help="Parse SLUSCHI-like text outputs for CALPHAD handoff observables.")
+    parse.add_argument("--root", type=Path, default=Path("."))
+    parse.add_argument("--outdir", type=Path, default=Path("results"))
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> dict[str, Any] | None:
+    args = build_parser().parse_args(argv)
+    if args.command == "status":
+        return status_main(args)
+    if args.command == "init":
+        return init_workspace(args)
+    if args.command == "parse":
+        return parse_main(args)
+    build_parser().print_help()
+    return None
+
+
+if __name__ == "__main__":
+    main()
