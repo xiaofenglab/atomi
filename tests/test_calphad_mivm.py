@@ -1,6 +1,10 @@
+import csv
 import json
+from pathlib import Path
 
-from atomi.calphad.mivm import main as mivm_main
+import pytest
+
+from atomi.calphad.mivm import excess_gibbs_j_mol, load_parameters, main as mivm_main
 from atomi.cli.main import main as atomi_main
 
 
@@ -28,3 +32,70 @@ def test_atomi_cli_forwards_calphad_mivm(capsys):
     out = capsys.readouterr().out
     assert "Solid/ceramic" in out
     assert "(Gd,U)O2" in out
+
+
+def write_simple_params(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "atomi.calphad.mivm.parameters.v1",
+                "phase": "LIQUID",
+                "components": {
+                    "A": {"molar_volume": 10.0, "coordination": 10.0},
+                    "B": {"molar_volume": 10.0, "coordination": 10.0},
+                },
+                "pairs": [
+                    {"from": "A", "to": "B", "B": 1.0},
+                    {"from": "B", "to": "A", "B": 1.0},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_mivm_equal_volume_unit_pairs_has_zero_excess_gibbs(tmp_path: Path):
+    path = tmp_path / "params.json"
+    write_simple_params(path)
+    params = load_parameters(path)
+
+    assert excess_gibbs_j_mol(1000.0, {"A": 0.25, "B": 0.75}, params) == pytest.approx(0.0, abs=1.0e-10)
+
+
+def test_mivm_sample_writes_bridge_table(tmp_path: Path):
+    path = tmp_path / "params.json"
+    write_simple_params(path)
+    outdir = tmp_path / "sample"
+
+    mivm_main(
+        [
+            "sample",
+            "--params",
+            str(path),
+            "--outdir",
+            str(outdir),
+            "--temperature",
+            "1000",
+            "--binary-grid",
+            "A,B,0,1,0.5",
+        ]
+    )
+
+    rows = list(csv.DictReader((outdir / "mivm_property_table.csv").open(encoding="utf-8")))
+    assert len(rows) == 3
+    assert rows[1]["composition"] == "A=0.5;B=0.5"
+    assert float(rows[1]["G_excess_MIVM_J_mol"]) == pytest.approx(0.0, abs=1.0e-10)
+    metadata = json.loads((outdir / "mivm_sample_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["schema"] == "atomi.calphad.mivm.sample.v1"
+
+
+def test_mivm_pycalphad_bridge_writes_model_helper(tmp_path: Path):
+    path = tmp_path / "params.json"
+    write_simple_params(path)
+    outdir = tmp_path / "bridge"
+
+    mivm_main(["pycalphad-bridge", "--params", str(path), "--outdir", str(outdir)])
+
+    helper = (outdir / "mivm_pycalphad_bridge.py").read_text(encoding="utf-8")
+    assert "make_pycalphad_model_class" in helper
+    assert (outdir / "mivm_parameters.json").exists()
