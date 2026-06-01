@@ -128,3 +128,84 @@ def test_mivm_pycalphad_bridge_writes_model_helper(tmp_path: Path):
     helper = (outdir / "mivm_pycalphad_bridge.py").read_text(encoding="utf-8")
     assert "make_pycalphad_model_class" in helper
     assert (outdir / "mivm_parameters.json").exists()
+
+
+def write_mivm_database(root: Path) -> Path:
+    params_dir = root / "data" / "parameter_sets"
+    params_dir.mkdir(parents=True)
+    write_simple_params(params_dir / "toy.json")
+    rows = {
+        "component_mstdb_map.csv": [
+            {
+                "parameter_set_id": "toy",
+                "subgroup_id": "toy_group",
+                "component": "A",
+                "mstdb_phase": "MSCL",
+                "mstdb_species_aliases": "ACl",
+                "role": "toy",
+            }
+        ],
+        "needed_parameter_checklist.csv": [
+            {
+                "subgroup_id": "toy_group",
+                "system": "A-B",
+                "priority": "high",
+                "status": "needs_fit",
+                "needed_data": "Hmix",
+            }
+        ],
+    }
+    for filename, table_rows in rows.items():
+        with (root / "data" / filename).open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(table_rows[0]))
+            writer.writeheader()
+            writer.writerows(table_rows)
+    database = {
+        "schema": "atomi.copilot.mivm.parameter_database.v0.1",
+        "mivm_parameter_schema": "atomi.calphad.mivm.parameters.v1",
+        "subgroups": [{"id": "toy_group", "halide": "Cl", "status": "test", "label": "toy"}],
+        "parameter_sets": [
+            {
+                "id": "toy",
+                "subgroup_id": "toy_group",
+                "confidence": "test",
+                "components": ["A", "B"],
+                "parameter_file": "data/parameter_sets/toy.json",
+            }
+        ],
+        "tables": {
+            "component_mstdb_map": "data/component_mstdb_map.csv",
+            "needed_parameter_checklist": "data/needed_parameter_checklist.csv",
+        },
+    }
+    db_path = root / "mivm_parameter_database.json"
+    db_path.write_text(json.dumps(database), encoding="utf-8")
+    return db_path
+
+
+def test_mivm_database_lists_parameter_sets(tmp_path: Path, capsys):
+    db_path = write_mivm_database(tmp_path)
+
+    mivm_main(["database", "--db", str(db_path), "list", "--component", "A"])
+
+    out = capsys.readouterr().out
+    assert "toy_group" in out
+    assert "data/parameter_sets/toy.json" in out
+
+
+def test_mivm_database_maps_targets_and_validates(tmp_path: Path, capsys):
+    db_path = write_mivm_database(tmp_path)
+
+    mivm_main(["database", "--db", str(db_path), "map", "--component", "A"])
+    out = capsys.readouterr().out
+    assert "ACl" in out
+    assert "MSCL" in out
+
+    mivm_main(["database", "--db", str(db_path), "targets", "--priority", "high"])
+    out = capsys.readouterr().out
+    assert "A-B" in out
+    assert "Hmix" in out
+
+    mivm_main(["database", "--db", str(db_path), "validate-all"])
+    out = capsys.readouterr().out
+    assert "PASS\ttoy" in out

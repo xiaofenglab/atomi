@@ -16,6 +16,7 @@ from typing import Any
 R_J_MOLK = 8.31446261815324
 SCHEMA = "atomi.calphad.mivm.parameters.v1"
 SAMPLE_SCHEMA = "atomi.calphad.mivm.sample.v1"
+DATABASE_SCHEMA = "atomi.copilot.mivm.parameter_database.v0.1"
 
 
 MIVM_HELP_EPILOG = """\
@@ -91,6 +92,139 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None
         writer.writeheader()
         for row in rows:
             writer.writerow({field: format_value(row.get(field)) for field in fields})
+
+
+def load_parameter_database(path: Path) -> dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    schema = data.get("schema")
+    if schema != DATABASE_SCHEMA:
+        raise ValueError(f"Expected MIVM database schema {DATABASE_SCHEMA!r}, got {schema!r}.")
+    if data.get("mivm_parameter_schema") != SCHEMA:
+        raise ValueError(f"MIVM database must reference parameter schema {SCHEMA!r}.")
+    return data
+
+
+def _database_table_rows(db_path: Path, database: dict[str, Any], table_key: str) -> list[dict[str, str]]:
+    rel = database.get("tables", {}).get(table_key)
+    if not rel:
+        raise ValueError(f"MIVM database has no table entry for {table_key!r}.")
+    table = db_path.parent / str(rel)
+    with table.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _emit_rows(rows: list[dict[str, Any]], fields: list[str], *, output_format: str) -> None:
+    if output_format == "json":
+        print(json.dumps(rows, indent=2, sort_keys=True))
+        return
+    print("\t".join(fields))
+    for row in rows:
+        print("\t".join(str(row.get(field, "")) for field in fields))
+
+
+def _filter_parameter_sets(
+    rows: list[dict[str, Any]],
+    *,
+    subgroup: str | None = None,
+    component: str | None = None,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if subgroup and row.get("subgroup_id") != subgroup:
+            continue
+        components = row.get("components", [])
+        if isinstance(components, str):
+            components = [item for item in components.split(";") if item]
+        if component and component not in components:
+            continue
+        out.append(row)
+    return out
+
+
+def database_action(args: argparse.Namespace) -> dict[str, Any] | None:
+    database = load_parameter_database(args.db)
+    if args.action == "summary":
+        subgroups = database.get("subgroups", [])
+        parameter_sets = database.get("parameter_sets", [])
+        targets = _database_table_rows(args.db, database, "needed_parameter_checklist")
+        summary = {
+            "schema": database.get("schema"),
+            "description": database.get("description", ""),
+            "n_subgroups": len(subgroups),
+            "n_parameter_sets": len(parameter_sets),
+            "n_targets": len(targets),
+            "tables": database.get("tables", {}),
+        }
+        if args.format == "json":
+            print(json.dumps(summary, indent=2, sort_keys=True))
+        else:
+            print(f"MIVM parameter database: {args.db}")
+            print(f"Subgroups: {summary['n_subgroups']}")
+            print(f"Parameter sets: {summary['n_parameter_sets']}")
+            print(f"Target systems: {summary['n_targets']}")
+        return summary
+    if args.action == "list":
+        rows = _filter_parameter_sets(
+            database.get("parameter_sets", []),
+            subgroup=args.subgroup,
+            component=args.component,
+        )
+        fields = ["id", "subgroup_id", "confidence", "components", "parameter_file"]
+        _emit_rows(rows, fields, output_format=args.format)
+        return {"rows": rows}
+    if args.action == "map":
+        rows = _database_table_rows(args.db, database, "component_mstdb_map")
+        out = []
+        for row in rows:
+            if args.subgroup and row.get("subgroup_id") != args.subgroup:
+                continue
+            if args.component and row.get("component") != args.component:
+                continue
+            out.append(row)
+        fields = ["component", "mstdb_phase", "mstdb_species_aliases", "role", "parameter_set_id"]
+        _emit_rows(out, fields, output_format=args.format)
+        return {"rows": out}
+    if args.action == "targets":
+        rows = _database_table_rows(args.db, database, "needed_parameter_checklist")
+        out = []
+        for row in rows:
+            if args.subgroup and row.get("subgroup_id") != args.subgroup:
+                continue
+            if args.priority and row.get("priority") != args.priority:
+                continue
+            out.append(row)
+        fields = ["priority", "system", "status", "needed_data"]
+        _emit_rows(out, fields, output_format=args.format)
+        return {"rows": out}
+    if args.action == "validate-all":
+        rows = _filter_parameter_sets(
+            database.get("parameter_sets", []),
+            subgroup=args.subgroup,
+            component=args.component,
+        )
+        results: list[dict[str, Any]] = []
+        failures = 0
+        for row in rows:
+            params_path = args.db.parent / str(row["parameter_file"])
+            try:
+                params = load_parameters(params_path)
+                warnings = validate_parameters(params)
+                status = "PASS" if not warnings else "WARN"
+            except Exception as exc:
+                warnings = [str(exc)]
+                status = "FAIL"
+                failures += 1
+            results.append({"id": row["id"], "status": status, "warnings": warnings})
+        if args.format == "json":
+            print(json.dumps(results, indent=2, sort_keys=True))
+        else:
+            for result in results:
+                detail = "; ".join(result["warnings"])
+                print(f"{result['status']}\t{result['id']}\t{detail}")
+        if failures:
+            raise ValueError(f"{failures} MIVM parameter set(s) failed validation.")
+        return {"results": results}
+    raise ValueError(f"Unsupported database action: {args.action}")
 
 
 @dataclass(frozen=True)
@@ -846,6 +980,18 @@ def build_parser() -> argparse.ArgumentParser:
     bridge = subparsers.add_parser("pycalphad-bridge", help="Write a pycalphad custom-Model bridge module.")
     bridge.add_argument("--params", type=Path, required=True)
     bridge.add_argument("--outdir", type=Path, default=Path("analysis/mivm_pycalphad_bridge"))
+
+    database = subparsers.add_parser("database", help="Inspect a subgrouped MIVM parameter database registry.")
+    database.add_argument("--db", type=Path, required=True, help="Path to mivm_parameter_database.json.")
+    database.add_argument(
+        "action",
+        choices=("summary", "list", "map", "targets", "validate-all"),
+        help="Database inspection action.",
+    )
+    database.add_argument("--subgroup", help="Filter by subgroup id.")
+    database.add_argument("--component", help="Filter by MIVM component name.")
+    database.add_argument("--priority", help="Filter target systems by priority.")
+    database.add_argument("--format", choices=("text", "json"), default="text")
     return parser
 
 
@@ -912,6 +1058,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
         print(f"Wrote pycalphad bridge: {metadata['outputs']['bridge']}")
         print(f"Wrote parameter copy  : {metadata['outputs']['parameters']}")
         return metadata
+    if args.command == "database":
+        return database_action(args)
     parser.error(f"Unsupported command: {args.command}")
     return None
 
