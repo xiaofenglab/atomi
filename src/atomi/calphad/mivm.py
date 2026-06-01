@@ -949,13 +949,24 @@ def _atom_fractions(amount_a: float, amount_b: float, counts_a: dict[str, float]
     return {element: count / total_atoms for element, count in totals.items()}
 
 
-def _mqmqa_hm_atom(db: Any, phase: str, elements: list[str], atom_fractions: dict[str, float], temperature: float, pressure: float) -> float:
+def _mqmqa_hm_atom(
+    db: Any,
+    phase: str,
+    elements: list[str],
+    atom_fractions: dict[str, float],
+    temperature: float,
+    pressure: float,
+    *,
+    dependent_element: str | None = None,
+) -> float:
     try:
         from pycalphad import equilibrium, variables as v
     except Exception as exc:  # pragma: no cover - optional dependency
         raise ImportError("pycalphad is required for mqmqa-binary.") from exc
 
-    dependent = max(atom_fractions, key=lambda item: atom_fractions[item])
+    dependent = dependent_element.upper() if dependent_element else max(atom_fractions, key=lambda item: atom_fractions[item])
+    if dependent not in atom_fractions:
+        raise ValueError(f"Dependent element {dependent!r} is not present in this binary formula system.")
     cond: dict[Any, float] = {v.T: temperature, v.P: pressure}
     for element, fraction in atom_fractions.items():
         if element != dependent:
@@ -978,6 +989,8 @@ def write_mqmqa_binary_curve(args: argparse.Namespace) -> dict[str, Any]:
     counts_a = parse_formula_counts(args.component_a)
     counts_b = parse_formula_counts(args.component_b)
     elements = sorted(set(counts_a) | set(counts_b))
+    unique_a = sorted(set(counts_a) - set(counts_b))
+    dependent_element = args.dependent_element.upper() if args.dependent_element else (unique_a[0] if unique_a else None)
     grid = _float_grid(args.grid)
     eps = args.endpoint_epsilon
     ref_x_a = 1.0 - eps if args.x_component == args.component_a else eps
@@ -990,6 +1003,7 @@ def write_mqmqa_binary_curve(args: argparse.Namespace) -> dict[str, Any]:
         _atom_fractions(amount_a_ref, amount_b_ref, counts_a, counts_b),
         args.temperature,
         args.pressure,
+        dependent_element=dependent_element,
     )
     amount_a_ref, amount_b_ref = _binary_formula_amounts(ref_x_b, args.component_a, args.component_b, args.x_component)
     h_b = _mqmqa_hm_atom(
@@ -999,6 +1013,7 @@ def write_mqmqa_binary_curve(args: argparse.Namespace) -> dict[str, Any]:
         _atom_fractions(amount_a_ref, amount_b_ref, counts_a, counts_b),
         args.temperature,
         args.pressure,
+        dependent_element=dependent_element,
     )
     unique_b = sorted(set(counts_b) - set(counts_a))
     pure_b_unique_fraction = sum(counts_b[element] for element in unique_b) / sum(counts_b.values()) if unique_b else None
@@ -1008,7 +1023,15 @@ def write_mqmqa_binary_curve(args: argparse.Namespace) -> dict[str, Any]:
     for x_value in grid:
         amount_a, amount_b = _binary_formula_amounts(x_value, args.component_a, args.component_b, args.x_component)
         atom_fractions = _atom_fractions(amount_a, amount_b, counts_a, counts_b)
-        h_mix_atom = _mqmqa_hm_atom(db, args.phase, elements, atom_fractions, args.temperature, args.pressure)
+        h_mix_atom = _mqmqa_hm_atom(
+            db,
+            args.phase,
+            elements,
+            atom_fractions,
+            args.temperature,
+            args.pressure,
+            dependent_element=dependent_element,
+        )
         if pure_b_unique_fraction and unique_b:
             alpha_b = sum(atom_fractions[element] for element in unique_b) / pure_b_unique_fraction
         else:
@@ -1050,6 +1073,7 @@ def write_mqmqa_binary_curve(args: argparse.Namespace) -> dict[str, Any]:
         "component_a": args.component_a,
         "component_b": args.component_b,
         "x_component": args.x_component,
+        "dependent_element": dependent_element,
         "grid": args.grid,
         "basis_note": (
             "Hmix_kJ_mol is an atom-molar endmember-linear excess enthalpy for compatibility with "
@@ -1491,6 +1515,10 @@ def build_parser() -> argparse.ArgumentParser:
     mqmqa.add_argument("--pressure", type=float, default=101325.0, help="Pressure in Pa.")
     mqmqa.add_argument("--grid", default="0.02,0.98,0.02", help="x grid: step or xmin,xmax,step.")
     mqmqa.add_argument("--endpoint-epsilon", type=float, default=1.0e-6)
+    mqmqa.add_argument(
+        "--dependent-element",
+        help="Element to leave dependent in pycalphad composition conditions; defaults to an element unique to component A.",
+    )
     mqmqa.add_argument("--outdir", type=Path, default=Path("analysis/mqmqa_binary"))
 
     bridge = subparsers.add_parser("pycalphad-bridge", help="Write a pycalphad custom-Model bridge module.")
