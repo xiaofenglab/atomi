@@ -399,6 +399,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         calphad_export.add_argument("calphad_export_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("calphad_mivm", "calphad-mivm"):
+        calphad_mivm = subparsers.add_parser(
+            command_name,
+            help="Print MIVM parameter guidance for molten salts and solid/ceramic solutions.",
+        )
+        calphad_mivm.add_argument("calphad_mivm_args", nargs=argparse.REMAINDER)
+
     for command_name in ("paper-draft", "report-draft", "atomi-paper-draft"):
         paper_draft = subparsers.add_parser(
             command_name,
@@ -1049,6 +1056,11 @@ def main(argv: list[str] | None = None) -> None:
 
         calphad_export_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("calphad_mivm", "calphad-mivm"):
+        from atomi.calphad.mivm import main as calphad_mivm_main
+
+        calphad_mivm_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] in ("atat-bridge", "atat_bridge"):
         from atomi.atat.bridge import main as atat_bridge_main
 
@@ -1638,6 +1650,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.calphad.export import main as calphad_export_main
 
         calphad_export_main(args.calphad_export_args)
+        return
+
+    if args.subcommand in ("calphad_mivm", "calphad-mivm"):
+        from atomi.calphad.mivm import main as calphad_mivm_main
+
+        calphad_mivm_main(args.calphad_mivm_args)
         return
 
     if args.subcommand in ("atat-bridge", "atat_bridge"):
