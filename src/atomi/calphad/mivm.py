@@ -332,7 +332,7 @@ def total_gibbs_j_mol(
     )
 
 
-def excess_enthalpy_j_mol(
+def excess_enthalpy_gibbs_helmholtz_j_mol(
     temperature_k: float,
     composition: dict[str, float],
     params: MIVMParameters,
@@ -346,6 +346,55 @@ def excess_enthalpy_j_mol(
     g_over_t1 = excess_gibbs_j_mol(t1, composition, params) / t1
     derivative = (g_over_t1 - g_over_t0) / (t1 - t0)
     return -(temperature_k**2) * derivative
+
+
+def excess_enthalpy_j_mol(
+    temperature_k: float,
+    composition: dict[str, float],
+    params: MIVMParameters,
+) -> float:
+    """Return the direct MIVM excess/mixing enthalpy in J/mol.
+
+    This follows the molten-salt MIVM expression used for mixing-enthalpy
+    curves, where constant directed B_ji parameters still carry pair-energy
+    information and therefore produce a nonzero H_ex.
+    """
+    if temperature_k <= 0.0:
+        raise ValueError("Temperature must be positive.")
+    x = normalize_composition(composition, params)
+    enthalpy_over_rt = 0.0
+    for target in params.component_names:
+        x_i = x[target]
+        if x_i <= 0.0:
+            continue
+        comp_i = params.components[target]
+        b_denom = 0.0
+        b_log_numer = 0.0
+        b_log_weighted = 0.0
+        volume_denom = 0.0
+        volume_log_numer = 0.0
+        for source in params.component_names:
+            x_j = x[source]
+            if x_j <= 0.0:
+                continue
+            comp_j = params.components[source]
+            b_ji = pair_b(params, source, target, temperature_k)
+            ln_b_ji = pair_ln_b(params, source, target, temperature_k)
+            b_weight = x_j * b_ji
+            volume_weight = x_j * comp_j.molar_volume * b_ji
+            b_denom += b_weight
+            b_log_numer += b_weight * ln_b_ji
+            b_log_weighted += (1.0 + ln_b_ji) * b_weight * ln_b_ji
+            volume_denom += volume_weight
+            volume_log_numer += volume_weight * ln_b_ji
+        if b_denom <= 0.0 or volume_denom <= 0.0:
+            raise ValueError(f"Invalid MIVM enthalpy denominator for component {target!r}.")
+        avg_ln_b = b_log_numer / b_denom
+        enthalpy_over_rt += 0.5 * comp_i.coordination * x_i * (
+            avg_ln_b**2 - b_log_weighted / b_denom
+        )
+        enthalpy_over_rt += -x_i * (volume_log_numer / volume_denom)
+    return R_J_MOLK * temperature_k * enthalpy_over_rt
 
 
 def _molar_total_from_moles(

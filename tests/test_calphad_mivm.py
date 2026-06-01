@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from atomi.calphad.mivm import excess_gibbs_j_mol, load_parameters, main as mivm_main
+from atomi.calphad.mivm import excess_enthalpy_j_mol, excess_gibbs_j_mol, load_parameters, main as mivm_main
 from atomi.cli.main import main as atomi_main
 
 
@@ -60,6 +60,34 @@ def test_mivm_equal_volume_unit_pairs_has_zero_excess_gibbs(tmp_path: Path):
     params = load_parameters(path)
 
     assert excess_gibbs_j_mol(1000.0, {"A": 0.25, "B": 0.75}, params) == pytest.approx(0.0, abs=1.0e-10)
+    assert excess_enthalpy_j_mol(1000.0, {"A": 0.25, "B": 0.75}, params) == pytest.approx(0.0, abs=1.0e-10)
+
+
+def test_mivm_direct_enthalpy_uses_constant_pair_parameters(tmp_path: Path):
+    path = tmp_path / "params.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "atomi.calphad.mivm.parameters.v1",
+                "phase": "LIQUID",
+                "components": {
+                    "LaCl3": {"molar_volume": 70.27, "coordination": 8.76},
+                    "LiKCl_eut": {"molar_volume": 32.51, "coordination": 8.39},
+                },
+                "pairs": [
+                    {"from": "LaCl3", "to": "LiKCl_eut", "B": 1.38},
+                    {"from": "LiKCl_eut", "to": "LaCl3", "B": 1.04},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    params = load_parameters(path)
+
+    assert excess_enthalpy_j_mol(873.0, {"LaCl3": 0.42, "LiKCl_eut": 0.58}, params) == pytest.approx(
+        -4590.0,
+        abs=15.0,
+    )
 
 
 def test_mivm_sample_writes_bridge_table(tmp_path: Path):
@@ -85,6 +113,7 @@ def test_mivm_sample_writes_bridge_table(tmp_path: Path):
     assert len(rows) == 3
     assert rows[1]["composition"] == "A=0.5;B=0.5"
     assert float(rows[1]["G_excess_MIVM_J_mol"]) == pytest.approx(0.0, abs=1.0e-10)
+    assert float(rows[1]["H_excess_MIVM_J_mol"]) == pytest.approx(0.0, abs=1.0e-10)
     metadata = json.loads((outdir / "mivm_sample_metadata.json").read_text(encoding="utf-8"))
     assert metadata["schema"] == "atomi.calphad.mivm.sample.v1"
 
