@@ -406,6 +406,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         calphad_mivm.add_argument("calphad_mivm_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("calphad_workflow", "calphad-workflow"):
+        calphad_workflow = subparsers.add_parser(
+            command_name,
+            help="Run config-driven pycalphad inspection, scans, maps, and reaction summaries.",
+        )
+        calphad_workflow.add_argument("calphad_workflow_args", nargs=argparse.REMAINDER)
+
     for command_name in ("paper-draft", "report-draft", "atomi-paper-draft"):
         paper_draft = subparsers.add_parser(
             command_name,
@@ -1061,6 +1068,11 @@ def main(argv: list[str] | None = None) -> None:
 
         calphad_mivm_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("calphad_workflow", "calphad-workflow"):
+        from atomi.calphad.workflow import main as calphad_workflow_main
+
+        calphad_workflow_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] in ("atat-bridge", "atat_bridge"):
         from atomi.atat.bridge import main as atat_bridge_main
 
@@ -1656,6 +1668,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.calphad.mivm import main as calphad_mivm_main
 
         calphad_mivm_main(args.calphad_mivm_args)
+        return
+
+    if args.subcommand in ("calphad_workflow", "calphad-workflow"):
+        from atomi.calphad.workflow import main as calphad_workflow_main
+
+        calphad_workflow_main(args.calphad_workflow_args)
         return
 
     if args.subcommand in ("atat-bridge", "atat_bridge"):

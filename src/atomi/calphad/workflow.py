@@ -1,0 +1,890 @@
+"""Config-driven pycalphad workflow helpers."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import re
+import textwrap
+from collections import Counter, defaultdict, deque
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+ALWAYS_INCLUDE_BY_NAME = {"LIQUID", "GAS", "VAPOR", "FLUID"}
+SCHEMA_CONFIG = "atomi.calphad.workflow.config.v1"
+SCHEMA_GRID = "atomi.calphad.workflow.grid.v1"
+SCHEMA_REACTION = "atomi.calphad.workflow.reaction_summary.v1"
+
+
+def finite_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def safe_float(value: Any) -> float:
+    number = finite_float(value)
+    return number if number is not None else math.nan
+
+
+def format_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not math.isfinite(number):
+        return ""
+    return f"{number:.12g}"
+
+
+def write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def read_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: format_value(row.get(field)) for field in fields})
+
+
+def read_csv(path: Path) -> list[dict[str, str]]:
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def parse_csv_list(value: str | list[str] | None) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            out.extend(parse_csv_list(item))
+        return out
+    return [item.strip() for item in str(value).replace(";", ",").split(",") if item.strip()]
+
+
+def frange(start: float, stop: float, step: float) -> list[float]:
+    if step <= 0.0:
+        raise ValueError("Grid step must be positive.")
+    values: list[float] = []
+    current = float(start)
+    while current <= float(stop) + 1.0e-10:
+        values.append(round(current, 12))
+        current += step
+    return values
+
+
+def linspace(start: float, stop: float, count: int) -> list[float]:
+    if count <= 1:
+        return [float(start)]
+    return [float(start) + (float(stop) - float(start)) * i / (count - 1) for i in range(count)]
+
+
+def normalize_species_name(name: str) -> str:
+    text = str(name).strip()
+    text = re.sub(r"_POS\d+", "", text)
+    text = re.sub(r"_NEG\d+", "", text)
+    text = re.sub(r"[+-]\d+", "", text)
+    return text
+
+
+def species_elements_from_name(name: str) -> set[str]:
+    text = normalize_species_name(name)
+    if text in {"", "/-", "-", "/"}:
+        return set()
+    if text == "VA":
+        return {"VA"}
+    return set(re.findall(r"[A-Z][a-z]?", text))
+
+
+def species_in_binary_subsystem(species_name: str, a: str, b: str) -> bool:
+    return species_elements_from_name(species_name).issubset({a, b, "VA"})
+
+
+def phase_feasible_in_binary_subsystem(phase_obj: Any, a: str, b: str) -> tuple[bool, list[dict[str, Any]], list[list[str]]]:
+    allowed_somewhere = False
+    bad_sublattices: list[dict[str, Any]] = []
+    allowed_by_sublattice: list[list[str]] = []
+    for index, sublattice in enumerate(phase_obj.constituents):
+        allowed: list[str] = []
+        rejected: list[str] = []
+        for species in sublattice:
+            name = str(species)
+            if species_in_binary_subsystem(name, a, b):
+                allowed.append(name)
+                if name != "VA":
+                    allowed_somewhere = True
+            else:
+                rejected.append(name)
+        allowed_by_sublattice.append(allowed)
+        if not allowed:
+            bad_sublattices.append({"sublattice": index + 1, "rejected_species": rejected})
+    return len(bad_sublattices) == 0 and allowed_somewhere, bad_sublattices, allowed_by_sublattice
+
+
+def recommend_phase_subset(candidate_phases: list[str], a: str, b: str) -> list[str]:
+    candidates = set(candidate_phases)
+    if {a, b} == {"U", "O"}:
+        preferred = [
+            "ORTHORHOMBIC_A20",
+            "TETRAGONAL_U",
+            "BCC_A2",
+            "FCC_A1",
+            "LIQUID",
+            "C1_MO2",
+            "U4O9_S",
+            "U4O9_S2",
+            "U4O9_S3",
+            "U3O8_S",
+            "U3O8_S2",
+            "U3O8_S3",
+            "U3O8_S4",
+            "UO3",
+            "GAS",
+        ]
+        return [phase for phase in preferred if phase in candidates]
+    return sorted(candidate_phases)
+
+
+def require_pycalphad():
+    try:
+        from pycalphad import Database, Model, calculate, equilibrium, variables as v
+    except Exception as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "pycalphad is required for this command. Run inside a CALPHAD environment "
+            "or set up one with Atomi's calphad-doctor guidance."
+        ) from exc
+    return Database, Model, calculate, equilibrium, v
+
+
+def resolve_path(path: str | Path, base: Path | None = None) -> Path:
+    p = Path(path).expanduser()
+    if p.is_absolute() or base is None:
+        return p
+    return (base / p).resolve()
+
+
+@dataclass(frozen=True)
+class CalphadConfig:
+    path: Path | None
+    tdb_file: Path
+    components: list[str]
+    selected_phases: list[str]
+    x_axis_component: str
+    component_a: str = ""
+    component_b: str = ""
+    pressure_pa: float = 101325.0
+    total_moles: float = 1.0
+    phase_labels: dict[str, str] | None = None
+
+
+def load_config(path: Path) -> CalphadConfig:
+    data = read_json(path)
+    base = path.parent
+    tdb = resolve_path(data["tdb_file"], base)
+    return CalphadConfig(
+        path=path,
+        tdb_file=tdb,
+        components=parse_csv_list(data.get("components")),
+        selected_phases=parse_csv_list(data.get("selected_phases") or data.get("phases")),
+        x_axis_component=str(data.get("x_axis_component") or data.get("component_B") or ""),
+        component_a=str(data.get("component_A") or ""),
+        component_b=str(data.get("component_B") or ""),
+        pressure_pa=float(data.get("pressure_pa") or 101325.0),
+        total_moles=float(data.get("total_moles") or 1.0),
+        phase_labels=data.get("phase_labels") if isinstance(data.get("phase_labels"), dict) else {},
+    )
+
+
+def inspect_binary_tdb(tdb_file: Path, a: str, b: str) -> dict[str, Any]:
+    Database, *_ = require_pycalphad()
+    dbf = Database(str(tdb_file))
+    candidate_phases: list[str] = []
+    debug: dict[str, Any] = {}
+    for name, phase in dbf.phases.items():
+        upper = name.upper()
+        if upper in ALWAYS_INCLUDE_BY_NAME or any(key in upper for key in ALWAYS_INCLUDE_BY_NAME):
+            candidate_phases.append(name)
+            debug[name] = {"status": "included", "reason": "forced inclusion by fluid-like phase name"}
+            continue
+        ok, bad_sublattices, allowed_by_sublattice = phase_feasible_in_binary_subsystem(phase, a, b)
+        if ok:
+            candidate_phases.append(name)
+            debug[name] = {
+                "status": "included",
+                "reason": f"phase feasible in binary subsystem {a}-{b}",
+                "allowed_by_sublattice": allowed_by_sublattice,
+            }
+        else:
+            debug[name] = {
+                "status": "excluded",
+                "reason": f"no valid {a}/{b}/VA choice on some sublattices",
+                "bad_sublattices": bad_sublattices,
+                "allowed_by_sublattice": allowed_by_sublattice,
+            }
+    candidate_phases = sorted(set(candidate_phases))
+    return {
+        "schema": SCHEMA_CONFIG,
+        "tdb_file": str(tdb_file),
+        "component_A": a,
+        "component_B": b,
+        "components": [a, b, "VA"],
+        "x_axis_component": b,
+        "candidate_phases": candidate_phases,
+        "selected_phases": recommend_phase_subset(candidate_phases, a, b),
+        "debug": debug,
+    }
+
+
+def summarize_phases(phases: Any, npvals: Any, tol: float = 1.0e-10) -> list[tuple[str, float]]:
+    kept: list[tuple[str, float]] = []
+    for phase, amount in zip(list(phases), list(npvals)):
+        name = str(phase)
+        value = safe_float(amount)
+        if name and name != "" and math.isfinite(value) and value > tol:
+            kept.append((name, value))
+    return kept
+
+
+def stable_signature_from_kept(kept: list[tuple[str, float]]) -> str:
+    return " + ".join(sorted(phase for phase, _ in kept)) if kept else "NONE"
+
+
+def stable_detail_from_kept(kept: list[tuple[str, float]]) -> str:
+    return "; ".join(f"{phase}:{amount:.6g}" for phase, amount in kept) if kept else "NONE"
+
+
+def _first_finite(values: Any) -> float:
+    try:
+        import numpy as np
+
+        array = np.asarray(values, dtype=float).ravel()
+        finite = array[np.isfinite(array)]
+        return float(finite[0]) if finite.size else math.nan
+    except Exception:
+        return math.nan
+
+
+def _phase_amounts(eq: Any) -> list[tuple[str, float]]:
+    try:
+        import numpy as np
+
+        phases = np.asarray(eq.Phase.values).ravel()
+        amounts = np.asarray(eq.NP.values, dtype=float).ravel()
+        n = min(len(phases), len(amounts))
+        return summarize_phases(phases[:n], amounts[:n])
+    except Exception:
+        return []
+
+
+def _component_values(eq: Any, variable: str) -> dict[str, float]:
+    values = getattr(eq, variable).values
+    comps = [str(item) for item in eq.component.values]
+    try:
+        import numpy as np
+
+        array = np.asarray(values, dtype=float)
+        reshaped = array.reshape(-1, len(comps))
+        finite_rows = reshaped[np.isfinite(reshaped).any(axis=1)]
+        row = finite_rows[0] if len(finite_rows) else reshaped[0]
+        return {comp: safe_float(value) for comp, value in zip(comps, row)}
+    except Exception:
+        return {}
+
+
+def equilibrium_summary(
+    *,
+    dbf: Any,
+    components: list[str],
+    phases: list[str],
+    conditions: dict[Any, Any],
+    output: str = "GM",
+    verbose: bool = False,
+) -> tuple[dict[str, Any], Any]:
+    _, _, _, equilibrium, _ = require_pycalphad()
+    eq = equilibrium(dbf, components, phases, conditions, output=output, verbose=verbose)
+    kept = _phase_amounts(eq)
+    summary = {
+        "stable_signature": stable_signature_from_kept(kept),
+        "stable_detail": stable_detail_from_kept(kept),
+        "phase_amounts": [{"phase": phase, "amount": amount} for phase, amount in kept],
+        "GM_J_mol": _first_finite(eq.GM.values) if hasattr(eq, "GM") else math.nan,
+        "X": _component_values(eq, "X") if hasattr(eq, "X") else {},
+        "MU": _component_values(eq, "MU") if hasattr(eq, "MU") else {},
+    }
+    return summary, eq
+
+
+def tx_scan_rows(
+    config: CalphadConfig,
+    *,
+    t_values: list[float],
+    x_values: list[float],
+    phases: list[str] | None = None,
+    verbose: bool = False,
+) -> list[dict[str, Any]]:
+    Database, _, _, _, v = require_pycalphad()
+    dbf = Database(str(config.tdb_file))
+    phase_list = phases or config.selected_phases
+    rows: list[dict[str, Any]] = []
+    for temp in t_values:
+        for xval in x_values:
+            row: dict[str, Any] = {"T_K": temp, f"X_{config.x_axis_component}": xval}
+            try:
+                summary, _ = equilibrium_summary(
+                    dbf=dbf,
+                    components=config.components,
+                    phases=phase_list,
+                    conditions={
+                        v.N: config.total_moles,
+                        v.T: temp,
+                        v.P: config.pressure_pa,
+                        v.X(config.x_axis_component): xval,
+                    },
+                    verbose=verbose,
+                )
+                row.update(
+                    {
+                        "stable_signature": summary["stable_signature"],
+                        "stable_detail": summary["stable_detail"],
+                        "GM_J_mol": summary["GM_J_mol"],
+                    }
+                )
+                for comp, value in summary["MU"].items():
+                    row[f"mu_{comp}_J_mol"] = value
+            except Exception as exc:
+                row.update({"stable_signature": "FAILED", "stable_detail": str(exc), "GM_J_mol": math.nan})
+            rows.append(row)
+    return rows
+
+
+def muo_scan_rows(
+    config: CalphadConfig,
+    *,
+    t_values: list[float],
+    mu_values: list[float],
+    mu_component: str,
+    phases: list[str] | None = None,
+    verbose: bool = False,
+) -> list[dict[str, Any]]:
+    Database, _, _, _, v = require_pycalphad()
+    dbf = Database(str(config.tdb_file))
+    phase_list = phases or config.selected_phases
+    rows: list[dict[str, Any]] = []
+    for temp in t_values:
+        for mu in mu_values:
+            row: dict[str, Any] = {"T_K": temp, f"MU_{mu_component}_J_mol": mu}
+            try:
+                summary, _ = equilibrium_summary(
+                    dbf=dbf,
+                    components=config.components,
+                    phases=phase_list,
+                    conditions={
+                        v.N: config.total_moles,
+                        v.T: temp,
+                        v.P: config.pressure_pa,
+                        v.MU(mu_component): mu,
+                    },
+                    verbose=verbose,
+                )
+                row.update(
+                    {
+                        "stable_signature": summary["stable_signature"],
+                        "stable_detail": summary["stable_detail"],
+                        "GM_J_mol": summary["GM_J_mol"],
+                    }
+                )
+                for comp, value in summary["X"].items():
+                    row[f"X_{comp}"] = value
+            except Exception as exc:
+                row.update({"stable_signature": "FAILED", "stable_detail": str(exc), "GM_J_mol": math.nan})
+            rows.append(row)
+    return rows
+
+
+def infer_x_column(rows: list[dict[str, str]]) -> str:
+    for key in ("X_O", "X", "x", "x_value"):
+        if rows and key in rows[0]:
+            return key
+    for key in rows[0] if rows else []:
+        if key.startswith("X_"):
+            return key
+    raise ValueError("Could not infer x/composition column from grid CSV.")
+
+
+def infer_grid_axes(rows: list[dict[str, str]]) -> tuple[str, list[float], list[float], dict[tuple[float, float], str], dict[tuple[float, float], str]]:
+    if not rows:
+        raise ValueError("Grid CSV is empty.")
+    x_col = infer_x_column(rows)
+    t_values = sorted({float(row["T_K"]) for row in rows})
+    x_values = sorted({float(row[x_col]) for row in rows})
+    sig_map: dict[tuple[float, float], str] = {}
+    detail_map: dict[tuple[float, float], str] = {}
+    for row in rows:
+        key = (float(row["T_K"]), float(row[x_col]))
+        sig_map[key] = row.get("stable_signature") or row.get("signature") or "NONE"
+        detail_map[key] = row.get("stable_detail") or ""
+    return x_col, t_values, x_values, sig_map, detail_map
+
+
+def build_signature_grid(t_values: list[float], x_values: list[float], sig_map: dict[tuple[float, float], str]) -> list[list[str]]:
+    return [[sig_map.get((temp, x), "NONE") for x in x_values] for temp in t_values]
+
+
+def neighbors4(i: int, j: int, nrows: int, ncols: int):
+    for di, dj in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        ni, nj = i + di, j + dj
+        if 0 <= ni < nrows and 0 <= nj < ncols:
+            yield ni, nj
+
+
+def connected_components(grid: list[list[str]]) -> dict[str, list[list[tuple[int, int]]]]:
+    nrows = len(grid)
+    ncols = len(grid[0]) if nrows else 0
+    seen: set[tuple[int, int]] = set()
+    components: dict[str, list[list[tuple[int, int]]]] = defaultdict(list)
+    for i in range(nrows):
+        for j in range(ncols):
+            if (i, j) in seen:
+                continue
+            signature = grid[i][j]
+            queue = deque([(i, j)])
+            seen.add((i, j))
+            coords: list[tuple[int, int]] = []
+            while queue:
+                ci, cj = queue.popleft()
+                coords.append((ci, cj))
+                for ni, nj in neighbors4(ci, cj, nrows, ncols):
+                    if (ni, nj) not in seen and grid[ni][nj] == signature:
+                        seen.add((ni, nj))
+                        queue.append((ni, nj))
+            components[signature].append(coords)
+    return components
+
+
+def summarize_fields(grid: list[list[str]], t_values: list[float], x_values: list[float]) -> list[dict[str, Any]]:
+    comps = connected_components(grid)
+    dx = abs(x_values[1] - x_values[0]) if len(x_values) > 1 else 1.0
+    dt = abs(t_values[1] - t_values[0]) if len(t_values) > 1 else 1.0
+    rows: list[dict[str, Any]] = []
+    for signature, groups in comps.items():
+        for region_id, coords in enumerate(groups, start=1):
+            xs = [x_values[j] for _, j in coords]
+            ts = [t_values[i] for i, _ in coords]
+            phase_count = 0 if signature == "NONE" else len(signature.split(" + "))
+            rows.append(
+                {
+                    "signature": signature,
+                    "region_id": region_id,
+                    "n_cells": len(coords),
+                    "x_min": min(xs),
+                    "x_max": max(xs),
+                    "t_min": min(ts),
+                    "t_max": max(ts),
+                    "x_center": sum(xs) / len(xs),
+                    "t_center": sum(ts) / len(ts),
+                    "approx_area": len(coords) * dx * dt,
+                    "phase_count": phase_count,
+                    "is_single_phase": phase_count == 1,
+                    "is_two_phase": phase_count == 2,
+                }
+            )
+    return sorted(rows, key=lambda item: (item["phase_count"], item["signature"], item["region_id"]))
+
+
+def summarize_boundaries(grid: list[list[str]], t_values: list[float], x_values: list[float]) -> list[dict[str, Any]]:
+    nrows = len(grid)
+    ncols = len(grid[0]) if nrows else 0
+    pairs: dict[tuple[str, str], list[tuple[float, float, str]]] = defaultdict(list)
+    for i in range(nrows):
+        for j in range(ncols):
+            here = grid[i][j]
+            if j + 1 < ncols and here != grid[i][j + 1]:
+                pairs[tuple(sorted((here, grid[i][j + 1])))].append((0.5 * (x_values[j] + x_values[j + 1]), t_values[i], "vertical_in_x"))
+            if i + 1 < nrows and here != grid[i + 1][j]:
+                pairs[tuple(sorted((here, grid[i + 1][j])))].append((x_values[j], 0.5 * (t_values[i] + t_values[i + 1]), "horizontal_in_T"))
+    rows: list[dict[str, Any]] = []
+    for (field_1, field_2), pts in pairs.items():
+        xs = [item[0] for item in pts]
+        ts = [item[1] for item in pts]
+        orient = Counter(item[2] for item in pts).most_common(1)[0][0]
+        rows.append(
+            {
+                "field_1": field_1,
+                "field_2": field_2,
+                "n_boundary_points": len(pts),
+                "x_min": min(xs),
+                "x_max": max(xs),
+                "t_min": min(ts),
+                "t_max": max(ts),
+                "x_center": sum(xs) / len(xs),
+                "t_center": sum(ts) / len(ts),
+                "main_orientation": orient,
+            }
+        )
+    return sorted(rows, key=lambda item: (item["t_center"], item["x_center"]))
+
+
+def summarize_candidate_invariants(grid: list[list[str]], t_values: list[float], x_values: list[float]) -> list[dict[str, Any]]:
+    nrows = len(grid)
+    ncols = len(grid[0]) if nrows else 0
+    rows: list[dict[str, Any]] = []
+    for i in range(nrows - 1):
+        for j in range(ncols - 1):
+            block = {grid[i][j], grid[i + 1][j], grid[i][j + 1], grid[i + 1][j + 1]}
+            if len(block) >= 3:
+                rows.append(
+                    {
+                        "x": 0.5 * (x_values[j] + x_values[j + 1]),
+                        "T_K": 0.5 * (t_values[i] + t_values[i + 1]),
+                        "n_neighboring_fields": len(block),
+                        "neighboring_fields": " | ".join(sorted(block)),
+                        "reaction_guess": " ; ".join(sorted(block)),
+                    }
+                )
+    unique: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        unique[(round(row["x"], 10), round(row["T_K"], 8), row["neighboring_fields"])] = row
+    return sorted(unique.values(), key=lambda item: (item["T_K"], item["x"]))
+
+
+def write_reaction_report(path: Path, fields: list[dict[str, Any]], boundaries: list[dict[str, Any]], invariants: list[dict[str, Any]], x_col: str) -> None:
+    lines = [
+        "Reaction / transition summary from CALPHAD grid",
+        "=" * 72,
+        "",
+        f"Composition axis: {x_col}",
+        f"Detected connected phase fields: {len(fields)}",
+        f"Detected boundary classes: {len(boundaries)}",
+        f"Detected candidate invariant regions: {len(invariants)}",
+        "",
+        "Candidate invariants:",
+    ]
+    for row in invariants[:50]:
+        lines.append(f"  T={row['T_K']:.6g} {x_col}={row['x']:.6g}: {row['neighboring_fields']}")
+    lines.append("")
+    lines.append("Boundary classes:")
+    for row in boundaries[:80]:
+        lines.append(
+            f"  {row['field_1']} <-> {row['field_2']}: "
+            f"T={row['t_min']:.6g}-{row['t_max']:.6g}, x={row['x_min']:.6g}-{row['x_max']:.6g}, n={row['n_boundary_points']}"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def plot_grid_map(csv_path: Path, out_png: Path, title: str | None = None) -> None:
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except Exception as exc:  # pragma: no cover - optional plotting dependency
+        raise RuntimeError("matplotlib and numpy are required for plot-map.") from exc
+    rows = read_csv(csv_path)
+    x_col, t_values, x_values, sig_map, _ = infer_grid_axes(rows)
+    signatures = sorted({sig_map[(temp, x)] for temp in t_values for x in x_values})
+    sig_to_idx = {sig: idx for idx, sig in enumerate(signatures)}
+    grid = np.array([[sig_to_idx[sig_map.get((temp, x), "NONE")] for x in x_values] for temp in t_values])
+    fig, ax = plt.subplots(figsize=(10, 6), constrained_layout=True)
+    image = ax.imshow(
+        grid,
+        origin="lower",
+        aspect="auto",
+        extent=[min(x_values), max(x_values), min(t_values), max(t_values)],
+        interpolation="nearest",
+    )
+    cbar = fig.colorbar(image, ax=ax, ticks=list(sig_to_idx.values()))
+    cbar.ax.set_yticklabels(signatures)
+    ax.set_xlabel(x_col)
+    ax.set_ylabel("T (K)")
+    ax.set_title(title or "CALPHAD phase map")
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_png, dpi=300)
+    plt.close(fig)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="calphad-workflow",
+        description="Config-driven pycalphad inspection, equilibrium, scan, and phase-map helpers.",
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    init = sub.add_parser("init", help="Write a portable CALPHAD workflow folder skeleton.")
+    init.add_argument("--outdir", type=Path, default=Path("calphad_workflow"))
+    init.add_argument("--tdb", default="TDB/UPUOC.TDB")
+    init.add_argument("--component-a", default="U")
+    init.add_argument("--component-b", default="O")
+
+    inspect = sub.add_parser("inspect", help="Inspect a TDB and write a binary subsystem config.")
+    inspect.add_argument("--tdb", type=Path, required=True)
+    inspect.add_argument("--A", "--component-a", dest="component_a", required=True)
+    inspect.add_argument("--B", "--component-b", dest="component_b", required=True)
+    inspect.add_argument("--xcomp", help="X-axis component. Defaults to --B.")
+    inspect.add_argument("--out", type=Path)
+
+    eq = sub.add_parser("eq", help="Run one equilibrium point and write JSON summary.")
+    eq.add_argument("--config", type=Path, required=True)
+    eq.add_argument("--temperature", type=float, required=True)
+    eq.add_argument("--x", type=float, help="Mole fraction of config x-axis component.")
+    eq.add_argument("--mu", type=float, help="Chemical potential in J/mol for --mu-component.")
+    eq.add_argument("--mu-component", default=None)
+    eq.add_argument("--phase", action="append", help="Override selected phases. Repeatable or comma-separated.")
+    eq.add_argument("--out", type=Path, default=Path("equilibrium/eq_single.json"))
+    eq.add_argument("--verbose-solver", action="store_true")
+
+    scan_tx = sub.add_parser("scan-tx", help="Scan a T-X phase grid and write CSV.")
+    scan_tx.add_argument("--config", type=Path, required=True)
+    scan_tx.add_argument("--outdir", type=Path, default=Path("phase_diagram"))
+    scan_tx.add_argument("--xmin", type=float, default=0.0)
+    scan_tx.add_argument("--xmax", type=float, default=1.0)
+    scan_tx.add_argument("--nx", type=int, default=51)
+    scan_tx.add_argument("--tmin", type=float, required=True)
+    scan_tx.add_argument("--tmax", type=float, required=True)
+    scan_tx.add_argument("--nt", type=int, default=51)
+    scan_tx.add_argument("--plot", action="store_true")
+
+    scan_mu = sub.add_parser("scan-muo", help="Scan a T-mu(component) phase grid and write CSV.")
+    scan_mu.add_argument("--config", type=Path, required=True)
+    scan_mu.add_argument("--outdir", type=Path, default=Path("muO_maps"))
+    scan_mu.add_argument("--mu-component", default=None)
+    scan_mu.add_argument("--mu-min", type=float, required=True)
+    scan_mu.add_argument("--mu-max", type=float, required=True)
+    scan_mu.add_argument("--nmu", type=int, default=51)
+    scan_mu.add_argument("--tmin", type=float, required=True)
+    scan_mu.add_argument("--tmax", type=float, required=True)
+    scan_mu.add_argument("--nt", type=int, default=51)
+    scan_mu.add_argument("--plot", action="store_true")
+
+    summary = sub.add_parser("reaction-summary", help="Summarize phase fields, boundaries, and invariant candidates from a grid CSV.")
+    summary.add_argument("--grid-csv", type=Path, required=True)
+    summary.add_argument("--outdir", type=Path, default=Path("reaction_summary"))
+
+    plot = sub.add_parser("plot-map", help="Plot a phase map from a scan grid CSV.")
+    plot.add_argument("--grid-csv", type=Path, required=True)
+    plot.add_argument("--out", type=Path, default=Path("phase_map.png"))
+    plot.add_argument("--title")
+    return parser
+
+
+def init_workflow(args: argparse.Namespace) -> dict[str, Any]:
+    root = args.outdir.resolve()
+    folders = ["TDB", "config", "inspect", "equilibrium", "phase_diagram", "muO_maps", "phase_probe", "phase_analysis", "reaction_summary"]
+    for folder in folders:
+        (root / folder).mkdir(parents=True, exist_ok=True)
+    config = {
+        "schema": SCHEMA_CONFIG,
+        "tdb_file": args.tdb,
+        "component_A": args.component_a,
+        "component_B": args.component_b,
+        "components": [args.component_a, args.component_b, "VA"],
+        "x_axis_component": args.component_b,
+        "selected_phases": [],
+        "notes": "Run calphad-workflow inspect to populate selected phases from the TDB.",
+    }
+    config_path = root / "config" / f"{args.component_a}_{args.component_b}_phase_config.json"
+    write_json(config_path, config)
+    readme = root / "README_calphad_workflow.md"
+    readme.write_text(
+        textwrap.dedent(
+            f"""\
+            # Atomi CALPHAD workflow
+
+            1. Put/copy your TDB at `{args.tdb}` or update `config/*_phase_config.json`.
+            2. Inspect phases:
+               `calphad-workflow inspect --tdb {args.tdb} --A {args.component_a} --B {args.component_b} --out config/{args.component_a}_{args.component_b}_phase_config.json`
+            3. Run one point:
+               `calphad-workflow eq --config config/{args.component_a}_{args.component_b}_phase_config.json --temperature 1500 --x 0.6666667`
+            4. Scan T-X:
+               `calphad-workflow scan-tx --config config/{args.component_a}_{args.component_b}_phase_config.json --tmin 300 --tmax 4500 --nt 61 --nx 81 --plot`
+            5. Summarize reactions:
+               `calphad-workflow reaction-summary --grid-csv phase_diagram/T_X_phase_grid.csv`
+            """
+        ),
+        encoding="utf-8",
+    )
+    print(f"Wrote CALPHAD workflow skeleton: {root}")
+    return {"root": str(root), "config": str(config_path), "readme": str(readme)}
+
+
+def inspect_main(args: argparse.Namespace) -> dict[str, Any]:
+    out = args.out or Path(f"{args.component_a}_{args.component_b}_phase_config.json")
+    config = inspect_binary_tdb(args.tdb.resolve(), args.component_a, args.component_b)
+    if args.xcomp:
+        config["x_axis_component"] = args.xcomp
+    write_json(out, config)
+    print(f"Binary subsystem: {args.component_a}-{args.component_b}")
+    print(f"Candidate phases: {len(config['candidate_phases'])}")
+    print(f"Selected phases : {', '.join(config['selected_phases'])}")
+    print(f"Wrote config: {out}")
+    return config
+
+
+def eq_main(args: argparse.Namespace) -> dict[str, Any]:
+    Database, _, _, _, v = require_pycalphad()
+    config = load_config(args.config.resolve())
+    dbf = Database(str(config.tdb_file))
+    phases = parse_csv_list(args.phase) or config.selected_phases
+    if args.x is None and args.mu is None:
+        raise ValueError("eq requires either --x or --mu.")
+    conditions: dict[Any, Any] = {v.N: config.total_moles, v.T: args.temperature, v.P: config.pressure_pa}
+    if args.mu is not None:
+        mu_component = args.mu_component or config.x_axis_component
+        conditions[v.MU(mu_component)] = args.mu
+    else:
+        conditions[v.X(config.x_axis_component)] = args.x
+    summary, _ = equilibrium_summary(
+        dbf=dbf,
+        components=config.components,
+        phases=phases,
+        conditions=conditions,
+        verbose=args.verbose_solver,
+    )
+    payload = {
+        "schema": "atomi.calphad.workflow.eq.v1",
+        "config": str(args.config.resolve()),
+        "conditions": {str(key): format_value(value) for key, value in conditions.items()},
+        "components": config.components,
+        "phases": phases,
+        "summary": summary,
+    }
+    write_json(args.out, payload)
+    print(f"Stable phases: {summary['stable_signature']}")
+    print(f"GM: {format_value(summary['GM_J_mol'])} J/mol")
+    print(f"Wrote equilibrium summary: {args.out}")
+    return payload
+
+
+def scan_tx_main(args: argparse.Namespace) -> dict[str, Any]:
+    config = load_config(args.config.resolve())
+    t_values = linspace(args.tmin, args.tmax, args.nt)
+    x_values = linspace(args.xmin, args.xmax, args.nx)
+    rows = tx_scan_rows(config, t_values=t_values, x_values=x_values)
+    outdir = args.outdir.resolve()
+    table = outdir / "T_X_phase_grid.csv"
+    fields = ["T_K", f"X_{config.x_axis_component}", "stable_signature", "stable_detail", "GM_J_mol"]
+    for comp in config.components:
+        fields.append(f"mu_{comp}_J_mol")
+    write_csv(table, rows, fields)
+    metadata = {
+        "schema": SCHEMA_GRID,
+        "mode": "T-X",
+        "config": str(args.config.resolve()),
+        "n_rows": len(rows),
+        "outputs": {"grid_csv": str(table)},
+    }
+    if args.plot:
+        png = outdir / "T_X_phase_map.png"
+        plot_grid_map(table, png, title="CALPHAD T-X phase map")
+        metadata["outputs"]["plot_png"] = str(png)
+    write_json(outdir / "T_X_phase_grid_metadata.json", metadata)
+    print(f"Wrote T-X phase grid: {table}")
+    return metadata
+
+
+def scan_muo_main(args: argparse.Namespace) -> dict[str, Any]:
+    config = load_config(args.config.resolve())
+    mu_component = args.mu_component or config.x_axis_component
+    t_values = linspace(args.tmin, args.tmax, args.nt)
+    mu_values = linspace(args.mu_min, args.mu_max, args.nmu)
+    rows = muo_scan_rows(config, t_values=t_values, mu_values=mu_values, mu_component=mu_component)
+    outdir = args.outdir.resolve()
+    table = outdir / f"T_mu{mu_component}_phase_grid.csv"
+    fields = ["T_K", f"MU_{mu_component}_J_mol", "stable_signature", "stable_detail", "GM_J_mol"]
+    for comp in config.components:
+        fields.append(f"X_{comp}")
+    write_csv(table, rows, fields)
+    metadata = {
+        "schema": SCHEMA_GRID,
+        "mode": f"T-MU({mu_component})",
+        "config": str(args.config.resolve()),
+        "n_rows": len(rows),
+        "outputs": {"grid_csv": str(table)},
+    }
+    if args.plot:
+        png = outdir / f"T_mu{mu_component}_phase_map.png"
+        plot_grid_map(table, png, title=f"CALPHAD T-mu({mu_component}) phase map")
+        metadata["outputs"]["plot_png"] = str(png)
+    write_json(outdir / f"T_mu{mu_component}_phase_grid_metadata.json", metadata)
+    print(f"Wrote T-mu({mu_component}) phase grid: {table}")
+    return metadata
+
+
+def reaction_summary_main(args: argparse.Namespace) -> dict[str, Any]:
+    rows = read_csv(args.grid_csv.resolve())
+    x_col, t_values, x_values, sig_map, _ = infer_grid_axes(rows)
+    grid = build_signature_grid(t_values, x_values, sig_map)
+    fields = summarize_fields(grid, t_values, x_values)
+    boundaries = summarize_boundaries(grid, t_values, x_values)
+    invariants = summarize_candidate_invariants(grid, t_values, x_values)
+    outdir = args.outdir.resolve()
+    fields_csv = outdir / "phase_fields_summary.csv"
+    boundaries_csv = outdir / "phase_boundaries_summary.csv"
+    invariants_csv = outdir / "candidate_invariants.csv"
+    write_csv(fields_csv, fields, list(fields[0]) if fields else ["signature"])
+    write_csv(boundaries_csv, boundaries, list(boundaries[0]) if boundaries else ["field_1", "field_2"])
+    write_csv(invariants_csv, invariants, list(invariants[0]) if invariants else ["x", "T_K"])
+    report = outdir / "reaction_detection_report.txt"
+    write_reaction_report(report, fields, boundaries, invariants, x_col)
+    metadata = {
+        "schema": SCHEMA_REACTION,
+        "grid_csv": str(args.grid_csv.resolve()),
+        "x_column": x_col,
+        "n_fields": len(fields),
+        "n_boundaries": len(boundaries),
+        "n_candidate_invariants": len(invariants),
+        "outputs": {
+            "phase_fields_summary": str(fields_csv),
+            "phase_boundaries_summary": str(boundaries_csv),
+            "candidate_invariants": str(invariants_csv),
+            "report": str(report),
+        },
+    }
+    write_json(outdir / "reaction_summary_metadata.json", metadata)
+    print(f"Wrote reaction summary: {report}")
+    return metadata
+
+
+def main(argv: list[str] | None = None) -> dict[str, Any] | None:
+    args = build_parser().parse_args(argv)
+    if args.command == "init":
+        return init_workflow(args)
+    if args.command == "inspect":
+        return inspect_main(args)
+    if args.command == "eq":
+        return eq_main(args)
+    if args.command == "scan-tx":
+        return scan_tx_main(args)
+    if args.command == "scan-muo":
+        return scan_muo_main(args)
+    if args.command == "reaction-summary":
+        return reaction_summary_main(args)
+    if args.command == "plot-map":
+        plot_grid_map(args.grid_csv.resolve(), args.out.resolve(), title=args.title)
+        print(f"Wrote phase map: {args.out.resolve()}")
+        return {"plot": str(args.out.resolve())}
+    build_parser().print_help()
+    return None
+
+
+if __name__ == "__main__":
+    main()
