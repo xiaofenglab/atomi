@@ -152,6 +152,7 @@ def write_run_script(
     phonopy_module: str | None,
     phonopy: str,
     phonopy_load: str,
+    fc_calculator: str | None,
     run_thermal: bool,
     run_dos: bool,
     run_band: bool,
@@ -191,9 +192,23 @@ def write_run_script(
         lines.append("module purge")
     if phonopy_module:
         lines.append(f"module load {shell_quote(phonopy_module)}")
+    load_extra_args = ""
+    if fc_calculator:
+        load_extra_args = f" --fc-calculator {shell_quote(fc_calculator)}"
     lines.extend(
         [
             'export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"',
+            "",
+            'echo "=== Step 0: phonopy displacement metadata ==="',
+            "if [[ ! -e phonopy_disp.yaml && ! -e disp.yaml ]]; then",
+            "  if [[ -e phonopy_displacement_metadata/phonopy_disp.yaml ]]; then",
+            '    echo "Linking phonopy_displacement_metadata/phonopy_disp.yaml -> phonopy_disp.yaml"',
+            "    ln -s phonopy_displacement_metadata/phonopy_disp.yaml phonopy_disp.yaml",
+            "  elif [[ -e _phonopy_displacements_work/phonopy_disp.yaml ]]; then",
+            '    echo "Linking _phonopy_displacements_work/phonopy_disp.yaml -> phonopy_disp.yaml"',
+            "    ln -s _phonopy_displacements_work/phonopy_disp.yaml phonopy_disp.yaml",
+            "  fi",
+            "fi",
             "",
             'echo "=== Step 1: FORCE_SETS ==="',
             "if [[ -f FORCE_SETS ]]; then",
@@ -217,7 +232,7 @@ def write_run_script(
         lines.extend(
             [
                 'echo "=== Step 2: Thermal properties ==="',
-                f"{shell_quote(phonopy_load)} --mesh ${{MESH}} -t",
+                f"{shell_quote(phonopy_load)} --mesh ${{MESH}} -t{load_extra_args}",
                 'cp -f thermal_properties.yaml "thermal_properties_mesh_${MESH// /x}.yaml"',
                 "",
             ]
@@ -226,7 +241,7 @@ def write_run_script(
         lines.extend(
             [
                 'echo "=== Step 3: DOS ==="',
-                f"{shell_quote(phonopy_load)} --mesh ${{MESH}} --dos",
+                f"{shell_quote(phonopy_load)} --mesh ${{MESH}} --dos{load_extra_args}",
                 'cp -f total_dos.dat "total_dos_mesh_${MESH// /x}.dat"',
                 "",
             ]
@@ -345,6 +360,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--module-purge", action="store_true", help="Write module purge before module load.")
     parser.add_argument("--phonopy", default="phonopy")
     parser.add_argument("--phonopy-load", default="phonopy-load")
+    parser.add_argument(
+        "--fc-calculator",
+        default=None,
+        help=(
+            "Optional phonopy-load force-constant solver, e.g. traditional. "
+            "Useful when phonopy 2.38 symfc fails with an eigenvalue error."
+        ),
+    )
     parser.add_argument("--band-path", default=None, help="Override fractional band path string.")
     parser.add_argument("--no-thermal", action="store_true")
     parser.add_argument("--no-dos", action="store_true")
@@ -386,6 +409,7 @@ def main(argv: list[str] | None = None) -> None:
         None if args.no_module else args.phonopy_module,
         args.phonopy,
         args.phonopy_load,
+        args.fc_calculator,
         run_thermal=not args.no_thermal,
         run_dos=not args.no_dos,
         run_band=not args.no_band,

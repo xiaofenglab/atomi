@@ -104,6 +104,7 @@ def test_vasp_phonopy_post_writes_env_run_and_sbatch(tmp_path: Path) -> None:
     assert 'export MESH="12 12 12"' in env_text
     assert 'export BAND_PATH="' in env_text
     assert "module load phonopy/example" in run_text
+    assert "phonopy_displacement_metadata/phonopy_disp.yaml" in run_text
     assert "phonopy -f disp-*/vasprun.xml" in run_text
     assert "phonopy-load --mesh ${MESH} -t" in run_text
     assert "phonopy-load --mesh ${MESH} --dos" in run_text
@@ -117,6 +118,28 @@ def test_vasp_phonopy_post_writes_env_run_and_sbatch(tmp_path: Path) -> None:
     assert "#SBATCH --mem=96G" in sbatch_text
     assert "bash run_phonopy_post.sh" in sbatch_text
     assert "Inferred reference cell" in summary_text
+
+
+def test_vasp_phonopy_post_can_request_traditional_fc_calculator(tmp_path: Path) -> None:
+    poscar = tmp_path / "POSCAR"
+    outdir = tmp_path / "post"
+    poscar.write_text(POSCAR_TEXT, encoding="utf-8")
+
+    main(
+        [
+            "--poscar",
+            str(poscar),
+            "--outdir",
+            str(outdir),
+            "--fc-calculator",
+            "traditional",
+            "--no-band",
+        ]
+    )
+
+    run_text = (outdir / "run_phonopy_post.sh").read_text(encoding="utf-8")
+    assert "phonopy-load --mesh ${MESH} -t --fc-calculator traditional" in run_text
+    assert "phonopy-load --mesh ${MESH} --dos --fc-calculator traditional" in run_text
 
 
 def test_phonopy_band_plotter_reads_segments_and_writes_png(tmp_path: Path) -> None:

@@ -146,7 +146,34 @@ def test_qha_run_can_append_plot_command(tmp_path: Path) -> None:
     )
 
     script = (outdir / "run_phonopy_qha.sh").read_text(encoding="utf-8")
+    assert "phonopy-qha --tmax 1500 e-v.dat" in script
     assert "python plot_qha_results.py --outdir qha_plots --t-min 300.0 --t-max 1500.0" in script
+
+
+def test_qha_run_accepts_explicit_qha_t_max(tmp_path: Path) -> None:
+    root = tmp_path / "2x2x2"
+    outdir = tmp_path / "qha_run"
+    parent = root / "V1.000" / "parent_static"
+    parent.mkdir(parents=True)
+    write_outcar(parent / "OUTCAR", energy=-10.0, volume=100.0, natoms=12)
+    (root / "V1.000" / "thermal_properties.yaml").write_text("thermal\n", encoding="utf-8")
+
+    main(
+        [
+            "--root",
+            str(root),
+            "--outdir",
+            str(outdir),
+            "--qha-t-max",
+            "1200",
+            "--plot-t-max",
+            "1000",
+        ]
+    )
+
+    script = (outdir / "run_phonopy_qha.sh").read_text(encoding="utf-8")
+    assert "phonopy-qha --tmax 1200 e-v.dat" in script
+    assert "python plot_qha_results.py" not in script
 
 
 def test_qha_run_accepts_custom_sbatch_memory(tmp_path: Path) -> None:

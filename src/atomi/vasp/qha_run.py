@@ -135,6 +135,7 @@ def write_run_script(
     outdir: Path,
     phonopy_module: str | None,
     phonopy_qha: str,
+    qha_t_max: float | None,
     plot_script: Path,
     plot_output_dir: str,
     plot_t_min: float | None,
@@ -146,7 +147,11 @@ def write_run_script(
         handle.write("set -euo pipefail\n\n")
         if phonopy_module:
             handle.write(f"module load {shlex.quote(phonopy_module)}\n\n")
-        handle.write(f"{shlex.quote(phonopy_qha)} {shlex.quote(rel_or_abs(ev_path, outdir))} \\\n")
+        command = shlex.quote(phonopy_qha)
+        if qha_t_max is not None:
+            command += f" --tmax {qha_t_max:g}"
+        command += f" {shlex.quote(rel_or_abs(ev_path, outdir))}"
+        handle.write(f"{command} \\\n")
         for index, thermal in enumerate(thermals):
             suffix = " \\" if index < len(thermals) - 1 else ""
             handle.write(f"  {shlex.quote(rel_or_abs(thermal, outdir))}{suffix}\n")
@@ -362,6 +367,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sbatch-script-name", default="submit_phonopy_qha.sbatch")
     parser.add_argument("--plot-script-name", default="plot_qha_results.py")
     parser.add_argument("--plot-output-dir", default="qha_plots")
+    parser.add_argument(
+        "--qha-t-max",
+        type=float,
+        default=None,
+        help=(
+            "Maximum temperature passed to phonopy-qha --tmax. "
+            "Defaults to --plot-t-max when that value is supplied."
+        ),
+    )
     parser.add_argument("--plot-t-min", type=float, default=None)
     parser.add_argument("--plot-t-max", type=float, default=None)
     parser.add_argument(
@@ -404,6 +418,7 @@ def main(argv: list[str] | None = None) -> None:
     write_ev_dat(ev_path, rows)
     write_manifest(manifest_path, rows, thermals, outdir)
     write_plot_script(plot_script_path)
+    qha_t_max = args.qha_t_max if args.qha_t_max is not None else args.plot_t_max
     write_run_script(
         script_path,
         ev_path,
@@ -411,6 +426,7 @@ def main(argv: list[str] | None = None) -> None:
         outdir,
         args.phonopy_module,
         args.phonopy_qha,
+        qha_t_max,
         plot_script_path,
         args.plot_output_dir,
         args.plot_t_min,
