@@ -9,6 +9,8 @@ from atomi.calphad.mivm import (
     excess_gibbs_j_mol,
     load_parameters,
     main as mivm_main,
+    parse_formula_counts,
+    sanitize_mstdb_chemsage_text,
     tdb_sanity_check,
 )
 from atomi.cli.main import main as atomi_main
@@ -177,8 +179,43 @@ def test_tdb_sanity_warns_on_chemsage_style_export(tmp_path: Path):
     sanity = tdb_sanity_check(path)
 
     assert not sanity["looks_like_pycalphad_tdb"]
+    assert not sanity["native_tdb_like"]
+    assert sanity["chemsage_like"]
     assert sanity["counts"]["CHEMSAGE_SYSTEM"] == 1
     assert sanity["warnings"]
+
+
+def test_mstdb_sanitizer_preserves_real_species_stoichiometry():
+    text = "U[CN=VI]+3.0 CL-1.0 U[DIMER]+6.0 NA[1+]+1.0"
+
+    sanitized, metadata = sanitize_mstdb_chemsage_text(text)
+
+    assert "U+3.0" in sanitized
+    assert "U2+6.0" in sanitized
+    assert "NA+1.0" in sanitized
+    assert "[CN=VI]" not in sanitized
+    assert "[DIMER]" not in sanitized
+    assert metadata["changed"]
+
+
+def test_mstdb_sanitize_cli_writes_metadata(tmp_path: Path):
+    source = tmp_path / "MSTDB.dat"
+    out = tmp_path / "MSTDB.sanitized.dat"
+    metadata = tmp_path / "MSTDB.sanitized.metadata.json"
+    source.write_text(" System Na-U-Cl L\nU[CN=VI]+3.0 U[DIMER]+6.0\n", encoding="utf-8")
+
+    result = mivm_main(["mstdb-sanitize", "--input", str(source), "--output", str(out), "--metadata", str(metadata)])
+
+    assert result is not None
+    assert out.exists()
+    assert metadata.exists()
+    assert "U+3.0" in out.read_text(encoding="utf-8")
+    assert "U2+6.0" in out.read_text(encoding="utf-8")
+
+
+def test_parse_formula_counts_for_halide_endmembers():
+    assert parse_formula_counts("NaCl") == {"NA": 1.0, "CL": 1.0}
+    assert parse_formula_counts("UCl3") == {"U": 1.0, "CL": 3.0}
 
 
 def test_mivm_pycalphad_bridge_writes_model_helper(tmp_path: Path):

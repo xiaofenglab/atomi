@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import math
+import re
 import shutil
 import textwrap
 from dataclasses import dataclass
@@ -845,6 +846,221 @@ def _read_xy_points(
     return sorted(points)
 
 
+def sanitize_mstdb_chemsage_text(text: str) -> tuple[str, dict[str, Any]]:
+    """Make common MSTDB ChemSage charged species names safe for pycalphad parsing.
+
+    Pycalphad's ChemSage reader can load MSTDB exports, but labels such as
+    ``U[CN=VI]+3.0`` are parsed as if ``CN`` and ``VI`` were chemical elements.
+    The sanitization keeps formal charge text and real-element stoichiometry:
+    ``U[CN=VI]+3.0 -> U+3.0`` and ``U[DIMER]+6.0 -> U2+6.0``.
+    """
+    original = text
+    replacements: list[dict[str, str]] = []
+
+    def sub(pattern: str, repl: str, label: str) -> None:
+        nonlocal text
+        text, count = re.subn(pattern, repl, text)
+        if count:
+            replacements.append({"pattern": label, "replacement": repl, "count": str(count)})
+
+    sub(r"\[CN=[A-Za-z0-9_+\-]+\]", "", "coordination tag [CN=*]")
+    sub(r"\[([1-9][0-9]*)\+\]", "", "formal charge bracket [n+]")
+    sub(
+        r"\b([A-Z][A-Z]?)(\[DIMER\])(\+[0-9]+(?:\.[0-9]+)?)",
+        r"\g<1>2\3",
+        "metal dimer tag [DIMER]",
+    )
+    metadata = {
+        "schema": "atomi.calphad.mivm.mstdb_chemsage_sanitizer.v1",
+        "changed": text != original,
+        "replacements": replacements,
+        "notes": [
+            "Use this for pycalphad parsing of ChemSage/MSTDB exports with bracketed charged-species labels.",
+            "The original database remains the provenance source; validate sanitized outputs against known diagrams or mixing heats.",
+        ],
+    }
+    return text, metadata
+
+
+def write_sanitized_mstdb_chemsage(source: Path, out: Path, *, metadata_path: Path | None = None) -> dict[str, Any]:
+    text = source.read_text(encoding="utf-8", errors="ignore")
+    sanitized, metadata = sanitize_mstdb_chemsage_text(text)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(sanitized, encoding="utf-8")
+    metadata.update(
+        {
+            "source": str(source.resolve()),
+            "output": str(out.resolve()),
+            "source_size_bytes": source.stat().st_size,
+            "output_size_bytes": out.stat().st_size,
+        }
+    )
+    if metadata_path:
+        write_json(metadata_path, metadata)
+    return metadata
+
+
+def parse_formula_counts(formula: str) -> dict[str, float]:
+    counts: dict[str, float] = {}
+    for element, count_text in re.findall(r"([A-Z][a-z]?)([0-9.]*)", formula):
+        count = float(count_text) if count_text else 1.0
+        counts[element.upper()] = counts.get(element.upper(), 0.0) + count
+    if not counts:
+        raise ValueError(f"Could not parse chemical formula {formula!r}.")
+    return counts
+
+
+def _float_grid(spec: str) -> list[float]:
+    parts = [float(part.strip()) for part in spec.split(",") if part.strip()]
+    if len(parts) == 1:
+        x_min, x_max, step = 0.0, 1.0, parts[0]
+    elif len(parts) == 3:
+        x_min, x_max, step = parts
+    else:
+        raise ValueError("--grid expects step or xmin,xmax,step")
+    if step <= 0.0 or x_min < 0.0 or x_max > 1.0 or x_min > x_max:
+        raise ValueError("Invalid grid range.")
+    values: list[float] = []
+    n_steps = int(round((x_max - x_min) / step))
+    for index in range(n_steps + 1):
+        values.append(min(x_max, x_min + index * step))
+    if not values or abs(values[-1] - x_max) > 1.0e-10:
+        values.append(x_max)
+    return values
+
+
+def _binary_formula_amounts(x_value: float, component_a: str, component_b: str, x_component: str) -> tuple[float, float]:
+    if x_component == component_a:
+        return x_value, 1.0 - x_value
+    if x_component == component_b:
+        return 1.0 - x_value, x_value
+    raise ValueError("--x-component must be one of --component-a or --component-b.")
+
+
+def _atom_fractions(amount_a: float, amount_b: float, counts_a: dict[str, float], counts_b: dict[str, float]) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for element, count in counts_a.items():
+        totals[element] = totals.get(element, 0.0) + amount_a * count
+    for element, count in counts_b.items():
+        totals[element] = totals.get(element, 0.0) + amount_b * count
+    total_atoms = sum(totals.values())
+    if total_atoms <= 0.0:
+        raise ValueError("Binary formula amounts produce zero atoms.")
+    return {element: count / total_atoms for element, count in totals.items()}
+
+
+def _mqmqa_hm_atom(db: Any, phase: str, elements: list[str], atom_fractions: dict[str, float], temperature: float, pressure: float) -> float:
+    try:
+        from pycalphad import equilibrium, variables as v
+    except Exception as exc:  # pragma: no cover - optional dependency
+        raise ImportError("pycalphad is required for mqmqa-binary.") from exc
+
+    dependent = max(atom_fractions, key=lambda item: atom_fractions[item])
+    cond: dict[Any, float] = {v.T: temperature, v.P: pressure}
+    for element, fraction in atom_fractions.items():
+        if element != dependent:
+            cond[v.X(element)] = max(float(fraction), 1.0e-10)
+    eq = equilibrium(db, elements, [phase], cond, output="HM", verbose=False)
+    values = [float(value) for value in eq.HM.values.ravel()]
+    for value in values:
+        if math.isfinite(value):
+            return value
+    raise ValueError("pycalphad returned no finite HM value.")
+
+
+def write_mqmqa_binary_curve(args: argparse.Namespace) -> dict[str, Any]:
+    try:
+        from pycalphad import Database
+    except Exception as exc:  # pragma: no cover - optional dependency
+        raise ImportError("pycalphad is required for mqmqa-binary.") from exc
+
+    db = Database(str(args.tdb))
+    counts_a = parse_formula_counts(args.component_a)
+    counts_b = parse_formula_counts(args.component_b)
+    elements = sorted(set(counts_a) | set(counts_b))
+    grid = _float_grid(args.grid)
+    eps = args.endpoint_epsilon
+    ref_x_a = 1.0 - eps if args.x_component == args.component_a else eps
+    ref_x_b = eps if args.x_component == args.component_a else 1.0 - eps
+    amount_a_ref, amount_b_ref = _binary_formula_amounts(ref_x_a, args.component_a, args.component_b, args.x_component)
+    h_a = _mqmqa_hm_atom(
+        db,
+        args.phase,
+        elements,
+        _atom_fractions(amount_a_ref, amount_b_ref, counts_a, counts_b),
+        args.temperature,
+        args.pressure,
+    )
+    amount_a_ref, amount_b_ref = _binary_formula_amounts(ref_x_b, args.component_a, args.component_b, args.x_component)
+    h_b = _mqmqa_hm_atom(
+        db,
+        args.phase,
+        elements,
+        _atom_fractions(amount_a_ref, amount_b_ref, counts_a, counts_b),
+        args.temperature,
+        args.pressure,
+    )
+    unique_b = sorted(set(counts_b) - set(counts_a))
+    pure_b_unique_fraction = sum(counts_b[element] for element in unique_b) / sum(counts_b.values()) if unique_b else None
+    rows: list[dict[str, Any]] = []
+    atoms_a = sum(counts_a.values())
+    atoms_b = sum(counts_b.values())
+    for x_value in grid:
+        amount_a, amount_b = _binary_formula_amounts(x_value, args.component_a, args.component_b, args.x_component)
+        atom_fractions = _atom_fractions(amount_a, amount_b, counts_a, counts_b)
+        h_mix_atom = _mqmqa_hm_atom(db, args.phase, elements, atom_fractions, args.temperature, args.pressure)
+        if pure_b_unique_fraction and unique_b:
+            alpha_b = sum(atom_fractions[element] for element in unique_b) / pure_b_unique_fraction
+        else:
+            alpha_b = amount_b
+        alpha_b = min(1.0, max(0.0, alpha_b))
+        h_excess_atom = (h_mix_atom - ((1.0 - alpha_b) * h_a + alpha_b * h_b)) / 1000.0
+        total_atoms_per_formula_mix = amount_a * atoms_a + amount_b * atoms_b
+        h_excess_formula = (
+            h_mix_atom * total_atoms_per_formula_mix - (amount_a * h_a * atoms_a + amount_b * h_b * atoms_b)
+        ) / 1000.0
+        row: dict[str, Any] = {
+            "T_K": args.temperature,
+            "phase": args.phase,
+            "x_component": args.x_component,
+            "x": x_value,
+            "component_a": args.component_a,
+            "component_b": args.component_b,
+            "Hmix_kJ_mol": h_excess_atom,
+            "Hmix_kJ_per_mol_atom": h_excess_atom,
+            "Hmix_kJ_per_mol_formula_mixture": h_excess_formula,
+            "HM_atom_J_mol": h_mix_atom,
+            "reference_HM_atom_a_J_mol": h_a,
+            "reference_HM_atom_b_J_mol": h_b,
+            "atom_reference_alpha_b": alpha_b,
+        }
+        for element in elements:
+            row[f"X_{element}"] = atom_fractions[element]
+        rows.append(row)
+    outdir = args.outdir.resolve()
+    table = outdir / "mqmqa_binary_curve.csv"
+    fields = list(rows[0])
+    write_csv(table, rows, fields)
+    metadata = {
+        "schema": "atomi.calphad.mivm.mqmqa_binary_curve.v1",
+        "tdb": str(args.tdb.resolve()),
+        "phase": args.phase,
+        "temperature_K": args.temperature,
+        "pressure_Pa": args.pressure,
+        "component_a": args.component_a,
+        "component_b": args.component_b,
+        "x_component": args.x_component,
+        "grid": args.grid,
+        "basis_note": (
+            "Hmix_kJ_mol is an atom-molar endmember-linear excess enthalpy for compatibility with "
+            "pycalphad/MSTDB HM curves. Hmix_kJ_per_mol_formula_mixture multiplies HM by formula-mixture atoms."
+        ),
+        "outputs": {"curve_csv": str(table)},
+    }
+    write_json(outdir / "mqmqa_binary_curve_metadata.json", metadata)
+    return metadata
+
+
 def tdb_sanity_check(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8", errors="ignore")
     upper = text.upper()
@@ -856,17 +1072,27 @@ def tdb_sanity_check(path: Path) -> dict[str, Any]:
         "PARAMETER": sum(1 for line in lines if line.strip().upper().startswith("PARAMETER ")),
         "CHEMSAGE_SYSTEM": sum(1 for line in lines[:10] if line.strip().upper().startswith("SYSTEM ")),
         "MQMQA_LITERAL": upper.count("MQMQA"),
+        "BRACKETED_CHARGED_SPECIES_HINTS": len(
+            re.findall(r"\[[A-Z0-9_=+\-]+\]\+[0-9]+(?:\.[0-9]+)?|\[DIMER\]\+[0-9]+", text)
+        ),
     }
     warnings: list[str] = []
+    native_tdb_like = counts["PHASE"] > 0 and counts["PARAMETER"] > 0
+    chemsage_like = bool(counts["CHEMSAGE_SYSTEM"])
     if counts["PHASE"] == 0 or counts["PARAMETER"] == 0:
         warnings.append(
-            "File does not look like a thermodynamically complete pycalphad TDB "
+            "File does not look like a native pycalphad TDB "
             "(missing PHASE or PARAMETER records)."
         )
     if counts["CHEMSAGE_SYSTEM"]:
         warnings.append(
             "File looks like a ChemSage/MSTDB export rather than a native TDB; "
-            "pycalphad phase diagrams or MQMQA curves from this file should be treated as invalid until converted."
+            "pycalphad may parse it with the ChemSage reader, but the result must be benchmarked."
+        )
+    if counts["BRACKETED_CHARGED_SPECIES_HINTS"]:
+        warnings.append(
+            "Bracketed charged-species labels were detected; sanitize labels before pycalphad equilibrium "
+            "if species such as U[CN=VI]+3.0 are parsed into pseudo-elements."
         )
     if "NO_FUNCTIONS" in path.name.upper():
         warnings.append("Filename indicates a no-functions/export subset; verify that all Gibbs functions survived conversion.")
@@ -875,7 +1101,10 @@ def tdb_sanity_check(path: Path) -> dict[str, Any]:
         "size_bytes": path.stat().st_size,
         "counts": counts,
         "warnings": warnings,
-        "looks_like_pycalphad_tdb": not warnings,
+        "looks_like_pycalphad_tdb": native_tdb_like and not warnings,
+        "native_tdb_like": native_tdb_like,
+        "chemsage_like": chemsage_like,
+        "needs_species_label_sanitization": counts["BRACKETED_CHARGED_SPECIES_HINTS"] > 0,
     }
 
 
@@ -1241,6 +1470,29 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--mqmqa-label", default="MQMQA/MSTDB")
     compare.add_argument("--tdb-sanity", type=Path, help="Optional TDB/MSTDB file to sanity-check for pycalphad use.")
 
+    sanitize = subparsers.add_parser(
+        "mstdb-sanitize",
+        help="Sanitize ChemSage/MSTDB charged-species labels for pycalphad equilibrium checks.",
+    )
+    sanitize.add_argument("--input", type=Path, required=True)
+    sanitize.add_argument("--output", type=Path, required=True)
+    sanitize.add_argument("--metadata", type=Path, help="Optional JSON metadata path.")
+
+    mqmqa = subparsers.add_parser(
+        "mqmqa-binary",
+        help="Generate a pycalphad/MSTDB MQMQA binary mixing-enthalpy CSV for compare-binary overlays.",
+    )
+    mqmqa.add_argument("--tdb", type=Path, required=True, help="Sanitized pycalphad-readable MSTDB/ChemSage database.")
+    mqmqa.add_argument("--phase", default="MSCL", help="MQMQA liquid phase, e.g. MSCL or MSFL.")
+    mqmqa.add_argument("--component-a", required=True, help="Formula for endmember A, e.g. NaCl.")
+    mqmqa.add_argument("--component-b", required=True, help="Formula for endmember B, e.g. UCl3.")
+    mqmqa.add_argument("--x-component", required=True, help="Endmember to use as x-axis.")
+    mqmqa.add_argument("--temperature", type=float, required=True, help="Temperature in K.")
+    mqmqa.add_argument("--pressure", type=float, default=101325.0, help="Pressure in Pa.")
+    mqmqa.add_argument("--grid", default="0.02,0.98,0.02", help="x grid: step or xmin,xmax,step.")
+    mqmqa.add_argument("--endpoint-epsilon", type=float, default=1.0e-6)
+    mqmqa.add_argument("--outdir", type=Path, default=Path("analysis/mqmqa_binary"))
+
     bridge = subparsers.add_parser("pycalphad-bridge", help="Write a pycalphad custom-Model bridge module.")
     bridge.add_argument("--params", type=Path, required=True)
     bridge.add_argument("--outdir", type=Path, default=Path("analysis/mivm_pycalphad_bridge"))
@@ -1334,6 +1586,22 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
             sanity = metadata["tdb_sanity"]
             for warning in sanity.get("warnings", []):
                 print(f"WARNING: {warning}")
+        return metadata
+    if args.command == "mstdb-sanitize":
+        metadata_path = args.metadata or args.output.with_suffix(args.output.suffix + ".metadata.json")
+        metadata = write_sanitized_mstdb_chemsage(args.input, args.output, metadata_path=metadata_path)
+        print(f"Wrote sanitized MSTDB/ChemSage file: {metadata['output']}")
+        print(f"Wrote sanitizer metadata        : {metadata_path}")
+        for replacement in metadata.get("replacements", []):
+            print(
+                f"replacement {replacement['pattern']}: "
+                f"{replacement['count']} occurrence(s)"
+            )
+        return metadata
+    if args.command == "mqmqa-binary":
+        metadata = write_mqmqa_binary_curve(args)
+        print(f"Wrote MQMQA binary curve: {metadata['outputs']['curve_csv']}")
+        print("Basis note:", metadata["basis_note"])
         return metadata
     if args.command == "pycalphad-bridge":
         metadata = write_pycalphad_bridge(args.params, args.outdir.resolve())
