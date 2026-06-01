@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from atomi.calphad.mivm import excess_enthalpy_j_mol, excess_gibbs_j_mol, load_parameters, main as mivm_main
+from atomi.calphad.mivm import (
+    excess_enthalpy_j_mol,
+    excess_gibbs_j_mol,
+    load_parameters,
+    main as mivm_main,
+    tdb_sanity_check,
+)
 from atomi.cli.main import main as atomi_main
 
 
@@ -116,6 +122,63 @@ def test_mivm_sample_writes_bridge_table(tmp_path: Path):
     assert float(rows[1]["H_excess_MIVM_J_mol"]) == pytest.approx(0.0, abs=1.0e-10)
     metadata = json.loads((outdir / "mivm_sample_metadata.json").read_text(encoding="utf-8"))
     assert metadata["schema"] == "atomi.calphad.mivm.sample.v1"
+
+
+def test_mivm_compare_binary_writes_metrics_and_plot(tmp_path: Path):
+    params_path = tmp_path / "params.json"
+    write_simple_params(params_path)
+    literature = tmp_path / "lit.csv"
+    literature.write_text("x_A,Hmix_kJ_mol\n0,0\n0.5,0\n1,0\n", encoding="utf-8")
+    outdir = tmp_path / "compare"
+
+    metadata = mivm_main(
+        [
+            "compare-binary",
+            "--params",
+            str(params_path),
+            "--outdir",
+            str(outdir),
+            "--temperature",
+            "1000",
+            "--binary-grid",
+            "A,B,0,1,0.5",
+            "--x-component",
+            "A",
+            "--literature-csv",
+            str(literature),
+            "--literature-x-column",
+            "x_A",
+            "--literature-y-column",
+            "Hmix_kJ_mol",
+            "--literature-label",
+            "toy literature",
+        ]
+    )
+
+    assert metadata is not None
+    rows = list(csv.DictReader((outdir / "mivm_binary_comparison.csv").open(encoding="utf-8")))
+    assert len(rows) == 3
+    metrics = list(csv.DictReader((outdir / "mivm_binary_comparison_metrics.csv").open(encoding="utf-8")))
+    assert metrics[0]["reference"] == "toy literature"
+    assert float(metrics[0]["rmse_kJ_mol"]) == pytest.approx(0.0, abs=1.0e-12)
+    assert (outdir / "mivm_binary_comparison_metadata.json").exists()
+
+
+def test_tdb_sanity_warns_on_chemsage_style_export(tmp_path: Path):
+    path = tmp_path / "MSTDB-No-Functions.dat"
+    path.write_text(
+        " System Na-U-Cl L\n"
+        " Na U Cl\n"
+        " NaCl\n"
+        "  1000.0 0.0 0.0\n",
+        encoding="utf-8",
+    )
+
+    sanity = tdb_sanity_check(path)
+
+    assert not sanity["looks_like_pycalphad_tdb"]
+    assert sanity["counts"]["CHEMSAGE_SYSTEM"] == 1
+    assert sanity["warnings"]
 
 
 def test_mivm_pycalphad_bridge_writes_model_helper(tmp_path: Path):

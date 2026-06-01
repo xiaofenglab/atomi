@@ -94,6 +94,11 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None
             writer.writerow({field: format_value(row.get(field)) for field in fields})
 
 
+def read_csv_rows(path: Path) -> list[dict[str, str]]:
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
 def load_parameter_database(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     schema = data.get("schema")
@@ -109,8 +114,7 @@ def _database_table_rows(db_path: Path, database: dict[str, Any], table_key: str
     if not rel:
         raise ValueError(f"MIVM database has no table entry for {table_key!r}.")
     table = db_path.parent / str(rel)
-    with table.open(newline="", encoding="utf-8") as handle:
-        return list(csv.DictReader(handle))
+    return read_csv_rows(table)
 
 
 def _emit_rows(rows: list[dict[str, Any]], fields: list[str], *, output_format: str) -> None:
@@ -804,6 +808,243 @@ def sample_fields(params: MIVMParameters) -> list[str]:
     return fields
 
 
+def _interp_linear(points: list[tuple[float, float]], x_value: float) -> float | None:
+    if not points:
+        return None
+    sorted_points = sorted(points)
+    if x_value < sorted_points[0][0] or x_value > sorted_points[-1][0]:
+        return None
+    for x0, y0 in sorted_points:
+        if abs(x_value - x0) <= 1.0e-12:
+            return y0
+    for (x0, y0), (x1, y1) in zip(sorted_points, sorted_points[1:]):
+        if x0 <= x_value <= x1:
+            if abs(x1 - x0) <= 1.0e-15:
+                return y0
+            frac = (x_value - x0) / (x1 - x0)
+            return y0 + frac * (y1 - y0)
+    return None
+
+
+def _read_xy_points(
+    path: Path,
+    *,
+    x_column: str,
+    y_column: str,
+    y_unit: str = "kJ/mol",
+) -> list[tuple[float, float]]:
+    scale = 1.0e-3 if y_unit == "J/mol" else 1.0
+    rows = read_csv_rows(path)
+    points: list[tuple[float, float]] = []
+    for row in rows:
+        x = finite_float(row.get(x_column))
+        y = finite_float(row.get(y_column))
+        if x is None or y is None:
+            continue
+        points.append((x, y * scale))
+    return sorted(points)
+
+
+def tdb_sanity_check(path: Path) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    upper = text.upper()
+    lines = text.splitlines()
+    counts = {
+        "ELEMENT": sum(1 for line in lines if line.strip().upper().startswith("ELEMENT ")),
+        "PHASE": sum(1 for line in lines if line.strip().upper().startswith("PHASE ")),
+        "CONSTITUENT": sum(1 for line in lines if line.strip().upper().startswith("CONSTITUENT ")),
+        "PARAMETER": sum(1 for line in lines if line.strip().upper().startswith("PARAMETER ")),
+        "CHEMSAGE_SYSTEM": sum(1 for line in lines[:10] if line.strip().upper().startswith("SYSTEM ")),
+        "MQMQA_LITERAL": upper.count("MQMQA"),
+    }
+    warnings: list[str] = []
+    if counts["PHASE"] == 0 or counts["PARAMETER"] == 0:
+        warnings.append(
+            "File does not look like a thermodynamically complete pycalphad TDB "
+            "(missing PHASE or PARAMETER records)."
+        )
+    if counts["CHEMSAGE_SYSTEM"]:
+        warnings.append(
+            "File looks like a ChemSage/MSTDB export rather than a native TDB; "
+            "pycalphad phase diagrams or MQMQA curves from this file should be treated as invalid until converted."
+        )
+    if "NO_FUNCTIONS" in path.name.upper():
+        warnings.append("Filename indicates a no-functions/export subset; verify that all Gibbs functions survived conversion.")
+    return {
+        "path": str(path),
+        "size_bytes": path.stat().st_size,
+        "counts": counts,
+        "warnings": warnings,
+        "looks_like_pycalphad_tdb": not warnings,
+    }
+
+
+def compare_binary_model(
+    params: MIVMParameters,
+    *,
+    temperature_k: float,
+    binary_grid_spec: str,
+    x_component: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for composition in binary_grid(binary_grid_spec, params):
+        x = normalize_composition(composition, params)
+        rows.append(
+            {
+                "T_K": temperature_k,
+                "x_component": x_component,
+                "x": x[x_component],
+                "composition": composition_label(x),
+                "H_excess_MIVM_kJ_mol": excess_enthalpy_j_mol(temperature_k, x, params) / 1000.0,
+                "G_excess_MIVM_kJ_mol": excess_gibbs_j_mol(temperature_k, x, params) / 1000.0,
+            }
+        )
+    return rows
+
+
+def comparison_metrics(
+    model_points: list[tuple[float, float]],
+    reference_points: list[tuple[float, float]],
+    *,
+    reference_label: str,
+) -> dict[str, Any]:
+    residuals: list[float] = []
+    matched = 0
+    for x, y_ref in reference_points:
+        y_model = _interp_linear(model_points, x)
+        if y_model is None:
+            continue
+        matched += 1
+        residuals.append(y_model - y_ref)
+    if not residuals:
+        return {
+            "reference": reference_label,
+            "matched_points": 0,
+            "rmse_kJ_mol": None,
+            "mae_kJ_mol": None,
+            "mean_bias_kJ_mol": None,
+        }
+    rmse = math.sqrt(sum(value * value for value in residuals) / len(residuals))
+    mae = sum(abs(value) for value in residuals) / len(residuals)
+    bias = sum(residuals) / len(residuals)
+    return {
+        "reference": reference_label,
+        "matched_points": matched,
+        "rmse_kJ_mol": rmse,
+        "mae_kJ_mol": mae,
+        "mean_bias_kJ_mol": bias,
+    }
+
+
+def write_comparison_plot(
+    path: Path,
+    *,
+    model_points: list[tuple[float, float]],
+    literature_points: list[tuple[float, float]],
+    mqmqa_points: list[tuple[float, float]],
+    title: str,
+    model_label: str,
+    literature_label: str,
+    mqmqa_label: str,
+) -> str | None:
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8.5, 5.5))
+    if model_points:
+        xs, ys = zip(*model_points)
+        ax.plot(xs, ys, color="#1f77b4", linewidth=2.0, label=model_label)
+    if mqmqa_points:
+        xs, ys = zip(*mqmqa_points)
+        ax.plot(xs, ys, color="#666666", linewidth=1.8, linestyle="--", label=mqmqa_label)
+    if literature_points:
+        xs, ys = zip(*literature_points)
+        ax.scatter(xs, ys, color="#f39c12", edgecolor="black", linewidth=0.3, label=literature_label, zorder=3)
+    ax.axhline(0.0, color="black", linewidth=0.8)
+    ax.set_xlabel("Mole fraction")
+    ax.set_ylabel("Excess/mixing enthalpy (kJ/mol)")
+    ax.set_title(title)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=220)
+    plt.close(fig)
+    return str(path)
+
+
+def write_binary_comparison(args: argparse.Namespace) -> dict[str, Any]:
+    params = load_parameters(args.params)
+    if args.x_component not in params.components:
+        raise ValueError("--x-component must be present in the MIVM parameter file.")
+    rows = compare_binary_model(
+        params,
+        temperature_k=args.temperature,
+        binary_grid_spec=args.binary_grid,
+        x_component=args.x_component,
+    )
+    outdir = args.outdir.resolve()
+    table = outdir / "mivm_binary_comparison.csv"
+    write_csv(
+        table,
+        rows,
+        ["T_K", "x_component", "x", "composition", "H_excess_MIVM_kJ_mol", "G_excess_MIVM_kJ_mol"],
+    )
+    model_points = [(float(row["x"]), float(row["H_excess_MIVM_kJ_mol"])) for row in rows]
+    literature_points: list[tuple[float, float]] = []
+    mqmqa_points: list[tuple[float, float]] = []
+    metrics: list[dict[str, Any]] = []
+    if args.literature_csv:
+        literature_points = _read_xy_points(
+            args.literature_csv,
+            x_column=args.literature_x_column,
+            y_column=args.literature_y_column,
+            y_unit=args.literature_y_unit,
+        )
+        metrics.append(comparison_metrics(model_points, literature_points, reference_label=args.literature_label))
+    if args.mqmqa_csv:
+        mqmqa_points = _read_xy_points(
+            args.mqmqa_csv,
+            x_column=args.mqmqa_x_column,
+            y_column=args.mqmqa_y_column,
+            y_unit=args.mqmqa_y_unit,
+        )
+        metrics.append(comparison_metrics(mqmqa_points, literature_points, reference_label=args.mqmqa_label))
+    metrics_table = outdir / "mivm_binary_comparison_metrics.csv"
+    write_csv(
+        metrics_table,
+        metrics,
+        ["reference", "matched_points", "rmse_kJ_mol", "mae_kJ_mol", "mean_bias_kJ_mol"],
+    )
+    tdb_sanity = tdb_sanity_check(args.tdb_sanity) if args.tdb_sanity else None
+    plot = write_comparison_plot(
+        outdir / "mivm_binary_comparison.png",
+        model_points=model_points,
+        literature_points=literature_points,
+        mqmqa_points=mqmqa_points,
+        title=args.title or f"MIVM binary comparison at {args.temperature:g} K",
+        model_label=args.model_label,
+        literature_label=args.literature_label,
+        mqmqa_label=args.mqmqa_label,
+    )
+    metadata = {
+        "schema": "atomi.calphad.mivm.binary_comparison.v1",
+        "parameters": str(args.params.resolve()),
+        "temperature_K": args.temperature,
+        "binary_grid": args.binary_grid,
+        "x_component": args.x_component,
+        "outputs": {
+            "comparison_table": str(table),
+            "metrics_table": str(metrics_table),
+            "plot": plot or "",
+        },
+        "metrics": metrics,
+        "tdb_sanity": tdb_sanity,
+    }
+    write_json(outdir / "mivm_binary_comparison_metadata.json", metadata)
+    return metadata
+
+
 def build_pycalphad_bridge_text() -> str:
     return '''"""Generated Atomi MIVM/pycalphad bridge.
 
@@ -977,6 +1218,29 @@ def build_parser() -> argparse.ArgumentParser:
     sample.add_argument("--composition", action="append", help="Composition like A=0.25,B=0.75. Repeatable.")
     sample.add_argument("--binary-grid", help="Composition grid: A,B,step or A,B,xmin,xmax,step.")
 
+    compare = subparsers.add_parser(
+        "compare-binary",
+        help="Compare a MIVM binary mixing curve with literature and optional MQMQA/MSTDB CSV data.",
+    )
+    compare.add_argument("--params", type=Path, required=True)
+    compare.add_argument("--outdir", type=Path, default=Path("analysis/mivm_binary_comparison"))
+    compare.add_argument("--temperature", type=float, required=True, help="Temperature in K.")
+    compare.add_argument("--binary-grid", required=True, help="Composition grid: A,B,step or A,B,xmin,xmax,step.")
+    compare.add_argument("--x-component", required=True, help="Component to use as the x-axis.")
+    compare.add_argument("--model-label", default="MIVM")
+    compare.add_argument("--title")
+    compare.add_argument("--literature-csv", type=Path)
+    compare.add_argument("--literature-x-column", default="x_UCl3")
+    compare.add_argument("--literature-y-column", default="Hmix_kJ_mol")
+    compare.add_argument("--literature-y-unit", choices=("kJ/mol", "J/mol"), default="kJ/mol")
+    compare.add_argument("--literature-label", default="literature")
+    compare.add_argument("--mqmqa-csv", type=Path, help="Optional pycalphad/MQMQA curve CSV to overlay.")
+    compare.add_argument("--mqmqa-x-column", default="x")
+    compare.add_argument("--mqmqa-y-column", default="Hmix_kJ_mol")
+    compare.add_argument("--mqmqa-y-unit", choices=("kJ/mol", "J/mol"), default="kJ/mol")
+    compare.add_argument("--mqmqa-label", default="MQMQA/MSTDB")
+    compare.add_argument("--tdb-sanity", type=Path, help="Optional TDB/MSTDB file to sanity-check for pycalphad use.")
+
     bridge = subparsers.add_parser("pycalphad-bridge", help="Write a pycalphad custom-Model bridge module.")
     bridge.add_argument("--params", type=Path, required=True)
     bridge.add_argument("--outdir", type=Path, default=Path("analysis/mivm_pycalphad_bridge"))
@@ -1051,6 +1315,24 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
         print(f"Wrote MIVM property table: {table}")
         if warnings:
             for warning in warnings:
+                print(f"WARNING: {warning}")
+        return metadata
+    if args.command == "compare-binary":
+        metadata = write_binary_comparison(args)
+        print(f"Wrote MIVM binary comparison: {metadata['outputs']['comparison_table']}")
+        print(f"Wrote comparison metrics    : {metadata['outputs']['metrics_table']}")
+        if metadata["outputs"].get("plot"):
+            print(f"Wrote comparison plot       : {metadata['outputs']['plot']}")
+        for metric in metadata["metrics"]:
+            rmse = metric.get("rmse_kJ_mol")
+            if rmse is not None:
+                print(
+                    f"{metric['reference']}: matched={metric['matched_points']} "
+                    f"RMSE={rmse:.6g} kJ/mol MAE={metric['mae_kJ_mol']:.6g} kJ/mol"
+                )
+        if metadata.get("tdb_sanity"):
+            sanity = metadata["tdb_sanity"]
+            for warning in sanity.get("warnings", []):
                 print(f"WARNING: {warning}")
         return metadata
     if args.command == "pycalphad-bridge":
