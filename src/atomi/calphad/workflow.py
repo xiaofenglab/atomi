@@ -514,6 +514,34 @@ def _component_values(eq: Any, variable: str) -> dict[str, float]:
         return {}
 
 
+def deduplicate_mqmqa_z_parameters(dbf: Any, phases: list[str]) -> int:
+    """Remove duplicate MQMQA Z records that make pycalphad model construction ambiguous."""
+    table = getattr(dbf, "_parameters", None)
+    if table is None or not hasattr(table, "all") or not hasattr(table, "remove"):
+        return 0
+    phase_set = set(phases)
+    seen: set[tuple[str, str, str, Any]] = set()
+    remove_ids: list[int] = []
+    for row in table.all():
+        if row.get("phase_name") not in phase_set or row.get("parameter_type") != "MQMZ":
+            continue
+        key = (
+            str(row.get("phase_name")),
+            str(row.get("parameter_type")),
+            str(row.get("constituent_array")),
+            row.get("parameter_order"),
+        )
+        if key in seen:
+            doc_id = getattr(row, "doc_id", row.get("doc_id"))
+            if doc_id is not None:
+                remove_ids.append(doc_id)
+        else:
+            seen.add(key)
+    if remove_ids:
+        table.remove(doc_ids=remove_ids)
+    return len(remove_ids)
+
+
 def equilibrium_summary(
     *,
     dbf: Any,
@@ -524,6 +552,7 @@ def equilibrium_summary(
     verbose: bool = False,
 ) -> tuple[dict[str, Any], Any]:
     _, _, _, equilibrium, _ = require_pycalphad()
+    deduplicate_mqmqa_z_parameters(dbf, phases)
     eq = equilibrium(dbf, components, phases, conditions, output=output, verbose=verbose)
     kept = _phase_amounts(eq)
     summary = {

@@ -11,6 +11,30 @@ class FakePhase:
         self.constituents = constituents
 
 
+class FakeParameter(dict):
+    def __init__(self, doc_id, **kwargs):
+        super().__init__(**kwargs)
+        self.doc_id = doc_id
+
+
+class FakeParameterTable:
+    def __init__(self, rows):
+        self.rows = rows
+        self.removed = []
+
+    def all(self):
+        return list(self.rows)
+
+    def remove(self, *, doc_ids):
+        self.removed.extend(doc_ids)
+        self.rows = [row for row in self.rows if row.doc_id not in set(doc_ids)]
+
+
+class FakeDatabase:
+    def __init__(self, rows):
+        self._parameters = FakeParameterTable(rows)
+
+
 def test_species_filtering_and_uo_preferred_phase_order():
     assert workflow.normalize_species_name("U_POS4") == "U"
     assert workflow.species_elements_from_name("UO2") == {"U", "O"}
@@ -48,6 +72,40 @@ def test_pseudo_binary_formula_join_constraints():
     assert components == ["CL", "NA", "U", "VA"]
     assert dependent == "CL"
     assert fractions == {"NA": 1.0 / 6.0, "CL": 4.0 / 6.0, "U": 1.0 / 6.0}
+
+
+def test_deduplicate_mqmqa_z_parameters_removes_duplicate_keys():
+    dbf = FakeDatabase(
+        [
+            FakeParameter(
+                1,
+                phase_name="MSFL",
+                parameter_type="MQMZ",
+                constituent_array=(("LI", "U"), ("F", "F")),
+                parameter_order=None,
+            ),
+            FakeParameter(
+                2,
+                phase_name="MSFL",
+                parameter_type="MQMZ",
+                constituent_array=(("LI", "U"), ("F", "F")),
+                parameter_order=None,
+            ),
+            FakeParameter(
+                3,
+                phase_name="MSFL",
+                parameter_type="MQMG",
+                constituent_array=(("LI",), ("F",)),
+                parameter_order=None,
+            ),
+        ]
+    )
+
+    removed = workflow.deduplicate_mqmqa_z_parameters(dbf, ["MSFL"])
+
+    assert removed == 1
+    assert dbf._parameters.removed == [2]
+    assert [row.doc_id for row in dbf._parameters.rows] == [1, 3]
 
 
 def test_init_workflow_writes_portable_layout(tmp_path: Path):
