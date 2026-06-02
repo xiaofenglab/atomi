@@ -15,6 +15,7 @@ from typing import Any
 
 
 ALWAYS_INCLUDE_BY_NAME = {"LIQUID", "GAS", "VAPOR", "FLUID"}
+HALIDE_ELEMENTS = {"F", "CL", "BR", "I"}
 SCHEMA_CONFIG = "atomi.calphad.workflow.config.v1"
 SCHEMA_GRID = "atomi.calphad.workflow.grid.v1"
 SCHEMA_REACTION = "atomi.calphad.workflow.reaction_summary.v1"
@@ -288,7 +289,114 @@ def phase_feasible_in_multicomponent_subsystem(
     return len(bad_sublattices) == 0 and allowed_somewhere, bad_sublattices, allowed_by_sublattice
 
 
-def recommend_phase_subset(candidate_phases: list[str], a: str, b: str) -> list[str]:
+def phase_formula_from_debug_entry(name: str, debug_entry: dict[str, Any] | None = None) -> dict[str, float]:
+    for token in [re.split(r"[_\s(/]", name, maxsplit=1)[0], *re.split(r"[_\s()/]+", name)]:
+        counts = parse_formula_counts(token)
+        if counts and set(counts).intersection(HALIDE_ELEMENTS):
+            return counts
+    debug_formulas: list[dict[str, float]] = []
+    if debug_entry:
+        for sublattice in debug_entry.get("allowed_by_sublattice") or []:
+            for species in sublattice:
+                counts = parse_formula_counts(str(species))
+                if counts:
+                    debug_formulas.append(counts)
+    if debug_formulas:
+        debug_formulas.sort(key=lambda item: (len(item), sum(item.values())))
+        return debug_formulas[0]
+    for token in [re.split(r"[_\s(/]", name, maxsplit=1)[0], *re.split(r"[_\s()/]+", name)]:
+        counts = parse_formula_counts(token)
+        if counts:
+            return counts
+    return {}
+
+
+def phase_name_formula_key(name: str) -> tuple[tuple[str, float], ...]:
+    token = re.split(r"[_\s(/]", name, maxsplit=1)[0]
+    counts = parse_formula_counts(token)
+    if counts and set(counts).intersection(HALIDE_ELEMENTS):
+        return formula_key(counts)
+    return ()
+
+
+def formula_key(counts: dict[str, float]) -> tuple[tuple[str, float], ...]:
+    return tuple(sorted((elem, round(float(amount), 8)) for elem, amount in counts.items() if elem != "VA" and amount))
+
+
+def is_salt_formula_join(a: str, b: str) -> tuple[bool, str]:
+    a_counts = parse_formula_counts(a)
+    b_counts = parse_formula_counts(b)
+    common_halides = sorted(set(a_counts).intersection(b_counts).intersection(HALIDE_ELEMENTS))
+    return bool(common_halides), common_halides[0] if common_halides else ""
+
+
+def is_generic_solution_phase(name: str) -> bool:
+    upper = name.upper()
+    return bool(re.fullmatch(r"SS[A-Z0-9_]*SOLN", upper))
+
+
+def is_pure_liquid_phase(name: str) -> bool:
+    upper = name.upper()
+    return upper.endswith("_L1(LIQ)") or upper.endswith("_L1_LIQ") or "L1(LIQ)" in upper
+
+
+def is_molten_salt_phase(name: str) -> bool:
+    upper = name.upper()
+    return bool(re.fullmatch(r"MS[A-Z0-9_]*", upper))
+
+
+def recommend_salt_phase_subset(
+    candidate_phases: list[str],
+    a: str,
+    b: str,
+    debug: dict[str, Any] | None = None,
+) -> list[str]:
+    ok, anion = is_salt_formula_join(a, b)
+    if not ok:
+        return sorted(candidate_phases)
+    endmember_keys = {formula_key(parse_formula_counts(a)), formula_key(parse_formula_counts(b))}
+    cations = set(parse_formula_counts(a)).union(parse_formula_counts(b)).difference({anion, "VA"})
+    selected: list[str] = []
+    formula_by_phase: dict[str, tuple[tuple[str, float], ...]] = {}
+    for phase in candidate_phases:
+        upper = phase.upper()
+        if is_molten_salt_phase(phase):
+            selected.append(phase)
+            continue
+        if upper in {"GAS", "GAS_IDEAL"} or is_pure_liquid_phase(phase) or is_generic_solution_phase(phase):
+            continue
+        counts = phase_formula_from_debug_entry(phase, (debug or {}).get(phase))
+        elements = set(counts).difference({"VA"})
+        if not elements or not elements.issubset(cations | {anion}):
+            continue
+        if formula_key(counts) in endmember_keys:
+            formula_by_phase[phase] = formula_key(counts)
+            selected.append(phase)
+            continue
+        phase_cations = elements.difference({anion})
+        if anion in elements and len(phase_cations.intersection(cations)) >= 2:
+            formula_by_phase[phase] = formula_key(counts)
+            selected.append(phase)
+    deduped: list[str] = []
+    by_formula: dict[tuple[tuple[str, float], ...], list[str]] = defaultdict(list)
+    for phase in dict.fromkeys(selected):
+        key = formula_by_phase.get(phase)
+        if key:
+            by_formula[key].append(phase)
+        else:
+            deduped.append(phase)
+    for key, phases in by_formula.items():
+        explicit = [phase for phase in phases if phase_name_formula_key(phase) == key]
+        deduped.extend(explicit or phases)
+    return sorted(dict.fromkeys(deduped))
+
+
+def recommend_phase_subset(
+    candidate_phases: list[str],
+    a: str,
+    b: str,
+    debug: dict[str, Any] | None = None,
+) -> list[str]:
     candidates = set(candidate_phases)
     if {a, b} == {"U", "O"}:
         preferred = [
@@ -309,6 +417,10 @@ def recommend_phase_subset(candidate_phases: list[str], a: str, b: str) -> list[
             "GAS",
         ]
         return [phase for phase in preferred if phase in candidates]
+    if is_formula_binary(a, b):
+        salt_selected = recommend_salt_phase_subset(candidate_phases, a, b, debug)
+        if salt_selected:
+            return salt_selected
     return sorted(candidate_phases)
 
 
@@ -448,13 +560,19 @@ def inspect_binary_tdb(tdb_file: Path, a: str, b: str) -> dict[str, Any]:
         "components": components,
         "x_axis_component": b,
         "candidate_phases": candidate_phases,
-        "selected_phases": recommend_phase_subset(candidate_phases, a, b),
+        "selected_phases": recommend_phase_subset(candidate_phases, a, b, debug),
         "debug": debug,
     }
     if formula_mode:
         config["formula_endmembers"] = formula_endmembers
         config["dependent_component"] = dependent
         config["composition_mode"] = "pseudo_binary_formula_join"
+        if is_salt_formula_join(a, b)[0]:
+            config["phase_filter_note"] = (
+                "Pseudo-binary halide salt join: selected phases keep molten-salt liquids and "
+                "stoichiometric endmember/mixed salt solids, while excluding pure L1 liquids, "
+                "gas phases, elemental phases, generic solution phases, and off-redox one-cation salts."
+            )
     return config
 
 

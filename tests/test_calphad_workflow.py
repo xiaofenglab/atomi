@@ -49,6 +49,57 @@ def test_species_filtering_and_uo_preferred_phase_order():
     assert workflow.recommend_phase_subset(phases, "U", "O") == ["BCC_A2", "C1_MO2", "U4O9_S", "GAS"]
 
 
+def test_halide_salt_phase_subset_excludes_pure_liquids_and_solution_aliases():
+    phases = [
+        "MSFL",
+        "LIF_L1(LIQ)",
+        "UF4_L1(LIQ)",
+        "LI4UF8_S1(S)",
+        "LIUF5_S1(S)",
+        "LIU4F17_S1(S)",
+        "LIU2F9_S1(S)",
+        "UF3_P3C1_NO.158(S)",
+        "UF4_C2/C_NO.15(S)",
+        "SSAESOLN",
+        "GAS_IDEAL",
+    ]
+
+    selected = workflow.recommend_phase_subset(phases, "LiF", "UF4")
+
+    assert selected == [
+        "LI4UF8_S1(S)",
+        "LIU2F9_S1(S)",
+        "LIU4F17_S1(S)",
+        "LIUF5_S1(S)",
+        "MSFL",
+        "UF4_C2/C_NO.15(S)",
+    ]
+
+
+def test_halide_salt_phase_subset_keeps_structural_alias_endmembers_from_debug():
+    phases = ["C2_C", "FM3M", "MSCL", "NACL_L1(LIQ)", "NA2UCL6_S1(S)", "NAU2CL7_S1(S)", "UCL4_L1(LIQ)"]
+    debug = {
+        "C2_C": {"allowed_by_sublattice": [["UCL3"]]},
+        "FM3M": {"allowed_by_sublattice": [["NACL"]]},
+    }
+
+    selected = workflow.recommend_phase_subset(phases, "NaCl", "UCl3", debug)
+
+    assert selected == ["C2_C", "FM3M", "MSCL", "NA2UCL6_S1(S)", "NAU2CL7_S1(S)"]
+
+
+def test_halide_salt_phase_subset_prefers_formula_named_aliases():
+    phases = ["C2_C", "FM3M", "LIF_FM3M_NO.225(S)", "MSFL", "UF4_C2/C_NO.15(S)"]
+    debug = {
+        "C2_C": {"allowed_by_sublattice": [["UF4"]]},
+        "FM3M": {"allowed_by_sublattice": [["LIF"]]},
+    }
+
+    selected = workflow.recommend_phase_subset(phases, "LiF", "UF4", debug)
+
+    assert selected == ["LIF_FM3M_NO.225(S)", "MSFL", "UF4_C2/C_NO.15(S)"]
+
+
 def test_phase_feasible_in_binary_subsystem_reports_allowed_sublattices():
     ok_phase = FakePhase([["U_POS4", "PU"], ["O_NEG2", "VA"]])
     ok, bad, allowed = workflow.phase_feasible_in_binary_subsystem(ok_phase, "U", "O")
