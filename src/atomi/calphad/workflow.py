@@ -514,8 +514,8 @@ def _component_values(eq: Any, variable: str) -> dict[str, float]:
         return {}
 
 
-def deduplicate_mqmqa_z_parameters(dbf: Any, phases: list[str]) -> int:
-    """Remove duplicate MQMQA Z records that make pycalphad model construction ambiguous."""
+def deduplicate_mqmqa_parameters(dbf: Any, phases: list[str]) -> int:
+    """Remove duplicate MQMQA records that make pycalphad model construction ambiguous."""
     table = getattr(dbf, "_parameters", None)
     if table is None or not hasattr(table, "all") or not hasattr(table, "remove"):
         return 0
@@ -523,11 +523,12 @@ def deduplicate_mqmqa_z_parameters(dbf: Any, phases: list[str]) -> int:
     seen: set[tuple[str, str, str, Any]] = set()
     remove_ids: list[int] = []
     for row in table.all():
-        if row.get("phase_name") not in phase_set or row.get("parameter_type") != "MQMZ":
+        ptype = str(row.get("parameter_type") or "")
+        if row.get("phase_name") not in phase_set or not ptype.startswith("MQM"):
             continue
         key = (
             str(row.get("phase_name")),
-            str(row.get("parameter_type")),
+            ptype,
             str(row.get("constituent_array")),
             row.get("parameter_order"),
         )
@@ -542,6 +543,11 @@ def deduplicate_mqmqa_z_parameters(dbf: Any, phases: list[str]) -> int:
     return len(remove_ids)
 
 
+def deduplicate_mqmqa_z_parameters(dbf: Any, phases: list[str]) -> int:
+    """Backward-compatible alias for the broader MQMQA duplicate guard."""
+    return deduplicate_mqmqa_parameters(dbf, phases)
+
+
 def equilibrium_summary(
     *,
     dbf: Any,
@@ -552,7 +558,7 @@ def equilibrium_summary(
     verbose: bool = False,
 ) -> tuple[dict[str, Any], Any]:
     _, _, _, equilibrium, _ = require_pycalphad()
-    deduplicate_mqmqa_z_parameters(dbf, phases)
+    deduplicate_mqmqa_parameters(dbf, phases)
     eq = equilibrium(dbf, components, phases, conditions, output=output, verbose=verbose)
     kept = _phase_amounts(eq)
     summary = {

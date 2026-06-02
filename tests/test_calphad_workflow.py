@@ -74,7 +74,7 @@ def test_pseudo_binary_formula_join_constraints():
     assert fractions == {"NA": 1.0 / 6.0, "CL": 4.0 / 6.0, "U": 1.0 / 6.0}
 
 
-def test_deduplicate_mqmqa_z_parameters_removes_duplicate_keys():
+def test_deduplicate_mqmqa_parameters_removes_duplicate_keys():
     dbf = FakeDatabase(
         [
             FakeParameter(
@@ -101,7 +101,7 @@ def test_deduplicate_mqmqa_z_parameters_removes_duplicate_keys():
         ]
     )
 
-    removed = workflow.deduplicate_mqmqa_z_parameters(dbf, ["MSFL"])
+    removed = workflow.deduplicate_mqmqa_parameters(dbf, ["MSFL"])
 
     assert removed == 1
     assert dbf._parameters.removed == [2]
