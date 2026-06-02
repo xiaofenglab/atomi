@@ -792,6 +792,51 @@ def summarize_boundaries(grid: list[list[str]], t_values: list[float], x_values:
     return sorted(rows, key=lambda item: (item["t_center"], item["x_center"]))
 
 
+def boundary_points_from_grid(
+    grid: list[list[str]],
+    t_values: list[float],
+    x_values: list[float],
+    *,
+    include_none: bool = False,
+) -> list[dict[str, Any]]:
+    """Extract per-cell phase-boundary points from a categorical T-X grid."""
+    nrows = len(grid)
+    ncols = len(grid[0]) if nrows else 0
+    rows: list[dict[str, Any]] = []
+    for i in range(nrows):
+        for j in range(ncols):
+            here = grid[i][j]
+            if not include_none and here == "NONE":
+                continue
+            if j + 1 < ncols and here != grid[i][j + 1]:
+                other = grid[i][j + 1]
+                if include_none or other != "NONE":
+                    field_1, field_2 = sorted((here, other))
+                    rows.append(
+                        {
+                            "x": 0.5 * (x_values[j] + x_values[j + 1]),
+                            "T_K": t_values[i],
+                            "field_1": field_1,
+                            "field_2": field_2,
+                            "orientation": "vertical_in_x",
+                        }
+                    )
+            if i + 1 < nrows and here != grid[i + 1][j]:
+                other = grid[i + 1][j]
+                if include_none or other != "NONE":
+                    field_1, field_2 = sorted((here, other))
+                    rows.append(
+                        {
+                            "x": x_values[j],
+                            "T_K": 0.5 * (t_values[i] + t_values[i + 1]),
+                            "field_1": field_1,
+                            "field_2": field_2,
+                            "orientation": "horizontal_in_T",
+                        }
+                    )
+    return sorted(rows, key=lambda item: (item["T_K"], item["x"], item["field_1"], item["field_2"]))
+
+
 def summarize_candidate_invariants(grid: list[list[str]], t_values: list[float], x_values: list[float]) -> list[dict[str, Any]]:
     nrows = len(grid)
     ncols = len(grid[0]) if nrows else 0
@@ -869,6 +914,186 @@ def plot_grid_map(csv_path: Path, out_png: Path, title: str | None = None) -> No
     plt.close(fig)
 
 
+def _phase_label(signature: str) -> str:
+    if signature == "NONE":
+        return ""
+    labels = []
+    for phase in signature.split(" + "):
+        label = phase
+        label = label.replace("_L1(LIQ)", "(liq)")
+        label = label.replace("_S1(S)", "")
+        label = label.replace("_NO.", " No.")
+        label = label.replace("_", " ")
+        labels.append(label)
+    return " + ".join(labels)
+
+
+def _composition_axis_label(x_col: str) -> str:
+    if x_col.startswith("X_") and len(x_col) > 2:
+        return f"x({x_col[2:]})"
+    return x_col
+
+
+def _axis_edges(values: list[float]) -> list[float]:
+    if len(values) == 1:
+        return [values[0] - 0.5, values[0] + 0.5]
+    edges = [values[0] - 0.5 * (values[1] - values[0])]
+    edges.extend(0.5 * (values[idx] + values[idx + 1]) for idx in range(len(values) - 1))
+    edges.append(values[-1] + 0.5 * (values[-1] - values[-2]))
+    return edges
+
+
+def _boundary_segments(
+    signature_grid: list[list[str]],
+    x_values: list[float],
+    t_values: list[float],
+    *,
+    include_none: bool = False,
+) -> list[list[tuple[float, float]]]:
+    nrows = len(signature_grid)
+    ncols = len(signature_grid[0]) if nrows else 0
+    x_edges = _axis_edges(x_values)
+    t_edges = _axis_edges(t_values)
+    segments: list[list[tuple[float, float]]] = []
+    for i in range(nrows):
+        for j in range(ncols):
+            here = signature_grid[i][j]
+            if not include_none and here == "NONE":
+                continue
+            if j + 1 < ncols and here != signature_grid[i][j + 1]:
+                other = signature_grid[i][j + 1]
+                if include_none or other != "NONE":
+                    x_mid = 0.5 * (x_values[j] + x_values[j + 1])
+                    segments.append([(x_mid, t_edges[i]), (x_mid, t_edges[i + 1])])
+            if i + 1 < nrows and here != signature_grid[i + 1][j]:
+                other = signature_grid[i + 1][j]
+                if include_none or other != "NONE":
+                    t_mid = 0.5 * (t_values[i] + t_values[i + 1])
+                    segments.append([(x_edges[j], t_mid), (x_edges[j + 1], t_mid)])
+    return segments
+
+
+def _plot_grid_boundaries(
+    ax: Any,
+    signature_grid: list[list[str]],
+    x_values: list[float],
+    t_values: list[float],
+    *,
+    color: str,
+    linestyle: str,
+    linewidth: float,
+    label: str | None = None,
+) -> None:
+    from matplotlib.collections import LineCollection
+
+    segments = _boundary_segments(signature_grid, x_values, t_values)
+    if not segments:
+        return
+    collection = LineCollection(
+        segments,
+        colors=color,
+        linestyles=linestyle,
+        linewidths=linewidth,
+        capstyle="butt",
+        joinstyle="miter",
+    )
+    ax.add_collection(collection)
+    if label:
+        ax.plot([], [], color=color, linestyle=linestyle, linewidth=linewidth, label=label)
+
+
+def plot_phase_diagram_lines(
+    csv_path: Path,
+    out_png: Path,
+    *,
+    title: str | None = None,
+    boundary_csv: Path | None = None,
+    label_fields: bool = True,
+    overlay_csvs: list[Path] | None = None,
+    overlay_labels: list[str] | None = None,
+) -> dict[str, Any]:
+    try:
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # pragma: no cover - optional plotting dependency
+        raise RuntimeError("matplotlib is required for plot-diagram.") from exc
+
+    rows = read_csv(csv_path)
+    x_col, t_values, x_values, sig_map, _ = infer_grid_axes(rows)
+    signatures = sorted({sig_map[(temp, x)] for temp in t_values for x in x_values})
+    signature_grid = build_signature_grid(t_values, x_values, sig_map)
+    boundaries = boundary_points_from_grid(signature_grid, t_values, x_values)
+
+    if boundary_csv is not None:
+        fields = ["x", "T_K", "field_1", "field_2", "orientation"]
+        write_csv(boundary_csv, boundaries, fields)
+
+    fig, ax = plt.subplots(figsize=(7.2, 5.2), constrained_layout=True)
+    _plot_grid_boundaries(
+        ax,
+        signature_grid,
+        x_values,
+        t_values,
+        color="black",
+        linestyle="-",
+        linewidth=1.15,
+        label="CALPHAD/MQMQA" if overlay_csvs else None,
+    )
+
+    if overlay_csvs:
+        overlay_labels = overlay_labels or []
+        colors = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd"]
+        for idx, overlay_csv in enumerate(overlay_csvs):
+            overlay_rows = read_csv(overlay_csv.resolve())
+            _, overlay_t, overlay_x, overlay_sig_map, _ = infer_grid_axes(overlay_rows)
+            overlay_grid = build_signature_grid(overlay_t, overlay_x, overlay_sig_map)
+            label = overlay_labels[idx] if idx < len(overlay_labels) else overlay_csv.stem
+            _plot_grid_boundaries(
+                ax,
+                overlay_grid,
+                overlay_x,
+                overlay_t,
+                color=colors[idx % len(colors)],
+                linestyle="--",
+                linewidth=1.2,
+                label=label,
+            )
+
+    if label_fields:
+        fields = summarize_fields(signature_grid, t_values, x_values)
+        for field in fields:
+            if field["signature"] == "NONE" or field["n_cells"] < 2:
+                continue
+            ax.text(
+                field["x_center"],
+                field["t_center"],
+                _phase_label(field["signature"]),
+                ha="center",
+                va="center",
+                fontsize=7,
+                color="black",
+                bbox={"boxstyle": "round,pad=0.18", "facecolor": "white", "edgecolor": "none", "alpha": 0.72},
+            )
+
+    ax.set_xlim(min(x_values), max(x_values))
+    ax.set_ylim(min(t_values), max(t_values))
+    ax.set_xlabel(_composition_axis_label(x_col))
+    ax.set_ylabel("T (K)")
+    ax.set_title(title or "CALPHAD T-X phase diagram")
+    ax.tick_params(direction="in", top=True, right=True)
+    ax.grid(True, color="0.86", linewidth=0.5)
+    if overlay_csvs:
+        ax.legend(frameon=False, loc="best")
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_png, dpi=300)
+    plt.close(fig)
+    return {
+        "plot_png": str(out_png),
+        "boundary_csv": str(boundary_csv) if boundary_csv else None,
+        "n_boundary_points": len(boundaries),
+        "n_phase_fields": len(signatures),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="calphad-workflow",
@@ -909,6 +1134,12 @@ def build_parser() -> argparse.ArgumentParser:
     scan_tx.add_argument("--tmax", type=float, required=True)
     scan_tx.add_argument("--nt", type=int, default=51)
     scan_tx.add_argument("--plot", action="store_true")
+    scan_tx.add_argument(
+        "--plot-style",
+        choices=("map", "diagram", "both"),
+        default="both",
+        help="Plot diagnostic color map, paper-style boundary diagram, or both when --plot is set.",
+    )
 
     scan_mu = sub.add_parser("scan-muo", help="Scan a T-mu(component) phase grid and write CSV.")
     scan_mu.add_argument("--config", type=Path, required=True)
@@ -930,6 +1161,25 @@ def build_parser() -> argparse.ArgumentParser:
     plot.add_argument("--grid-csv", type=Path, required=True)
     plot.add_argument("--out", type=Path, default=Path("phase_map.png"))
     plot.add_argument("--title")
+    plot.add_argument(
+        "--style",
+        choices=("map", "diagram", "both"),
+        default="map",
+        help="Plot diagnostic color map, paper-style boundary diagram, or both.",
+    )
+    plot.add_argument("--boundary-csv", type=Path, help="Optional CSV path for extracted boundary points in diagram mode.")
+    plot.add_argument("--overlay-grid-csv", type=Path, action="append", default=[], help="Additional grid CSV to overlay as dashed boundaries.")
+    plot.add_argument("--overlay-label", action="append", default=[], help="Legend label for each --overlay-grid-csv.")
+    plot.add_argument("--no-label-fields", action="store_true", help="Suppress field labels in diagram mode.")
+
+    diagram = sub.add_parser("plot-diagram", help="Plot a paper-style T-X phase-boundary diagram from a scan grid CSV.")
+    diagram.add_argument("--grid-csv", type=Path, required=True)
+    diagram.add_argument("--out", type=Path, default=Path("phase_diagram.png"))
+    diagram.add_argument("--boundary-csv", type=Path, default=Path("phase_boundaries_points.csv"))
+    diagram.add_argument("--title")
+    diagram.add_argument("--overlay-grid-csv", type=Path, action="append", default=[], help="Additional grid CSV to overlay as dashed boundaries.")
+    diagram.add_argument("--overlay-label", action="append", default=[], help="Legend label for each --overlay-grid-csv.")
+    diagram.add_argument("--no-label-fields", action="store_true", help="Suppress field labels.")
     return parser
 
 
@@ -1062,10 +1312,22 @@ def scan_tx_main(args: argparse.Namespace) -> dict[str, Any]:
         metadata["composition_mode"] = "pseudo_binary_formula_join"
         metadata["formula_endmembers"] = config.formula_endmembers
         metadata["dependent_component"] = config.dependent_component
-    if args.plot:
+    if args.plot and args.plot_style in {"map", "both"}:
         png = outdir / "T_X_phase_map.png"
         plot_grid_map(table, png, title="CALPHAD T-X phase map")
         metadata["outputs"]["plot_png"] = str(png)
+    if args.plot and args.plot_style in {"diagram", "both"}:
+        diagram_png = outdir / "T_X_phase_diagram.png"
+        boundary_csv = outdir / "T_X_phase_boundary_points.csv"
+        diagram_meta = plot_phase_diagram_lines(
+            table,
+            diagram_png,
+            title="CALPHAD T-X phase diagram",
+            boundary_csv=boundary_csv,
+        )
+        metadata["outputs"]["phase_diagram_png"] = str(diagram_png)
+        metadata["outputs"]["phase_boundary_points"] = str(boundary_csv)
+        metadata["n_boundary_points"] = diagram_meta["n_boundary_points"]
     write_json(outdir / "T_X_phase_grid_metadata.json", metadata)
     print(f"Wrote T-X phase grid: {table}")
     return metadata
@@ -1149,9 +1411,40 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
     if args.command == "reaction-summary":
         return reaction_summary_main(args)
     if args.command == "plot-map":
-        plot_grid_map(args.grid_csv.resolve(), args.out.resolve(), title=args.title)
-        print(f"Wrote phase map: {args.out.resolve()}")
-        return {"plot": str(args.out.resolve())}
+        outputs: dict[str, Any] = {}
+        if args.style in {"map", "both"}:
+            plot_grid_map(args.grid_csv.resolve(), args.out.resolve(), title=args.title)
+            outputs["plot_png"] = str(args.out.resolve())
+            print(f"Wrote phase map: {args.out.resolve()}")
+        if args.style in {"diagram", "both"}:
+            diagram_out = args.out.resolve()
+            if args.style == "both":
+                diagram_out = args.out.resolve().with_name(f"{args.out.resolve().stem}_diagram{args.out.resolve().suffix}")
+            boundary_csv = args.boundary_csv.resolve() if args.boundary_csv else diagram_out.with_name(f"{diagram_out.stem}_boundary_points.csv")
+            diagram_meta = plot_phase_diagram_lines(
+                args.grid_csv.resolve(),
+                diagram_out,
+                title=args.title,
+                boundary_csv=boundary_csv,
+                label_fields=not args.no_label_fields,
+                overlay_csvs=[item.resolve() for item in args.overlay_grid_csv],
+                overlay_labels=args.overlay_label,
+            )
+            outputs.update(diagram_meta)
+            print(f"Wrote phase diagram: {diagram_out}")
+        return outputs
+    if args.command == "plot-diagram":
+        metadata = plot_phase_diagram_lines(
+            args.grid_csv.resolve(),
+            args.out.resolve(),
+            title=args.title,
+            boundary_csv=args.boundary_csv.resolve(),
+            label_fields=not args.no_label_fields,
+            overlay_csvs=[item.resolve() for item in args.overlay_grid_csv],
+            overlay_labels=args.overlay_label,
+        )
+        print(f"Wrote phase diagram: {args.out.resolve()}")
+        return metadata
     build_parser().print_help()
     return None
 

@@ -189,3 +189,52 @@ def test_reaction_summary_writes_grid_diagnostics(tmp_path: Path):
     assert (outdir / "candidate_invariants.csv").exists()
     report = (outdir / "reaction_detection_report.txt").read_text(encoding="utf-8")
     assert "Candidate invariants" in report
+
+
+def test_boundary_points_from_grid_skips_none_by_default():
+    grid = [
+        ["A", "A", "B"],
+        ["A", "NONE", "B"],
+        ["C", "C", "B"],
+    ]
+
+    rows = workflow.boundary_points_from_grid(grid, [900, 1000, 1100], [0.1, 0.2, 0.3])
+
+    assert rows
+    assert all(row["field_1"] != "NONE" and row["field_2"] != "NONE" for row in rows)
+    assert {row["orientation"] for row in rows} == {"vertical_in_x", "horizontal_in_T"}
+
+
+def test_plot_diagram_cli_writes_boundary_csv(tmp_path: Path):
+    grid_csv = tmp_path / "T_X_phase_grid.csv"
+    rows = [
+        {"T_K": 900, "X_UCL3": 0.1, "stable_signature": "FM3M", "stable_detail": "FM3M:1", "GM_J_mol": 0},
+        {"T_K": 900, "X_UCL3": 0.2, "stable_signature": "FM3M", "stable_detail": "FM3M:1", "GM_J_mol": 0},
+        {"T_K": 900, "X_UCL3": 0.3, "stable_signature": "MSCL", "stable_detail": "MSCL:1", "GM_J_mol": 0},
+        {"T_K": 1000, "X_UCL3": 0.1, "stable_signature": "FM3M", "stable_detail": "FM3M:1", "GM_J_mol": 0},
+        {"T_K": 1000, "X_UCL3": 0.2, "stable_signature": "MSCL", "stable_detail": "MSCL:1", "GM_J_mol": 0},
+        {"T_K": 1000, "X_UCL3": 0.3, "stable_signature": "MSCL", "stable_detail": "MSCL:1", "GM_J_mol": 0},
+    ]
+    with grid_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    out = tmp_path / "phase_diagram.png"
+    boundary_csv = tmp_path / "boundary_points.csv"
+
+    metadata = workflow.main(
+        [
+            "plot-diagram",
+            "--grid-csv",
+            str(grid_csv),
+            "--out",
+            str(out),
+            "--boundary-csv",
+            str(boundary_csv),
+        ]
+    )
+
+    assert metadata and metadata["n_boundary_points"] >= 2
+    assert out.exists()
+    boundary_rows = list(csv.DictReader(boundary_csv.open(encoding="utf-8")))
+    assert boundary_rows
