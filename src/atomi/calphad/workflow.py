@@ -982,6 +982,7 @@ def _plot_grid_boundaries(
     color: str,
     linestyle: str,
     linewidth: float,
+    alpha: float = 1.0,
     label: str | None = None,
 ) -> None:
     from matplotlib.collections import LineCollection
@@ -994,12 +995,13 @@ def _plot_grid_boundaries(
         colors=color,
         linestyles=linestyle,
         linewidths=linewidth,
+        alpha=alpha,
         capstyle="butt",
         joinstyle="miter",
     )
     ax.add_collection(collection)
     if label:
-        ax.plot([], [], color=color, linestyle=linestyle, linewidth=linewidth, label=label)
+        ax.plot([], [], color=color, linestyle=linestyle, linewidth=linewidth, alpha=alpha, label=label)
 
 
 def _typical_step(values: list[float]) -> float:
@@ -1085,6 +1087,7 @@ def _plot_smoothed_boundaries(
     linestyle: str,
     linewidth: float,
     window: int,
+    alpha: float = 1.0,
     label: str | None = None,
 ) -> int:
     paths = _smoothed_boundary_paths(boundary_points, x_values, t_values, window=window)
@@ -1092,9 +1095,9 @@ def _plot_smoothed_boundaries(
         points = path["points"]
         xs = [point[0] for point in points]
         ts = [point[1] for point in points]
-        ax.plot(xs, ts, color=color, linestyle=linestyle, linewidth=linewidth)
+        ax.plot(xs, ts, color=color, linestyle=linestyle, linewidth=linewidth, alpha=alpha)
     if paths and label:
-        ax.plot([], [], color=color, linestyle=linestyle, linewidth=linewidth, label=label)
+        ax.plot([], [], color=color, linestyle=linestyle, linewidth=linewidth, alpha=alpha, label=label)
     return len(paths)
 
 
@@ -1128,15 +1131,20 @@ def plot_phase_diagram_lines(
 
     fig, ax = plt.subplots(figsize=(7.2, 5.2), constrained_layout=True)
     n_smooth_paths = 0
+    raw_color = "0.38" if smooth_boundaries else "black"
+    raw_linestyle = "--" if smooth_boundaries else "-"
+    raw_linewidth = 0.55 if smooth_boundaries else 1.15
+    raw_alpha = 0.72 if smooth_boundaries else 1.0
     if not hide_raw_boundaries:
         _plot_grid_boundaries(
             ax,
             signature_grid,
             x_values,
             t_values,
-            color="black",
-            linestyle="-",
-            linewidth=1.15,
+            color=raw_color,
+            linestyle=raw_linestyle,
+            linewidth=raw_linewidth,
+            alpha=raw_alpha,
             label="CALPHAD/MQMQA raw" if overlay_csvs or smooth_boundaries else None,
         )
     if smooth_boundaries:
@@ -1147,7 +1155,7 @@ def plot_phase_diagram_lines(
             t_values,
             color="black",
             linestyle="-",
-            linewidth=1.6,
+            linewidth=1.9,
             window=smooth_window,
             label="CALPHAD/MQMQA smoothed" if overlay_csvs or not hide_raw_boundaries else None,
         )
@@ -1168,9 +1176,10 @@ def plot_phase_diagram_lines(
                     overlay_x,
                     overlay_t,
                     color=colors[idx % len(colors)],
-                    linestyle="--",
-                    linewidth=1.2,
-                    label=label,
+                    linestyle=":",
+                    linewidth=0.6 if smooth_boundaries else 1.2,
+                    alpha=0.72 if smooth_boundaries else 1.0,
+                    label=f"{label} raw" if smooth_boundaries else label,
                 )
             if smooth_boundaries:
                 n_smooth_paths += _plot_smoothed_boundaries(
@@ -1180,7 +1189,7 @@ def plot_phase_diagram_lines(
                     overlay_t,
                     color=colors[idx % len(colors)],
                     linestyle="--",
-                    linewidth=1.6,
+                    linewidth=1.9,
                     window=smooth_window,
                     label=f"{label} smoothed" if not hide_raw_boundaries else label,
                 )
