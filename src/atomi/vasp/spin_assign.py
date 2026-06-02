@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 from atomi.vasp.magmom import (
+    PoscarStructure,
     PoscarSpecies,
     find_magmom_line,
     format_magmom_line,
@@ -54,6 +56,159 @@ def write_poscar_text(
     lines.append("Direct")
     lines.extend("  " + "  ".join(f"{value % 1.0: .16f}" for value in position) for position in scaled_positions)
     return "\n".join(lines) + "\n"
+
+
+def parse_cif_number(value: object) -> float | None:
+    text = str(value).strip().strip("'\"")
+    if not text or text in {".", "?"}:
+        return None
+    text = re.sub(r"\([^)]*\)$", "", text)
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def cell_from_lengths_angles(
+    a: float,
+    b: float,
+    c: float,
+    alpha_deg: float,
+    beta_deg: float,
+    gamma_deg: float,
+) -> list[list[float]]:
+    alpha = math.radians(alpha_deg)
+    beta = math.radians(beta_deg)
+    gamma = math.radians(gamma_deg)
+    sin_gamma = math.sin(gamma)
+    if abs(sin_gamma) < 1.0e-12:
+        raise ValueError("CIF cell has singular gamma angle.")
+    cx = c * math.cos(beta)
+    cy = c * (math.cos(alpha) - math.cos(beta) * math.cos(gamma)) / sin_gamma
+    cz2 = c * c - cx * cx - cy * cy
+    if cz2 < -1.0e-8:
+        raise ValueError("CIF cell lengths/angles are inconsistent.")
+    return [
+        [a, 0.0, 0.0],
+        [b * math.cos(gamma), b * sin_gamma, 0.0],
+        [cx, cy, math.sqrt(max(cz2, 0.0))],
+    ]
+
+
+def grouped_structure_from_symbols_positions(
+    symbols: list[str],
+    cell: list[list[float]],
+    scaled_positions: list[list[float]],
+) -> PoscarStructure:
+    order: list[str] = []
+    for symbol in symbols:
+        if symbol not in order:
+            order.append(symbol)
+    grouped_positions: list[list[float]] = []
+    counts: list[int] = []
+    for symbol in order:
+        indices = [index for index, item in enumerate(symbols) if item == symbol]
+        counts.append(len(indices))
+        grouped_positions.extend(scaled_positions[index] for index in indices)
+    return PoscarStructure(
+        species=PoscarSpecies(order, counts),
+        cell=cell,
+        scaled_positions=[[value % 1.0 for value in position] for position in grouped_positions],
+    )
+
+
+def read_cif_structure_with_ase(path: Path) -> PoscarStructure | None:
+    try:
+        from ase.io import read
+    except ImportError:
+        return None
+    atoms = read(path)
+    symbols = list(atoms.get_chemical_symbols())
+    cell = [[float(value) for value in vector] for vector in atoms.get_cell().array.tolist()]
+    scaled_positions = [[float(value) % 1.0 for value in row] for row in atoms.get_scaled_positions(wrap=True)]
+    return grouped_structure_from_symbols_positions(symbols, cell, scaled_positions)
+
+
+def read_cif_structure_fallback(path: Path) -> PoscarStructure:
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    scalars: dict[str, float] = {}
+    rows: list[dict[str, str]] = []
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped.startswith("_cell_"):
+            parts = stripped.split(None, 1)
+            if len(parts) == 2:
+                number = parse_cif_number(parts[1])
+                if number is not None:
+                    scalars[parts[0].lower()] = number
+            i += 1
+            continue
+        if stripped.lower() != "loop_":
+            i += 1
+            continue
+        i += 1
+        tags: list[str] = []
+        while i < len(lines) and lines[i].strip().startswith("_"):
+            tags.append(lines[i].strip())
+            i += 1
+        if not any(tag.startswith("_atom_site_") for tag in tags):
+            continue
+        while i < len(lines):
+            line = lines[i].strip()
+            if not line or line.startswith("#"):
+                i += 1
+                continue
+            if line.lower() == "loop_" or line.startswith("_") or line.startswith("data_"):
+                break
+            parts = line.replace("'", "").replace('"', "").split()
+            if len(parts) >= len(tags):
+                rows.append(dict(zip(tags, parts)))
+            i += 1
+    required = {
+        "_cell_length_a",
+        "_cell_length_b",
+        "_cell_length_c",
+        "_cell_angle_alpha",
+        "_cell_angle_beta",
+        "_cell_angle_gamma",
+    }
+    missing = sorted(required - set(scalars))
+    if missing:
+        raise ValueError(f"CIF is missing required cell fields: {', '.join(missing)}")
+    cell = cell_from_lengths_angles(
+        scalars["_cell_length_a"],
+        scalars["_cell_length_b"],
+        scalars["_cell_length_c"],
+        scalars["_cell_angle_alpha"],
+        scalars["_cell_angle_beta"],
+        scalars["_cell_angle_gamma"],
+    )
+    symbols: list[str] = []
+    positions: list[list[float]] = []
+    for row in rows:
+        symbol = row.get("_atom_site_type_symbol") or row.get("_atom_site_label") or ""
+        symbol = re.match(r"[A-Z][a-z]?", re.sub(r"[^A-Za-z]", "", symbol))
+        fx = parse_cif_number(row.get("_atom_site_fract_x"))
+        fy = parse_cif_number(row.get("_atom_site_fract_y"))
+        fz = parse_cif_number(row.get("_atom_site_fract_z"))
+        occ = parse_cif_number(row.get("_atom_site_occupancy"))
+        if symbol and fx is not None and fy is not None and fz is not None and (occ is None or occ > 0.0):
+            symbols.append(symbol.group(0))
+            positions.append([fx, fy, fz])
+    if not symbols:
+        raise ValueError(f"Could not parse any atom sites from CIF: {path}")
+    return grouped_structure_from_symbols_positions(symbols, cell, positions)
+
+
+def read_input_structure(path: Path) -> tuple[PoscarStructure, str]:
+    suffix = path.suffix.lower()
+    if suffix == ".cif":
+        structure = read_cif_structure_with_ase(path)
+        if structure is not None:
+            return structure, "cif/ase"
+        return read_cif_structure_fallback(path), "cif/fallback"
+    return read_poscar_structure(path), "poscar"
 
 
 def parse_key_values(items: list[str]) -> dict[str, float]:
@@ -310,7 +465,7 @@ def assign_spins(
     outdir = outdir.expanduser().resolve()
     outdir.mkdir(parents=True, exist_ok=True)
 
-    structure = read_poscar_structure(poscar)
+    structure, source_format = read_input_structure(poscar)
     source_symbols = atom_symbols(structure.species)
     cation_order = list(cation_elements or [])
     anion_set = set(anion_elements or ["O"])
@@ -365,6 +520,7 @@ def assign_spins(
     copied = copy_static_inputs((source_incar or poscar).parent, outdir) if copy_inputs else []
     summary = {
         "source_poscar": str(poscar),
+        "source_format": source_format,
         "source_incar": "" if source_incar is None else str(source_incar),
         "source_incar_species_order_source": incar_species_source,
         "source_incar_species_order": incar_species.symbols,
@@ -398,9 +554,10 @@ def assign_spins(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vasp-assign-spins",
-        description="Write a cation-first POSCAR and INCAR MAGMOM from element/range spin rules.",
+        description="Write an ordered POSCAR and INCAR MAGMOM from POSCAR/CIF plus element/range spin rules.",
     )
-    parser.add_argument("--poscar", type=Path, default=Path("POSCAR"), help="Input POSCAR.")
+    parser.add_argument("--poscar", type=Path, default=Path("POSCAR"), help="Input POSCAR, or a CIF when --cif is not used.")
+    parser.add_argument("--cif", type=Path, help="Input CIF. Overrides --poscar.")
     parser.add_argument("--incar", type=Path, help="Reference INCAR. Defaults to POSCAR folder INCAR when present.")
     parser.add_argument(
         "--incar-poscar",
@@ -435,8 +592,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if args.cif is not None and args.poscar != Path("POSCAR"):
+        raise ValueError("Use either --cif or --poscar, not both.")
+    input_structure = args.cif or args.poscar
     result = assign_spins(
-        args.poscar,
+        input_structure,
         outdir=args.outdir,
         incar=args.incar,
         incar_poscar=args.incar_poscar,

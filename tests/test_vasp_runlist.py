@@ -129,6 +129,37 @@ def test_repeat_poscar_expands_template_magmom_in_output_order(tmp_path: Path) -
     assert metadata["magmom"]["magmom_line"] == "MAGMOM = 2 2 0.1 -0.1 0.1 -0.1"
 
 
+def test_repeat_poscar_incar_argument_implies_magmom_repeat(tmp_path: Path) -> None:
+    poscar = tmp_path / "POSCAR"
+    incar = tmp_path / "source.INCAR"
+    atoms = Atoms(
+        ["U", "C", "C"],
+        scaled_positions=[(0.0, 0.0, 0.0), (0.25, 0.25, 0.25), (0.75, 0.75, 0.75)],
+        cell=[3.0, 4.0, 5.0],
+        pbc=True,
+    )
+    write(poscar, atoms, format="vasp", direct=True, sort=False, vasp5=True)
+    incar.write_text("ENCUT = 520\nMAGMOM = 2 0.1 -0.1\n", encoding="utf-8")
+    outdir = tmp_path / "UC2_2x1x1"
+
+    repeat_poscar_main(
+        [
+            str(poscar),
+            "--repeat",
+            "2x1x1",
+            "--outdir",
+            str(outdir),
+            "--incar",
+            str(incar),
+        ]
+    )
+
+    assert (outdir / "INCAR").read_text(encoding="utf-8") == "ENCUT = 520\nMAGMOM = 2 2 0.1 -0.1 0.1 -0.1\n"
+    metadata = json.loads((outdir / "POSCAR.repeat_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["magmom"]["incar"] == str(incar)
+    assert metadata["magmom"]["output_magmom_count"] == 6
+
+
 def test_repeat_poscar_reorders_ldau_species_arrays_when_species_order_changes(tmp_path: Path) -> None:
     poscar = tmp_path / "POSCAR"
     atoms = Atoms(

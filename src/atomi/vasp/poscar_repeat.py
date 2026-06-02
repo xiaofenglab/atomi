@@ -294,12 +294,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--incar",
         type=Path,
-        help="INCAR whose MAGMOM matches the input POSCAR. Overrides --template/INCAR and input-folder INCAR.",
+        help=(
+            "Optional INCAR whose MAGMOM matches the input POSCAR. When supplied, "
+            "the output INCAR is written with MAGMOM repeated and LDAU species tags "
+            "remapped to the repeated POSCAR order."
+        ),
     )
     parser.add_argument(
         "--repeat-magmom",
         action="store_true",
-        help="Rewrite output INCAR with the input MAGMOM repeated and reordered to match the output POSCAR.",
+        help=(
+            "Rewrite output INCAR with the source MAGMOM repeated and reordered to match "
+            "the output POSCAR. Uses --incar, --template/INCAR, or input-folder INCAR."
+        ),
     )
     parser.add_argument("--magmom-decimals", type=int, default=3, help="Decimal places for the expanded MAGMOM line.")
     parser.add_argument("--cartesian", action="store_true", help="Write Cartesian coordinates. Default writes Direct.")
@@ -333,7 +340,7 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
         copy_inputs=args.copy_inputs,
         template=args.template,
         incar=args.incar,
-        repeat_magmom=args.repeat_magmom,
+        repeat_magmom=args.repeat_magmom or args.incar is not None,
         magmom_decimals=args.magmom_decimals,
         metadata=not args.no_metadata,
     )
