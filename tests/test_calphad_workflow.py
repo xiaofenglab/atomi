@@ -211,9 +211,19 @@ def test_plot_diagram_cli_writes_boundary_csv(tmp_path: Path):
         {"T_K": 900, "X_UCL3": 0.1, "stable_signature": "FM3M", "stable_detail": "FM3M:1", "GM_J_mol": 0},
         {"T_K": 900, "X_UCL3": 0.2, "stable_signature": "FM3M", "stable_detail": "FM3M:1", "GM_J_mol": 0},
         {"T_K": 900, "X_UCL3": 0.3, "stable_signature": "MSCL", "stable_detail": "MSCL:1", "GM_J_mol": 0},
+        {"T_K": 900, "X_UCL3": 0.4, "stable_signature": "MSCL", "stable_detail": "MSCL:1", "GM_J_mol": 0},
         {"T_K": 1000, "X_UCL3": 0.1, "stable_signature": "FM3M", "stable_detail": "FM3M:1", "GM_J_mol": 0},
         {"T_K": 1000, "X_UCL3": 0.2, "stable_signature": "MSCL", "stable_detail": "MSCL:1", "GM_J_mol": 0},
         {"T_K": 1000, "X_UCL3": 0.3, "stable_signature": "MSCL", "stable_detail": "MSCL:1", "GM_J_mol": 0},
+        {"T_K": 1000, "X_UCL3": 0.4, "stable_signature": "MSCL", "stable_detail": "MSCL:1", "GM_J_mol": 0},
+        {"T_K": 1100, "X_UCL3": 0.1, "stable_signature": "FM3M", "stable_detail": "FM3M:1", "GM_J_mol": 0},
+        {"T_K": 1100, "X_UCL3": 0.2, "stable_signature": "MSCL", "stable_detail": "MSCL:1", "GM_J_mol": 0},
+        {"T_K": 1100, "X_UCL3": 0.3, "stable_signature": "MSCL", "stable_detail": "MSCL:1", "GM_J_mol": 0},
+        {"T_K": 1100, "X_UCL3": 0.4, "stable_signature": "MSCL", "stable_detail": "MSCL:1", "GM_J_mol": 0},
+        {"T_K": 1200, "X_UCL3": 0.1, "stable_signature": "FM3M", "stable_detail": "FM3M:1", "GM_J_mol": 0},
+        {"T_K": 1200, "X_UCL3": 0.2, "stable_signature": "MSCL", "stable_detail": "MSCL:1", "GM_J_mol": 0},
+        {"T_K": 1200, "X_UCL3": 0.3, "stable_signature": "MSCL", "stable_detail": "MSCL:1", "GM_J_mol": 0},
+        {"T_K": 1200, "X_UCL3": 0.4, "stable_signature": "MSCL", "stable_detail": "MSCL:1", "GM_J_mol": 0},
     ]
     with grid_csv.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
@@ -231,10 +241,15 @@ def test_plot_diagram_cli_writes_boundary_csv(tmp_path: Path):
             str(out),
             "--boundary-csv",
             str(boundary_csv),
+            "--smooth-boundaries",
+            "--smooth-window",
+            "3",
         ]
     )
 
     assert metadata and metadata["n_boundary_points"] >= 2
+    assert metadata["n_smoothed_boundary_paths"] >= 1
+    assert metadata["smooth_window"] == 3
     assert out.exists()
     boundary_rows = list(csv.DictReader(boundary_csv.open(encoding="utf-8")))
     assert boundary_rows

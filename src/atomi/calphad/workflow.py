@@ -1002,6 +1002,102 @@ def _plot_grid_boundaries(
         ax.plot([], [], color=color, linestyle=linestyle, linewidth=linewidth, label=label)
 
 
+def _typical_step(values: list[float]) -> float:
+    if len(values) < 2:
+        return 1.0
+    diffs = [abs(values[idx + 1] - values[idx]) for idx in range(len(values) - 1)]
+    diffs = [item for item in diffs if item > 0]
+    return min(diffs) if diffs else 1.0
+
+
+def _centered_moving_average(values: list[float], window: int) -> list[float]:
+    if window <= 1 or len(values) < 3:
+        return list(values)
+    window = max(1, min(window, len(values)))
+    half = window // 2
+    smoothed: list[float] = []
+    for idx in range(len(values)):
+        lo = max(0, idx - half)
+        hi = min(len(values), idx + half + 1)
+        smoothed.append(sum(values[lo:hi]) / (hi - lo))
+    return smoothed
+
+
+def _smoothed_boundary_paths(
+    boundary_points: list[dict[str, Any]],
+    x_values: list[float],
+    t_values: list[float],
+    *,
+    window: int,
+) -> list[dict[str, Any]]:
+    if window <= 1:
+        return []
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in boundary_points:
+        grouped[(row["field_1"], row["field_2"], row["orientation"])].append(row)
+
+    x_step = _typical_step(x_values)
+    t_step = _typical_step(t_values)
+    paths: list[dict[str, Any]] = []
+    for (field_1, field_2, orientation), rows in grouped.items():
+        independent_key = "T_K" if orientation == "vertical_in_x" else "x"
+        dependent_key = "x" if orientation == "vertical_in_x" else "T_K"
+        max_gap = 1.75 * (t_step if independent_key == "T_K" else x_step)
+        collapsed: dict[float, list[float]] = defaultdict(list)
+        for row in rows:
+            collapsed[float(row[independent_key])].append(float(row[dependent_key]))
+        points = [(independent, sum(dependent) / len(dependent)) for independent, dependent in collapsed.items()]
+        points.sort(key=lambda item: item[0])
+        if len(points) < 3:
+            continue
+        chunks: list[list[tuple[float, float]]] = [[]]
+        for point in points:
+            if chunks[-1] and abs(point[0] - chunks[-1][-1][0]) > max_gap:
+                chunks.append([])
+            chunks[-1].append(point)
+        for chunk in chunks:
+            if len(chunk) < 3:
+                continue
+            independent = [point[0] for point in chunk]
+            dependent = _centered_moving_average([point[1] for point in chunk], window)
+            if orientation == "vertical_in_x":
+                xy = list(zip(dependent, independent))
+            else:
+                xy = list(zip(independent, dependent))
+            paths.append(
+                {
+                    "field_1": field_1,
+                    "field_2": field_2,
+                    "orientation": orientation,
+                    "points": xy,
+                }
+            )
+    return paths
+
+
+def _plot_smoothed_boundaries(
+    ax: Any,
+    boundary_points: list[dict[str, Any]],
+    x_values: list[float],
+    t_values: list[float],
+    *,
+    color: str,
+    linestyle: str,
+    linewidth: float,
+    window: int,
+    label: str | None = None,
+) -> int:
+    paths = _smoothed_boundary_paths(boundary_points, x_values, t_values, window=window)
+    for path in paths:
+        points = path["points"]
+        xs = [point[0] for point in points]
+        ts = [point[1] for point in points]
+        ax.plot(xs, ts, color=color, linestyle=linestyle, linewidth=linewidth)
+    if paths and label:
+        ax.plot([], [], color=color, linestyle=linestyle, linewidth=linewidth, label=label)
+    return len(paths)
+
+
 def plot_phase_diagram_lines(
     csv_path: Path,
     out_png: Path,
@@ -1011,6 +1107,9 @@ def plot_phase_diagram_lines(
     label_fields: bool = True,
     overlay_csvs: list[Path] | None = None,
     overlay_labels: list[str] | None = None,
+    smooth_boundaries: bool = False,
+    smooth_window: int = 5,
+    hide_raw_boundaries: bool = False,
 ) -> dict[str, Any]:
     try:
         import matplotlib.pyplot as plt
@@ -1028,16 +1127,30 @@ def plot_phase_diagram_lines(
         write_csv(boundary_csv, boundaries, fields)
 
     fig, ax = plt.subplots(figsize=(7.2, 5.2), constrained_layout=True)
-    _plot_grid_boundaries(
-        ax,
-        signature_grid,
-        x_values,
-        t_values,
-        color="black",
-        linestyle="-",
-        linewidth=1.15,
-        label="CALPHAD/MQMQA" if overlay_csvs else None,
-    )
+    n_smooth_paths = 0
+    if not hide_raw_boundaries:
+        _plot_grid_boundaries(
+            ax,
+            signature_grid,
+            x_values,
+            t_values,
+            color="black",
+            linestyle="-",
+            linewidth=1.15,
+            label="CALPHAD/MQMQA raw" if overlay_csvs or smooth_boundaries else None,
+        )
+    if smooth_boundaries:
+        n_smooth_paths += _plot_smoothed_boundaries(
+            ax,
+            boundaries,
+            x_values,
+            t_values,
+            color="black",
+            linestyle="-",
+            linewidth=1.6,
+            window=smooth_window,
+            label="CALPHAD/MQMQA smoothed" if overlay_csvs or not hide_raw_boundaries else None,
+        )
 
     if overlay_csvs:
         overlay_labels = overlay_labels or []
@@ -1047,16 +1160,30 @@ def plot_phase_diagram_lines(
             _, overlay_t, overlay_x, overlay_sig_map, _ = infer_grid_axes(overlay_rows)
             overlay_grid = build_signature_grid(overlay_t, overlay_x, overlay_sig_map)
             label = overlay_labels[idx] if idx < len(overlay_labels) else overlay_csv.stem
-            _plot_grid_boundaries(
-                ax,
-                overlay_grid,
-                overlay_x,
-                overlay_t,
-                color=colors[idx % len(colors)],
-                linestyle="--",
-                linewidth=1.2,
-                label=label,
-            )
+            overlay_boundaries = boundary_points_from_grid(overlay_grid, overlay_t, overlay_x)
+            if not hide_raw_boundaries:
+                _plot_grid_boundaries(
+                    ax,
+                    overlay_grid,
+                    overlay_x,
+                    overlay_t,
+                    color=colors[idx % len(colors)],
+                    linestyle="--",
+                    linewidth=1.2,
+                    label=label,
+                )
+            if smooth_boundaries:
+                n_smooth_paths += _plot_smoothed_boundaries(
+                    ax,
+                    overlay_boundaries,
+                    overlay_x,
+                    overlay_t,
+                    color=colors[idx % len(colors)],
+                    linestyle="--",
+                    linewidth=1.6,
+                    window=smooth_window,
+                    label=f"{label} smoothed" if not hide_raw_boundaries else label,
+                )
 
     if label_fields:
         fields = summarize_fields(signature_grid, t_values, x_values)
@@ -1091,6 +1218,8 @@ def plot_phase_diagram_lines(
         "boundary_csv": str(boundary_csv) if boundary_csv else None,
         "n_boundary_points": len(boundaries),
         "n_phase_fields": len(signatures),
+        "n_smoothed_boundary_paths": n_smooth_paths,
+        "smooth_window": smooth_window if smooth_boundaries else None,
     }
 
 
@@ -1140,6 +1269,9 @@ def build_parser() -> argparse.ArgumentParser:
         default="both",
         help="Plot diagnostic color map, paper-style boundary diagram, or both when --plot is set.",
     )
+    scan_tx.add_argument("--smooth-boundaries", action="store_true", help="Overlay smoothed guide curves on paper-style phase diagrams.")
+    scan_tx.add_argument("--smooth-window", type=int, default=5, help="Centered moving-average window for smoothed boundary guide curves.")
+    scan_tx.add_argument("--hide-raw-boundaries", action="store_true", help="Hide raw grid-step boundaries when --smooth-boundaries is enabled.")
 
     scan_mu = sub.add_parser("scan-muo", help="Scan a T-mu(component) phase grid and write CSV.")
     scan_mu.add_argument("--config", type=Path, required=True)
@@ -1171,6 +1303,9 @@ def build_parser() -> argparse.ArgumentParser:
     plot.add_argument("--overlay-grid-csv", type=Path, action="append", default=[], help="Additional grid CSV to overlay as dashed boundaries.")
     plot.add_argument("--overlay-label", action="append", default=[], help="Legend label for each --overlay-grid-csv.")
     plot.add_argument("--no-label-fields", action="store_true", help="Suppress field labels in diagram mode.")
+    plot.add_argument("--smooth-boundaries", action="store_true", help="Overlay smoothed guide curves in diagram mode.")
+    plot.add_argument("--smooth-window", type=int, default=5, help="Centered moving-average window for smoothed boundary guide curves.")
+    plot.add_argument("--hide-raw-boundaries", action="store_true", help="Hide raw grid-step boundaries when --smooth-boundaries is enabled.")
 
     diagram = sub.add_parser("plot-diagram", help="Plot a paper-style T-X phase-boundary diagram from a scan grid CSV.")
     diagram.add_argument("--grid-csv", type=Path, required=True)
@@ -1180,6 +1315,9 @@ def build_parser() -> argparse.ArgumentParser:
     diagram.add_argument("--overlay-grid-csv", type=Path, action="append", default=[], help="Additional grid CSV to overlay as dashed boundaries.")
     diagram.add_argument("--overlay-label", action="append", default=[], help="Legend label for each --overlay-grid-csv.")
     diagram.add_argument("--no-label-fields", action="store_true", help="Suppress field labels.")
+    diagram.add_argument("--smooth-boundaries", action="store_true", help="Overlay smoothed guide curves.")
+    diagram.add_argument("--smooth-window", type=int, default=5, help="Centered moving-average window for smoothed boundary guide curves.")
+    diagram.add_argument("--hide-raw-boundaries", action="store_true", help="Hide raw grid-step boundaries when --smooth-boundaries is enabled.")
     return parser
 
 
@@ -1324,6 +1462,9 @@ def scan_tx_main(args: argparse.Namespace) -> dict[str, Any]:
             diagram_png,
             title="CALPHAD T-X phase diagram",
             boundary_csv=boundary_csv,
+            smooth_boundaries=args.smooth_boundaries,
+            smooth_window=args.smooth_window,
+            hide_raw_boundaries=args.hide_raw_boundaries,
         )
         metadata["outputs"]["phase_diagram_png"] = str(diagram_png)
         metadata["outputs"]["phase_boundary_points"] = str(boundary_csv)
@@ -1429,6 +1570,9 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
                 label_fields=not args.no_label_fields,
                 overlay_csvs=[item.resolve() for item in args.overlay_grid_csv],
                 overlay_labels=args.overlay_label,
+                smooth_boundaries=args.smooth_boundaries,
+                smooth_window=args.smooth_window,
+                hide_raw_boundaries=args.hide_raw_boundaries,
             )
             outputs.update(diagram_meta)
             print(f"Wrote phase diagram: {diagram_out}")
@@ -1442,6 +1586,9 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
             label_fields=not args.no_label_fields,
             overlay_csvs=[item.resolve() for item in args.overlay_grid_csv],
             overlay_labels=args.overlay_label,
+            smooth_boundaries=args.smooth_boundaries,
+            smooth_window=args.smooth_window,
+            hide_raw_boundaries=args.hide_raw_boundaries,
         )
         print(f"Wrote phase diagram: {args.out.resolve()}")
         return metadata
