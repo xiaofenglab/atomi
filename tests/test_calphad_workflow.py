@@ -14,6 +14,9 @@ class FakePhase:
 def test_species_filtering_and_uo_preferred_phase_order():
     assert workflow.normalize_species_name("U_POS4") == "U"
     assert workflow.species_elements_from_name("UO2") == {"U", "O"}
+    assert workflow.species_elements_from_name("NA2UCL6") == {"NA", "U", "CL"}
+    assert workflow.parse_formula_counts("NaCl") == {"NA": 1.0, "CL": 1.0}
+    assert workflow.parse_formula_counts("UCl3") == {"U": 1.0, "CL": 3.0}
     assert workflow.species_in_binary_subsystem("U_POS4", "U", "O")
     assert workflow.species_in_binary_subsystem("VA", "U", "O")
     assert not workflow.species_in_binary_subsystem("ZRO2", "U", "O")
@@ -38,6 +41,15 @@ def test_phase_feasible_in_binary_subsystem_reports_allowed_sublattices():
     assert allowed == [[], ["O_NEG2", "VA"]]
 
 
+def test_pseudo_binary_formula_join_constraints():
+    components, endmembers, dependent = workflow.formula_endmember_config("NaCl", "UCl3")
+    fractions = workflow.pseudo_binary_element_fractions(0.5, endmembers, "NaCl", "UCl3")
+
+    assert components == ["CL", "NA", "U", "VA"]
+    assert dependent == "CL"
+    assert fractions == {"NA": 1.0 / 6.0, "CL": 4.0 / 6.0, "U": 1.0 / 6.0}
+
+
 def test_init_workflow_writes_portable_layout(tmp_path: Path):
     result = workflow.main(
         [
@@ -60,6 +72,29 @@ def test_init_workflow_writes_portable_layout(tmp_path: Path):
     assert (root / "muO_maps").is_dir()
     assert config["tdb_file"] == "TDB/UPUOC.TDB"
     assert config["components"] == ["U", "O", "VA"]
+
+
+def test_init_workflow_formula_endmembers_use_elemental_components(tmp_path: Path):
+    result = workflow.main(
+        [
+            "init",
+            "--outdir",
+            str(tmp_path / "salt_workflow"),
+            "--tdb",
+            "TDB/MSTDB.dat",
+            "--component-a",
+            "LiF",
+            "--component-b",
+            "UF4",
+        ]
+    )
+
+    root = Path(result["root"])
+    config = json.loads((root / "config" / "LiF_UF4_phase_config.json").read_text(encoding="utf-8"))
+    assert config["components"] == ["F", "LI", "U", "VA"]
+    assert config["formula_endmembers"]["LiF"] == {"F": 1.0, "LI": 1.0}
+    assert config["formula_endmembers"]["UF4"] == {"F": 4.0, "U": 1.0}
+    assert config["dependent_component"] == "F"
 
 
 def test_atomi_cli_forwards_calphad_workflow_init(tmp_path: Path):

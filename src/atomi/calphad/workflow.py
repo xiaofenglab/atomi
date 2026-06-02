@@ -18,6 +18,111 @@ ALWAYS_INCLUDE_BY_NAME = {"LIQUID", "GAS", "VAPOR", "FLUID"}
 SCHEMA_CONFIG = "atomi.calphad.workflow.config.v1"
 SCHEMA_GRID = "atomi.calphad.workflow.grid.v1"
 SCHEMA_REACTION = "atomi.calphad.workflow.reaction_summary.v1"
+PERIODIC_SYMBOLS = {
+    "H",
+    "HE",
+    "LI",
+    "BE",
+    "B",
+    "C",
+    "N",
+    "O",
+    "F",
+    "NE",
+    "NA",
+    "MG",
+    "AL",
+    "SI",
+    "P",
+    "S",
+    "CL",
+    "AR",
+    "K",
+    "CA",
+    "SC",
+    "TI",
+    "V",
+    "CR",
+    "MN",
+    "FE",
+    "CO",
+    "NI",
+    "CU",
+    "ZN",
+    "GA",
+    "GE",
+    "AS",
+    "SE",
+    "BR",
+    "KR",
+    "RB",
+    "SR",
+    "Y",
+    "ZR",
+    "NB",
+    "MO",
+    "TC",
+    "RU",
+    "RH",
+    "PD",
+    "AG",
+    "CD",
+    "IN",
+    "SN",
+    "SB",
+    "TE",
+    "I",
+    "XE",
+    "CS",
+    "BA",
+    "LA",
+    "CE",
+    "PR",
+    "ND",
+    "PM",
+    "SM",
+    "EU",
+    "GD",
+    "TB",
+    "DY",
+    "HO",
+    "ER",
+    "TM",
+    "YB",
+    "LU",
+    "HF",
+    "TA",
+    "W",
+    "RE",
+    "OS",
+    "IR",
+    "PT",
+    "AU",
+    "HG",
+    "TL",
+    "PB",
+    "BI",
+    "PO",
+    "AT",
+    "RN",
+    "FR",
+    "RA",
+    "AC",
+    "TH",
+    "PA",
+    "U",
+    "NP",
+    "PU",
+    "AM",
+    "CM",
+    "BK",
+    "CF",
+    "ES",
+    "FM",
+    "MD",
+    "NO",
+    "LR",
+}
 
 
 def finite_float(value: Any) -> float | None:
@@ -108,13 +213,47 @@ def normalize_species_name(name: str) -> str:
     return text
 
 
+def parse_formula_counts(formula: str) -> dict[str, float]:
+    text = normalize_species_name(formula)
+    if text in {"", "/-", "-", "/"}:
+        return {}
+    if text.upper() == "VA":
+        return {"VA": 1.0}
+    counts: Counter[str] = Counter()
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if not char.isalpha():
+            i += 1
+            continue
+        if i + 1 < len(text) and text[i + 1].islower():
+            symbol = (char + text[i + 1]).upper()
+            i += 2
+        else:
+            two = text[i : i + 2].upper()
+            if len(two) == 2 and two in PERIODIC_SYMBOLS:
+                symbol = two
+                i += 2
+            else:
+                symbol = char.upper()
+                i += 1
+        if symbol not in PERIODIC_SYMBOLS:
+            continue
+        start = i
+        while i < len(text) and (text[i].isdigit() or text[i] == "."):
+            i += 1
+        amount = float(text[start:i] or 1.0)
+        counts[symbol] += amount
+    return dict(counts)
+
+
 def species_elements_from_name(name: str) -> set[str]:
     text = normalize_species_name(name)
     if text in {"", "/-", "-", "/"}:
         return set()
     if text == "VA":
         return {"VA"}
-    return set(re.findall(r"[A-Z][a-z]?", text))
+    return set(parse_formula_counts(text))
 
 
 def species_in_binary_subsystem(species_name: str, a: str, b: str) -> bool:
@@ -122,6 +261,12 @@ def species_in_binary_subsystem(species_name: str, a: str, b: str) -> bool:
 
 
 def phase_feasible_in_binary_subsystem(phase_obj: Any, a: str, b: str) -> tuple[bool, list[dict[str, Any]], list[list[str]]]:
+    return phase_feasible_in_multicomponent_subsystem(phase_obj, {a, b, "VA"})
+
+
+def phase_feasible_in_multicomponent_subsystem(
+    phase_obj: Any, allowed_elements: set[str]
+) -> tuple[bool, list[dict[str, Any]], list[list[str]]]:
     allowed_somewhere = False
     bad_sublattices: list[dict[str, Any]] = []
     allowed_by_sublattice: list[list[str]] = []
@@ -130,9 +275,10 @@ def phase_feasible_in_binary_subsystem(phase_obj: Any, a: str, b: str) -> tuple[
         rejected: list[str] = []
         for species in sublattice:
             name = str(species)
-            if species_in_binary_subsystem(name, a, b):
+            elements = species_elements_from_name(name)
+            if elements.issubset(allowed_elements):
                 allowed.append(name)
-                if name != "VA":
+                if name != "VA" and elements:
                     allowed_somewhere = True
             else:
                 rejected.append(name)
@@ -196,12 +342,55 @@ class CalphadConfig:
     pressure_pa: float = 101325.0
     total_moles: float = 1.0
     phase_labels: dict[str, str] | None = None
+    formula_endmembers: dict[str, dict[str, float]] | None = None
+    dependent_component: str = ""
+
+
+def formula_endmember_config(a: str, b: str) -> tuple[list[str], dict[str, dict[str, float]], str]:
+    counts = {a: parse_formula_counts(a), b: parse_formula_counts(b)}
+    elements = sorted({elem for payload in counts.values() for elem in payload if elem != "VA"})
+    common = sorted(set(counts[a]).intersection(counts[b]).difference({"VA"}))
+    dependent = common[0] if common else (elements[-1] if elements else "")
+    return [*elements, "VA"], counts, dependent
+
+
+def pseudo_binary_element_fractions(
+    x_value: float,
+    formula_endmembers: dict[str, dict[str, float]],
+    component_a: str,
+    component_b: str,
+) -> dict[str, float]:
+    xa = 1.0 - float(x_value)
+    xb = float(x_value)
+    totals: Counter[str] = Counter()
+    for elem, amount in formula_endmembers.get(component_a, {}).items():
+        if elem != "VA":
+            totals[elem] += xa * float(amount)
+    for elem, amount in formula_endmembers.get(component_b, {}).items():
+        if elem != "VA":
+            totals[elem] += xb * float(amount)
+    total_atoms = sum(totals.values())
+    if total_atoms <= 0.0:
+        raise ValueError("Pseudo-binary formula endmembers produced zero atoms.")
+    return {elem: amount / total_atoms for elem, amount in totals.items()}
+
+
+def is_formula_binary(a: str, b: str) -> bool:
+    elements = set(parse_formula_counts(a)).union(parse_formula_counts(b)).difference({"VA"})
+    return len(elements) > 2
 
 
 def load_config(path: Path) -> CalphadConfig:
     data = read_json(path)
     base = path.parent
     tdb = resolve_path(data["tdb_file"], base)
+    formula_endmembers = data.get("formula_endmembers")
+    if formula_endmembers is not None:
+        formula_endmembers = {
+            str(name): {str(elem): float(amount) for elem, amount in payload.items()}
+            for name, payload in formula_endmembers.items()
+            if isinstance(payload, dict)
+        }
     return CalphadConfig(
         path=path,
         tdb_file=tdb,
@@ -213,12 +402,17 @@ def load_config(path: Path) -> CalphadConfig:
         pressure_pa=float(data.get("pressure_pa") or 101325.0),
         total_moles=float(data.get("total_moles") or 1.0),
         phase_labels=data.get("phase_labels") if isinstance(data.get("phase_labels"), dict) else {},
+        formula_endmembers=formula_endmembers,
+        dependent_component=str(data.get("dependent_component") or ""),
     )
 
 
 def inspect_binary_tdb(tdb_file: Path, a: str, b: str) -> dict[str, Any]:
     Database, *_ = require_pycalphad()
     dbf = Database(str(tdb_file))
+    formula_mode = is_formula_binary(a, b)
+    components, formula_endmembers, dependent = formula_endmember_config(a, b) if formula_mode else ([a, b, "VA"], {}, "")
+    allowed_elements = set(components)
     candidate_phases: list[str] = []
     debug: dict[str, Any] = {}
     for name, phase in dbf.phases.items():
@@ -227,33 +421,41 @@ def inspect_binary_tdb(tdb_file: Path, a: str, b: str) -> dict[str, Any]:
             candidate_phases.append(name)
             debug[name] = {"status": "included", "reason": "forced inclusion by fluid-like phase name"}
             continue
-        ok, bad_sublattices, allowed_by_sublattice = phase_feasible_in_binary_subsystem(phase, a, b)
+        if formula_mode:
+            ok, bad_sublattices, allowed_by_sublattice = phase_feasible_in_multicomponent_subsystem(phase, allowed_elements)
+        else:
+            ok, bad_sublattices, allowed_by_sublattice = phase_feasible_in_binary_subsystem(phase, a, b)
         if ok:
             candidate_phases.append(name)
             debug[name] = {
                 "status": "included",
-                "reason": f"phase feasible in binary subsystem {a}-{b}",
+                "reason": f"phase feasible in subsystem {'-'.join(sorted(allowed_elements.difference({'VA'})))}",
                 "allowed_by_sublattice": allowed_by_sublattice,
             }
         else:
             debug[name] = {
                 "status": "excluded",
-                "reason": f"no valid {a}/{b}/VA choice on some sublattices",
+                "reason": f"no valid {'/'.join(sorted(allowed_elements))} choice on some sublattices",
                 "bad_sublattices": bad_sublattices,
                 "allowed_by_sublattice": allowed_by_sublattice,
             }
     candidate_phases = sorted(set(candidate_phases))
-    return {
+    config = {
         "schema": SCHEMA_CONFIG,
         "tdb_file": str(tdb_file),
         "component_A": a,
         "component_B": b,
-        "components": [a, b, "VA"],
+        "components": components,
         "x_axis_component": b,
         "candidate_phases": candidate_phases,
         "selected_phases": recommend_phase_subset(candidate_phases, a, b),
         "debug": debug,
     }
+    if formula_mode:
+        config["formula_endmembers"] = formula_endmembers
+        config["dependent_component"] = dependent
+        config["composition_mode"] = "pseudo_binary_formula_join"
+    return config
 
 
 def summarize_phases(phases: Any, npvals: Any, tol: float = 1.0e-10) -> list[tuple[str, float]]:
@@ -350,17 +552,27 @@ def tx_scan_rows(
     for temp in t_values:
         for xval in x_values:
             row: dict[str, Any] = {"T_K": temp, f"X_{config.x_axis_component}": xval}
+            conditions = {v.N: config.total_moles, v.T: temp, v.P: config.pressure_pa}
+            if config.formula_endmembers:
+                fractions = pseudo_binary_element_fractions(
+                    xval,
+                    config.formula_endmembers,
+                    config.component_a,
+                    config.component_b,
+                )
+                dependent = config.dependent_component or next(reversed(sorted(fractions)))
+                for elem, fraction in fractions.items():
+                    if elem != dependent:
+                        conditions[v.X(elem)] = fraction
+                    row[f"X_{elem}"] = fraction
+            else:
+                conditions[v.X(config.x_axis_component)] = xval
             try:
                 summary, _ = equilibrium_summary(
                     dbf=dbf,
                     components=config.components,
                     phases=phase_list,
-                    conditions={
-                        v.N: config.total_moles,
-                        v.T: temp,
-                        v.P: config.pressure_pa,
-                        v.X(config.x_axis_component): xval,
-                    },
+                    conditions=conditions,
                     verbose=verbose,
                 )
                 row.update(
@@ -691,16 +903,24 @@ def init_workflow(args: argparse.Namespace) -> dict[str, Any]:
     folders = ["TDB", "config", "inspect", "equilibrium", "phase_diagram", "muO_maps", "phase_probe", "phase_analysis", "reaction_summary"]
     for folder in folders:
         (root / folder).mkdir(parents=True, exist_ok=True)
+    if is_formula_binary(args.component_a, args.component_b):
+        components, formula_endmembers, dependent = formula_endmember_config(args.component_a, args.component_b)
+    else:
+        components, formula_endmembers, dependent = [args.component_a, args.component_b, "VA"], {}, ""
     config = {
         "schema": SCHEMA_CONFIG,
         "tdb_file": args.tdb,
         "component_A": args.component_a,
         "component_B": args.component_b,
-        "components": [args.component_a, args.component_b, "VA"],
+        "components": components,
         "x_axis_component": args.component_b,
         "selected_phases": [],
         "notes": "Run calphad-workflow inspect to populate selected phases from the TDB.",
     }
+    if formula_endmembers:
+        config["formula_endmembers"] = formula_endmembers
+        config["dependent_component"] = dependent
+        config["composition_mode"] = "pseudo_binary_formula_join"
     config_path = root / "config" / f"{args.component_a}_{args.component_b}_phase_config.json"
     write_json(config_path, config)
     readme = root / "README_calphad_workflow.md"
@@ -751,7 +971,14 @@ def eq_main(args: argparse.Namespace) -> dict[str, Any]:
         mu_component = args.mu_component or config.x_axis_component
         conditions[v.MU(mu_component)] = args.mu
     else:
-        conditions[v.X(config.x_axis_component)] = args.x
+        if config.formula_endmembers:
+            fractions = pseudo_binary_element_fractions(args.x, config.formula_endmembers, config.component_a, config.component_b)
+            dependent = config.dependent_component or next(reversed(sorted(fractions)))
+            for elem, fraction in fractions.items():
+                if elem != dependent:
+                    conditions[v.X(elem)] = fraction
+        else:
+            conditions[v.X(config.x_axis_component)] = args.x
     summary, _ = equilibrium_summary(
         dbf=dbf,
         components=config.components,
@@ -782,6 +1009,10 @@ def scan_tx_main(args: argparse.Namespace) -> dict[str, Any]:
     outdir = args.outdir.resolve()
     table = outdir / "T_X_phase_grid.csv"
     fields = ["T_K", f"X_{config.x_axis_component}", "stable_signature", "stable_detail", "GM_J_mol"]
+    if config.formula_endmembers:
+        for comp in config.components:
+            if comp != "VA":
+                fields.append(f"X_{comp}")
     for comp in config.components:
         fields.append(f"mu_{comp}_J_mol")
     write_csv(table, rows, fields)
@@ -792,6 +1023,10 @@ def scan_tx_main(args: argparse.Namespace) -> dict[str, Any]:
         "n_rows": len(rows),
         "outputs": {"grid_csv": str(table)},
     }
+    if config.formula_endmembers:
+        metadata["composition_mode"] = "pseudo_binary_formula_join"
+        metadata["formula_endmembers"] = config.formula_endmembers
+        metadata["dependent_component"] = config.dependent_component
     if args.plot:
         png = outdir / "T_X_phase_map.png"
         plot_grid_map(table, png, title="CALPHAD T-X phase map")
