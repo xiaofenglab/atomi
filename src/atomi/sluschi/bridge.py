@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from atomi.thermo_prior import PRIOR_SCHEMA
+
 
 SCHEMA_PLAN = "atomi.sluschi.bridge.plan.v1"
 SCHEMA_STATUS = "atomi.sluschi.bridge.status.v1"
@@ -20,6 +22,20 @@ SCHEMA_RESULTS = "atomi.sluschi.bridge.results.v1"
 
 DEFAULT_REPO = "https://github.com/qjhong/SLUSCHI.git"
 DEFAULT_SUPERSALT_REF = "SuperSalt chloride MLIP; install/provide externally, not vendored by Atomi."
+
+OBSERVABLE_UNITS = {
+    "melting_temperature_K": "K",
+    "solidus_temperature_K": "K",
+    "liquidus_temperature_K": "K",
+    "heat_of_fusion_J_mol": "J/mol",
+    "enthalpy_J_mol": "J/mol",
+    "entropy_J_mol_K": "J/mol/K",
+    "heat_capacity_J_mol_K": "J/mol/K",
+    "density_g_cm3": "g/cm^3",
+    "volume_cm3_mol": "cm^3/mol",
+    "diffusion_m2_s": "m^2/s",
+    "viscosity_Pa_s": "Pa*s",
+}
 
 
 def write_json(path: Path, data: Any) -> None:
@@ -98,8 +114,11 @@ def inspect_environment(config_path: Path | None = None, profile_name: str = "sl
         "ready_for_lammps_mlip": bool(executables.get("lmp") or executables.get("lammps")) and bool(model),
         "recommendation": (
             "Use SLUSCHI as an external dependency. Keep Atomi responsible for input staging, "
-            "MLIP manifest/provenance, parsing, and CALPHAD handoff."
+            "MLIP manifest/provenance, parsing, and CALPHAD/thermo-prior handoff. Treat melting point "
+            "and heat of fusion as native SLUSCHI strengths; treat Cp as a phase-MD observable that "
+            "requires a validated MLIP and explicit solid/liquid enthalpy-fluctuation or H(T)-slope data."
         ),
+        "install_hint": f"git clone {DEFAULT_REPO} ~/SLUSCHI && export ATOMI_SLUSCHI_ROOT=$HOME/SLUSCHI",
     }
     return status
 
@@ -136,8 +155,18 @@ def write_readme(path: Path, plan: dict[str, Any]) -> None:
             5. Run SLUSCHI externally, then parse outputs:
                `atomi sluschi-bridge parse --root . --outdir results`
 
-            6. Use the resulting CSV/JSON as CALPHAD fitting/check data:
-               melting point, heat of fusion, enthalpy, density/volume, or entropy.
+            6. Use the resulting CSV/JSON/thermo-prior handoff as CALPHAD fitting/check
+               data: melting point, heat of fusion, enthalpy, density/volume,
+               entropy, or phase-specific heat capacity.
+
+            Scientific guard:
+
+            - SLUSCHI is a robust melting/coexistence engine.
+            - Cp is only a robust prior when it is parsed from explicit solid/liquid
+              MD observables, e.g. NPT enthalpy fluctuations or H(T) slopes with a
+              validated MLIP. For UO2/UC2 solids, keep QHA/phonopy as the baseline
+              at low temperature and use SLUSCHI/MLIP-MD to probe high-temperature
+              anharmonic and liquid behavior.
             """
         ),
         encoding="utf-8",
@@ -193,8 +222,24 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             "note": DEFAULT_SUPERSALT_REF if args.mlip_provider.lower() == "supersalt" else "",
         },
         "handoff": {
-            "calphad_observables": ["melting_temperature_K", "heat_of_fusion_J_mol", "enthalpy_J_mol", "density_g_cm3"],
-            "md_observables": ["diffusion", "density", "heat_capacity", "thermal_conductivity_if_requested"],
+            "calphad_observables": [
+                "melting_temperature_K",
+                "solidus_temperature_K",
+                "liquidus_temperature_K",
+                "heat_of_fusion_J_mol",
+                "enthalpy_J_mol",
+                "entropy_J_mol_K",
+                "density_g_cm3",
+                "volume_cm3_mol",
+            ],
+            "md_observables": [
+                "diffusion_m2_s",
+                "density_g_cm3",
+                "heat_capacity_J_mol_K",
+                "viscosity_Pa_s",
+                "thermal_conductivity_if_requested",
+            ],
+            "thermo_prior_schema": PRIOR_SCHEMA,
         },
     }
 
@@ -230,9 +275,26 @@ def init_workspace(args: argparse.Namespace) -> dict[str, Any]:
 
 
 RESULT_PATTERNS = {
-    "melting_temperature_K": re.compile(r"(?:melting|m\.p\.|tm)[^\n:=]*[:=]?\s*([-+]?\d+(?:\.\d+)?)\s*K?", re.IGNORECASE),
-    "heat_of_fusion_J_mol": re.compile(r"(?:heat\s+of\s+fusion|delta\s*h|dh)[^\n:=]*[:=]?\s*([-+]?\d+(?:\.\d+)?)", re.IGNORECASE),
-    "enthalpy_J_mol": re.compile(r"(?:enthalpy|h)[^\n:=]*[:=]?\s*([-+]?\d+(?:\.\d+)?)", re.IGNORECASE),
+    "melting_temperature_K": re.compile(
+        r"(?:melting\s+temperature|melting\s+point|m\.p\.|tm)\b[^\n:=]*[:=]?\s*([-+]?\d+(?:\.\d+)?)\s*K?",
+        re.IGNORECASE,
+    ),
+    "solidus_temperature_K": re.compile(r"\bsolidus\b[^\n:=]*[:=]?\s*([-+]?\d+(?:\.\d+)?)\s*K?", re.IGNORECASE),
+    "liquidus_temperature_K": re.compile(r"\bliquidus\b[^\n:=]*[:=]?\s*([-+]?\d+(?:\.\d+)?)\s*K?", re.IGNORECASE),
+    "heat_of_fusion_J_mol": re.compile(
+        r"(?:heat\s+of\s+fusion|enthalpy\s+of\s+fusion|delta\s*h(?:fus)?|dh(?:fus)?)\b[^\n:=]*[:=]?\s*([-+]?\d+(?:\.\d+)?)",
+        re.IGNORECASE,
+    ),
+    "enthalpy_J_mol": re.compile(r"\b(?:enthalpy|h)\b(?!\s+of\s+fusion)[^\n:=]*[:=]\s*([-+]?\d+(?:\.\d+)?)", re.IGNORECASE),
+    "entropy_J_mol_K": re.compile(r"\b(?:entropy|s)\b[^\n:=]*[:=]\s*([-+]?\d+(?:\.\d+)?)", re.IGNORECASE),
+    "heat_capacity_J_mol_K": re.compile(
+        r"\b(?:heat\s+capacity|cp|c_p)\b[^\n:=]*[:=]\s*([-+]?\d+(?:\.\d+)?)",
+        re.IGNORECASE,
+    ),
+    "density_g_cm3": re.compile(r"\b(?:density|rho)\b[^\n:=]*[:=]\s*([-+]?\d+(?:\.\d+)?)", re.IGNORECASE),
+    "volume_cm3_mol": re.compile(r"\b(?:molar\s+volume|volume)\b[^\n:=]*[:=]\s*([-+]?\d+(?:\.\d+)?)", re.IGNORECASE),
+    "diffusion_m2_s": re.compile(r"\b(?:diffusion|diffusivity|D)\b[^\n:=]*[:=]\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", re.IGNORECASE),
+    "viscosity_Pa_s": re.compile(r"\b(?:viscosity|eta)\b[^\n:=]*[:=]\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", re.IGNORECASE),
 }
 
 
@@ -241,7 +303,27 @@ class ParsedResult:
     file: str
     observable: str
     value: float
+    unit: str
+    phase: str
+    temperature_K: float | None
+    composition: str
     line: str
+
+
+def infer_phase(path: Path, line: str, default: str = "") -> str:
+    haystack = f"{path} {line}".lower()
+    if "coexist" in haystack or "solid-liquid" in haystack or "solid_liquid" in haystack:
+        return "solid-liquid"
+    if "liquid" in haystack or "melt" in haystack or "_liq" in haystack:
+        return "liquid"
+    if "solid" in haystack or "_sol" in haystack:
+        return "solid"
+    return default
+
+
+def infer_temperature(line: str, default: float | None = None) -> float | None:
+    match = re.search(r"(?:temperature|temp|T)\b[^\n:=]*[:=]\s*([-+]?\d+(?:\.\d+)?)\s*K?", line, re.IGNORECASE)
+    return float(match.group(1)) if match else default
 
 
 def parse_results(root: Path) -> list[ParsedResult]:
@@ -264,10 +346,59 @@ def parse_results(root: Path) -> list[ParsedResult]:
                         file=str(path),
                         observable=observable,
                         value=float(match.group(1)),
+                        unit=OBSERVABLE_UNITS.get(observable, ""),
+                        phase=infer_phase(path, text[line_start:line_end].strip()),
+                        temperature_K=infer_temperature(text[line_start:line_end].strip()),
+                        composition="",
                         line=text[line_start:line_end].strip(),
                     )
                 )
     return rows
+
+
+def load_bridge_plan(root: Path) -> dict[str, Any]:
+    plan = root / "sluschi_bridge_plan.json"
+    if not plan.exists():
+        return {}
+    try:
+        data = json.loads(plan.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def build_thermo_prior_payload(args: argparse.Namespace, rows: list[ParsedResult]) -> dict[str, Any]:
+    plan = load_bridge_plan(args.root.resolve())
+    components = parse_csv_list(args.components) or plan.get("components", [])
+    observables = []
+    for row in rows:
+        record = row.__dict__.copy()
+        if args.phase and not record["phase"]:
+            record["phase"] = args.phase
+        if args.temperature_k is not None and record["temperature_K"] is None:
+            record["temperature_K"] = args.temperature_k
+        if args.composition and not record["composition"]:
+            record["composition"] = args.composition
+        record["file"] = str(Path(record["file"]).resolve())
+        observables.append(record)
+    return {
+        "schema": PRIOR_SCHEMA,
+        "kind": "sluschi_phase_observable_set",
+        "system": args.system or plan.get("system") or args.root.resolve().name,
+        "formula": args.formula or "",
+        "components": components,
+        "thermo": {"observables": observables},
+        "source": {
+            "method": "sluschi_bridge_parse",
+            "root": str(args.root.resolve()),
+            "sluschi_repo": DEFAULT_REPO,
+            "bridge_schema": SCHEMA_RESULTS,
+        },
+        "notes": [
+            "SLUSCHI-native priors are strongest for melting/coexistence and heat of fusion.",
+            "Cp entries should be used only when generated from explicit phase MD fluctuation or H(T)-slope analyses with a validated MLIP.",
+        ],
+    }
 
 
 def parse_main(args: argparse.Namespace) -> dict[str, Any]:
@@ -275,17 +406,21 @@ def parse_main(args: argparse.Namespace) -> dict[str, Any]:
     outdir = args.outdir.resolve()
     csv_rows = [row.__dict__ for row in rows]
     table = outdir / "sluschi_parsed_results.csv"
-    write_csv(table, csv_rows, ["file", "observable", "value", "line"])
+    write_csv(table, csv_rows, ["file", "observable", "value", "unit", "phase", "temperature_K", "composition", "line"])
+    prior_path = args.prior_out or outdir / "sluschi_thermo_prior.json"
+    prior_payload = build_thermo_prior_payload(args, rows)
+    write_json(prior_path, prior_payload)
     payload = {
         "schema": SCHEMA_RESULTS,
         "root": str(args.root.resolve()),
         "n_results": len(rows),
-        "outputs": {"csv": str(table)},
+        "outputs": {"csv": str(table), "thermo_prior_json": str(prior_path)},
         "results": csv_rows,
     }
     write_json(outdir / "sluschi_parsed_results.json", payload)
     print(f"Parsed SLUSCHI-like outputs: {len(rows)} result(s)")
     print(f"Wrote CSV                 : {table}")
+    print(f"Wrote thermo-prior JSON   : {prior_path}")
     return payload
 
 
@@ -337,6 +472,13 @@ def build_parser() -> argparse.ArgumentParser:
     parse = sub.add_parser("parse", help="Parse SLUSCHI-like text outputs for CALPHAD handoff observables.")
     parse.add_argument("--root", type=Path, default=Path("."))
     parse.add_argument("--outdir", type=Path, default=Path("results"))
+    parse.add_argument("--prior-out", type=Path, help="Optional thermo-prior JSON output path.")
+    parse.add_argument("--system", default="", help="System label for the thermo-prior JSON.")
+    parse.add_argument("--formula", default="", help="Formula label for unary phase priors, if applicable.")
+    parse.add_argument("--components", default="", help="Comma-separated component labels for mixture priors.")
+    parse.add_argument("--phase", default="", help="Default phase label when not inferable from output text.")
+    parse.add_argument("--temperature-k", type=float, help="Default temperature for parsed observables.")
+    parse.add_argument("--composition", default="", help="Default composition label for parsed observables.")
 
     return parser
 

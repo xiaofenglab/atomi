@@ -74,17 +74,50 @@ def test_sluschi_parse_collects_calphad_handoff_values(tmp_path: Path):
     root = tmp_path / "run"
     root.mkdir()
     (root / "sluschi.out").write_text(
-        "melting temperature = 973.15 K\nheat of fusion = 14500\n",
+        "\n".join(
+            [
+                "melting temperature = 973.15 K",
+                "heat of fusion = 14500",
+                "liquid Cp = 96.5 J/mol/K at temperature = 1100 K",
+                "solid entropy = 72.1 J/mol/K",
+                "",
+            ]
+        ),
         encoding="utf-8",
     )
     out = tmp_path / "results"
 
-    result = bridge.main(["parse", "--root", str(root), "--outdir", str(out)])
+    result = bridge.main(
+        [
+            "parse",
+            "--root",
+            str(root),
+            "--outdir",
+            str(out),
+            "--system",
+            "NaCl-UCl3",
+            "--components",
+            "NaCl,UCl3",
+            "--composition",
+            "x_UCl3=0.50",
+        ]
+    )
 
     data = rows(out / "sluschi_parsed_results.csv")
     assert result["n_results"] >= 2
     assert {row["observable"] for row in data} >= {"melting_temperature_K", "heat_of_fusion_J_mol"}
+    cp_rows = [row for row in data if row["observable"] == "heat_capacity_J_mol_K"]
+    assert cp_rows
+    assert cp_rows[0]["unit"] == "J/mol/K"
+    assert cp_rows[0]["phase"] == "liquid"
+    assert cp_rows[0]["composition"] == ""
     assert (out / "sluschi_parsed_results.json").exists()
+    prior = json.loads((out / "sluschi_thermo_prior.json").read_text(encoding="utf-8"))
+    assert prior["schema"] == "atomi.thermo_prior.v1"
+    assert prior["kind"] == "sluschi_phase_observable_set"
+    assert prior["system"] == "NaCl-UCl3"
+    assert prior["components"] == ["NaCl", "UCl3"]
+    assert any(item["observable"] == "heat_capacity_J_mol_K" for item in prior["thermo"]["observables"])
 
 
 def test_confighpc_exports_sluschi_profile_values(tmp_path: Path):
