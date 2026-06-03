@@ -92,6 +92,34 @@ class RunSpinReport:
     physics_guard_bad_by_element: dict[str, int] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class OxidationMomentRule:
+    element: str
+    magnitude: float
+    oxidation: float
+
+
+@dataclass
+class SpinCorrectionAtom:
+    index: int
+    element: str
+    initial: float | None
+    final: float
+    suggested_moment: float
+    suggested_oxidation: float | None
+    label: str
+    note: str = ""
+
+
+@dataclass
+class SpinCorrectionResult:
+    atoms: list[SpinCorrectionAtom]
+    magmom_line: str
+    charge_total: float | None
+    neutral: bool | None
+    notes: list[str] = field(default_factory=list)
+
+
 def infer_nions_from_outcar(outcar: Path) -> int | None:
     opener = gzip.open if outcar.suffix == ".gz" else open
     with opener(outcar, "rt", encoding="utf-8", errors="replace") as handle:
@@ -548,6 +576,264 @@ def apply_moment_guards(atoms: list[AtomReport], guards: dict[str, tuple[list[fl
         return "NO_MATCHED_ELEMENTS", 0, {}
     bad_count = sum(bad_by_element.values())
     return ("OK" if bad_count == 0 else "FAIL"), bad_count, bad_by_element
+
+
+def parse_magmom_oxidation(values: list[str]) -> dict[str, list[OxidationMomentRule]]:
+    rules: dict[str, list[OxidationMomentRule]] = {}
+    for raw in values:
+        for part in raw.split(","):
+            text = part.strip()
+            if not text:
+                continue
+            if ":" not in text or "=" not in text:
+                raise ValueError(f"Expected --magmom-oxidation like U:2=4 or O:0=-2, got {text!r}.")
+            element, rest = text.split(":", 1)
+            magnitude_text, oxidation_text = rest.split("=", 1)
+            element = element.strip()
+            if not element:
+                raise ValueError(f"Missing element in --magmom-oxidation {text!r}.")
+            try:
+                magnitude = abs(float(magnitude_text))
+                oxidation = float(oxidation_text)
+            except ValueError as exc:
+                raise ValueError(f"Invalid numeric value in --magmom-oxidation {text!r}.") from exc
+            rules.setdefault(element, []).append(OxidationMomentRule(element, magnitude, oxidation))
+    for element, element_rules in rules.items():
+        element_rules.sort(key=lambda rule: (rule.oxidation, rule.magnitude))
+        seen: set[float] = set()
+        for rule in element_rules:
+            if rule.magnitude in seen:
+                raise ValueError(f"Duplicate MAGMOM magnitude for {element}: {rule.magnitude:g}.")
+            seen.add(rule.magnitude)
+    return rules
+
+
+def _atom_assignment_cost(atom: AtomReport, magnitude: float) -> float:
+    cost = abs(abs(atom.final) - magnitude)
+    if atom.initial is not None:
+        cost += 0.35 * abs(abs(atom.initial) - magnitude)
+    return cost
+
+
+def _sign_for_atom(atom: AtomReport, position: int, magnitude: float, order: str) -> float:
+    if magnitude == 0:
+        return 0.0
+    if order in {"afm", "afm-like", "afmlike"}:
+        return magnitude if position % 2 == 0 else -magnitude
+    if order in {"fm", "positive"}:
+        return magnitude
+    if order == "negative":
+        return -magnitude
+    for value in (atom.initial, atom.final):
+        if value is not None and abs(value) > 0.25:
+            return magnitude if value > 0 else -magnitude
+    return magnitude if position % 2 == 0 else -magnitude
+
+
+def _single_variable_neutral_counts(
+    atoms: list[AtomReport],
+    rules: dict[str, list[OxidationMomentRule]],
+) -> tuple[dict[str, dict[float, int]], float | None, bool | None, list[str]]:
+    notes: list[str] = []
+    counts_by_element = Counter(atom.element for atom in atoms)
+    assignment_counts: dict[str, dict[float, int]] = {}
+    fixed_charge = 0.0
+    variable_elements: list[str] = []
+    for element, count in counts_by_element.items():
+        element_rules = rules.get(element)
+        if not element_rules:
+            notes.append(f"No oxidation rule for {element}; excluded from charge-neutrality solve.")
+            continue
+        if len(element_rules) == 1:
+            rule = element_rules[0]
+            assignment_counts[element] = {rule.magnitude: count}
+            fixed_charge += count * rule.oxidation
+        elif len(element_rules) == 2:
+            variable_elements.append(element)
+        else:
+            notes.append(f"{element} has {len(element_rules)} oxidation states; automatic neutral solve supports two.")
+            variable_elements.append(element)
+    if len(variable_elements) != 1:
+        if variable_elements:
+            notes.append("Automatic neutral-count solve skipped because more than one element has variable oxidation states.")
+        return assignment_counts, None, None, notes
+    element = variable_elements[0]
+    element_rules = rules[element]
+    low, high = sorted(element_rules, key=lambda rule: rule.oxidation)
+    count = counts_by_element[element]
+    denominator = high.oxidation - low.oxidation
+    if abs(denominator) < 1.0e-12:
+        notes.append(f"{element} variable oxidation states have identical charge; cannot solve neutrality.")
+        return assignment_counts, None, None, notes
+    high_count_float = (-fixed_charge - count * low.oxidation) / denominator
+    high_count = int(round(high_count_float))
+    if abs(high_count - high_count_float) > 1.0e-6 or high_count < 0 or high_count > count:
+        notes.append(
+            f"Neutrality requires {high_count_float:g} atoms of {element}{high.oxidation:g}; "
+            "not an integer in [0, count]."
+        )
+        return assignment_counts, fixed_charge + count * low.oxidation + high_count_float * denominator, False, notes
+    low_count = count - high_count
+    assignment_counts[element] = {low.magnitude: low_count, high.magnitude: high_count}
+    charge_total = fixed_charge + low_count * low.oxidation + high_count * high.oxidation
+    notes.append(
+        f"Neutrality assignment for {element}: {low_count} x {low.oxidation:g}+ "
+        f"(|MAGMOM|~{low.magnitude:g}), {high_count} x {high.oxidation:g}+ "
+        f"(|MAGMOM|~{high.magnitude:g})."
+    )
+    return assignment_counts, charge_total, abs(charge_total) < 1.0e-8, notes
+
+
+def _assign_magnitudes_for_element(
+    atoms: list[AtomReport],
+    element_rules: list[OxidationMomentRule],
+    target_counts: dict[float, int] | None,
+) -> dict[int, OxidationMomentRule]:
+    if not element_rules:
+        return {}
+    if target_counts is None:
+        return {
+            atom.index: min(element_rules, key=lambda rule: _atom_assignment_cost(atom, rule.magnitude))
+            for atom in atoms
+        }
+    remaining = dict(target_counts)
+    assignments: dict[int, OxidationMomentRule] = {}
+    if len(element_rules) == 2:
+        low, high = sorted(element_rules, key=lambda rule: rule.oxidation)
+        high_count = remaining.get(high.magnitude, 0)
+        ranked = sorted(
+            atoms,
+            key=lambda atom: _atom_assignment_cost(atom, high.magnitude) - _atom_assignment_cost(atom, low.magnitude),
+        )
+        high_indices = {atom.index for atom in ranked[:high_count]}
+        for atom in atoms:
+            assignments[atom.index] = high if atom.index in high_indices else low
+        return assignments
+    for rule in sorted(element_rules, key=lambda item: item.oxidation, reverse=True):
+        need = remaining.get(rule.magnitude, 0)
+        if need <= 0:
+            continue
+        available = [atom for atom in atoms if atom.index not in assignments]
+        ranked = sorted(available, key=lambda atom: _atom_assignment_cost(atom, rule.magnitude))
+        for atom in ranked[:need]:
+            assignments[atom.index] = rule
+    fallback = element_rules[0]
+    for atom in atoms:
+        assignments.setdefault(atom.index, fallback)
+    return assignments
+
+
+def suggest_spin_corrections(
+    atoms: list[AtomReport],
+    oxidation_rules: dict[str, list[OxidationMomentRule]],
+    *,
+    magnetic_order_name: str,
+    moment_tol: float,
+    decimals: int,
+) -> SpinCorrectionResult:
+    target_counts, charge_total, neutral, notes = _single_variable_neutral_counts(atoms, oxidation_rules)
+    by_element: dict[str, list[AtomReport]] = {}
+    for atom in atoms:
+        by_element.setdefault(atom.element, []).append(atom)
+    assignments: dict[int, OxidationMomentRule] = {}
+    for element, element_atoms in by_element.items():
+        element_rules = oxidation_rules.get(element, [])
+        assignments.update(_assign_magnitudes_for_element(element_atoms, element_rules, target_counts.get(element)))
+    corrected: list[SpinCorrectionAtom] = []
+    suggested_moments: list[float] = []
+    element_positions: dict[str, int] = {}
+    for atom in atoms:
+        position = element_positions.get(atom.element, 0)
+        element_positions[atom.element] = position + 1
+        rule = assignments.get(atom.index)
+        if rule is None:
+            suggested = atom.initial if atom.initial is not None else atom.final
+            suggested_oxidation = None
+        else:
+            suggested = _sign_for_atom(atom, position, rule.magnitude, magnetic_order_name)
+            suggested_oxidation = rule.oxidation
+        suggested_moments.append(suggested)
+        labels: list[str] = []
+        if atom.initial is not None and abs(atom.initial) > 0.25 and abs(atom.final) > 0.25 and (atom.initial > 0) != (atom.final > 0):
+            labels.append("sign_flipped")
+        if rule is not None and abs(abs(atom.final) - rule.magnitude) > moment_tol:
+            labels.append("unphysical_or_drifted")
+        if abs(suggested - atom.final) > moment_tol:
+            labels.append("suggested_changed")
+        corrected.append(
+            SpinCorrectionAtom(
+                index=atom.index,
+                element=atom.element,
+                initial=atom.initial,
+                final=atom.final,
+                suggested_moment=suggested,
+                suggested_oxidation=suggested_oxidation,
+                label=";".join(labels) if labels else "ok",
+            )
+        )
+    return SpinCorrectionResult(
+        atoms=corrected,
+        magmom_line=magmom_line(suggested_moments, decimals=decimals),
+        charge_total=charge_total,
+        neutral=neutral,
+        notes=notes,
+    )
+
+
+def replace_or_append_magmom_text(incar_text: str, magmom: str) -> str:
+    lines = incar_text.splitlines()
+    pattern = re.compile(r"^\s*MAGMOM\s*=", re.IGNORECASE)
+    for index, line in enumerate(lines):
+        if pattern.match(line):
+            lines[index] = magmom
+            return "\n".join(lines) + "\n"
+    lines.append(magmom)
+    return "\n".join(lines) + "\n"
+
+
+def write_spin_correction_outputs(
+    result: SpinCorrectionResult,
+    *,
+    csv_path: Path,
+    corrected_incar: Path | None,
+    source_incar: Path | None,
+) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "atom",
+                "element",
+                "initial_moment",
+                "final_moment",
+                "suggested_moment",
+                "suggested_oxidation",
+                "label",
+                "note",
+            ],
+        )
+        writer.writeheader()
+        for atom in result.atoms:
+            writer.writerow(
+                {
+                    "atom": atom.index,
+                    "element": atom.element,
+                    "initial_moment": "" if atom.initial is None else f"{atom.initial:.8f}",
+                    "final_moment": f"{atom.final:.8f}",
+                    "suggested_moment": f"{atom.suggested_moment:.8f}",
+                    "suggested_oxidation": "" if atom.suggested_oxidation is None else f"{atom.suggested_oxidation:g}",
+                    "label": atom.label,
+                    "note": atom.note,
+                }
+            )
+    if corrected_incar is not None:
+        corrected_incar.parent.mkdir(parents=True, exist_ok=True)
+        if source_incar is not None and source_incar.is_file():
+            text = source_incar.read_text(encoding="utf-8", errors="replace")
+            corrected_incar.write_text(replace_or_append_magmom_text(text, result.magmom_line), encoding="utf-8")
+        else:
+            corrected_incar.write_text(result.magmom_line + "\n", encoding="utf-8")
 
 
 def summarize_counts(moments: list[float]) -> dict[str, int]:
@@ -1383,6 +1669,37 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.25,
         help="Tolerance for automatically inferred near-zero/nonmagnetic elements.",
     )
+    parser.add_argument(
+        "--magmom-oxidation",
+        action="append",
+        default=[],
+        help=(
+            "Map |MAGMOM| magnitude to oxidation state for correction suggestions, "
+            "e.g. U:2=4,U:1=5,O:0=-2. Repeatable."
+        ),
+    )
+    parser.add_argument(
+        "--corrected-incar",
+        type=Path,
+        help="Single-run mode: write an INCAR with corrected suggested MAGMOM.",
+    )
+    parser.add_argument(
+        "--spin-correction-csv",
+        type=Path,
+        help="Single-run mode: write per-atom flip/unphysical/correction labels. Default: <output-prefix>_spin_corrections.csv.",
+    )
+    parser.add_argument(
+        "--correction-magnetic-order",
+        choices=("preserve-sign", "afm", "afm-like", "afmlike", "fm", "positive", "negative"),
+        default="preserve-sign",
+        help="Sign policy for suggested corrected MAGMOM values. Use afm for alternating +/- by element occurrence.",
+    )
+    parser.add_argument(
+        "--correction-moment-tol",
+        type=float,
+        default=0.6,
+        help="Tolerance for labeling a final moment as drifted from the assigned oxidation-state magnitude.",
+    )
     parser.add_argument("--compress-tol", type=float, default=0.05)
     parser.add_argument("--decimals", type=int, default=3)
     parser.add_argument("--no-plot", action="store_true")
@@ -1451,10 +1768,42 @@ def run_single(args: argparse.Namespace) -> None:
         print(f"Physics status     : {status}  bad_sites={bad_count}  by_element={bad_by_element or {}}")
     else:
         print(f"Physics guard      : {auto_moment_guard_notice(moment_guards, not args.no_auto_moment_guard)}")
+    oxidation_rules = parse_magmom_oxidation(args.magmom_oxidation)
+    if args.corrected_incar is not None and not oxidation_rules:
+        raise ValueError("--corrected-incar requires --magmom-oxidation rules.")
+    if oxidation_rules:
+        initial = None
+        if incar is not None and species is not None:
+            initial = existing_magmom_values(incar, species.total_atoms)
+        atoms = build_atom_reports(block.moments, labels, initial, args.change_threshold)
+        correction = suggest_spin_corrections(
+            atoms,
+            oxidation_rules,
+            magnetic_order_name=args.correction_magnetic_order,
+            moment_tol=args.correction_moment_tol,
+            decimals=args.decimals,
+        )
+        csv_path = args.spin_correction_csv or args.output_prefix.with_name(args.output_prefix.name + "_spin_corrections.csv")
+        write_spin_correction_outputs(
+            correction,
+            csv_path=csv_path,
+            corrected_incar=args.corrected_incar,
+            source_incar=incar,
+        )
+        print(f"Spin correction CSV: {csv_path}")
+        print(f"Correction MAGMOM  : {correction.magmom_line}")
+        if correction.charge_total is not None:
+            print(f"Charge check       : total={correction.charge_total:g} neutral={correction.neutral}")
+        for note in correction.notes:
+            print(f"Correction note    : {note}")
+        if args.corrected_incar is not None:
+            print(f"Corrected INCAR    : {args.corrected_incar}")
     print(f"Wrote prefix       : {args.output_prefix}")
 
 
 def run_batch(args: argparse.Namespace) -> None:
+    if args.magmom_oxidation or args.corrected_incar is not None or args.spin_correction_csv is not None:
+        raise ValueError("Spin-correction INCAR suggestions are currently single-run only; use --outcar, not --runlist.")
     runlist = args.runlist or Path("runlist.txt")
     moment_guards = prepare_batch_moment_guards(args, runlist)
     reports = build_run_reports(

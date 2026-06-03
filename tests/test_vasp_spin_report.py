@@ -492,6 +492,82 @@ def test_batch_uses_outcar_gz_for_moments_and_vasp_stdout_for_latest_energy(tmp_
     assert rows[0]["energy_eV"] == "-12.7500000000"
 
 
+def test_single_spincheck_suggests_neutral_u4o9_corrected_incar(tmp_path: Path, capsys) -> None:
+    poscar = tmp_path / "POSCAR"
+    incar = tmp_path / "INCAR"
+    outcar = tmp_path / "OUTCAR"
+    corrected = tmp_path / "INCAR.corrected"
+    prefix = tmp_path / "reports" / "u4o9"
+    poscar.write_text(
+        "\n".join(
+            [
+                "U4O9 spin test",
+                "1.0",
+                "8 0 0",
+                "0 8 0",
+                "0 0 8",
+                "U O",
+                "4 9",
+                "Direct",
+                "0.00 0.00 0.00",
+                "0.10 0.10 0.10",
+                "0.20 0.20 0.20",
+                "0.30 0.30 0.30",
+                "0.40 0.40 0.40",
+                "0.45 0.45 0.45",
+                "0.50 0.50 0.50",
+                "0.55 0.55 0.55",
+                "0.60 0.60 0.60",
+                "0.65 0.65 0.65",
+                "0.70 0.70 0.70",
+                "0.75 0.75 0.75",
+                "0.80 0.80 0.80",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    incar.write_text("ENCUT = 520\nMAGMOM = 2 -2 2 -2 9*0\n", encoding="utf-8")
+    initial = [2.0, -2.0, 2.0, -2.0] + [0.0] * 9
+    final = [2.1, -0.1, 1.1, 2.2] + [0.01] * 9
+    text = " NIONS =      13 ions\n" + mag_block(initial)
+    text += " free  energy   TOTEN  =       -20.000000 eV\n"
+    text += mag_block(final)
+    text += " free  energy   TOTEN  =       -21.000000 eV\n"
+    outcar.write_text(text, encoding="utf-8")
+
+    main(
+        [
+            "--outcar",
+            str(outcar),
+            "--species",
+            str(poscar),
+            "--incar",
+            str(incar),
+            "--output-prefix",
+            str(prefix),
+            "--magmom-oxidation",
+            "U:2=4,U:1=5,O:0=-2",
+            "--correction-magnetic-order",
+            "afm",
+            "--corrected-incar",
+            str(corrected),
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert "Charge check       : total=0 neutral=True" in output
+    corrected_text = corrected.read_text(encoding="utf-8")
+    assert "MAGMOM = +2.000 -1.000 +1.000 -2.000" in corrected_text
+    rows = list(csv.DictReader((tmp_path / "reports" / "u4o9_spin_corrections.csv").open()))
+    atom2 = rows[1]
+    atom4 = rows[3]
+    assert atom2["suggested_oxidation"] == "5"
+    assert "unphysical_or_drifted" in atom2["label"]
+    assert atom4["suggested_moment"] == "-2.00000000"
+    assert "sign_flipped" in atom4["label"]
+
+
 def test_missing_magnetization_error_is_clear(tmp_path: Path) -> None:
     outcar = tmp_path / "OUTCAR"
     outcar.write_text("NIONS = 2\n", encoding="utf-8")
