@@ -342,6 +342,7 @@ def build_hpc_config_template(site: str = "") -> dict[str, Any]:
                 "root": "",
                 "bin": "",
                 "env_path": "",
+                "lammps_prefix": "",
                 "lammps_executable": "",
                 "mlip_model": "",
                 "mlip_provider": "SuperSalt",
@@ -851,6 +852,10 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
             exports.setdefault("ATOMI_MLIP_PROVIDER", str(sluschi["mlip_provider"]))
         if _nonempty(sluschi.get("lammps_executable")):
             exports.setdefault("ATOMI_LMP_EXE", str(sluschi["lammps_executable"]))
+        if _nonempty(sluschi.get("env_path")):
+            exports.setdefault("ATOMI_SLUSCHI_ENV", str(sluschi["env_path"]))
+        if _nonempty(sluschi.get("lammps_prefix")):
+            exports.setdefault("ATOMI_SLUSCHI_LAMMPS_PREFIX", str(sluschi["lammps_prefix"]))
 
     phonopy = profiles.get("phonopy", {})
     if isinstance(phonopy, dict):

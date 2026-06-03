@@ -64,6 +64,8 @@ def test_sluschi_status_reads_hpc_profile(tmp_path: Path, monkeypatch):
                         "mlip_model": "/models/supersalt.pt",
                         "mlip_provider": "SuperSalt",
                         "lammps_executable": str(lmp),
+                        "env_path": "/envs/m_lammps_env",
+                        "lammps_prefix": "/apps/lammps",
                     }
                 }
             }
@@ -79,6 +81,8 @@ def test_sluschi_status_reads_hpc_profile(tmp_path: Path, monkeypatch):
     assert status["mlip_model"] == "/models/supersalt.pt"
     assert status["mlip_provider"] == "SuperSalt"
     assert status["executables"]["lmp"] == str(lmp)
+    assert status["env_path"] == "/envs/m_lammps_env"
+    assert status["lammps_prefix"] == "/apps/lammps"
     assert status["supersalt"]["doi"] == bridge.SUPERSALT_DOI
     assert status["ready_for_bridge"] is True
 
@@ -99,6 +103,8 @@ def test_sluschi_supersalt_example_uses_profile_model(tmp_path: Path):
                         "mlip_model": str(model),
                         "mlip_provider": "SuperSalt",
                         "lammps_executable": str(lmp),
+                        "env_path": "/envs/m_lammps_env",
+                        "lammps_prefix": "/apps/lammps",
                     }
                 }
             }
@@ -112,6 +118,8 @@ def test_sluschi_supersalt_example_uses_profile_model(tmp_path: Path):
     assert result is not None
     assert result["mlip_model"] == str(model)
     assert result["lammps_executable"] == str(lmp)
+    assert result["env_path"] == "/envs/m_lammps_env"
+    assert result["lammps_prefix"] == "/apps/lammps"
     manifest = json.loads((out / "mlip" / "sluschi_mlip_manifest.json").read_text(encoding="utf-8"))
     assert manifest["provider"] == "SuperSalt"
     assert manifest["model_path"] == str(model)
@@ -119,6 +127,8 @@ def test_sluschi_supersalt_example_uses_profile_model(tmp_path: Path):
     assert (out / "README_KCL_LICL_SUPERSALT_DEMO.md").exists()
     probe = (out / "sluschi_inputs" / "run_supersalt_probe.sbatch").read_text(encoding="utf-8")
     assert str(lmp) in probe
+    assert 'source "/envs/m_lammps_env/bin/activate"' in probe
+    assert 'export LD_LIBRARY_PATH="/apps/lammps/lib:${LD_LIBRARY_PATH:-}"' in probe
 
 
 def test_sluschi_parse_collects_calphad_handoff_values(tmp_path: Path):
@@ -183,6 +193,8 @@ def test_confighpc_exports_sluschi_profile_values(tmp_path: Path):
                         "mlip_model": "/models/supersalt.pt",
                         "mlip_provider": "SuperSalt",
                         "lammps_executable": "/apps/lammps/bin/lmp",
+                        "env_path": "/envs/m_lammps_env",
+                        "lammps_prefix": "/apps/lammps",
                     }
                 }
             }
@@ -197,3 +209,5 @@ def test_confighpc_exports_sluschi_profile_values(tmp_path: Path):
     assert "ATOMI_SUPERSALT_MODEL=/models/supersalt.pt" in env_text
     assert "ATOMI_MLIP_PROVIDER=SuperSalt" in env_text
     assert "ATOMI_LMP_EXE=/apps/lammps/bin/lmp" in env_text
+    assert "ATOMI_SLUSCHI_ENV=/envs/m_lammps_env" in env_text
+    assert "ATOMI_SLUSCHI_LAMMPS_PREFIX=/apps/lammps" in env_text
