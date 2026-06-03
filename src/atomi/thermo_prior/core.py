@@ -122,11 +122,19 @@ def write_line_compound_prior(
     gform_ref_kj_mol: float,
     dcp_form_j_mol_k: float = 0.0,
     tref_k: float = 298.15,
+    temperature_min_k: float | None = None,
+    temperature_max_k: float | None = None,
     uncertainty_kj_mol: float | None = None,
     source: dict[str, Any] | None = None,
     notes: list[str] | None = None,
 ) -> dict[str, Any]:
     coeffs = solve_pseudobinary_coefficients(formula, component_a, component_b)
+    if temperature_min_k is not None and temperature_min_k <= 0.0:
+        raise ValueError("temperature_min_k must be positive when provided.")
+    if temperature_max_k is not None and temperature_max_k <= 0.0:
+        raise ValueError("temperature_max_k must be positive when provided.")
+    if temperature_min_k is not None and temperature_max_k is not None and temperature_min_k >= temperature_max_k:
+        raise ValueError("temperature_min_k must be smaller than temperature_max_k.")
     prior = {
         "schema": PRIOR_SCHEMA,
         "kind": "line_compound",
@@ -143,12 +151,24 @@ def write_line_compound_prior(
             "gform_ref_kJ_mol": gform_ref_kj_mol,
             "dCp_form_J_mol_K": dcp_form_j_mol_k,
             "tref_K": tref_k,
+            "temperature_min_K": temperature_min_k,
+            "temperature_max_K": temperature_max_k,
         },
         "uncertainty": {"gform_sigma_kJ_mol": uncertainty_kj_mol},
         "source": source or {"method": "manual"},
         "notes": notes or [],
         "calphad_mivm": {
-            "line_compound_spec": f"{label or formula}:{coeffs['x_B']:.12g}:{gform_ref_kj_mol:.12g}:{dcp_form_j_mol_k:.12g}:{tref_k:.12g}"
+            "line_compound_spec": ":".join(
+                [
+                    str(label or formula),
+                    f"{coeffs['x_B']:.12g}",
+                    f"{gform_ref_kj_mol:.12g}",
+                    f"{dcp_form_j_mol_k:.12g}",
+                    f"{tref_k:.12g}",
+                    "" if temperature_min_k is None else f"{temperature_min_k:.12g}",
+                    "" if temperature_max_k is None else f"{temperature_max_k:.12g}",
+                ]
+            ).rstrip(":")
         },
     }
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -206,14 +226,26 @@ def line_compound_spec_from_prior(data: dict[str, Any], *, default_tref_k: float
     gform = float(thermo["gform_ref_kJ_mol"])
     dcp = float(thermo.get("dCp_form_J_mol_K", 0.0) or 0.0)
     tref = float(thermo.get("tref_K", default_tref_k) or default_tref_k)
+    tmin = thermo.get("temperature_min_K")
+    tmax = thermo.get("temperature_max_K")
+    tmin_k = float(tmin) if tmin is not None else None
+    tmax_k = float(tmax) if tmax is not None else None
     if not math.isfinite(x_b) or x_b <= 0.0 or x_b >= 1.0:
         raise ValueError(f"Invalid line-compound x_B in prior {label}.")
+    if tmin_k is not None and (not math.isfinite(tmin_k) or tmin_k <= 0.0):
+        raise ValueError(f"Invalid line-compound temperature_min_K in prior {label}.")
+    if tmax_k is not None and (not math.isfinite(tmax_k) or tmax_k <= 0.0):
+        raise ValueError(f"Invalid line-compound temperature_max_K in prior {label}.")
+    if tmin_k is not None and tmax_k is not None and tmin_k >= tmax_k:
+        raise ValueError(f"Invalid line-compound temperature window in prior {label}.")
     return {
         "label": label,
         "x_B": x_b,
         "gform_ref_kJ_mol": gform,
         "dCp_form_J_mol_K": dcp,
         "tref_K": tref,
+        "tmin_K": tmin_k,
+        "tmax_K": tmax_k,
         "prior_source": data.get("source", {}),
         "prior_uncertainty": data.get("uncertainty", {}),
     }

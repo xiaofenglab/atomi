@@ -37,6 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
     line.add_argument("--aeris-device", default="cpu")
     line.add_argument("--dcp-form", type=float, default=0.0, help="Formation Cp correction in J/mol/K.")
     line.add_argument("--tref-k", type=float, default=298.15)
+    line.add_argument("--temperature-min-k", type=float, help="Optional lower stability bound for this compound.")
+    line.add_argument("--temperature-max-k", type=float, help="Optional upper stability bound for this compound.")
     line.add_argument("--uncertainty-kj-mol", type=float)
     line.add_argument("--source-label", default="manual")
     line.add_argument("--out", type=Path, required=True)
@@ -106,6 +108,8 @@ def _line_compound_from_args(args: argparse.Namespace) -> dict[str, Any]:
         gform_ref_kj_mol=float(gform),
         dcp_form_j_mol_k=args.dcp_form,
         tref_k=args.tref_k,
+        temperature_min_k=args.temperature_min_k,
+        temperature_max_k=args.temperature_max_k,
         uncertainty_kj_mol=args.uncertainty_kj_mol,
         source=source,
         notes=["Thermo-ML prior for screening; refine with DFT/phonopy/CALPHAD before final assessment."],
@@ -142,10 +146,17 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
 
         prior = read_prior(args.prior)
         compound = line_compound_spec_from_prior(prior, default_tref_k=args.default_tref_k)
-        spec = (
-            f"{compound['label']}:{compound['x_B']:.12g}:{compound['gform_ref_kJ_mol']:.12g}:"
-            f"{compound['dCp_form_J_mol_K']:.12g}:{compound['tref_K']:.12g}"
-        )
+        fields = [
+            compound["label"],
+            f"{compound['x_B']:.12g}",
+            f"{compound['gform_ref_kJ_mol']:.12g}",
+            f"{compound['dCp_form_J_mol_K']:.12g}",
+            f"{compound['tref_K']:.12g}",
+        ]
+        if compound.get("tmin_K") is not None or compound.get("tmax_K") is not None:
+            fields.append("" if compound.get("tmin_K") is None else f"{compound['tmin_K']:.12g}")
+            fields.append("" if compound.get("tmax_K") is None else f"{compound['tmax_K']:.12g}")
+        spec = ":".join(fields).rstrip(":")
         print(spec)
         return {"line_compound_spec": spec}
     if args.command == "aeris-status":

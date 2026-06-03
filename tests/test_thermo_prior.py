@@ -41,6 +41,10 @@ def test_thermo_prior_cli_writes_line_compound_prior(tmp_path: Path):
             "1.5",
             "--tref-k",
             "793",
+            "--temperature-min-k",
+            "688.15",
+            "--temperature-max-k",
+            "923.15",
             "--out",
             str(out),
         ]
@@ -50,9 +54,13 @@ def test_thermo_prior_cli_writes_line_compound_prior(tmp_path: Path):
     assert prior["schema"] == "atomi.thermo_prior.v1"
     assert prior["pseudo_binary"]["x_B"] == pytest.approx(0.625)
     assert prior["thermo"]["gform_ref_kJ_mol"] == pytest.approx(-10.0)
+    assert prior["thermo"]["temperature_min_K"] == pytest.approx(688.15)
+    assert prior["thermo"]["temperature_max_K"] == pytest.approx(923.15)
     compound = line_compound_spec_from_prior(prior, default_tref_k=793)
     assert compound["label"] == "Na3U5Cl18"
     assert compound["dCp_form_J_mol_K"] == pytest.approx(1.5)
+    assert compound["tmin_K"] == pytest.approx(688.15)
+    assert compound["tmax_K"] == pytest.approx(923.15)
 
 
 def test_write_line_compound_prior_from_elemental_basis(tmp_path: Path):
@@ -123,6 +131,53 @@ def test_benchmark_uq_phase_accepts_line_compound_prior(tmp_path: Path):
     assert metadata["line_compound_prior_paths"] == [str(prior.resolve())]
     rows = list(csv.DictReader((outdir / "candidate_phase_diagrams.csv").open(encoding="utf-8")))
     assert "line_compound_A3B5_K" in rows[0]
+
+
+def test_benchmark_uq_phase_clips_line_compound_temperature_window(tmp_path: Path):
+    curves = tmp_path / "curves.csv"
+    curves.write_text("x_B,hmix\n0.1,-1\n0.3,-3\n0.5,-2\n0.7,-1\n0.9,0\n", encoding="utf-8")
+    outdir = tmp_path / "bench_window"
+
+    metadata = mivm_main(
+        [
+            "benchmark-uq-phase",
+            "--curve-csv",
+            str(curves),
+            "--x-column",
+            "x_B",
+            "--curve-columns",
+            "hmix",
+            "--component-a",
+            "A",
+            "--component-b",
+            "B",
+            "--x-component",
+            "B",
+            "--tm-a",
+            "1000",
+            "--tm-b",
+            "1100",
+            "--dhfus-a",
+            "20",
+            "--dhfus-b",
+            "22",
+            "--line-compound",
+            "A3B5:0.625:-10:0:800:1:2",
+            "--eutectic-x",
+            "0.35",
+            "--eutectic-t",
+            "800",
+            "--outdir",
+            str(outdir),
+        ]
+    )
+
+    assert metadata is not None
+    rows = list(csv.DictReader((outdir / "candidate_phase_diagrams.csv").open(encoding="utf-8")))
+    assert "line_compound_A3B5_K" in rows[0]
+    finite = [float(row["line_compound_A3B5_K"]) for row in rows if row["line_compound_A3B5_K"]]
+    assert finite
+    assert all(1.0 <= value <= 2.0 for value in finite)
 
 
 def test_cp_placeholder_cli_writes_prior(tmp_path: Path):

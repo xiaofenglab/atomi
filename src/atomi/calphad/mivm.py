@@ -1402,17 +1402,28 @@ def _parse_line_compounds(specs: list[str] | None, *, default_tref_k: float) -> 
     compounds: list[dict[str, Any]] = []
     for spec in specs or []:
         parts = [part.strip() for part in spec.split(":")]
-        if len(parts) not in {3, 4, 5}:
-            raise ValueError("--line-compound expects label:x_B:gform_kJ_mol[:dCp_form_J_mol_K[:tref_K]].")
+        if len(parts) not in {3, 4, 5, 6, 7}:
+            raise ValueError(
+                "--line-compound expects "
+                "label:x_B:gform_kJ_mol[:dCp_form_J_mol_K[:tref_K[:tmin_K[:tmax_K]]]]."
+            )
         label = parts[0]
         x_b = float(parts[1])
         gform = float(parts[2])
         dcp = float(parts[3]) if len(parts) >= 4 and parts[3] else 0.0
         tref = float(parts[4]) if len(parts) >= 5 and parts[4] else default_tref_k
+        tmin = float(parts[5]) if len(parts) >= 6 and parts[5] else None
+        tmax = float(parts[6]) if len(parts) >= 7 and parts[6] else None
         if not label:
             raise ValueError("Line compound label cannot be blank.")
         if x_b <= 0.0 or x_b >= 1.0:
             raise ValueError("Line compound x_B must be inside (0, 1).")
+        if tmin is not None and (not math.isfinite(tmin) or tmin <= 0.0):
+            raise ValueError("Line compound tmin_K must be positive when provided.")
+        if tmax is not None and (not math.isfinite(tmax) or tmax <= 0.0):
+            raise ValueError("Line compound tmax_K must be positive when provided.")
+        if tmin is not None and tmax is not None and tmin >= tmax:
+            raise ValueError("Line compound tmin_K must be smaller than tmax_K.")
         compounds.append(
             {
                 "label": label,
@@ -1420,6 +1431,8 @@ def _parse_line_compounds(specs: list[str] | None, *, default_tref_k: float) -> 
                 "gform_ref_kJ_mol": gform,
                 "dCp_form_J_mol_K": dcp,
                 "tref_K": tref,
+                "tmin_K": tmin,
+                "tmax_K": tmax,
             }
         )
     return compounds
@@ -1486,6 +1499,13 @@ def _binary_liquidus_from_gex_curve(
                 gform_tref_k=float(compound["tref_K"]),
                 dcp_form_j_mol_k=float(compound["dCp_form_J_mol_K"]),
             )
+            tmin_k = compound.get("tmin_K")
+            tmax_k = compound.get("tmax_K")
+            if math.isfinite(t_c):
+                if tmin_k is not None and t_c < float(tmin_k):
+                    t_c = float(tmin_k)
+                if tmax_k is not None and t_c > float(tmax_k):
+                    t_c = float(tmax_k)
             compound_temperatures[f"line_compound_{compound['label']}_K"] = t_c
         candidates = [t_a, t_b, *compound_temperatures.values()]
         finite_candidates = [value for value in candidates if math.isfinite(value)]
