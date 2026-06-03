@@ -1123,6 +1123,70 @@ def warning_level(value: float | None, warn: float, fail: float) -> str:
     return "ok"
 
 
+def _read_lammps_box_lengths(data_path: Path) -> tuple[tuple[float, float, float], bool] | None:
+    """Return orthogonal box lengths and whether the data file has nonzero tilt."""
+    x_len = y_len = z_len = None
+    tilted = False
+    try:
+        with data_path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                parts = line.split()
+                if len(parts) >= 4 and parts[-2:] == ["xlo", "xhi"]:
+                    x_len = abs(float(parts[1]) - float(parts[0]))
+                elif len(parts) >= 4 and parts[-2:] == ["ylo", "yhi"]:
+                    y_len = abs(float(parts[1]) - float(parts[0]))
+                elif len(parts) >= 4 and parts[-2:] == ["zlo", "zhi"]:
+                    z_len = abs(float(parts[1]) - float(parts[0]))
+                elif len(parts) >= 6 and parts[-3:] == ["xy", "xz", "yz"]:
+                    tilted = any(abs(float(value)) > 1.0e-8 for value in parts[:3])
+                if x_len is not None and y_len is not None and z_len is not None and "Atoms" in line:
+                    break
+    except OSError:
+        return None
+    if x_len is None or y_len is None or z_len is None:
+        return None
+    return (float(x_len), float(y_len), float(z_len)), tilted
+
+
+def _stage_cell_symmetry(
+    stage: dict[str, Any] | None,
+    *,
+    root: Path,
+    cubic_tolerance_fraction: float,
+) -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "mode": "unknown",
+        "source": "",
+        "lengths_A": [],
+        "length_anisotropy_fraction": None,
+        "tilted": None,
+        "cubic_tolerance_fraction": cubic_tolerance_fraction,
+    }
+    if not stage:
+        return info
+    source = stage.get("input_structure") or stage.get("input_data") or stage.get("data_file")
+    if not source:
+        return info
+    path = resolve_root_path(Path(str(source)), root)
+    box = _read_lammps_box_lengths(path)
+    info["source"] = str(path)
+    if box is None:
+        return info
+    lengths, tilted = box
+    mean_len = float(np.mean(lengths))
+    anisotropy = (max(lengths) - min(lengths)) / mean_len if mean_len else None
+    mode = "anisotropic" if tilted or (anisotropy is not None and anisotropy > cubic_tolerance_fraction) else "isotropic"
+    info.update(
+        {
+            "mode": mode,
+            "lengths_A": [float(length) for length in lengths],
+            "length_anisotropy_fraction": anisotropy,
+            "tilted": tilted,
+        }
+    )
+    return info
+
+
 def validate_main(args: argparse.Namespace) -> dict[str, Any]:
     config = args.gk_config.resolve()
     cfg = load_json(config)
@@ -1178,6 +1242,23 @@ def validate_main(args: argparse.Namespace) -> dict[str, Any]:
         axis_spread = None
         if len(axes) == 3 and k_final not in (None, 0.0):
             axis_spread = (max(axes) - min(axes)) / abs(k_final)
+        temp_expected = [
+            stage
+            for stage in expected_stages
+            if finite_float_or_none(stage.get("temperature")) is not None
+            and abs(float(stage["temperature"]) - temp) <= 1.0e-6
+        ]
+        cell_symmetry = _stage_cell_symmetry(
+            temp_expected[0] if temp_expected else None,
+            root=root,
+            cubic_tolerance_fraction=args.axis_spread_cubic_tolerance_fraction,
+        )
+        axis_level = warning_level(axis_spread, args.axis_spread_warn_fraction, args.axis_spread_fail_fraction)
+        axis_fail_counts_as_fail = axis_level == "fail"
+        if args.axis_spread_symmetry == "anisotropic":
+            axis_fail_counts_as_fail = False
+        elif args.axis_spread_symmetry == "auto" and cell_symmetry.get("mode") == "anisotropic":
+            axis_fail_counts_as_fail = False
 
         drift_values: list[float] = []
         missing_hcacf = 0
@@ -1205,8 +1286,16 @@ def validate_main(args: argparse.Namespace) -> dict[str, Any]:
             warnings.append(f"{len(bad_rows)} seed row(s) not ok")
         if missing_hcacf:
             warnings.append(f"{missing_hcacf} ok seed(s) missing readable HCACF")
-        if warning_level(axis_spread, args.axis_spread_warn_fraction, args.axis_spread_fail_fraction) != "ok":
-            warnings.append(f"axis spread high: {axis_spread:.1%}" if axis_spread is not None else "axis spread unavailable")
+        if axis_level != "ok":
+            if axis_spread is None:
+                warnings.append("axis spread unavailable")
+            elif axis_level == "fail" and not axis_fail_counts_as_fail:
+                warnings.append(
+                    f"axis spread high: {axis_spread:.1%}; treated as warning because "
+                    f"cell symmetry is {args.axis_spread_symmetry}/{cell_symmetry.get('mode', 'unknown')}"
+                )
+            else:
+                warnings.append(f"axis spread high: {axis_spread:.1%}")
         if warning_level(seed_cv, args.seed_cv_warn_fraction, args.seed_cv_fail_fraction) != "ok":
             warnings.append(f"seed CV high: {seed_cv:.1%}" if seed_cv is not None else "seed CV unavailable")
         if warning_level(drift_mean, args.plateau_drift_warn_fraction, args.plateau_drift_fail_fraction) != "ok":
@@ -1216,7 +1305,7 @@ def validate_main(args: argparse.Namespace) -> dict[str, Any]:
         if warnings:
             status = "warn"
         if (
-            warning_level(axis_spread, args.axis_spread_warn_fraction, args.axis_spread_fail_fraction) == "fail"
+            axis_fail_counts_as_fail
             or warning_level(seed_cv, args.seed_cv_warn_fraction, args.seed_cv_fail_fraction) == "fail"
             or warning_level(drift_mean, args.plateau_drift_warn_fraction, args.plateau_drift_fail_fraction) == "fail"
         ):
@@ -1228,6 +1317,9 @@ def validate_main(args: argparse.Namespace) -> dict[str, Any]:
                 "k_W_mK": k_final,
                 "k_axes_W_mK": axes,
                 "axis_spread_fraction": axis_spread,
+                "axis_spread_level": axis_level,
+                "axis_spread_counts_as_fail": axis_fail_counts_as_fail,
+                "cell_symmetry": cell_symmetry,
                 "seed_count": len(rows),
                 "ok_seed_count": len(ok_rows),
                 "k_seed_mean_W_mK": seed_mean,
@@ -1249,6 +1341,8 @@ def validate_main(args: argparse.Namespace) -> dict[str, Any]:
             "min_seeds": args.min_seeds,
             "axis_spread_warn_fraction": args.axis_spread_warn_fraction,
             "axis_spread_fail_fraction": args.axis_spread_fail_fraction,
+            "axis_spread_symmetry": args.axis_spread_symmetry,
+            "axis_spread_cubic_tolerance_fraction": args.axis_spread_cubic_tolerance_fraction,
             "seed_cv_warn_fraction": args.seed_cv_warn_fraction,
             "seed_cv_fail_fraction": args.seed_cv_fail_fraction,
             "plateau_drift_warn_fraction": args.plateau_drift_warn_fraction,
@@ -1430,6 +1524,22 @@ def build_parser() -> argparse.ArgumentParser:
     val.add_argument("--min-seeds", type=int, default=5, help="Warn when fewer ok seeds are available. Default: 5.")
     val.add_argument("--axis-spread-warn-fraction", type=float, default=0.25)
     val.add_argument("--axis-spread-fail-fraction", type=float, default=0.50)
+    val.add_argument(
+        "--axis-spread-symmetry",
+        choices=("auto", "isotropic", "anisotropic"),
+        default="auto",
+        help=(
+            "How to interpret large Cartesian GK axis spread. auto treats a high axis spread as a fail only for "
+            "unknown/near-cubic cells, and downgrades it to a warning when the stage input_structure is anisotropic. "
+            "Use isotropic for the old strict behavior or anisotropic for tensor-valued/non-cubic runs."
+        ),
+    )
+    val.add_argument(
+        "--axis-spread-cubic-tolerance-fraction",
+        type=float,
+        default=0.02,
+        help="Relative box-length tolerance used by --axis-spread-symmetry=auto to identify near-cubic cells. Default: 2%.",
+    )
     val.add_argument("--seed-cv-warn-fraction", type=float, default=0.25)
     val.add_argument("--seed-cv-fail-fraction", type=float, default=0.50)
     val.add_argument("--plateau-drift-warn-fraction", type=float, default=0.35)

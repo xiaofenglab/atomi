@@ -705,7 +705,98 @@ def test_green_kubo_validate_reports_seed_and_axis_warnings(tmp_path, capsys):
     assert "only 1 ok seed" in output
     assert "axis spread high" in output
     report = json.loads((fit / "gk_validation_summary.json").read_text(encoding="utf-8"))
+    assert report["temperatures"][0]["status"] == "fail"
+    assert report["temperatures"][0]["axis_spread_counts_as_fail"] is True
     assert report["temperatures"][0]["k_seed_sem_W_mK"] == 0.0
+
+
+def test_green_kubo_validate_downgrades_axis_fail_for_anisotropic_cell(tmp_path):
+    cfg = base_cfg(tmp_path)
+    data_file = tmp_path / "stages" / "gk_T300K_s01" / "gk_T300K_s01.data"
+    data_file.parent.mkdir(parents=True)
+    data_file.write_text(
+        "\n".join(
+            [
+                "LAMMPS data",
+                "",
+                "1 atoms",
+                "",
+                "0.0 10.0 xlo xhi",
+                "0.0 12.5 ylo yhi",
+                "0.0 18.0 zlo zhi",
+                "",
+                "Atoms",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    cfg["stages"] = [
+        {
+            "name": "gk_T300K_s01",
+            "type": "nve",
+            "temperature": 300,
+            "green_kubo_run": True,
+            "chunk_name": "chunk_gk",
+            "velocity_seed": 100,
+            "input_structure": str(data_file.relative_to(tmp_path)),
+        }
+    ]
+    config = tmp_path / "config_gk.json"
+    config.write_text(json.dumps(cfg), encoding="utf-8")
+    fit = tmp_path / "analysis" / "gk_fit"
+    fit.mkdir(parents=True)
+    chunk = tmp_path / "stages" / "gk_T300K_s01" / "chunk_gk"
+    chunk.mkdir(parents=True)
+    hcacf = chunk / "heatflux_hcacf.dat"
+    hcacf.write_text(
+        "\n".join(
+            [
+                "# TimeStep Number-of-time-windows",
+                "# Index TimeDelta c_flux[1]*c_flux[1] c_flux[2]*c_flux[2] c_flux[3]*c_flux[3]",
+                "100 1",
+                "1 0 1.0 1.0 1.0",
+                "2 10 0.5 0.5 0.5",
+                "3 20 0.25 0.25 0.25",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (fit / "gk_seed_summary.csv").write_text(
+        "stage_name,temperature_K,seed,status,hcacf_path,k_seed_W_mK\n"
+        f"gk_T300K_s01,300,100,ok,{hcacf},1.0\n",
+        encoding="utf-8",
+    )
+    (fit / "thermal_conductivity_T.csv").write_text(
+        "T_K,k_W_mK,k_x_W_mK,k_y_W_mK,k_z_W_mK,n_gk_seeds\n"
+        "300,1.0,0.5,1.0,2.0,1\n",
+        encoding="utf-8",
+    )
+
+    green_kubo.main(
+        [
+            "validate",
+            "--gk-config",
+            str(config),
+            "--fit-dir",
+            str(fit),
+            "--min-seeds",
+            "1",
+            "--seed-cv-fail-fraction",
+            "99",
+            "--plateau-drift-fail-fraction",
+            "99",
+        ]
+    )
+
+    report = json.loads((fit / "gk_validation_summary.json").read_text(encoding="utf-8"))
+    temp_report = report["temperatures"][0]
+    assert temp_report["status"] == "warn"
+    assert temp_report["axis_spread_level"] == "fail"
+    assert temp_report["axis_spread_counts_as_fail"] is False
+    assert temp_report["cell_symmetry"]["mode"] == "anisotropic"
+    assert "treated as warning" in temp_report["warnings"][0]
 
 
 def test_green_kubo_hcacf_parser_handles_lammps_count_column(tmp_path):
