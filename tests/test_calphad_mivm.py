@@ -244,6 +244,97 @@ def test_benchmark_uq_phase_weights_hmix_and_eutectic(tmp_path: Path):
     assert {row["label"] for row in rows} == {"left", "center"}
     assert sum(float(row["posterior_weight"]) for row in rows) == pytest.approx(1.0)
     assert any(float(row["hmix_rmse_kJ_mol"]) < 1.0 for row in rows)
+    assert all("dCp_B_liq_minus_solid_J_mol_K" in row for row in rows)
+
+
+def test_benchmark_uq_phase_scans_dcp_grid(tmp_path: Path):
+    curves = tmp_path / "curves.csv"
+    curves.write_text("x_B,hmix\n0.1,-1\n0.3,-3\n0.5,-2\n0.7,-1\n0.9,0\n", encoding="utf-8")
+    outdir = tmp_path / "bench_dcp"
+
+    metadata = mivm_main(
+        [
+            "benchmark-uq-phase",
+            "--curve-csv",
+            str(curves),
+            "--x-column",
+            "x_B",
+            "--curve-columns",
+            "hmix",
+            "--component-a",
+            "A",
+            "--component-b",
+            "B",
+            "--x-component",
+            "B",
+            "--tm-a",
+            "1000",
+            "--tm-b",
+            "1100",
+            "--dhfus-a",
+            "20",
+            "--dhfus-b",
+            "22",
+            "--dcp-b-grid=-10,10,10",
+            "--eutectic-x",
+            "0.35",
+            "--eutectic-t",
+            "800",
+            "--outdir",
+            str(outdir),
+        ]
+    )
+
+    assert metadata is not None
+    assert metadata["dCp_grid_J_mol_K"]["component_b"] == [-10.0, 0.0, 10.0]
+    rows = list(csv.DictReader((outdir / "posterior_model_weights.csv").open(encoding="utf-8")))
+    assert len(rows) == 3
+    assert {float(row["dCp_B_liq_minus_solid_J_mol_K"]) for row in rows} == {-10.0, 0.0, 10.0}
+
+
+def test_benchmark_uq_phase_accepts_line_compound(tmp_path: Path):
+    curves = tmp_path / "curves.csv"
+    curves.write_text("x_B,hmix\n0.1,-1\n0.3,-3\n0.5,-2\n0.7,-1\n0.9,0\n", encoding="utf-8")
+    outdir = tmp_path / "bench_compound"
+
+    metadata = mivm_main(
+        [
+            "benchmark-uq-phase",
+            "--curve-csv",
+            str(curves),
+            "--x-column",
+            "x_B",
+            "--curve-columns",
+            "hmix",
+            "--component-a",
+            "A",
+            "--component-b",
+            "B",
+            "--x-component",
+            "B",
+            "--tm-a",
+            "1000",
+            "--tm-b",
+            "1100",
+            "--dhfus-a",
+            "20",
+            "--dhfus-b",
+            "22",
+            "--line-compound",
+            "A3B5:0.625:-10:0:800",
+            "--eutectic-x",
+            "0.35",
+            "--eutectic-t",
+            "800",
+            "--outdir",
+            str(outdir),
+        ]
+    )
+
+    assert metadata is not None
+    assert metadata["line_compounds"][0]["label"] == "A3B5"
+    rows = list(csv.DictReader((outdir / "candidate_phase_diagrams.csv").open(encoding="utf-8")))
+    assert "line_compound_A3B5_K" in rows[0]
 
 
 def test_tdb_sanity_warns_on_chemsage_style_export(tmp_path: Path):

@@ -1263,6 +1263,168 @@ def _curve_derivatives(points: list[tuple[float, float]]) -> list[tuple[float, f
     return out
 
 
+def _fusion_gibbs_j_mol(temperature_k: float, *, tm_k: float, dhfus_kj_mol: float, dcp_j_mol_k: float = 0.0) -> float:
+    if temperature_k <= 0.0 or tm_k <= 0.0:
+        return math.nan
+    dh_j_mol = dhfus_kj_mol * 1000.0
+    return dh_j_mol * (1.0 - temperature_k / tm_k) + dcp_j_mol_k * (
+        (temperature_k - tm_k) - temperature_k * math.log(temperature_k / tm_k)
+    )
+
+
+def _solve_liquidus_temperature(
+    x: float,
+    mu_ex_j_mol: float,
+    *,
+    tm_k: float,
+    dhfus_kj_mol: float,
+    dcp_j_mol_k: float = 0.0,
+) -> float:
+    if x <= 0.0:
+        return math.nan
+
+    def residual(temp: float) -> float:
+        return _fusion_gibbs_j_mol(temp, tm_k=tm_k, dhfus_kj_mol=dhfus_kj_mol, dcp_j_mol_k=dcp_j_mol_k) + (
+            R_J_MOLK * temp * math.log(max(x, 1.0e-15))
+        ) + mu_ex_j_mol
+
+    low = 1.0
+    high = max(tm_k * 1.5, tm_k + 1000.0)
+    f_low = residual(low)
+    f_high = residual(high)
+    expand = 0
+    while math.isfinite(f_low) and math.isfinite(f_high) and f_low * f_high > 0.0 and expand < 12:
+        high *= 1.5
+        f_high = residual(high)
+        expand += 1
+    if not (math.isfinite(f_low) and math.isfinite(f_high)) or f_low * f_high > 0.0:
+        return math.nan
+    for _ in range(100):
+        mid = 0.5 * (low + high)
+        f_mid = residual(mid)
+        if not math.isfinite(f_mid):
+            return math.nan
+        if abs(f_mid) < 1.0e-8 or abs(high - low) < 1.0e-8:
+            return mid
+        if f_low * f_mid <= 0.0:
+            high = mid
+            f_high = f_mid
+        else:
+            low = mid
+            f_low = f_mid
+    return 0.5 * (low + high)
+
+
+def _line_compound_gform_j_mol(
+    temperature_k: float,
+    *,
+    gform_ref_kj_mol: float,
+    tref_k: float,
+    dcp_form_j_mol_k: float = 0.0,
+) -> float:
+    if temperature_k <= 0.0 or tref_k <= 0.0:
+        return math.nan
+    return gform_ref_kj_mol * 1000.0 + dcp_form_j_mol_k * (
+        (temperature_k - tref_k) - temperature_k * math.log(temperature_k / tref_k)
+    )
+
+
+def _solve_line_compound_liquidus_temperature(
+    x_liquid_b: float,
+    mu_a_ex_j_mol: float,
+    mu_b_ex_j_mol: float,
+    *,
+    x_compound_b: float,
+    tm_a_k: float,
+    tm_b_k: float,
+    dhfus_a_kj_mol: float,
+    dhfus_b_kj_mol: float,
+    dcp_a_j_mol_k: float,
+    dcp_b_j_mol_k: float,
+    gform_ref_kj_mol: float,
+    gform_tref_k: float,
+    dcp_form_j_mol_k: float = 0.0,
+) -> float:
+    x_a = 1.0 - x_liquid_b
+    x_b = x_liquid_b
+    if x_a <= 0.0 or x_b <= 0.0:
+        return math.nan
+
+    def residual(temp: float) -> float:
+        term_a = _fusion_gibbs_j_mol(
+            temp,
+            tm_k=tm_a_k,
+            dhfus_kj_mol=dhfus_a_kj_mol,
+            dcp_j_mol_k=dcp_a_j_mol_k,
+        ) + R_J_MOLK * temp * math.log(max(x_a, 1.0e-15)) + mu_a_ex_j_mol
+        term_b = _fusion_gibbs_j_mol(
+            temp,
+            tm_k=tm_b_k,
+            dhfus_kj_mol=dhfus_b_kj_mol,
+            dcp_j_mol_k=dcp_b_j_mol_k,
+        ) + R_J_MOLK * temp * math.log(max(x_b, 1.0e-15)) + mu_b_ex_j_mol
+        gform = _line_compound_gform_j_mol(
+            temp,
+            gform_ref_kj_mol=gform_ref_kj_mol,
+            tref_k=gform_tref_k,
+            dcp_form_j_mol_k=dcp_form_j_mol_k,
+        )
+        return (1.0 - x_compound_b) * term_a + x_compound_b * term_b - gform
+
+    low = 1.0
+    high = max(tm_a_k, tm_b_k) * 1.5 + 100.0
+    f_low = residual(low)
+    f_high = residual(high)
+    expand = 0
+    while math.isfinite(f_low) and math.isfinite(f_high) and f_low * f_high > 0.0 and expand < 12:
+        high *= 1.5
+        f_high = residual(high)
+        expand += 1
+    if not (math.isfinite(f_low) and math.isfinite(f_high)) or f_low * f_high > 0.0:
+        return math.nan
+    for _ in range(100):
+        mid = 0.5 * (low + high)
+        f_mid = residual(mid)
+        if not math.isfinite(f_mid):
+            return math.nan
+        if abs(f_mid) < 1.0e-8 or abs(high - low) < 1.0e-8:
+            return mid
+        if f_low * f_mid <= 0.0:
+            high = mid
+            f_high = f_mid
+        else:
+            low = mid
+            f_low = f_mid
+    return 0.5 * (low + high)
+
+
+def _parse_line_compounds(specs: list[str] | None, *, default_tref_k: float) -> list[dict[str, Any]]:
+    compounds: list[dict[str, Any]] = []
+    for spec in specs or []:
+        parts = [part.strip() for part in spec.split(":")]
+        if len(parts) not in {3, 4, 5}:
+            raise ValueError("--line-compound expects label:x_B:gform_kJ_mol[:dCp_form_J_mol_K[:tref_K]].")
+        label = parts[0]
+        x_b = float(parts[1])
+        gform = float(parts[2])
+        dcp = float(parts[3]) if len(parts) >= 4 and parts[3] else 0.0
+        tref = float(parts[4]) if len(parts) >= 5 and parts[4] else default_tref_k
+        if not label:
+            raise ValueError("Line compound label cannot be blank.")
+        if x_b <= 0.0 or x_b >= 1.0:
+            raise ValueError("Line compound x_B must be inside (0, 1).")
+        compounds.append(
+            {
+                "label": label,
+                "x_B": x_b,
+                "gform_ref_kJ_mol": gform,
+                "dCp_form_J_mol_K": dcp,
+                "tref_K": tref,
+            }
+        )
+    return compounds
+
+
 def _binary_liquidus_from_gex_curve(
     points_kJ_mol: list[tuple[float, float]],
     *,
@@ -1270,6 +1432,9 @@ def _binary_liquidus_from_gex_curve(
     tm_b_k: float,
     dhfus_a_kj_mol: float,
     dhfus_b_kj_mol: float,
+    dcp_a_j_mol_k: float = 0.0,
+    dcp_b_j_mol_k: float = 0.0,
+    line_compounds: list[dict[str, Any]] | None = None,
     x_min: float = 1.0e-6,
     x_max: float = 1.0 - 1.0e-6,
 ) -> list[dict[str, float]]:
@@ -1290,13 +1455,41 @@ def _binary_liquidus_from_gex_curve(
         dgdx_j_mol = dgdx_kj_mol * 1000.0
         mu_a_ex = g_j_mol - x_b * dgdx_j_mol
         mu_b_ex = g_j_mol + x_a * dgdx_j_mol
-        dh_a = dhfus_a_kj_mol * 1000.0
-        dh_b = dhfus_b_kj_mol * 1000.0
-        denom_a = R_J_MOLK * math.log(max(x_a, 1.0e-15)) - dh_a / tm_a_k
-        denom_b = R_J_MOLK * math.log(max(x_b, 1.0e-15)) - dh_b / tm_b_k
-        t_a = (-dh_a - mu_a_ex) / denom_a if abs(denom_a) > 1.0e-15 else math.nan
-        t_b = (-dh_b - mu_b_ex) / denom_b if abs(denom_b) > 1.0e-15 else math.nan
-        liquidus = max(t_a, t_b) if math.isfinite(t_a) and math.isfinite(t_b) else math.nan
+        t_a = _solve_liquidus_temperature(
+            x_a,
+            mu_a_ex,
+            tm_k=tm_a_k,
+            dhfus_kj_mol=dhfus_a_kj_mol,
+            dcp_j_mol_k=dcp_a_j_mol_k,
+        )
+        t_b = _solve_liquidus_temperature(
+            x_b,
+            mu_b_ex,
+            tm_k=tm_b_k,
+            dhfus_kj_mol=dhfus_b_kj_mol,
+            dcp_j_mol_k=dcp_b_j_mol_k,
+        )
+        compound_temperatures: dict[str, float] = {}
+        for compound in line_compounds or []:
+            t_c = _solve_line_compound_liquidus_temperature(
+                x_b,
+                mu_a_ex,
+                mu_b_ex,
+                x_compound_b=float(compound["x_B"]),
+                tm_a_k=tm_a_k,
+                tm_b_k=tm_b_k,
+                dhfus_a_kj_mol=dhfus_a_kj_mol,
+                dhfus_b_kj_mol=dhfus_b_kj_mol,
+                dcp_a_j_mol_k=dcp_a_j_mol_k,
+                dcp_b_j_mol_k=dcp_b_j_mol_k,
+                gform_ref_kj_mol=float(compound["gform_ref_kJ_mol"]),
+                gform_tref_k=float(compound["tref_K"]),
+                dcp_form_j_mol_k=float(compound["dCp_form_J_mol_K"]),
+            )
+            compound_temperatures[f"line_compound_{compound['label']}_K"] = t_c
+        candidates = [t_a, t_b, *compound_temperatures.values()]
+        finite_candidates = [value for value in candidates if math.isfinite(value)]
+        liquidus = max(finite_candidates) if finite_candidates else math.nan
         rows.append(
             {
                 "x": x_b,
@@ -1307,6 +1500,9 @@ def _binary_liquidus_from_gex_curve(
                 "liquidus_A_K": t_a,
                 "liquidus_B_K": t_b,
                 "liquidus_K": liquidus,
+                "dCp_A_liq_minus_solid_J_mol_K": dcp_a_j_mol_k,
+                "dCp_B_liq_minus_solid_J_mol_K": dcp_b_j_mol_k,
+                **compound_temperatures,
             }
         )
     return rows
@@ -1333,8 +1529,13 @@ def _predicted_eutectic(liquidus_rows: list[dict[str, float]]) -> dict[str, floa
 def _softmax_from_chi2(rows: list[dict[str, Any]]) -> list[float]:
     if not rows:
         return []
-    logs = [-0.5 * float(row["chi2_total"]) for row in rows]
+    logs = []
+    for row in rows:
+        chi2 = finite_float(row.get("chi2_total"))
+        logs.append(-0.5 * chi2 if chi2 is not None else -math.inf)
     max_log = max(logs)
+    if not math.isfinite(max_log):
+        return [1.0 / len(rows)] * len(rows)
     raw = [math.exp(value - max_log) for value in logs]
     total = sum(raw)
     return [value / total for value in raw] if total > 0.0 else [1.0 / len(raw)] * len(raw)
@@ -1354,6 +1555,27 @@ def _weighted_quantile(values: list[tuple[float, float]], quantile: float) -> fl
     return finite[-1][0]
 
 
+def _numeric_grid_spec(spec: str | None, *, default: float) -> list[float]:
+    if spec is None or str(spec).strip() == "":
+        return [float(default)]
+    parts = [float(part.strip()) for part in str(spec).split(",") if part.strip()]
+    if len(parts) == 1:
+        return [parts[0]]
+    if len(parts) != 3:
+        raise ValueError("Grid spec expects one value or min,max,step.")
+    start, stop, step = parts
+    if step <= 0.0 or start > stop:
+        raise ValueError("Grid spec has invalid min/max/step.")
+    values: list[float] = []
+    current = start
+    while current <= stop + 1.0e-10:
+        values.append(round(current, 12))
+        current += step
+    if not values or abs(values[-1] - stop) > 1.0e-10:
+        values.append(stop)
+    return values
+
+
 def _write_benchmark_phase_plot(
     path: Path,
     *,
@@ -1362,6 +1584,8 @@ def _write_benchmark_phase_plot(
     benchmark: dict[str, float],
     title: str,
     x_label: str,
+    t_min: float | None = None,
+    t_max: float | None = None,
 ) -> str | None:
     try:
         import matplotlib.pyplot as plt
@@ -1374,16 +1598,33 @@ def _write_benchmark_phase_plot(
         by_label[str(row["label"])].append(row)
     for label, rows in by_label.items():
         rows = sorted(rows, key=lambda item: float(item["x"]))
-        xs = [float(row["x"]) for row in rows]
-        ys = [float(row["liquidus_K"]) for row in rows]
+        filtered = [
+            row
+            for row in rows
+            if math.isfinite(float(row["liquidus_K"]))
+            and (t_min is None or float(row["liquidus_K"]) >= t_min)
+            and (t_max is None or float(row["liquidus_K"]) <= t_max)
+        ]
+        if not filtered:
+            continue
+        xs = [float(row["x"]) for row in filtered]
+        ys = [float(row["liquidus_K"]) for row in filtered]
         ax.plot(xs, ys, linewidth=1.0, alpha=0.35, label=label)
     if envelope_rows:
-        xs = [float(row["x"]) for row in envelope_rows]
-        p05 = [float(row["liquidus_p05_K"]) for row in envelope_rows]
-        p50 = [float(row["liquidus_p50_K"]) for row in envelope_rows]
-        p95 = [float(row["liquidus_p95_K"]) for row in envelope_rows]
-        ax.fill_between(xs, p05, p95, color="#1f77b4", alpha=0.18, label="posterior 5-95%")
-        ax.plot(xs, p50, color="#1f77b4", linewidth=2.4, label="posterior median")
+        filtered_env = [
+            row
+            for row in envelope_rows
+            if math.isfinite(float(row["liquidus_p50_K"]))
+            and (t_min is None or float(row["liquidus_p50_K"]) >= t_min)
+            and (t_max is None or float(row["liquidus_p50_K"]) <= t_max)
+        ]
+        xs = [float(row["x"]) for row in filtered_env]
+        p05 = [float(row["liquidus_p05_K"]) for row in filtered_env]
+        p50 = [float(row["liquidus_p50_K"]) for row in filtered_env]
+        p95 = [float(row["liquidus_p95_K"]) for row in filtered_env]
+        if xs:
+            ax.fill_between(xs, p05, p95, color="#1f77b4", alpha=0.18, label="posterior 5-95%")
+            ax.plot(xs, p50, color="#1f77b4", linewidth=2.4, label="posterior median")
     if math.isfinite(benchmark.get("x", math.nan)) and math.isfinite(benchmark.get("T_K", math.nan)):
         ax.scatter(
             [benchmark["x"]],
@@ -1399,6 +1640,8 @@ def _write_benchmark_phase_plot(
     ax.set_xlabel(x_label)
     ax.set_ylabel("Temperature (K)")
     ax.set_title(title)
+    if t_min is not None or t_max is not None:
+        ax.set_ylim(bottom=t_min, top=t_max)
     ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(path, dpi=220)
@@ -1448,46 +1691,75 @@ def write_benchmarked_uq_phase(args: argparse.Namespace) -> dict[str, Any]:
     diagram_rows: list[dict[str, Any]] = []
     weight_rows: list[dict[str, Any]] = []
     per_curve_liquidus: dict[str, list[dict[str, float]]] = {}
+    dcp_a_values = _numeric_grid_spec(args.dcp_a_grid, default=args.dcp_a)
+    dcp_b_values = _numeric_grid_spec(args.dcp_b_grid, default=args.dcp_b)
+    line_compounds = _parse_line_compounds(args.line_compound, default_tref_k=args.eutectic_t)
     for curve in curves:
-        points = curve["points_kJ_mol"]
-        liquidus = _binary_liquidus_from_gex_curve(
-            points,
-            tm_a_k=args.tm_a,
-            tm_b_k=args.tm_b,
-            dhfus_a_kj_mol=args.dhfus_a,
-            dhfus_b_kj_mol=args.dhfus_b,
-        )
-        label = str(curve["label"])
-        per_curve_liquidus[label] = liquidus
-        for row in liquidus:
-            out = dict(row)
-            out["label"] = label
-            diagram_rows.append(out)
-        eutectic = _predicted_eutectic(liquidus)
-        model_points = [(float(x), float(y)) for x, y in points]
-        hmix_metric = comparison_metrics(model_points, literature_points, reference_label=args.literature_label)
-        rmse = finite_float(hmix_metric.get("rmse_kJ_mol"))
-        chi2_hmix = (rmse / args.sigma_hmix) ** 2 if rmse is not None and args.sigma_hmix > 0 else 0.0
-        chi2_x = ((eutectic["x"] - args.eutectic_x) / args.sigma_eutectic_x) ** 2 if args.sigma_eutectic_x > 0 else 0.0
-        chi2_t = ((eutectic["T_K"] - args.eutectic_t) / args.sigma_eutectic_t) ** 2 if args.sigma_eutectic_t > 0 else 0.0
-        min_x, min_h = _curve_minimum(points)
-        weight_rows.append(
-            {
-                "label": label,
-                "source": curve["source"],
-                "y_column": curve["y_column"],
-                "hmix_min_x": min_x,
-                "hmix_min_kJ_mol": min_h,
-                "hmix_rmse_kJ_mol": rmse,
-                "eutectic_x": eutectic["x"],
-                "eutectic_T_K": eutectic["T_K"],
-                "eutectic_branch_gap_K": eutectic["branch_gap_K"],
-                "chi2_hmix": chi2_hmix,
-                "chi2_eutectic_x": chi2_x,
-                "chi2_eutectic_T": chi2_t,
-                "chi2_total": chi2_hmix + chi2_x + chi2_t,
-            }
-        )
+        for dcp_a in dcp_a_values:
+            for dcp_b in dcp_b_values:
+                points = curve["points_kJ_mol"]
+                liquidus = _binary_liquidus_from_gex_curve(
+                    points,
+                    tm_a_k=args.tm_a,
+                    tm_b_k=args.tm_b,
+                    dhfus_a_kj_mol=args.dhfus_a,
+                    dhfus_b_kj_mol=args.dhfus_b,
+                    dcp_a_j_mol_k=dcp_a,
+                    dcp_b_j_mol_k=dcp_b,
+                    line_compounds=line_compounds,
+                )
+                base_label = str(curve["label"])
+                label = base_label
+                if len(dcp_a_values) > 1 or len(dcp_b_values) > 1:
+                    label = f"{base_label} dCpA={dcp_a:g} dCpB={dcp_b:g}"
+                per_curve_liquidus[label] = liquidus
+                for row in liquidus:
+                    out = dict(row)
+                    out["label"] = label
+                    out["base_label"] = base_label
+                    diagram_rows.append(out)
+                eutectic = _predicted_eutectic(liquidus)
+                model_points = [(float(x), float(y)) for x, y in points]
+                hmix_metric = comparison_metrics(model_points, literature_points, reference_label=args.literature_label)
+                rmse = finite_float(hmix_metric.get("rmse_kJ_mol"))
+                chi2_hmix = (rmse / args.sigma_hmix) ** 2 if rmse is not None and args.sigma_hmix > 0 else 0.0
+                if math.isfinite(eutectic["x"]) and math.isfinite(eutectic["T_K"]):
+                    chi2_x = (
+                        ((eutectic["x"] - args.eutectic_x) / args.sigma_eutectic_x) ** 2
+                        if args.sigma_eutectic_x > 0
+                        else 0.0
+                    )
+                    chi2_t = (
+                        ((eutectic["T_K"] - args.eutectic_t) / args.sigma_eutectic_t) ** 2
+                        if args.sigma_eutectic_t > 0
+                        else 0.0
+                    )
+                    chi2_total = chi2_hmix + chi2_x + chi2_t
+                else:
+                    chi2_x = math.inf
+                    chi2_t = math.inf
+                    chi2_total = math.inf
+                min_x, min_h = _curve_minimum(points)
+                weight_rows.append(
+                    {
+                        "label": label,
+                        "base_label": base_label,
+                        "source": curve["source"],
+                        "y_column": curve["y_column"],
+                        "dCp_A_liq_minus_solid_J_mol_K": dcp_a,
+                        "dCp_B_liq_minus_solid_J_mol_K": dcp_b,
+                        "hmix_min_x": min_x,
+                        "hmix_min_kJ_mol": min_h,
+                        "hmix_rmse_kJ_mol": rmse,
+                        "eutectic_x": eutectic["x"],
+                        "eutectic_T_K": eutectic["T_K"],
+                        "eutectic_branch_gap_K": eutectic["branch_gap_K"],
+                        "chi2_hmix": chi2_hmix,
+                        "chi2_eutectic_x": chi2_x,
+                        "chi2_eutectic_T": chi2_t,
+                        "chi2_total": chi2_total,
+                    }
+                )
     weights = _softmax_from_chi2(weight_rows)
     for row, weight in zip(weight_rows, weights):
         row["posterior_weight"] = weight
@@ -1515,8 +1787,11 @@ def write_benchmarked_uq_phase(args: argparse.Namespace) -> dict[str, Any]:
         weight_rows,
         [
             "label",
+            "base_label",
             "source",
             "y_column",
+            "dCp_A_liq_minus_solid_J_mol_K",
+            "dCp_B_liq_minus_solid_J_mol_K",
             "hmix_min_x",
             "hmix_min_kJ_mol",
             "hmix_rmse_kJ_mol",
@@ -1531,20 +1806,26 @@ def write_benchmarked_uq_phase(args: argparse.Namespace) -> dict[str, Any]:
         ],
     )
     diagram_csv = outdir / "candidate_phase_diagrams.csv"
+    diagram_fields = [
+        "label",
+        "base_label",
+        "x",
+        "Gex_kJ_mol",
+        "dGex_dx_kJ_mol",
+        "mu_A_ex_J_mol",
+        "mu_B_ex_J_mol",
+        "liquidus_A_K",
+        "liquidus_B_K",
+        "liquidus_K",
+        "dCp_A_liq_minus_solid_J_mol_K",
+        "dCp_B_liq_minus_solid_J_mol_K",
+    ]
+    for compound in line_compounds:
+        diagram_fields.append(f"line_compound_{compound['label']}_K")
     write_csv(
         diagram_csv,
         diagram_rows,
-        [
-            "label",
-            "x",
-            "Gex_kJ_mol",
-            "dGex_dx_kJ_mol",
-            "mu_A_ex_J_mol",
-            "mu_B_ex_J_mol",
-            "liquidus_A_K",
-            "liquidus_B_K",
-            "liquidus_K",
-        ],
+        diagram_fields,
     )
     envelope_csv = outdir / "posterior_phase_envelope.csv"
     write_csv(envelope_csv, envelope_rows, ["x", "liquidus_p05_K", "liquidus_p50_K", "liquidus_p95_K"])
@@ -1555,6 +1836,8 @@ def write_benchmarked_uq_phase(args: argparse.Namespace) -> dict[str, Any]:
         benchmark={"x": args.eutectic_x, "T_K": args.eutectic_t},
         title=args.title or f"{args.component_a}-{args.component_b} UQ-benchmarked liquidus",
         x_label=f"x({args.x_component})",
+        t_min=args.plot_t_min,
+        t_max=args.plot_t_max,
     )
     best_hmix = min(weight_rows, key=lambda row: float(row["chi2_hmix"])) if weight_rows else {}
     best_eutectic = min(
@@ -1563,14 +1846,22 @@ def write_benchmarked_uq_phase(args: argparse.Namespace) -> dict[str, Any]:
     ) if weight_rows else {}
     best_joint = max(weight_rows, key=lambda row: float(row["posterior_weight"])) if weight_rows else {}
     tension = bool(best_hmix and best_eutectic and best_hmix.get("label") != best_eutectic.get("label"))
+    branch_note = (
+        "Note: this diagnostic liquidus model includes terminal solid-liquid branches and "
+        f"{len(line_compounds)} specified line-compound branch(es). The line-compound formation "
+        "terms are simplified pseudo-binary diagnostics, not a replacement for assessed "
+        "compound Gibbs functions."
+        if line_compounds
+        else "Note: this diagnostic liquidus model includes only terminal solid-liquid branches."
+    )
     report = outdir / "posterior_tension_report.md"
     report.write_text(
         textwrap.dedent(
             f"""\
             # {args.component_a}-{args.component_b} UQ-Benchmarked Mixing/Phase Report
 
-            This route weights candidate liquid excess-Gibbs curves against both mixing-enthalpy data
-            and a eutectic benchmark. It is a fast diagnostic layer before a full pycalphad refit.
+This route weights candidate liquid excess-Gibbs curves against both mixing-enthalpy data
+and a eutectic benchmark. It is a fast diagnostic layer before a full pycalphad refit.
 
             Benchmark eutectic: x({args.x_component}) = {args.eutectic_x:g}, T = {args.eutectic_t:g} K.
             Hmix sigma = {args.sigma_hmix:g} kJ/mol; eutectic sigmas = {args.sigma_eutectic_x:g} in x and {args.sigma_eutectic_t:g} K.
@@ -1583,9 +1874,14 @@ def write_benchmarked_uq_phase(args: argparse.Namespace) -> dict[str, Any]:
 
             Interpretation rule: if no candidate has simultaneously low Hmix and eutectic chi-square,
             the model family is under strain. That can indicate missing liquid excess entropy/T-dependence,
-            wrong Hmix basis conversion, inconsistent pure/fusion anchors, or incorrect solid/intermediate
-            compound Gibbs functions. This is useful information, not merely a failed fit.
-            """
+wrong Hmix basis conversion, inconsistent pure/fusion anchors, or incorrect solid/intermediate
+compound Gibbs functions. This is useful information, not merely a failed fit.
+
+{branch_note}
+If a real or missing intermediate line compound participates in the invariant reaction,
+its Gibbs energy can lift, split, or reshape the eutectic/peritectic region. In that case,
+failure to match the eutectic does not uniquely implicate the liquid Hmix/Cp model.
+"""
         ),
         encoding="utf-8",
     )
@@ -1602,6 +1898,8 @@ def write_benchmarked_uq_phase(args: argparse.Namespace) -> dict[str, Any]:
             "component_a": {"Tm_K": args.tm_a, "dHfus_kJ_mol": args.dhfus_a},
             "component_b": {"Tm_K": args.tm_b, "dHfus_kJ_mol": args.dhfus_b},
         },
+        "dCp_grid_J_mol_K": {"component_a": dcp_a_values, "component_b": dcp_b_values},
+        "line_compounds": line_compounds,
         "best_hmix_label": best_hmix.get("label", ""),
         "best_eutectic_label": best_eutectic.get("label", ""),
         "best_joint_label": best_joint.get("label", ""),
@@ -1952,11 +2250,41 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--tm-b", type=float, required=True, help="Pure component B melting point in K.")
     benchmark.add_argument("--dhfus-a", type=float, required=True, help="Pure component A fusion enthalpy in kJ/mol.")
     benchmark.add_argument("--dhfus-b", type=float, required=True, help="Pure component B fusion enthalpy in kJ/mol.")
+    benchmark.add_argument(
+        "--dcp-a",
+        type=float,
+        default=0.0,
+        help="Component A fusion heat-capacity jump Cp_liquid-Cp_solid in J/mol/K.",
+    )
+    benchmark.add_argument(
+        "--dcp-b",
+        type=float,
+        default=0.0,
+        help="Component B fusion heat-capacity jump Cp_liquid-Cp_solid in J/mol/K.",
+    )
+    benchmark.add_argument(
+        "--dcp-a-grid",
+        help="Optional component A dCp grid in J/mol/K: value or min,max,step. Overrides --dcp-a.",
+    )
+    benchmark.add_argument(
+        "--dcp-b-grid",
+        help="Optional component B dCp grid in J/mol/K: value or min,max,step. Overrides --dcp-b.",
+    )
     benchmark.add_argument("--eutectic-x", type=float, required=True, help="Experimental/assessed eutectic x(component B).")
     benchmark.add_argument("--eutectic-t", type=float, required=True, help="Experimental/assessed eutectic temperature in K.")
     benchmark.add_argument("--sigma-hmix", type=float, default=0.5, help="Hmix likelihood sigma in kJ/mol RMSE units.")
     benchmark.add_argument("--sigma-eutectic-x", type=float, default=0.02, help="Eutectic composition likelihood sigma.")
     benchmark.add_argument("--sigma-eutectic-t", type=float, default=25.0, help="Eutectic temperature likelihood sigma in K.")
+    benchmark.add_argument("--plot-t-min", type=float, help="Optional lower y-limit/filter for the phase plot in K.")
+    benchmark.add_argument("--plot-t-max", type=float, help="Optional upper y-limit/filter for the phase plot in K.")
+    benchmark.add_argument(
+        "--line-compound",
+        action="append",
+        help=(
+            "Optional line compound as label:x_component:gform_kJ_mol[:dCp_form_J_mol_K[:tref_K]]. "
+            "Formation term is relative to terminal solids on the pseudo-binary basis."
+        ),
+    )
     benchmark.add_argument("--title")
     benchmark.add_argument("--outdir", type=Path, default=Path("analysis/mivm_benchmark_uq_phase"))
 
