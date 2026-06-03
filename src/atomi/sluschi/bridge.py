@@ -268,7 +268,7 @@ def render_supersalt_probe_sbatch(plan: dict[str, Any]) -> str:
     if env_path:
         activate += f'if [ -f "{env_path}/bin/activate" ]; then source "{env_path}/bin/activate"; fi\n'
     if lammps_prefix:
-        activate += f'export LD_LIBRARY_PATH="{lammps_prefix}/lib:${{LD_LIBRARY_PATH:-}}"\n'
+        activate += f'export LD_LIBRARY_PATH="{lammps_prefix}/lib:{lammps_prefix}/lib64:${{LD_LIBRARY_PATH:-}}"\n'
     return textwrap.dedent(
         f"""\
         #!/bin/bash

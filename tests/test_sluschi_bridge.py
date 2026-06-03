@@ -128,7 +128,7 @@ def test_sluschi_supersalt_example_uses_profile_model(tmp_path: Path):
     probe = (out / "sluschi_inputs" / "run_supersalt_probe.sbatch").read_text(encoding="utf-8")
     assert str(lmp) in probe
     assert 'source "/envs/m_lammps_env/bin/activate"' in probe
-    assert 'export LD_LIBRARY_PATH="/apps/lammps/lib:${LD_LIBRARY_PATH:-}"' in probe
+    assert 'export LD_LIBRARY_PATH="/apps/lammps/lib:/apps/lammps/lib64:${LD_LIBRARY_PATH:-}"' in probe
 
 
 def test_sluschi_parse_collects_calphad_handoff_values(tmp_path: Path):
