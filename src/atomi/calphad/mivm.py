@@ -9,6 +9,7 @@ import math
 import re
 import shutil
 import textwrap
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ R_J_MOLK = 8.31446261815324
 SCHEMA = "atomi.calphad.mivm.parameters.v1"
 SAMPLE_SCHEMA = "atomi.calphad.mivm.sample.v1"
 DATABASE_SCHEMA = "atomi.copilot.mivm.parameter_database.v0.1"
+BENCHMARK_UQ_PHASE_SCHEMA = "atomi.calphad.mivm.benchmark_uq_phase.v1"
 
 
 MIVM_HELP_EPILOG = """\
@@ -98,6 +100,17 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
     with path.open("r", newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
+
+
+def parse_csv_list(value: str | list[str] | None) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            out.extend(parse_csv_list(item))
+        return out
+    return [item.strip() for item in str(value).replace(";", ",").split(",") if item.strip()]
 
 
 def load_parameter_database(path: Path) -> dict[str, Any]:
@@ -1189,6 +1202,422 @@ def comparison_metrics(
     }
 
 
+def _read_curve_family(
+    path: Path,
+    *,
+    x_column: str,
+    curve_columns: list[str],
+    y_unit: str = "kJ/mol",
+    labels: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    rows = read_csv_rows(path)
+    scale = 1.0e-3 if y_unit == "J/mol" else 1.0
+    curves: list[dict[str, Any]] = []
+    for index, column in enumerate(curve_columns):
+        points: list[tuple[float, float]] = []
+        for row in rows:
+            x = finite_float(row.get(x_column))
+            y = finite_float(row.get(column))
+            if x is None or y is None:
+                continue
+            points.append((x, y * scale))
+        if not points:
+            raise ValueError(f"Curve column {column!r} in {path} has no finite points.")
+        label = labels[index] if labels and index < len(labels) else column
+        curves.append(
+            {
+                "label": label,
+                "source": str(path),
+                "x_column": x_column,
+                "y_column": column,
+                "points_kJ_mol": sorted(points),
+            }
+        )
+    return curves
+
+
+def _curve_minimum(points: list[tuple[float, float]]) -> tuple[float, float]:
+    if not points:
+        return (math.nan, math.nan)
+    return min(points, key=lambda item: item[1])
+
+
+def _curve_derivatives(points: list[tuple[float, float]]) -> list[tuple[float, float, float]]:
+    sorted_points = sorted(points)
+    out: list[tuple[float, float, float]] = []
+    for index, (x, y) in enumerate(sorted_points):
+        if index == 0 and len(sorted_points) > 1:
+            x0, y0 = sorted_points[index]
+            x1, y1 = sorted_points[index + 1]
+        elif index == len(sorted_points) - 1 and len(sorted_points) > 1:
+            x0, y0 = sorted_points[index - 1]
+            x1, y1 = sorted_points[index]
+        elif len(sorted_points) > 2:
+            x0, y0 = sorted_points[index - 1]
+            x1, y1 = sorted_points[index + 1]
+        else:
+            x0, y0 = x, y
+            x1, y1 = x, y
+        dydx = (y1 - y0) / (x1 - x0) if abs(x1 - x0) > 1.0e-15 else 0.0
+        out.append((x, y, dydx))
+    return out
+
+
+def _binary_liquidus_from_gex_curve(
+    points_kJ_mol: list[tuple[float, float]],
+    *,
+    tm_a_k: float,
+    tm_b_k: float,
+    dhfus_a_kj_mol: float,
+    dhfus_b_kj_mol: float,
+    x_min: float = 1.0e-6,
+    x_max: float = 1.0 - 1.0e-6,
+) -> list[dict[str, float]]:
+    """Predict terminal liquidus branches from tabulated binary Gex/Hmix.
+
+    The binary coordinate is x_B. ``points_kJ_mol`` are treated as a
+    temperature-independent excess Gibbs proxy. For a binary molar excess
+    function g(x_B), the excess chemical potentials are:
+      mu_A^ex = g - x_B dg/dx_B
+      mu_B^ex = g + (1 - x_B) dg/dx_B.
+    """
+    rows: list[dict[str, float]] = []
+    for x_b, g_kj_mol, dgdx_kj_mol in _curve_derivatives(points_kJ_mol):
+        if x_b <= x_min or x_b >= x_max:
+            continue
+        x_a = 1.0 - x_b
+        g_j_mol = g_kj_mol * 1000.0
+        dgdx_j_mol = dgdx_kj_mol * 1000.0
+        mu_a_ex = g_j_mol - x_b * dgdx_j_mol
+        mu_b_ex = g_j_mol + x_a * dgdx_j_mol
+        dh_a = dhfus_a_kj_mol * 1000.0
+        dh_b = dhfus_b_kj_mol * 1000.0
+        denom_a = R_J_MOLK * math.log(max(x_a, 1.0e-15)) - dh_a / tm_a_k
+        denom_b = R_J_MOLK * math.log(max(x_b, 1.0e-15)) - dh_b / tm_b_k
+        t_a = (-dh_a - mu_a_ex) / denom_a if abs(denom_a) > 1.0e-15 else math.nan
+        t_b = (-dh_b - mu_b_ex) / denom_b if abs(denom_b) > 1.0e-15 else math.nan
+        liquidus = max(t_a, t_b) if math.isfinite(t_a) and math.isfinite(t_b) else math.nan
+        rows.append(
+            {
+                "x": x_b,
+                "Gex_kJ_mol": g_kj_mol,
+                "dGex_dx_kJ_mol": dgdx_kj_mol,
+                "mu_A_ex_J_mol": mu_a_ex,
+                "mu_B_ex_J_mol": mu_b_ex,
+                "liquidus_A_K": t_a,
+                "liquidus_B_K": t_b,
+                "liquidus_K": liquidus,
+            }
+        )
+    return rows
+
+
+def _predicted_eutectic(liquidus_rows: list[dict[str, float]]) -> dict[str, float]:
+    finite_rows = [
+        row
+        for row in liquidus_rows
+        if math.isfinite(row.get("liquidus_K", math.nan))
+        and math.isfinite(row.get("liquidus_A_K", math.nan))
+        and math.isfinite(row.get("liquidus_B_K", math.nan))
+    ]
+    if not finite_rows:
+        return {"x": math.nan, "T_K": math.nan, "branch_gap_K": math.nan}
+    best = min(finite_rows, key=lambda row: row["liquidus_K"])
+    return {
+        "x": best["x"],
+        "T_K": best["liquidus_K"],
+        "branch_gap_K": abs(best["liquidus_A_K"] - best["liquidus_B_K"]),
+    }
+
+
+def _softmax_from_chi2(rows: list[dict[str, Any]]) -> list[float]:
+    if not rows:
+        return []
+    logs = [-0.5 * float(row["chi2_total"]) for row in rows]
+    max_log = max(logs)
+    raw = [math.exp(value - max_log) for value in logs]
+    total = sum(raw)
+    return [value / total for value in raw] if total > 0.0 else [1.0 / len(raw)] * len(raw)
+
+
+def _weighted_quantile(values: list[tuple[float, float]], quantile: float) -> float:
+    finite = sorted((value, weight) for value, weight in values if math.isfinite(value) and weight > 0.0)
+    if not finite:
+        return math.nan
+    total = sum(weight for _, weight in finite)
+    threshold = quantile * total
+    accum = 0.0
+    for value, weight in finite:
+        accum += weight
+        if accum >= threshold:
+            return value
+    return finite[-1][0]
+
+
+def _write_benchmark_phase_plot(
+    path: Path,
+    *,
+    diagram_rows: list[dict[str, Any]],
+    envelope_rows: list[dict[str, Any]],
+    benchmark: dict[str, float],
+    title: str,
+    x_label: str,
+) -> str | None:
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8.5, 5.5))
+    by_label: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in diagram_rows:
+        by_label[str(row["label"])].append(row)
+    for label, rows in by_label.items():
+        rows = sorted(rows, key=lambda item: float(item["x"]))
+        xs = [float(row["x"]) for row in rows]
+        ys = [float(row["liquidus_K"]) for row in rows]
+        ax.plot(xs, ys, linewidth=1.0, alpha=0.35, label=label)
+    if envelope_rows:
+        xs = [float(row["x"]) for row in envelope_rows]
+        p05 = [float(row["liquidus_p05_K"]) for row in envelope_rows]
+        p50 = [float(row["liquidus_p50_K"]) for row in envelope_rows]
+        p95 = [float(row["liquidus_p95_K"]) for row in envelope_rows]
+        ax.fill_between(xs, p05, p95, color="#1f77b4", alpha=0.18, label="posterior 5-95%")
+        ax.plot(xs, p50, color="#1f77b4", linewidth=2.4, label="posterior median")
+    if math.isfinite(benchmark.get("x", math.nan)) and math.isfinite(benchmark.get("T_K", math.nan)):
+        ax.scatter(
+            [benchmark["x"]],
+            [benchmark["T_K"]],
+            marker="*",
+            s=180,
+            color="#d62728",
+            edgecolor="black",
+            linewidth=0.5,
+            zorder=5,
+            label="benchmark eutectic",
+        )
+    ax.set_xlabel(x_label)
+    ax.set_ylabel("Temperature (K)")
+    ax.set_title(title)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(path, dpi=220)
+    plt.close(fig)
+    return str(path)
+
+
+def write_benchmarked_uq_phase(args: argparse.Namespace) -> dict[str, Any]:
+    curve_columns = parse_csv_list(args.curve_columns)
+    if not curve_columns:
+        raise ValueError("--curve-columns must name at least one candidate curve column.")
+    labels = parse_csv_list(args.curve_labels)
+    curves = _read_curve_family(
+        args.curve_csv,
+        x_column=args.x_column,
+        curve_columns=curve_columns,
+        y_unit=args.curve_y_unit,
+        labels=labels,
+    )
+    if args.extra_curve_csv:
+        for spec in args.extra_curve_csv:
+            parts = [part.strip() for part in spec.split(":")]
+            if len(parts) not in {3, 4}:
+                raise ValueError("--extra-curve-csv expects path:x_column:y_column[:label].")
+            path = Path(parts[0])
+            label = parts[3] if len(parts) == 4 else parts[2]
+            curves.extend(
+                _read_curve_family(
+                    path,
+                    x_column=parts[1],
+                    curve_columns=[parts[2]],
+                    y_unit=args.curve_y_unit,
+                    labels=[label],
+                )
+            )
+    literature_points = (
+        _read_xy_points(
+            args.literature_csv,
+            x_column=args.literature_x_column,
+            y_column=args.literature_y_column,
+            y_unit=args.literature_y_unit,
+        )
+        if args.literature_csv
+        else []
+    )
+    outdir = args.outdir.resolve()
+    diagram_rows: list[dict[str, Any]] = []
+    weight_rows: list[dict[str, Any]] = []
+    per_curve_liquidus: dict[str, list[dict[str, float]]] = {}
+    for curve in curves:
+        points = curve["points_kJ_mol"]
+        liquidus = _binary_liquidus_from_gex_curve(
+            points,
+            tm_a_k=args.tm_a,
+            tm_b_k=args.tm_b,
+            dhfus_a_kj_mol=args.dhfus_a,
+            dhfus_b_kj_mol=args.dhfus_b,
+        )
+        label = str(curve["label"])
+        per_curve_liquidus[label] = liquidus
+        for row in liquidus:
+            out = dict(row)
+            out["label"] = label
+            diagram_rows.append(out)
+        eutectic = _predicted_eutectic(liquidus)
+        model_points = [(float(x), float(y)) for x, y in points]
+        hmix_metric = comparison_metrics(model_points, literature_points, reference_label=args.literature_label)
+        rmse = finite_float(hmix_metric.get("rmse_kJ_mol"))
+        chi2_hmix = (rmse / args.sigma_hmix) ** 2 if rmse is not None and args.sigma_hmix > 0 else 0.0
+        chi2_x = ((eutectic["x"] - args.eutectic_x) / args.sigma_eutectic_x) ** 2 if args.sigma_eutectic_x > 0 else 0.0
+        chi2_t = ((eutectic["T_K"] - args.eutectic_t) / args.sigma_eutectic_t) ** 2 if args.sigma_eutectic_t > 0 else 0.0
+        min_x, min_h = _curve_minimum(points)
+        weight_rows.append(
+            {
+                "label": label,
+                "source": curve["source"],
+                "y_column": curve["y_column"],
+                "hmix_min_x": min_x,
+                "hmix_min_kJ_mol": min_h,
+                "hmix_rmse_kJ_mol": rmse,
+                "eutectic_x": eutectic["x"],
+                "eutectic_T_K": eutectic["T_K"],
+                "eutectic_branch_gap_K": eutectic["branch_gap_K"],
+                "chi2_hmix": chi2_hmix,
+                "chi2_eutectic_x": chi2_x,
+                "chi2_eutectic_T": chi2_t,
+                "chi2_total": chi2_hmix + chi2_x + chi2_t,
+            }
+        )
+    weights = _softmax_from_chi2(weight_rows)
+    for row, weight in zip(weight_rows, weights):
+        row["posterior_weight"] = weight
+    envelope_rows: list[dict[str, Any]] = []
+    x_values = sorted({round(float(row["x"]), 12) for row in diagram_rows})
+    weight_by_label = {str(row["label"]): float(row["posterior_weight"]) for row in weight_rows}
+    for x_value in x_values:
+        samples: list[tuple[float, float]] = []
+        for label, rows in per_curve_liquidus.items():
+            point = _interp_linear([(float(row["x"]), float(row["liquidus_K"])) for row in rows], x_value)
+            if point is not None:
+                samples.append((point, weight_by_label.get(label, 0.0)))
+        if samples:
+            envelope_rows.append(
+                {
+                    "x": x_value,
+                    "liquidus_p05_K": _weighted_quantile(samples, 0.05),
+                    "liquidus_p50_K": _weighted_quantile(samples, 0.50),
+                    "liquidus_p95_K": _weighted_quantile(samples, 0.95),
+                }
+            )
+    weight_csv = outdir / "posterior_model_weights.csv"
+    write_csv(
+        weight_csv,
+        weight_rows,
+        [
+            "label",
+            "source",
+            "y_column",
+            "hmix_min_x",
+            "hmix_min_kJ_mol",
+            "hmix_rmse_kJ_mol",
+            "eutectic_x",
+            "eutectic_T_K",
+            "eutectic_branch_gap_K",
+            "chi2_hmix",
+            "chi2_eutectic_x",
+            "chi2_eutectic_T",
+            "chi2_total",
+            "posterior_weight",
+        ],
+    )
+    diagram_csv = outdir / "candidate_phase_diagrams.csv"
+    write_csv(
+        diagram_csv,
+        diagram_rows,
+        [
+            "label",
+            "x",
+            "Gex_kJ_mol",
+            "dGex_dx_kJ_mol",
+            "mu_A_ex_J_mol",
+            "mu_B_ex_J_mol",
+            "liquidus_A_K",
+            "liquidus_B_K",
+            "liquidus_K",
+        ],
+    )
+    envelope_csv = outdir / "posterior_phase_envelope.csv"
+    write_csv(envelope_csv, envelope_rows, ["x", "liquidus_p05_K", "liquidus_p50_K", "liquidus_p95_K"])
+    plot = _write_benchmark_phase_plot(
+        outdir / "uq_benchmarked_phase_diagram.png",
+        diagram_rows=diagram_rows,
+        envelope_rows=envelope_rows,
+        benchmark={"x": args.eutectic_x, "T_K": args.eutectic_t},
+        title=args.title or f"{args.component_a}-{args.component_b} UQ-benchmarked liquidus",
+        x_label=f"x({args.x_component})",
+    )
+    best_hmix = min(weight_rows, key=lambda row: float(row["chi2_hmix"])) if weight_rows else {}
+    best_eutectic = min(
+        weight_rows,
+        key=lambda row: float(row["chi2_eutectic_x"]) + float(row["chi2_eutectic_T"]),
+    ) if weight_rows else {}
+    best_joint = max(weight_rows, key=lambda row: float(row["posterior_weight"])) if weight_rows else {}
+    tension = bool(best_hmix and best_eutectic and best_hmix.get("label") != best_eutectic.get("label"))
+    report = outdir / "posterior_tension_report.md"
+    report.write_text(
+        textwrap.dedent(
+            f"""\
+            # {args.component_a}-{args.component_b} UQ-Benchmarked Mixing/Phase Report
+
+            This route weights candidate liquid excess-Gibbs curves against both mixing-enthalpy data
+            and a eutectic benchmark. It is a fast diagnostic layer before a full pycalphad refit.
+
+            Benchmark eutectic: x({args.x_component}) = {args.eutectic_x:g}, T = {args.eutectic_t:g} K.
+            Hmix sigma = {args.sigma_hmix:g} kJ/mol; eutectic sigmas = {args.sigma_eutectic_x:g} in x and {args.sigma_eutectic_t:g} K.
+
+            Best Hmix candidate: {best_hmix.get('label', '')}
+            Best eutectic candidate: {best_eutectic.get('label', '')}
+            Best joint posterior candidate: {best_joint.get('label', '')}
+
+            Posterior tension flag: {tension}
+
+            Interpretation rule: if no candidate has simultaneously low Hmix and eutectic chi-square,
+            the model family is under strain. That can indicate missing liquid excess entropy/T-dependence,
+            wrong Hmix basis conversion, inconsistent pure/fusion anchors, or incorrect solid/intermediate
+            compound Gibbs functions. This is useful information, not merely a failed fit.
+            """
+        ),
+        encoding="utf-8",
+    )
+    metadata = {
+        "schema": BENCHMARK_UQ_PHASE_SCHEMA,
+        "component_a": args.component_a,
+        "component_b": args.component_b,
+        "x_component": args.x_component,
+        "curve_csv": str(args.curve_csv.resolve()),
+        "curve_columns": curve_columns,
+        "literature_csv": str(args.literature_csv.resolve()) if args.literature_csv else "",
+        "benchmark": {"eutectic_x": args.eutectic_x, "eutectic_T_K": args.eutectic_t},
+        "pure_fusion_anchors": {
+            "component_a": {"Tm_K": args.tm_a, "dHfus_kJ_mol": args.dhfus_a},
+            "component_b": {"Tm_K": args.tm_b, "dHfus_kJ_mol": args.dhfus_b},
+        },
+        "best_hmix_label": best_hmix.get("label", ""),
+        "best_eutectic_label": best_eutectic.get("label", ""),
+        "best_joint_label": best_joint.get("label", ""),
+        "posterior_tension": tension,
+        "outputs": {
+            "posterior_model_weights": str(weight_csv),
+            "candidate_phase_diagrams": str(diagram_csv),
+            "posterior_phase_envelope": str(envelope_csv),
+            "phase_plot": plot or "",
+            "tension_report": str(report),
+        },
+    }
+    write_json(outdir / "benchmark_uq_phase_metadata.json", metadata)
+    return metadata
+
+
 def write_comparison_plot(
     path: Path,
     *,
@@ -1494,6 +1923,43 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--mqmqa-label", default="MQMQA/MSTDB")
     compare.add_argument("--tdb-sanity", type=Path, help="Optional TDB/MSTDB file to sanity-check for pycalphad use.")
 
+    benchmark = subparsers.add_parser(
+        "benchmark-uq-phase",
+        help=(
+            "Weight UQ liquid Hmix/Gex curves by mixing-enthalpy and eutectic benchmarks, "
+            "then write a fast posterior liquidus envelope."
+        ),
+    )
+    benchmark.add_argument("--curve-csv", type=Path, required=True, help="CSV containing candidate Hmix/Gex curves.")
+    benchmark.add_argument("--x-column", required=True, help="Composition column for x(component B).")
+    benchmark.add_argument("--curve-columns", required=True, help="Comma-separated Hmix/Gex candidate columns.")
+    benchmark.add_argument("--curve-labels", help="Optional comma-separated labels matching --curve-columns.")
+    benchmark.add_argument("--curve-y-unit", choices=("kJ/mol", "J/mol"), default="kJ/mol")
+    benchmark.add_argument(
+        "--extra-curve-csv",
+        action="append",
+        help="Optional extra candidate as path:x_column:y_column[:label]. Repeatable.",
+    )
+    benchmark.add_argument("--literature-csv", type=Path, help="Optional Hmix benchmark CSV.")
+    benchmark.add_argument("--literature-x-column", default="x_UCl3")
+    benchmark.add_argument("--literature-y-column", default="Hmix_kJ_mol")
+    benchmark.add_argument("--literature-y-unit", choices=("kJ/mol", "J/mol"), default="kJ/mol")
+    benchmark.add_argument("--literature-label", default="literature Hmix")
+    benchmark.add_argument("--component-a", required=True, help="Low-x terminal component, e.g. NaCl.")
+    benchmark.add_argument("--component-b", required=True, help="High-x terminal component, e.g. UCl3.")
+    benchmark.add_argument("--x-component", required=True, help="Name shown on the x-axis, usually component B.")
+    benchmark.add_argument("--tm-a", type=float, required=True, help="Pure component A melting point in K.")
+    benchmark.add_argument("--tm-b", type=float, required=True, help="Pure component B melting point in K.")
+    benchmark.add_argument("--dhfus-a", type=float, required=True, help="Pure component A fusion enthalpy in kJ/mol.")
+    benchmark.add_argument("--dhfus-b", type=float, required=True, help="Pure component B fusion enthalpy in kJ/mol.")
+    benchmark.add_argument("--eutectic-x", type=float, required=True, help="Experimental/assessed eutectic x(component B).")
+    benchmark.add_argument("--eutectic-t", type=float, required=True, help="Experimental/assessed eutectic temperature in K.")
+    benchmark.add_argument("--sigma-hmix", type=float, default=0.5, help="Hmix likelihood sigma in kJ/mol RMSE units.")
+    benchmark.add_argument("--sigma-eutectic-x", type=float, default=0.02, help="Eutectic composition likelihood sigma.")
+    benchmark.add_argument("--sigma-eutectic-t", type=float, default=25.0, help="Eutectic temperature likelihood sigma in K.")
+    benchmark.add_argument("--title")
+    benchmark.add_argument("--outdir", type=Path, default=Path("analysis/mivm_benchmark_uq_phase"))
+
     sanitize = subparsers.add_parser(
         "mstdb-sanitize",
         help="Sanitize ChemSage/MSTDB charged-species labels for pycalphad equilibrium checks.",
@@ -1614,6 +2080,18 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
             sanity = metadata["tdb_sanity"]
             for warning in sanity.get("warnings", []):
                 print(f"WARNING: {warning}")
+        return metadata
+    if args.command == "benchmark-uq-phase":
+        metadata = write_benchmarked_uq_phase(args)
+        print(f"Wrote posterior weights      : {metadata['outputs']['posterior_model_weights']}")
+        print(f"Wrote candidate liquidus CSV : {metadata['outputs']['candidate_phase_diagrams']}")
+        print(f"Wrote posterior envelope CSV : {metadata['outputs']['posterior_phase_envelope']}")
+        if metadata["outputs"].get("phase_plot"):
+            print(f"Wrote benchmarked phase plot : {metadata['outputs']['phase_plot']}")
+        print(f"Wrote tension report         : {metadata['outputs']['tension_report']}")
+        print(f"Best joint candidate         : {metadata['best_joint_label']}")
+        if metadata["posterior_tension"]:
+            print("WARNING: Hmix and eutectic benchmarks prefer different candidate curves.")
         return metadata
     if args.command == "mstdb-sanitize":
         metadata_path = args.metadata or args.output.with_suffix(args.output.suffix + ".metadata.json")

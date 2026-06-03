@@ -166,6 +166,86 @@ def test_mivm_compare_binary_writes_metrics_and_plot(tmp_path: Path):
     assert (outdir / "mivm_binary_comparison_metadata.json").exists()
 
 
+def test_benchmark_uq_phase_weights_hmix_and_eutectic(tmp_path: Path):
+    curves = tmp_path / "curves.csv"
+    curves.write_text(
+        "\n".join(
+            [
+                "x_B,hmix_left,hmix_center",
+                "0.05,-1.0,-0.2",
+                "0.20,-4.0,-2.0",
+                "0.35,-3.0,-5.0",
+                "0.50,-1.0,-4.0",
+                "0.65,-0.3,-2.0",
+                "0.80,-0.1,-0.5",
+                "0.95,0.0,-0.1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    literature = tmp_path / "hmix_lit.csv"
+    literature.write_text("x_B,Hmix_kJ_mol\n0.20,-4.0\n0.35,-3.0\n0.50,-1.0\n", encoding="utf-8")
+    outdir = tmp_path / "bench"
+
+    metadata = mivm_main(
+        [
+            "benchmark-uq-phase",
+            "--curve-csv",
+            str(curves),
+            "--x-column",
+            "x_B",
+            "--curve-columns",
+            "hmix_left,hmix_center",
+            "--curve-labels",
+            "left,center",
+            "--literature-csv",
+            str(literature),
+            "--literature-x-column",
+            "x_B",
+            "--literature-y-column",
+            "Hmix_kJ_mol",
+            "--component-a",
+            "A",
+            "--component-b",
+            "B",
+            "--x-component",
+            "B",
+            "--tm-a",
+            "1000",
+            "--tm-b",
+            "1100",
+            "--dhfus-a",
+            "20",
+            "--dhfus-b",
+            "22",
+            "--eutectic-x",
+            "0.45",
+            "--eutectic-t",
+            "760",
+            "--sigma-hmix",
+            "0.5",
+            "--sigma-eutectic-x",
+            "0.2",
+            "--sigma-eutectic-t",
+            "200",
+            "--outdir",
+            str(outdir),
+        ]
+    )
+
+    assert metadata is not None
+    assert metadata["schema"] == "atomi.calphad.mivm.benchmark_uq_phase.v1"
+    assert (outdir / "posterior_model_weights.csv").exists()
+    assert (outdir / "candidate_phase_diagrams.csv").exists()
+    assert (outdir / "posterior_phase_envelope.csv").exists()
+    assert (outdir / "posterior_tension_report.md").exists()
+    rows = list(csv.DictReader((outdir / "posterior_model_weights.csv").open(encoding="utf-8")))
+    assert {row["label"] for row in rows} == {"left", "center"}
+    assert sum(float(row["posterior_weight"]) for row in rows) == pytest.approx(1.0)
+    assert any(float(row["hmix_rmse_kJ_mol"]) < 1.0 for row in rows)
+
+
 def test_tdb_sanity_warns_on_chemsage_style_export(tmp_path: Path):
     path = tmp_path / "MSTDB-No-Functions.dat"
     path.write_text(
