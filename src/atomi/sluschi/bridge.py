@@ -96,12 +96,14 @@ def inspect_environment(config_path: Path | None = None, profile_name: str = "sl
     root = str(profile.get("root") or env_root or "")
     bin_dir = str(profile.get("bin") or env_bin or "")
     model = str(profile.get("mlip_model") or env_mlip or "")
-    executables = which_many(["sluschi", "mds_lmp", "lmp", "lammps", "vasp_std", "sbatch", "python3"])
+    executables = which_many(["sluschi", "SLUSCHI", "mds_lmp", "lmp", "lammps", "vasp_std", "sbatch", "python3"])
     if bin_dir:
-        for exe in ("sluschi", "mds_lmp"):
+        for exe in ("sluschi", "SLUSCHI", "mds_lmp"):
             candidate = Path(bin_dir).expanduser() / exe
             if candidate.exists():
                 executables[exe] = str(candidate)
+    if not executables.get("sluschi") and executables.get("SLUSCHI"):
+        executables["sluschi"] = executables["SLUSCHI"]
     status = {
         "schema": SCHEMA_STATUS,
         "profile": profile_name,
