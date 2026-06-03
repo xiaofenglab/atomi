@@ -1149,6 +1149,8 @@ def _smoothed_boundary_paths(
     t_values: list[float],
     *,
     window: int,
+    mode: str = "average",
+    max_gap_steps: float = 4.0,
 ) -> list[dict[str, Any]]:
     if window <= 1:
         return []
@@ -1162,7 +1164,9 @@ def _smoothed_boundary_paths(
     for (field_1, field_2, orientation), rows in grouped.items():
         independent_key = "T_K" if orientation == "vertical_in_x" else "x"
         dependent_key = "x" if orientation == "vertical_in_x" else "T_K"
-        max_gap = 1.75 * (t_step if independent_key == "T_K" else x_step)
+        step = t_step if independent_key == "T_K" else x_step
+        max_gap = 1.75 * step
+        bridge_gap = max(max_gap, max_gap_steps * step)
         collapsed: dict[float, list[float]] = defaultdict(list)
         for row in rows:
             collapsed[float(row[independent_key])].append(float(row[dependent_key]))
@@ -1170,6 +1174,25 @@ def _smoothed_boundary_paths(
         points.sort(key=lambda item: item[0])
         if len(points) < 3:
             continue
+        if mode == "bridge-gaps":
+            for left, right in zip(points[:-1], points[1:]):
+                gap = abs(right[0] - left[0])
+                if max_gap < gap <= bridge_gap:
+                    if orientation == "vertical_in_x":
+                        xy = [(left[1], left[0]), (right[1], right[0])]
+                    else:
+                        xy = [(left[0], left[1]), (right[0], right[1])]
+                    paths.append(
+                        {
+                            "field_1": field_1,
+                            "field_2": field_2,
+                            "orientation": orientation,
+                            "points": xy,
+                        }
+                    )
+            continue
+        if mode != "average":
+            raise ValueError(f"Unsupported smooth mode: {mode}")
         chunks: list[list[tuple[float, float]]] = [[]]
         for point in points:
             if chunks[-1] and abs(point[0] - chunks[-1][-1][0]) > max_gap:
@@ -1205,10 +1228,19 @@ def _plot_smoothed_boundaries(
     linestyle: str,
     linewidth: float,
     window: int,
+    mode: str = "average",
+    max_gap_steps: float = 4.0,
     alpha: float = 1.0,
     label: str | None = None,
 ) -> int:
-    paths = _smoothed_boundary_paths(boundary_points, x_values, t_values, window=window)
+    paths = _smoothed_boundary_paths(
+        boundary_points,
+        x_values,
+        t_values,
+        window=window,
+        mode=mode,
+        max_gap_steps=max_gap_steps,
+    )
     for path in paths:
         points = path["points"]
         xs = [point[0] for point in points]
@@ -1230,6 +1262,8 @@ def plot_phase_diagram_lines(
     overlay_labels: list[str] | None = None,
     smooth_boundaries: bool = False,
     smooth_window: int = 5,
+    smooth_mode: str = "average",
+    smooth_max_gap_steps: float = 4.0,
     hide_raw_boundaries: bool = False,
 ) -> dict[str, Any]:
     try:
@@ -1249,10 +1283,16 @@ def plot_phase_diagram_lines(
 
     fig, ax = plt.subplots(figsize=(7.2, 5.2), constrained_layout=True)
     n_smooth_paths = 0
-    raw_color = "0.38" if smooth_boundaries else "black"
-    raw_linestyle = "--" if smooth_boundaries else "-"
-    raw_linewidth = 0.55 if smooth_boundaries else 1.15
-    raw_alpha = 0.72 if smooth_boundaries else 1.0
+    if smooth_boundaries and smooth_mode == "bridge-gaps":
+        raw_color = "black"
+        raw_linestyle = "-"
+        raw_linewidth = 1.05
+        raw_alpha = 0.92
+    else:
+        raw_color = "0.38" if smooth_boundaries else "black"
+        raw_linestyle = "--" if smooth_boundaries else "-"
+        raw_linewidth = 0.55 if smooth_boundaries else 1.15
+        raw_alpha = 0.72 if smooth_boundaries else 1.0
     if not hide_raw_boundaries:
         _plot_grid_boundaries(
             ax,
@@ -1273,9 +1313,18 @@ def plot_phase_diagram_lines(
             t_values,
             color="black",
             linestyle="-",
-            linewidth=1.9,
+            linewidth=1.4 if smooth_mode == "bridge-gaps" else 1.9,
             window=smooth_window,
-            label="CALPHAD/MQMQA smoothed" if overlay_csvs or not hide_raw_boundaries else None,
+            mode=smooth_mode,
+            max_gap_steps=smooth_max_gap_steps,
+            alpha=0.82 if smooth_mode == "bridge-gaps" else 1.0,
+            label=(
+                "CALPHAD/MQMQA gap bridges"
+                if smooth_mode == "bridge-gaps" and (overlay_csvs or not hide_raw_boundaries)
+                else "CALPHAD/MQMQA smoothed"
+                if overlay_csvs or not hide_raw_boundaries
+                else None
+            ),
         )
 
     if overlay_csvs:
@@ -1295,7 +1344,7 @@ def plot_phase_diagram_lines(
                     overlay_t,
                     color=colors[idx % len(colors)],
                     linestyle=":",
-                    linewidth=0.6 if smooth_boundaries else 1.2,
+                    linewidth=0.9 if smooth_boundaries and smooth_mode == "bridge-gaps" else 0.6 if smooth_boundaries else 1.2,
                     alpha=0.72 if smooth_boundaries else 1.0,
                     label=f"{label} raw" if smooth_boundaries else label,
                 )
@@ -1307,9 +1356,18 @@ def plot_phase_diagram_lines(
                     overlay_t,
                     color=colors[idx % len(colors)],
                     linestyle="--",
-                    linewidth=1.9,
+                    linewidth=1.4 if smooth_mode == "bridge-gaps" else 1.9,
                     window=smooth_window,
-                    label=f"{label} smoothed" if not hide_raw_boundaries else label,
+                    mode=smooth_mode,
+                    max_gap_steps=smooth_max_gap_steps,
+                    alpha=0.82 if smooth_mode == "bridge-gaps" else 1.0,
+                    label=(
+                        f"{label} gap bridges"
+                        if smooth_mode == "bridge-gaps" and not hide_raw_boundaries
+                        else f"{label} smoothed"
+                        if not hide_raw_boundaries
+                        else label
+                    ),
                 )
 
     if label_fields:
@@ -1347,6 +1405,8 @@ def plot_phase_diagram_lines(
         "n_phase_fields": len(signatures),
         "n_smoothed_boundary_paths": n_smooth_paths,
         "smooth_window": smooth_window if smooth_boundaries else None,
+        "smooth_mode": smooth_mode if smooth_boundaries else None,
+        "smooth_max_gap_steps": smooth_max_gap_steps if smooth_boundaries else None,
     }
 
 
@@ -1398,6 +1458,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scan_tx.add_argument("--smooth-boundaries", action="store_true", help="Overlay smoothed guide curves on paper-style phase diagrams.")
     scan_tx.add_argument("--smooth-window", type=int, default=5, help="Centered moving-average window for smoothed boundary guide curves.")
+    scan_tx.add_argument(
+        "--smooth-mode",
+        choices=("average", "bridge-gaps"),
+        default="average",
+        help="Boundary guide mode: moving-average whole paths, or only bridge short gaps while preserving raw dense-grid features.",
+    )
+    scan_tx.add_argument(
+        "--smooth-max-gap-steps",
+        type=float,
+        default=4.0,
+        help="For --smooth-mode bridge-gaps, bridge missing boundary spans up to this many grid steps.",
+    )
     scan_tx.add_argument("--hide-raw-boundaries", action="store_true", help="Hide raw grid-step boundaries when --smooth-boundaries is enabled.")
 
     scan_mu = sub.add_parser("scan-muo", help="Scan a T-mu(component) phase grid and write CSV.")
@@ -1432,6 +1504,18 @@ def build_parser() -> argparse.ArgumentParser:
     plot.add_argument("--no-label-fields", action="store_true", help="Suppress field labels in diagram mode.")
     plot.add_argument("--smooth-boundaries", action="store_true", help="Overlay smoothed guide curves in diagram mode.")
     plot.add_argument("--smooth-window", type=int, default=5, help="Centered moving-average window for smoothed boundary guide curves.")
+    plot.add_argument(
+        "--smooth-mode",
+        choices=("average", "bridge-gaps"),
+        default="average",
+        help="Boundary guide mode: moving-average whole paths, or only bridge short gaps while preserving raw dense-grid features.",
+    )
+    plot.add_argument(
+        "--smooth-max-gap-steps",
+        type=float,
+        default=4.0,
+        help="For --smooth-mode bridge-gaps, bridge missing boundary spans up to this many grid steps.",
+    )
     plot.add_argument("--hide-raw-boundaries", action="store_true", help="Hide raw grid-step boundaries when --smooth-boundaries is enabled.")
 
     diagram = sub.add_parser("plot-diagram", help="Plot a paper-style T-X phase-boundary diagram from a scan grid CSV.")
@@ -1444,6 +1528,18 @@ def build_parser() -> argparse.ArgumentParser:
     diagram.add_argument("--no-label-fields", action="store_true", help="Suppress field labels.")
     diagram.add_argument("--smooth-boundaries", action="store_true", help="Overlay smoothed guide curves.")
     diagram.add_argument("--smooth-window", type=int, default=5, help="Centered moving-average window for smoothed boundary guide curves.")
+    diagram.add_argument(
+        "--smooth-mode",
+        choices=("average", "bridge-gaps"),
+        default="average",
+        help="Boundary guide mode: moving-average whole paths, or only bridge short gaps while preserving raw dense-grid features.",
+    )
+    diagram.add_argument(
+        "--smooth-max-gap-steps",
+        type=float,
+        default=4.0,
+        help="For --smooth-mode bridge-gaps, bridge missing boundary spans up to this many grid steps.",
+    )
     diagram.add_argument("--hide-raw-boundaries", action="store_true", help="Hide raw grid-step boundaries when --smooth-boundaries is enabled.")
     return parser
 
@@ -1591,6 +1687,8 @@ def scan_tx_main(args: argparse.Namespace) -> dict[str, Any]:
             boundary_csv=boundary_csv,
             smooth_boundaries=args.smooth_boundaries,
             smooth_window=args.smooth_window,
+            smooth_mode=args.smooth_mode,
+            smooth_max_gap_steps=args.smooth_max_gap_steps,
             hide_raw_boundaries=args.hide_raw_boundaries,
         )
         metadata["outputs"]["phase_diagram_png"] = str(diagram_png)
@@ -1699,6 +1797,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
                 overlay_labels=args.overlay_label,
                 smooth_boundaries=args.smooth_boundaries,
                 smooth_window=args.smooth_window,
+                smooth_mode=args.smooth_mode,
+                smooth_max_gap_steps=args.smooth_max_gap_steps,
                 hide_raw_boundaries=args.hide_raw_boundaries,
             )
             outputs.update(diagram_meta)
@@ -1715,6 +1815,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
             overlay_labels=args.overlay_label,
             smooth_boundaries=args.smooth_boundaries,
             smooth_window=args.smooth_window,
+            smooth_mode=args.smooth_mode,
+            smooth_max_gap_steps=args.smooth_max_gap_steps,
             hide_raw_boundaries=args.hide_raw_boundaries,
         )
         print(f"Wrote phase diagram: {args.out.resolve()}")

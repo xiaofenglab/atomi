@@ -304,3 +304,42 @@ def test_plot_diagram_cli_writes_boundary_csv(tmp_path: Path):
     assert out.exists()
     boundary_rows = list(csv.DictReader(boundary_csv.open(encoding="utf-8")))
     assert boundary_rows
+
+
+def test_plot_diagram_bridge_gaps_mode_preserves_raw_boundaries(tmp_path: Path):
+    grid_csv = tmp_path / "T_X_phase_grid.csv"
+    rows = [
+        {"T_K": 900, "X_O": 0.1, "stable_signature": "A", "stable_detail": "A:1", "GM_J_mol": 0},
+        {"T_K": 900, "X_O": 0.2, "stable_signature": "B", "stable_detail": "B:1", "GM_J_mol": 0},
+        {"T_K": 1000, "X_O": 0.1, "stable_signature": "NONE", "stable_detail": "", "GM_J_mol": 0},
+        {"T_K": 1000, "X_O": 0.2, "stable_signature": "NONE", "stable_detail": "", "GM_J_mol": 0},
+        {"T_K": 1100, "X_O": 0.1, "stable_signature": "A", "stable_detail": "A:1", "GM_J_mol": 0},
+        {"T_K": 1100, "X_O": 0.2, "stable_signature": "B", "stable_detail": "B:1", "GM_J_mol": 0},
+        {"T_K": 1200, "X_O": 0.1, "stable_signature": "A", "stable_detail": "A:1", "GM_J_mol": 0},
+        {"T_K": 1200, "X_O": 0.2, "stable_signature": "B", "stable_detail": "B:1", "GM_J_mol": 0},
+    ]
+    with grid_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    metadata = workflow.main(
+        [
+            "plot-diagram",
+            "--grid-csv",
+            str(grid_csv),
+            "--out",
+            str(tmp_path / "phase_diagram.png"),
+            "--boundary-csv",
+            str(tmp_path / "boundary_points.csv"),
+            "--smooth-boundaries",
+            "--smooth-mode",
+            "bridge-gaps",
+            "--smooth-max-gap-steps",
+            "3",
+        ]
+    )
+
+    assert metadata["smooth_mode"] == "bridge-gaps"
+    assert metadata["n_boundary_points"] == 3
+    assert metadata["n_smoothed_boundary_paths"] == 1
