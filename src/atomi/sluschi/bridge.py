@@ -114,11 +114,15 @@ def inspect_environment(config_path: Path | None = None, profile_name: str = "sl
     env_root = os.environ.get("ATOMI_SLUSCHI_ROOT")
     env_bin = os.environ.get("ATOMI_SLUSCHI_BIN")
     env_mlip = os.environ.get("ATOMI_SUPERSALT_MODEL") or os.environ.get("ATOMI_MLIP_MODEL")
+    env_lmp = os.environ.get("ATOMI_LMP_EXE") or os.environ.get("ATOMI_LMP_RNEMD_EXE") or os.environ.get("ATOMI_LMP_GK_EXE")
     root = str(profile.get("root") or env_root or "")
     bin_dir = str(profile.get("bin") or env_bin or "")
     model = str(profile.get("mlip_model") or env_mlip or "")
+    lammps_executable = str(profile.get("lammps_executable") or env_lmp or "")
     provider = str(profile.get("mlip_provider") or os.environ.get("ATOMI_MLIP_PROVIDER") or "SuperSalt")
     executables = which_many(["sluschi", "SLUSCHI", "mds_lmp", "lmp", "lammps", "vasp_std", "sbatch", "python3"])
+    if lammps_executable and Path(lammps_executable).expanduser().exists():
+        executables["lmp"] = str(Path(lammps_executable).expanduser())
     if bin_dir:
         for exe in ("sluschi", "SLUSCHI", "mds_lmp"):
             candidate = Path(bin_dir).expanduser() / exe
@@ -135,6 +139,7 @@ def inspect_environment(config_path: Path | None = None, profile_name: str = "sl
         "mlip_model": model,
         "mlip_provider": provider,
         "mlip_model_info": file_info(model),
+        "lammps_executable": lammps_executable,
         "executables": executables,
         "ready_for_bridge": bool(root or bin_dir or executables.get("sluschi") or executables.get("mds_lmp")),
         "ready_for_lammps_mlip": bool(executables.get("lmp") or executables.get("lammps")) and bool(model),
@@ -252,6 +257,7 @@ def render_lammps_supersalt_probe(plan: dict[str, Any]) -> str:
 
 
 def render_supersalt_probe_sbatch(plan: dict[str, Any]) -> str:
+    lmp = plan.get("runtime", {}).get("lammps_executable") or "lmp"
     return textwrap.dedent(
         f"""\
         #!/bin/bash
@@ -264,7 +270,7 @@ def render_supersalt_probe_sbatch(plan: dict[str, Any]) -> str:
         set -euo pipefail
         cd "$(dirname "$0")"
 
-        : "${{ATOMI_LMP_EXE:=lmp}}"
+        : "${{ATOMI_LMP_EXE:={lmp}}}"
         echo "LAMMPS executable: ${{ATOMI_LMP_EXE}}"
         echo "Input            : in.supersalt_probe"
         "${{ATOMI_LMP_EXE}}" -in in.supersalt_probe
@@ -281,6 +287,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     temperatures = parse_float_list(args.temperatures) or [900.0, 1000.0, 1100.0, 1200.0]
     compositions = parse_composition_states(args.compositions) or default_kcl_licl_compositions()
     model_path = args.mlip_model or os.environ.get("ATOMI_SUPERSALT_MODEL") or ""
+    lammps_executable = getattr(args, "lammps_executable", "") or os.environ.get("ATOMI_LMP_EXE") or ""
     provider = args.mlip_provider
     provider_meta: dict[str, Any] = {}
     elements = ["Li", "K", "Cl"] if args.system.lower().replace("-", "") in {"kcllicl", "liclkcl"} else []
@@ -315,6 +322,9 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             "provider_metadata": provider_meta,
             "elements": elements,
             "note": DEFAULT_SUPERSALT_REF if args.mlip_provider.lower() == "supersalt" else "",
+        },
+        "runtime": {
+            "lammps_executable": lammps_executable,
         },
         "handoff": {
             "calphad_observables": [
@@ -541,6 +551,7 @@ def status_main(args: argparse.Namespace) -> dict[str, Any]:
         print(f"SLUSCHI bin      : {status['bin'] or 'not set'}")
         print(f"MLIP provider    : {status['mlip_provider'] or 'not set'}")
         print(f"MLIP model       : {status['mlip_model'] or 'not set'}")
+        print(f"LAMMPS executable: {status['lammps_executable'] or status['executables'].get('lmp') or 'not set'}")
         if status["mlip_model"]:
             model_info = status.get("mlip_model_info", {})
             print(f"MLIP model exists: {model_info.get('exists')}")
@@ -556,6 +567,7 @@ def status_main(args: argparse.Namespace) -> dict[str, Any]:
 def supersalt_example_main(args: argparse.Namespace) -> dict[str, Any]:
     status = inspect_environment(args.hpc_config, args.profile)
     model = args.mlip_model or status.get("mlip_model") or os.environ.get("ATOMI_SUPERSALT_MODEL") or ""
+    lammps_executable = args.lammps_executable or status.get("lammps_executable") or status.get("executables", {}).get("lmp") or ""
     ns = argparse.Namespace(
         outdir=args.outdir,
         system="KCl-LiCl",
@@ -567,6 +579,7 @@ def supersalt_example_main(args: argparse.Namespace) -> dict[str, Any]:
         mlip_mode="external-model",
         mlip_provider="SuperSalt",
         mlip_model=model,
+        lammps_executable=lammps_executable,
     )
     result = init_workspace(ns)
     root = Path(result["root"])
@@ -581,6 +594,9 @@ def supersalt_example_main(args: argparse.Namespace) -> dict[str, Any]:
 
             Model path:
             `{model or "not configured; set --mlip-model or profiles.sluschi.mlip_model"}`
+
+            LAMMPS executable:
+            `{lammps_executable or "not configured; set --lammps-executable or profiles.sluschi.lammps_executable"}`
 
             SuperSalt provenance:
 
@@ -613,7 +629,7 @@ def supersalt_example_main(args: argparse.Namespace) -> dict[str, Any]:
         encoding="utf-8",
     )
     print(f"KCl-LiCl SuperSalt README    : {readme}")
-    return {**result, "readme": str(readme), "mlip_model": model, "status": status}
+    return {**result, "readme": str(readme), "mlip_model": model, "lammps_executable": lammps_executable, "status": status}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -642,12 +658,14 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--mlip-mode", choices=("external-model", "train-local", "none"), default="external-model")
     init.add_argument("--mlip-provider", default="SuperSalt")
     init.add_argument("--mlip-model", default="")
+    init.add_argument("--lammps-executable", default="", help="Optional LAMMPS executable for generated MLIP probe scripts.")
 
     demo = sub.add_parser("supersalt-example", help="Create a KCl-LiCl SuperSalt + SLUSCHI demonstration workspace.")
     demo.add_argument("--outdir", type=Path, default=Path("sluschi_kcl_licl_supersalt_demo"))
     demo.add_argument("--hpc-config", type=Path)
     demo.add_argument("--profile", default="sluschi")
     demo.add_argument("--mlip-model", default="", help="SuperSalt model path; default from profiles.sluschi.mlip_model.")
+    demo.add_argument("--lammps-executable", default="", help="MACE-capable LAMMPS executable; default from profile/status.")
     demo.add_argument("--temperatures", default="900,1000,1100,1200", help="Comma-separated temperatures in K.")
     demo.add_argument(
         "--compositions",

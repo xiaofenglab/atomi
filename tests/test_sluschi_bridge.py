@@ -52,6 +52,8 @@ def test_sluschi_bridge_init_writes_kcl_licl_handoff(tmp_path: Path):
 
 def test_sluschi_status_reads_hpc_profile(tmp_path: Path, monkeypatch):
     config = tmp_path / "atomi_hpc_config.kit.local.json"
+    lmp = tmp_path / "lmp"
+    lmp.write_text("#!/bin/sh\n", encoding="utf-8")
     config.write_text(
         json.dumps(
             {
@@ -61,6 +63,7 @@ def test_sluschi_status_reads_hpc_profile(tmp_path: Path, monkeypatch):
                         "bin": "/home/user/SLUSCHI/bin",
                         "mlip_model": "/models/supersalt.pt",
                         "mlip_provider": "SuperSalt",
+                        "lammps_executable": str(lmp),
                     }
                 }
             }
@@ -75,6 +78,7 @@ def test_sluschi_status_reads_hpc_profile(tmp_path: Path, monkeypatch):
     assert status["bin"] == "/home/user/SLUSCHI/bin"
     assert status["mlip_model"] == "/models/supersalt.pt"
     assert status["mlip_provider"] == "SuperSalt"
+    assert status["executables"]["lmp"] == str(lmp)
     assert status["supersalt"]["doi"] == bridge.SUPERSALT_DOI
     assert status["ready_for_bridge"] is True
 
@@ -82,6 +86,8 @@ def test_sluschi_status_reads_hpc_profile(tmp_path: Path, monkeypatch):
 def test_sluschi_supersalt_example_uses_profile_model(tmp_path: Path):
     model = tmp_path / "SuperSalt-swa.model"
     model.write_text("model", encoding="utf-8")
+    lmp = tmp_path / "lmp"
+    lmp.write_text("#!/bin/sh\n", encoding="utf-8")
     config = tmp_path / "atomi_hpc_config.kit.local.json"
     config.write_text(
         json.dumps(
@@ -92,6 +98,7 @@ def test_sluschi_supersalt_example_uses_profile_model(tmp_path: Path):
                         "bin": "/home/user/SLUSCHI/src",
                         "mlip_model": str(model),
                         "mlip_provider": "SuperSalt",
+                        "lammps_executable": str(lmp),
                     }
                 }
             }
@@ -104,12 +111,14 @@ def test_sluschi_supersalt_example_uses_profile_model(tmp_path: Path):
 
     assert result is not None
     assert result["mlip_model"] == str(model)
+    assert result["lammps_executable"] == str(lmp)
     manifest = json.loads((out / "mlip" / "sluschi_mlip_manifest.json").read_text(encoding="utf-8"))
     assert manifest["provider"] == "SuperSalt"
     assert manifest["model_path"] == str(model)
     assert manifest["provider_metadata"]["covered_elements"] == bridge.SUPERSALT_ELEMENTS
     assert (out / "README_KCL_LICL_SUPERSALT_DEMO.md").exists()
-    assert (out / "sluschi_inputs" / "run_supersalt_probe.sbatch").exists()
+    probe = (out / "sluschi_inputs" / "run_supersalt_probe.sbatch").read_text(encoding="utf-8")
+    assert str(lmp) in probe
 
 
 def test_sluschi_parse_collects_calphad_handoff_values(tmp_path: Path):
@@ -173,6 +182,7 @@ def test_confighpc_exports_sluschi_profile_values(tmp_path: Path):
                         "bin": "/home/user/SLUSCHI/src",
                         "mlip_model": "/models/supersalt.pt",
                         "mlip_provider": "SuperSalt",
+                        "lammps_executable": "/apps/lammps/bin/lmp",
                     }
                 }
             }
@@ -186,3 +196,4 @@ def test_confighpc_exports_sluschi_profile_values(tmp_path: Path):
     assert "ATOMI_SLUSCHI_BIN=/home/user/SLUSCHI/src" in env_text
     assert "ATOMI_SUPERSALT_MODEL=/models/supersalt.pt" in env_text
     assert "ATOMI_MLIP_PROVIDER=SuperSalt" in env_text
+    assert "ATOMI_LMP_EXE=/apps/lammps/bin/lmp" in env_text
