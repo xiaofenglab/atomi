@@ -846,6 +846,8 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
             exports.setdefault("ATOMI_SLUSCHI_BIN", str(sluschi["bin"]))
         if _nonempty(sluschi.get("mlip_model")):
             exports.setdefault("ATOMI_SUPERSALT_MODEL", str(sluschi["mlip_model"]))
+        if _nonempty(sluschi.get("mlip_provider")):
+            exports.setdefault("ATOMI_MLIP_PROVIDER", str(sluschi["mlip_provider"]))
 
     phonopy = profiles.get("phonopy", {})
     if isinstance(phonopy, dict):

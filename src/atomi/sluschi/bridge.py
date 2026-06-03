@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -22,6 +23,10 @@ SCHEMA_RESULTS = "atomi.sluschi.bridge.results.v1"
 
 DEFAULT_REPO = "https://github.com/qjhong/SLUSCHI.git"
 DEFAULT_SUPERSALT_REF = "SuperSalt chloride MLIP; install/provide externally, not vendored by Atomi."
+SUPERSALT_DOI = "10.5281/zenodo.15734798"
+SUPERSALT_DOWNLOAD_URL = "https://zenodo.org/records/15734798/files/SuperSalt.zip?download=1"
+SUPERSALT_CITATION = "Shen et al., Nat. Commun. 16, 7280 (2025), doi:10.1038/s41467-025-62450-1"
+SUPERSALT_ELEMENTS = ["Li", "Na", "K", "Rb", "Cs", "Mg", "Ca", "Sr", "Ba", "Zn", "Zr", "Cl"]
 
 OBSERVABLE_UNITS = {
     "melting_temperature_K": "K",
@@ -76,6 +81,22 @@ def which_many(names: list[str]) -> dict[str, str | None]:
     return {name: shutil.which(name) for name in names}
 
 
+def file_info(path: str | Path | None) -> dict[str, Any]:
+    if not path:
+        return {"path": "", "exists": False}
+    candidate = Path(path).expanduser()
+    info: dict[str, Any] = {"path": str(candidate), "exists": candidate.exists()}
+    if not candidate.exists() or not candidate.is_file():
+        return info
+    info["size_bytes"] = candidate.stat().st_size
+    digest = hashlib.sha256()
+    with candidate.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    info["sha256"] = digest.hexdigest()
+    return info
+
+
 def load_hpc_profile(config_path: Path | None, profile_name: str) -> dict[str, Any]:
     if config_path is None:
         env_config = os.environ.get("ATOMI_HPC_CONFIG")
@@ -96,6 +117,7 @@ def inspect_environment(config_path: Path | None = None, profile_name: str = "sl
     root = str(profile.get("root") or env_root or "")
     bin_dir = str(profile.get("bin") or env_bin or "")
     model = str(profile.get("mlip_model") or env_mlip or "")
+    provider = str(profile.get("mlip_provider") or os.environ.get("ATOMI_MLIP_PROVIDER") or "SuperSalt")
     executables = which_many(["sluschi", "SLUSCHI", "mds_lmp", "lmp", "lammps", "vasp_std", "sbatch", "python3"])
     if bin_dir:
         for exe in ("sluschi", "SLUSCHI", "mds_lmp"):
@@ -111,6 +133,8 @@ def inspect_environment(config_path: Path | None = None, profile_name: str = "sl
         "root": root,
         "bin": bin_dir,
         "mlip_model": model,
+        "mlip_provider": provider,
+        "mlip_model_info": file_info(model),
         "executables": executables,
         "ready_for_bridge": bool(root or bin_dir or executables.get("sluschi") or executables.get("mds_lmp")),
         "ready_for_lammps_mlip": bool(executables.get("lmp") or executables.get("lammps")) and bool(model),
@@ -121,6 +145,13 @@ def inspect_environment(config_path: Path | None = None, profile_name: str = "sl
             "requires a validated MLIP and explicit solid/liquid enthalpy-fluctuation or H(T)-slope data."
         ),
         "install_hint": f"git clone {DEFAULT_REPO} ~/SLUSCHI && export ATOMI_SLUSCHI_ROOT=$HOME/SLUSCHI",
+        "supersalt": {
+            "doi": SUPERSALT_DOI,
+            "download_url": SUPERSALT_DOWNLOAD_URL,
+            "citation": SUPERSALT_CITATION,
+            "covered_elements": SUPERSALT_ELEMENTS,
+            "kcl_licl_in_domain": provider.lower() == "supersalt",
+        },
     }
     return status
 
@@ -194,6 +225,53 @@ def render_job_in(plan: dict[str, Any]) -> str:
     )
 
 
+def render_lammps_supersalt_probe(plan: dict[str, Any]) -> str:
+    model = plan["mlip"]["model_path"] or "REPLACE_WITH_SUPERSALT_MODEL"
+    elements = plan["mlip"].get("elements") or ["Li", "K", "Cl"]
+    return textwrap.dedent(
+        f"""\
+        # Atomi SuperSalt/MACE LAMMPS smoke-test template for {plan["system"]}
+        # This is a backend probe, not a production SLUSCHI input.
+        # Provide a small equilibrated KCl-LiCl LAMMPS data file before running.
+        units           metal
+        atom_style      atomic
+        boundary        p p p
+
+        read_data       kcl_licl_probe.data
+
+        pair_style      mace no_domain_decomposition
+        pair_coeff      * * {model} {" ".join(elements)}
+
+        timestep        0.001
+        thermo          10
+        thermo_style    custom step temp pe etotal press density
+
+        run             0
+        """
+    )
+
+
+def render_supersalt_probe_sbatch(plan: dict[str, Any]) -> str:
+    return textwrap.dedent(
+        f"""\
+        #!/bin/bash
+        #SBATCH --job-name=ss-{plan["system"].lower().replace("-", "")}-probe
+        #SBATCH --output=../logs/supersalt_probe.%j.out
+        #SBATCH --error=../logs/supersalt_probe.%j.err
+        #SBATCH --time=00:10:00
+        #SBATCH --ntasks=1
+
+        set -euo pipefail
+        cd "$(dirname "$0")"
+
+        : "${{ATOMI_LMP_EXE:=lmp}}"
+        echo "LAMMPS executable: ${{ATOMI_LMP_EXE}}"
+        echo "Input            : in.supersalt_probe"
+        "${{ATOMI_LMP_EXE}}" -in in.supersalt_probe
+        """
+    )
+
+
 def default_kcl_licl_compositions() -> list[str]:
     return ["LiCl=0.00,KCl=1.00", "LiCl=0.25,KCl=0.75", "LiCl=0.50,KCl=0.50", "LiCl=0.75,KCl=0.25", "LiCl=1.00,KCl=0.00"]
 
@@ -203,6 +281,18 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     temperatures = parse_float_list(args.temperatures) or [900.0, 1000.0, 1100.0, 1200.0]
     compositions = parse_composition_states(args.compositions) or default_kcl_licl_compositions()
     model_path = args.mlip_model or os.environ.get("ATOMI_SUPERSALT_MODEL") or ""
+    provider = args.mlip_provider
+    provider_meta: dict[str, Any] = {}
+    elements = ["Li", "K", "Cl"] if args.system.lower().replace("-", "") in {"kcllicl", "liclkcl"} else []
+    if provider.lower() == "supersalt":
+        provider_meta = {
+            "doi": SUPERSALT_DOI,
+            "download_url": SUPERSALT_DOWNLOAD_URL,
+            "citation": SUPERSALT_CITATION,
+            "covered_elements": SUPERSALT_ELEMENTS,
+            "domain": "chloride melts over Li, Na, K, Rb, Cs, Mg, Ca, Sr, Ba, Zn, Zr cations",
+        }
+        elements = elements or SUPERSALT_ELEMENTS
     return {
         "schema": SCHEMA_PLAN,
         "system": args.system,
@@ -219,8 +309,11 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         },
         "mlip": {
             "mode": args.mlip_mode,
-            "provider": args.mlip_provider,
+            "provider": provider,
             "model_path": model_path,
+            "model_info": file_info(model_path),
+            "provider_metadata": provider_meta,
+            "elements": elements,
             "note": DEFAULT_SUPERSALT_REF if args.mlip_provider.lower() == "supersalt" else "",
         },
         "handoff": {
@@ -253,18 +346,26 @@ def init_workspace(args: argparse.Namespace) -> dict[str, Any]:
     plan = build_plan(args)
     write_json(root / "sluschi_bridge_plan.json", plan)
     (root / "sluschi_inputs" / "job.in").write_text(render_job_in(plan), encoding="utf-8")
+    if plan["mlip"]["provider"].lower() == "supersalt":
+        (root / "sluschi_inputs" / "in.supersalt_probe").write_text(render_lammps_supersalt_probe(plan), encoding="utf-8")
+        probe = root / "sluschi_inputs" / "run_supersalt_probe.sbatch"
+        probe.write_text(render_supersalt_probe_sbatch(plan), encoding="utf-8")
+        probe.chmod(0o755)
     mlip_manifest = {
         "schema": "atomi.sluschi.bridge.mlip_manifest.v1",
         "system": plan["system"],
         "provider": plan["mlip"]["provider"],
         "mode": plan["mlip"]["mode"],
         "model_path": plan["mlip"]["model_path"],
-        "elements": ["Li", "K", "Cl"] if plan["system"].lower().replace("-", "") in {"kcllicl", "liclkcl"} else [],
+        "model_info": plan["mlip"]["model_info"],
+        "provider_metadata": plan["mlip"].get("provider_metadata", {}),
+        "elements": plan["mlip"].get("elements", []),
         "validation_required": [
             "composition coverage includes target LiCl-KCl range",
             "temperature coverage includes melt/coexistence range",
             "density/RDF/enthalpy checked against DFT or experiment",
             "LAMMPS/ASE backend tested on a short NVT melt before SLUSCHI production",
+            "solid/coexistence use validated separately because SuperSalt was primarily trained for liquids",
         ],
     }
     write_json(root / "mlip" / "sluschi_mlip_manifest.json", mlip_manifest)
@@ -273,6 +374,8 @@ def init_workspace(args: argparse.Namespace) -> dict[str, Any]:
     print(f"Plan                         : {root / 'sluschi_bridge_plan.json'}")
     print(f"MLIP manifest                : {root / 'mlip' / 'sluschi_mlip_manifest.json'}")
     print(f"Starter job.in               : {root / 'sluschi_inputs' / 'job.in'}")
+    if plan["mlip"]["provider"].lower() == "supersalt":
+        print(f"SuperSalt LAMMPS probe       : {root / 'sluschi_inputs' / 'in.supersalt_probe'}")
     return {"root": str(root), "plan": str(root / "sluschi_bridge_plan.json")}
 
 
@@ -436,12 +539,81 @@ def status_main(args: argparse.Namespace) -> dict[str, Any]:
         print(f"profile          : {status['profile']}")
         print(f"SLUSCHI root     : {status['root'] or 'not set'}")
         print(f"SLUSCHI bin      : {status['bin'] or 'not set'}")
+        print(f"MLIP provider    : {status['mlip_provider'] or 'not set'}")
         print(f"MLIP model       : {status['mlip_model'] or 'not set'}")
+        if status["mlip_model"]:
+            model_info = status.get("mlip_model_info", {})
+            print(f"MLIP model exists: {model_info.get('exists')}")
+            if model_info.get("sha256"):
+                print(f"MLIP sha256      : {model_info['sha256']}")
         for name, path in status["executables"].items():
             print(f"{name:16}: {path or 'not found'}")
         print(f"bridge ready     : {status['ready_for_bridge']}")
         print(f"LAMMPS+MLIP ready: {status['ready_for_lammps_mlip']}")
     return status
+
+
+def supersalt_example_main(args: argparse.Namespace) -> dict[str, Any]:
+    status = inspect_environment(args.hpc_config, args.profile)
+    model = args.mlip_model or status.get("mlip_model") or os.environ.get("ATOMI_SUPERSALT_MODEL") or ""
+    ns = argparse.Namespace(
+        outdir=args.outdir,
+        system="KCl-LiCl",
+        components="LiCl,KCl",
+        engine="lammps",
+        phase_target="solid-liquid-coexistence",
+        temperatures=args.temperatures,
+        compositions=args.compositions,
+        mlip_mode="external-model",
+        mlip_provider="SuperSalt",
+        mlip_model=model,
+    )
+    result = init_workspace(ns)
+    root = Path(result["root"])
+    readme = root / "README_KCL_LICL_SUPERSALT_DEMO.md"
+    readme.write_text(
+        textwrap.dedent(
+            f"""\
+            # KCl-LiCl SuperSalt + SLUSCHI Demonstration
+
+            This workspace demonstrates how Atomi connects the public SuperSalt
+            chloride MLIP to a SLUSCHI phase-equilibria workflow.
+
+            Model path:
+            `{model or "not configured; set --mlip-model or profiles.sluschi.mlip_model"}`
+
+            SuperSalt provenance:
+
+            - DOI: {SUPERSALT_DOI}
+            - Citation: {SUPERSALT_CITATION}
+            - Download: {SUPERSALT_DOWNLOAD_URL}
+            - Covered elements: {", ".join(SUPERSALT_ELEMENTS)}
+
+            Recommended sequence:
+
+            1. Confirm the model manifest:
+               `cat mlip/sluschi_mlip_manifest.json`
+            2. Put a tiny KCl-LiCl LAMMPS data file at
+               `sluschi_inputs/kcl_licl_probe.data`.
+            3. Run the backend probe only when a MACE-capable LAMMPS executable is loaded:
+               `sbatch sluschi_inputs/run_supersalt_probe.sbatch`
+            4. Review the generated `sluschi_inputs/job.in` against the installed
+               SLUSCHI/SuperSalt workflow before production.
+            5. After SLUSCHI/MLIP-MD outputs are produced, parse them:
+               `atomi sluschi-bridge parse --root . --outdir results --system KCl-LiCl --components LiCl,KCl`
+
+            Scientific guard:
+
+            SuperSalt was designed for chloride melts and is in-domain for the
+            LiCl-KCl liquid. Solid and solid-liquid coexistence predictions should
+            be validated by short probes against known KCl-LiCl melting/eutectic
+            anchors before treating them as CALPHAD constraints.
+            """
+        ),
+        encoding="utf-8",
+    )
+    print(f"KCl-LiCl SuperSalt README    : {readme}")
+    return {**result, "readme": str(readme), "mlip_model": model, "status": status}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -471,6 +643,18 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--mlip-provider", default="SuperSalt")
     init.add_argument("--mlip-model", default="")
 
+    demo = sub.add_parser("supersalt-example", help="Create a KCl-LiCl SuperSalt + SLUSCHI demonstration workspace.")
+    demo.add_argument("--outdir", type=Path, default=Path("sluschi_kcl_licl_supersalt_demo"))
+    demo.add_argument("--hpc-config", type=Path)
+    demo.add_argument("--profile", default="sluschi")
+    demo.add_argument("--mlip-model", default="", help="SuperSalt model path; default from profiles.sluschi.mlip_model.")
+    demo.add_argument("--temperatures", default="900,1000,1100,1200", help="Comma-separated temperatures in K.")
+    demo.add_argument(
+        "--compositions",
+        default="LiCl=0.00,KCl=1.00;LiCl=0.25,KCl=0.75;LiCl=0.50,KCl=0.50;LiCl=0.75,KCl=0.25;LiCl=1.00,KCl=0.00",
+        help="KCl-LiCl composition states separated by semicolons.",
+    )
+
     parse = sub.add_parser("parse", help="Parse SLUSCHI-like text outputs for CALPHAD handoff observables.")
     parse.add_argument("--root", type=Path, default=Path("."))
     parse.add_argument("--outdir", type=Path, default=Path("results"))
@@ -491,6 +675,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
         return status_main(args)
     if args.command == "init":
         return init_workspace(args)
+    if args.command == "supersalt-example":
+        return supersalt_example_main(args)
     if args.command == "parse":
         return parse_main(args)
     build_parser().print_help()
