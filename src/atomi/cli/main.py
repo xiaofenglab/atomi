@@ -420,6 +420,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         calphad_workflow.add_argument("calphad_workflow_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("calphad_sharp", "calphad-sharp"):
+        calphad_sharp = subparsers.add_parser(
+            command_name,
+            help="Run SHARP attribution analysis for CALPHAD/MIVM parameter searches.",
+        )
+        calphad_sharp.add_argument("calphad_sharp_args", nargs=argparse.REMAINDER)
+
     for command_name in ("sluschi_bridge", "sluschi-bridge"):
         sluschi_bridge = subparsers.add_parser(
             command_name,
@@ -1091,6 +1098,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.calphad.workflow import main as calphad_workflow_main
 
         calphad_workflow_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in ("calphad_sharp", "calphad-sharp"):
+        from atomi.calphad.sharp import main as calphad_sharp_main
+
+        calphad_sharp_main(raw_args[1:])
         return
     if raw_args and raw_args[0] in ("sluschi_bridge", "sluschi-bridge"):
         from atomi.sluschi.bridge import main as sluschi_bridge_main
