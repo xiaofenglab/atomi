@@ -1694,6 +1694,10 @@ def write_benchmarked_uq_phase(args: argparse.Namespace) -> dict[str, Any]:
     dcp_a_values = _numeric_grid_spec(args.dcp_a_grid, default=args.dcp_a)
     dcp_b_values = _numeric_grid_spec(args.dcp_b_grid, default=args.dcp_b)
     line_compounds = _parse_line_compounds(args.line_compound, default_tref_k=args.eutectic_t)
+    if args.line_compound_prior:
+        from atomi.thermo_prior import load_line_compound_priors
+
+        line_compounds.extend(load_line_compound_priors(args.line_compound_prior, default_tref_k=args.eutectic_t))
     for curve in curves:
         for dcp_a in dcp_a_values:
             for dcp_b in dcp_b_values:
@@ -1900,6 +1904,7 @@ failure to match the eutectic does not uniquely implicate the liquid Hmix/Cp mod
         },
         "dCp_grid_J_mol_K": {"component_a": dcp_a_values, "component_b": dcp_b_values},
         "line_compounds": line_compounds,
+        "line_compound_prior_paths": [str(path.resolve()) for path in args.line_compound_prior or []],
         "best_hmix_label": best_hmix.get("label", ""),
         "best_eutectic_label": best_eutectic.get("label", ""),
         "best_joint_label": best_joint.get("label", ""),
@@ -2284,6 +2289,12 @@ def build_parser() -> argparse.ArgumentParser:
             "Optional line compound as label:x_component:gform_kJ_mol[:dCp_form_J_mol_K[:tref_K]]. "
             "Formation term is relative to terminal solids on the pseudo-binary basis."
         ),
+    )
+    benchmark.add_argument(
+        "--line-compound-prior",
+        type=Path,
+        action="append",
+        help="Optional atomi thermo-prior JSON line-compound prior. Repeatable.",
     )
     benchmark.add_argument("--title")
     benchmark.add_argument("--outdir", type=Path, default=Path("analysis/mivm_benchmark_uq_phase"))

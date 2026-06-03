@@ -1,0 +1,156 @@
+"""Command-line interface for thermodynamic prior JSON records."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Any
+
+from .aeris import AerisAdapter, AerisConfig
+from .core import (
+    read_prior,
+    salt_reference_gform_kj_mol,
+    write_cp_prior,
+    write_line_compound_prior,
+)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="atomi thermo-prior",
+        description="Create and inspect provenance-rich thermodynamic prior JSON files.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    line = sub.add_parser("line-compound", help="Write a line-compound prior for CALPHAD/MIVM diagnostics.")
+    line.add_argument("--formula", required=True)
+    line.add_argument("--component-a", required=True)
+    line.add_argument("--component-b", required=True)
+    line.add_argument("--label")
+    line.add_argument("--gform-kj-mol", type=float, help="Formation Gibbs term relative to terminal salts.")
+    line.add_argument("--formation-energy-ev-atom", type=float, help="Elemental-basis compound formation energy.")
+    line.add_argument("--component-a-formation-energy-ev-atom", type=float)
+    line.add_argument("--component-b-formation-energy-ev-atom", type=float)
+    line.add_argument("--aeris-root", type=Path)
+    line.add_argument("--aeris-model", type=Path)
+    line.add_argument("--aeris-device", default="cpu")
+    line.add_argument("--dcp-form", type=float, default=0.0, help="Formation Cp correction in J/mol/K.")
+    line.add_argument("--tref-k", type=float, default=298.15)
+    line.add_argument("--uncertainty-kj-mol", type=float)
+    line.add_argument("--source-label", default="manual")
+    line.add_argument("--out", type=Path, required=True)
+
+    cp = sub.add_parser("cp-solid", help="Write a placeholder solid Cp prior.")
+    cp.add_argument("--formula", required=True)
+    cp.add_argument("--cp-j-mol-k", type=float, required=True)
+    cp.add_argument("--temperature-min-k", type=float, default=298.15)
+    cp.add_argument("--temperature-max-k", type=float, default=1200.0)
+    cp.add_argument("--uncertainty-j-mol-k", type=float)
+    cp.add_argument("--source-label", default="manual_placeholder")
+    cp.add_argument("--out", type=Path, required=True)
+
+    validate = sub.add_parser("validate", help="Validate and print a prior JSON summary.")
+    validate.add_argument("prior", type=Path)
+
+    spec = sub.add_parser("line-spec", help="Print a benchmark-uq-phase --line-compound spec from a prior.")
+    spec.add_argument("prior", type=Path)
+    spec.add_argument("--default-tref-k", type=float, default=298.15)
+
+    aeris = sub.add_parser("aeris-status", help="Check a configured local AERIS checkout/checkpoint.")
+    aeris.add_argument("--aeris-root", type=Path, required=True)
+    aeris.add_argument("--aeris-model", type=Path, required=True)
+    aeris.add_argument("--aeris-device", default="cpu")
+
+    return parser
+
+
+def _line_compound_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    gform = args.gform_kj_mol
+    source: dict[str, Any] = {"method": args.source_label}
+    if gform is None:
+        formation_energy = args.formation_energy_ev_atom
+        if formation_energy is None and args.aeris_root and args.aeris_model:
+            adapter = AerisAdapter(AerisConfig(root=args.aeris_root, model=args.aeris_model, device=args.aeris_device))
+            prediction = adapter.predict_formation_energy_ev_atom(args.formula)
+            formation_energy = float(prediction["formation_energy_ev_atom"])
+            source = {"method": "aeris", **prediction}
+        if formation_energy is None:
+            raise ValueError("Provide --gform-kj-mol, --formation-energy-ev-atom, or configured --aeris-root/--aeris-model.")
+        if args.component_a_formation_energy_ev_atom is None or args.component_b_formation_energy_ev_atom is None:
+            raise ValueError(
+                "Elemental-basis formation energies require --component-a-formation-energy-ev-atom "
+                "and --component-b-formation-energy-ev-atom for salt-reference conversion."
+            )
+        gform = salt_reference_gform_kj_mol(
+            formula=args.formula,
+            component_a=args.component_a,
+            component_b=args.component_b,
+            formation_energy_ev_atom=formation_energy,
+            component_a_formation_energy_ev_atom=args.component_a_formation_energy_ev_atom,
+            component_b_formation_energy_ev_atom=args.component_b_formation_energy_ev_atom,
+        )
+        source = {
+            **source,
+            "formation_energy_ev_atom": formation_energy,
+            "component_a_formation_energy_ev_atom": args.component_a_formation_energy_ev_atom,
+            "component_b_formation_energy_ev_atom": args.component_b_formation_energy_ev_atom,
+            "basis_conversion": "elemental formation energy to pseudo-binary salt-reference gform",
+        }
+    prior = write_line_compound_prior(
+        out=args.out,
+        formula=args.formula,
+        component_a=args.component_a,
+        component_b=args.component_b,
+        label=args.label,
+        gform_ref_kj_mol=float(gform),
+        dcp_form_j_mol_k=args.dcp_form,
+        tref_k=args.tref_k,
+        uncertainty_kj_mol=args.uncertainty_kj_mol,
+        source=source,
+        notes=["Thermo-ML prior for screening; refine with DFT/phonopy/CALPHAD before final assessment."],
+    )
+    return prior
+
+
+def main(argv: list[str] | None = None) -> dict[str, Any] | None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "line-compound":
+        prior = _line_compound_from_args(args)
+        print(f"Wrote line-compound prior: {args.out}")
+        print(prior["calphad_mivm"]["line_compound_spec"])
+        return prior
+    if args.command == "cp-solid":
+        prior = write_cp_prior(
+            out=args.out,
+            formula=args.formula,
+            cp_j_mol_k=args.cp_j_mol_k,
+            temperature_min_k=args.temperature_min_k,
+            temperature_max_k=args.temperature_max_k,
+            uncertainty_j_mol_k=args.uncertainty_j_mol_k,
+            source={"method": args.source_label},
+        )
+        print(f"Wrote Cp prior: {args.out}")
+        return prior
+    if args.command == "validate":
+        prior = read_prior(args.prior)
+        print(json.dumps(prior, indent=2, sort_keys=True))
+        return prior
+    if args.command == "line-spec":
+        from .core import line_compound_spec_from_prior
+
+        prior = read_prior(args.prior)
+        compound = line_compound_spec_from_prior(prior, default_tref_k=args.default_tref_k)
+        spec = (
+            f"{compound['label']}:{compound['x_B']:.12g}:{compound['gform_ref_kJ_mol']:.12g}:"
+            f"{compound['dCp_form_J_mol_K']:.12g}:{compound['tref_K']:.12g}"
+        )
+        print(spec)
+        return {"line_compound_spec": spec}
+    if args.command == "aeris-status":
+        adapter = AerisAdapter(AerisConfig(root=args.aeris_root, model=args.aeris_model, device=args.aeris_device))
+        status = adapter.status()
+        print(json.dumps(status, indent=2, sort_keys=True))
+        return status
+    return None

@@ -406,6 +406,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         calphad_mivm.add_argument("calphad_mivm_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("thermo_prior", "thermo-prior"):
+        thermo_prior = subparsers.add_parser(
+            command_name,
+            help="Create and inspect thermodynamic ML prior JSON files.",
+        )
+        thermo_prior.add_argument("thermo_prior_args", nargs=argparse.REMAINDER)
+
     for command_name in ("calphad_workflow", "calphad-workflow"):
         calphad_workflow = subparsers.add_parser(
             command_name,
@@ -1075,6 +1082,11 @@ def main(argv: list[str] | None = None) -> None:
 
         calphad_mivm_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("thermo_prior", "thermo-prior"):
+        from atomi.thermo_prior.cli import main as thermo_prior_main
+
+        thermo_prior_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] in ("calphad_workflow", "calphad-workflow"):
         from atomi.calphad.workflow import main as calphad_workflow_main
 
@@ -1680,6 +1692,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.calphad.mivm import main as calphad_mivm_main
 
         calphad_mivm_main(args.calphad_mivm_args)
+        return
+
+    if args.subcommand in ("thermo_prior", "thermo-prior"):
+        from atomi.thermo_prior.cli import main as thermo_prior_main
+
+        thermo_prior_main(args.thermo_prior_args)
         return
 
     if args.subcommand in ("calphad_workflow", "calphad-workflow"):
