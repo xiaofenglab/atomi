@@ -504,6 +504,13 @@ def summarize_sconfig_case(args: argparse.Namespace, pairs: list[SconfigPair]) -
     liquid_like = sum(1 for row in pairs if "liquid" in row.state)
     solid_like = sum(1 for row in pairs if "solid" in row.state)
     mean_pair = sum(pair_values) / len(pair_values) if pair_values else None
+    if len(pair_values) > 1 and mean_pair is not None:
+        variance = sum((value - mean_pair) ** 2 for value in pair_values) / (len(pair_values) - 1)
+        std_pair = variance**0.5
+        sem_pair = std_pair / (len(pair_values) ** 0.5)
+    else:
+        std_pair = None
+        sem_pair = None
     return {
         "schema": SCHEMA_SCONFIG,
         "root": str(root),
@@ -520,6 +527,10 @@ def summarize_sconfig_case(args: argparse.Namespace, pairs: list[SconfigPair]) -
         "n_liquid_like_pairs": liquid_like,
         "n_solid_like_pairs": solid_like,
         "mean_pair_sconfig_J_mol_atom_K": mean_pair,
+        "std_pair_sconfig_J_mol_atom_K": std_pair,
+        "sem_pair_sconfig_J_mol_atom_K": sem_pair,
+        "min_pair_sconfig_J_mol_atom_K": min(pair_values) if pair_values else None,
+        "max_pair_sconfig_J_mol_atom_K": max(pair_values) if pair_values else None,
         "sconf_values_J_mol_atom_K": sconf,
         "sconf_min_values_J_mol_atom_K": sconf_min,
         "dump_stride_note": args.dump_stride_note,
@@ -598,6 +609,10 @@ def sconfig_main(args: argparse.Namespace) -> dict[str, Any]:
             "n_liquid_like_pairs",
             "n_solid_like_pairs",
             "mean_pair_sconfig_J_mol_atom_K",
+            "std_pair_sconfig_J_mol_atom_K",
+            "sem_pair_sconfig_J_mol_atom_K",
+            "min_pair_sconfig_J_mol_atom_K",
+            "max_pair_sconfig_J_mol_atom_K",
         ],
     )
     write_json(summary_json, {**summary, "pairs": pair_rows})

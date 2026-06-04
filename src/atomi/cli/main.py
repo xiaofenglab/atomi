@@ -441,6 +441,17 @@ def build_parser() -> argparse.ArgumentParser:
         )
         lammps_sconfig.add_argument("sconfig_args", nargs=argparse.REMAINDER)
 
+    for command_name in (
+        "lammps_sconfig_qha_overlay",
+        "lammps-sconfig-qha-overlay",
+        "sluschi-qha-entropy-overlay",
+    ):
+        sluschi_qha_overlay = subparsers.add_parser(
+            command_name,
+            help="Overlay SLUSCHI Svib/Sconf entropy points against QHA-MD entropy curves.",
+        )
+        sluschi_qha_overlay.add_argument("sluschi_qha_overlay_args", nargs=argparse.REMAINDER)
+
     for command_name in ("paper-draft", "report-draft", "atomi-paper-draft"):
         paper_draft = subparsers.add_parser(
             command_name,
@@ -1121,6 +1132,15 @@ def main(argv: list[str] | None = None) -> None:
 
         sluschi_bridge_main(["sconfig", *raw_args[1:]])
         return
+    if raw_args and raw_args[0] in (
+        "lammps_sconfig_qha_overlay",
+        "lammps-sconfig-qha-overlay",
+        "sluschi-qha-entropy-overlay",
+    ):
+        from atomi.lammps.sluschi_entropy_overlay import main as sluschi_qha_overlay_main
+
+        sluschi_qha_overlay_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] in ("atat-bridge", "atat_bridge"):
         from atomi.atat.bridge import main as atat_bridge_main
 
@@ -1740,6 +1760,16 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.sluschi.bridge import main as sluschi_bridge_main
 
         sluschi_bridge_main(["sconfig", *args.sconfig_args])
+        return
+
+    if args.subcommand in (
+        "lammps_sconfig_qha_overlay",
+        "lammps-sconfig-qha-overlay",
+        "sluschi-qha-entropy-overlay",
+    ):
+        from atomi.lammps.sluschi_entropy_overlay import main as sluschi_qha_overlay_main
+
+        sluschi_qha_overlay_main(args.sluschi_qha_overlay_args)
         return
 
     if args.subcommand in ("atat-bridge", "atat_bridge"):

@@ -2,11 +2,13 @@ import argparse
 import csv
 import json
 import math
+import re
 import sys
 from pathlib import Path
 
 from atomi.core.archive import archive_output_dir
 from atomi.core.cell import cell_metadata
+from atomi.lammps.sluschi_entropy_overlay import EntropyPoint, load_sluschi_entropy_csv
 from atomi.thermo_db import jaea_anchor
 
 
@@ -1098,6 +1100,7 @@ def plot_hybrid_quantity(
     args,
     db_points=None,
     neel_region=None,
+    entropy_points: list[EntropyPoint] | None = None,
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -1131,6 +1134,29 @@ def plot_hybrid_quantity(
             markersize=7.0,
             label=db_points[0].get("label", "database"),
         )
+    if entropy_points:
+        labels = sorted({point.label for point in entropy_points})
+        colors = ["#d62728", "#9467bd", "#2ca02c", "#ff7f0e", "#17becf"]
+        for idx, label in enumerate(labels):
+            group = [point for point in entropy_points if point.label == label]
+            yerr = [
+                [point.yerr_low_J_mol_formula_K or 0.0 for point in group],
+                [point.yerr_high_J_mol_formula_K or 0.0 for point in group],
+            ]
+            has_error = any(any(row) for row in yerr)
+            ax.errorbar(
+                [point.temperature_K for point in group],
+                [point.entropy_J_mol_formula_K for point in group],
+                yerr=yerr if has_error else None,
+                fmt="s",
+                markersize=5.2,
+                capsize=3 if has_error else 0,
+                color=colors[idx % len(colors)],
+                markeredgecolor="#111111",
+                markeredgewidth=0.5,
+                linestyle="none",
+                label=label,
+            )
     if blend_start == blend_end:
         ax.axvline(blend_start, color="#555555", linestyle=":", linewidth=1.2)
     else:
@@ -1152,6 +1178,103 @@ def plot_hybrid_quantity(
     fig.tight_layout()
     fig.savefig(path, dpi=300)
     plt.close(fig)
+
+
+def atom_count_from_formula(formula: str | None) -> float | None:
+    if not formula:
+        return None
+    total = 0.0
+    for _element, count in re.findall(r"([A-Z][a-z]?)([0-9]*\.?[0-9]*)", formula):
+        total += float(count) if count else 1.0
+    return total or None
+
+
+def sluschi_entropy_points_for_hybrid(args: argparse.Namespace) -> list[EntropyPoint]:
+    if not args.sluschi_entropy_csv:
+        return []
+    atoms_per_formula = args.sluschi_atoms_per_formula
+    if atoms_per_formula is None:
+        atoms_per_formula = atom_count_from_formula(args.thermo_formula or args.formula)
+    if atoms_per_formula is None or atoms_per_formula <= 0:
+        raise ValueError(
+            "--sluschi-atoms-per-formula is required when --sluschi-entropy-csv is used "
+            "and the formula cannot be parsed."
+        )
+    labels = args.sluschi_entropy_label or []
+    points: list[EntropyPoint] = []
+    for idx, csv_path in enumerate(args.sluschi_entropy_csv):
+        label = labels[idx] if idx < len(labels) else None
+        points.extend(
+            load_sluschi_entropy_csv(
+                csv_path,
+                atoms_per_formula=atoms_per_formula,
+                quantity=args.sluschi_entropy_kind,
+                label=label,
+                sluschi_unit=args.sluschi_entropy_unit,
+                value_column=args.sluschi_entropy_column,
+                sum_columns=[
+                    item.strip()
+                    for item in args.sluschi_entropy_sum_columns.split(",")
+                    if item.strip()
+                ]
+                if args.sluschi_entropy_sum_columns
+                else None,
+                stderr_column=args.sluschi_entropy_stderr_column,
+                t_min=args.t_min,
+                t_max=args.t_max,
+            )
+        )
+    if args.energy_basis == "target-cell":
+        for point in points:
+            point.entropy_J_mol_formula_K *= args.target_z
+            if point.yerr_low_J_mol_formula_K is not None:
+                point.yerr_low_J_mol_formula_K *= args.target_z
+            if point.yerr_high_J_mol_formula_K is not None:
+                point.yerr_high_J_mol_formula_K *= args.target_z
+            point.unit_basis += " -> J/mol-target-cell/K"
+    return points
+
+
+def write_sluschi_entropy_overlay_csv(path: Path, hybrid_rows: list[dict], points: list[EntropyPoint], key: str) -> None:
+    if not points:
+        return
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        fields = [
+            "source",
+            "label",
+            "T_K",
+            "entropy",
+            "yerr_low",
+            "yerr_high",
+            "input_csv",
+            "value_column",
+            "unit_basis",
+        ]
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for row in hybrid_rows:
+            writer.writerow(
+                {
+                    "source": "QHA-MD-hybrid",
+                    "label": key,
+                    "T_K": row["T_K"],
+                    "entropy": row[key],
+                }
+            )
+        for point in points:
+            writer.writerow(
+                {
+                    "source": "SLUSCHI",
+                    "label": point.label,
+                    "T_K": point.temperature_K,
+                    "entropy": point.entropy_J_mol_formula_K,
+                    "yerr_low": point.yerr_low_J_mol_formula_K,
+                    "yerr_high": point.yerr_high_J_mol_formula_K,
+                    "input_csv": point.input_csv,
+                    "value_column": point.value_column,
+                    "unit_basis": point.unit_basis,
+                }
+            )
 
 
 def cp_overlap_diagnostics(qha_cp, md_cp, blend_start: float, blend_end: float) -> dict:
@@ -1531,6 +1654,15 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         entropy_anchor_metadata,
         thermo_db_anchor,
     )
+    sluschi_entropy_points = sluschi_entropy_points_for_hybrid(args)
+    hybrid_entropy_key = "S_neel_corrected" if neel_metadata.get("applied") else "S_integrated"
+    sluschi_overlay_csv = args.outdir / "hybrid_S_QHA_MD_sluschi_overlay.csv"
+    write_sluschi_entropy_overlay_csv(
+        sluschi_overlay_csv,
+        hybrid_rows,
+        sluschi_entropy_points,
+        hybrid_entropy_key,
+    )
 
     csv_path = args.outdir / "hybrid_cp_entropy.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
@@ -1790,13 +1922,14 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         qha_entropy,
         md_entropy,
         hybrid_rows,
-        "S_neel_corrected" if neel_metadata.get("applied") else "S_integrated",
+        hybrid_entropy_key,
         "Hybrid S with Neel correction" if neel_metadata.get("applied") else "Integrated hybrid S",
         blend_start,
         blend_end,
         args,
         db_points=db_plot_points.get("S"),
         neel_region=neel_region,
+        entropy_points=sluschi_entropy_points,
     )
     if neel_metadata.get("applied"):
         plot_hybrid_quantity(
@@ -1944,6 +2077,13 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         "entropy_anchor_blend_calibration": entropy_blend_calibration,
         "entropy_anchor_shift": entropy_anchor_shift,
         "neel_correction": neel_metadata,
+        "sluschi_entropy_overlay": {
+            "n_points": len(sluschi_entropy_points),
+            "csv": str(sluschi_overlay_csv.resolve()) if sluschi_entropy_points else None,
+            "input_csv": [str(path.resolve()) for path in args.sluschi_entropy_csv],
+            "kind": args.sluschi_entropy_kind,
+            "basis": "J/mol-target-cell/K" if args.energy_basis == "target-cell" else "J/mol-formula/K",
+        },
         "structural_hybrid": structural_metadata,
         "cp_overlap_diagnostics": {
             key: value
@@ -2077,6 +2217,18 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
             "comparison_type": "integrated-hybrid",
         },
     ]
+    if sluschi_entropy_points:
+        index.append(
+            {
+                "quantity": "hybrid_entropy_sluschi_overlay",
+                "plot_png": entropy_png.name,
+                "data_csv": sluschi_overlay_csv.name,
+                "qha_source": "corrected hybrid_S_QHA_MD",
+                "md_source": ",".join(path.name for path in args.sluschi_entropy_csv),
+                "md_column": args.sluschi_entropy_column or args.sluschi_entropy_sum_columns or args.sluschi_entropy_kind,
+                "comparison_type": "SLUSCHI entropy marker overlay",
+            }
+        )
     if volume_rows:
         index.append(
             {
@@ -2421,6 +2573,48 @@ def build_parser() -> argparse.ArgumentParser:
         "--plot-thermo-db-points",
         action="store_true",
         help="Overlay thermodynamic database points on hybrid S/H/G plots.",
+    )
+    parser.add_argument(
+        "--sluschi-entropy-csv",
+        type=Path,
+        action="append",
+        default=[],
+        help="Overlay SLUSCHI/LAMMPS Svib/Sconf entropy CSV points on the corrected hybrid entropy plot. Repeatable.",
+    )
+    parser.add_argument(
+        "--sluschi-entropy-label",
+        action="append",
+        default=[],
+        help="Legend label for each --sluschi-entropy-csv, in the same order.",
+    )
+    parser.add_argument(
+        "--sluschi-entropy-kind",
+        choices=("auto", "sconfig", "svib", "total"),
+        default="auto",
+        help="Entropy quantity to infer from SLUSCHI CSVs.",
+    )
+    parser.add_argument(
+        "--sluschi-atoms-per-formula",
+        type=float,
+        default=None,
+        help="Atoms per formula unit for converting SLUSCHI J/mol-atom/K outputs.",
+    )
+    parser.add_argument(
+        "--sluschi-entropy-unit",
+        choices=("J/mol-atom/K", "kJ/mol-atom/K", "J/mol-formula/K", "kJ/mol-formula/K"),
+        default="J/mol-atom/K",
+        help="Fallback unit for SLUSCHI columns that do not encode their basis in the column name.",
+    )
+    parser.add_argument("--sluschi-entropy-column", default=None, help="Single SLUSCHI entropy column to overlay.")
+    parser.add_argument(
+        "--sluschi-entropy-sum-columns",
+        default=None,
+        help="Comma-separated SLUSCHI columns to sum, e.g. Svib_J_mol_formula_K,Sconf_J_mol_formula_K.",
+    )
+    parser.add_argument(
+        "--sluschi-entropy-stderr-column",
+        default=None,
+        help="Optional symmetric SLUSCHI entropy error column.",
     )
     return parser
 
