@@ -102,6 +102,77 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def _column_value(row: dict[str, str], column: str) -> float | None:
+    value = finite_float(row.get(column))
+    return value if value is not None else None
+
+
+def _entropy_unit_factor(unit: str, *, atoms_per_formula: float) -> float:
+    if unit == "J/mol/K":
+        return 1.0
+    if unit == "kJ/mol/K":
+        return 1000.0
+    if unit == "J/mol-atom/K":
+        return atoms_per_formula
+    if unit == "kJ/mol-atom/K":
+        return atoms_per_formula * 1000.0
+    raise ValueError(f"Unsupported entropy unit: {unit!r}.")
+
+
+def load_sconf_curve(
+    path: Path | None,
+    *,
+    x_column: str,
+    sconf_column: str,
+    unit: str,
+    atoms_per_formula: float = 1.0,
+    t_column: str | None = None,
+    temperature_k: float | None = None,
+    mode: str = "off",
+    label: str = "SLUSCHI Sconf",
+) -> SconfCurve | None:
+    if mode == "off":
+        return None
+    if path is None:
+        raise ValueError("--sconf-csv is required when --sconf-mode is not off.")
+    rows = read_csv_rows(path)
+    if not rows:
+        raise ValueError(f"Sconf CSV is empty: {path}")
+    factor = _entropy_unit_factor(unit, atoms_per_formula=atoms_per_formula)
+    selected = rows
+    reference_temperature = temperature_k
+    if t_column and any(row.get(t_column, "").strip() for row in rows):
+        finite_temps = [(_column_value(row, t_column), row) for row in rows]
+        finite_temps = [(temp, row) for temp, row in finite_temps if temp is not None]
+        if finite_temps and temperature_k is not None:
+            nearest = min(abs(temp - temperature_k) for temp, _ in finite_temps)
+            selected = [row for temp, row in finite_temps if abs(temp - temperature_k) <= nearest + 1.0e-9]
+            reference_temperature = float(selected[0][t_column]) if selected else temperature_k
+        elif finite_temps:
+            selected = [row for _, row in finite_temps]
+            reference_temperature = float(selected[0][t_column])
+    points: list[tuple[float, float]] = []
+    for row in selected:
+        x_value = _column_value(row, x_column)
+        sconf = _column_value(row, sconf_column)
+        if x_value is None or sconf is None:
+            continue
+        points.append((x_value, sconf * factor))
+    if not points:
+        raise ValueError(f"No finite Sconf points found in {path} using {x_column!r}/{sconf_column!r}.")
+    by_x: dict[float, list[float]] = defaultdict(list)
+    for x_value, sconf in points:
+        by_x[round(x_value, 12)].append(sconf)
+    averaged = [(x_value, sum(values) / len(values)) for x_value, values in sorted(by_x.items())]
+    return SconfCurve(
+        points_j_mol_k=averaged,
+        mode=mode,
+        label=label,
+        reference_temperature_k=reference_temperature,
+        source=str(path),
+    )
+
+
 def parse_csv_list(value: str | list[str] | None) -> list[str]:
     if value is None:
         return []
@@ -302,6 +373,41 @@ class MIVMParameters:
         return list(self.components)
 
 
+@dataclass(frozen=True)
+class SconfCurve:
+    """Composition-dependent configurational entropy prior for binary liquids."""
+
+    points_j_mol_k: list[tuple[float, float]]
+    mode: str = "off"
+    label: str = "SLUSCHI Sconf"
+    reference_temperature_k: float | None = None
+    source: str = ""
+
+    def value_derivative(self, x_value: float) -> tuple[float, float]:
+        points = sorted(self.points_j_mol_k)
+        if not points:
+            return math.nan, math.nan
+        if len(points) == 1:
+            return points[0][1], 0.0
+        if x_value <= points[0][0]:
+            x0, y0 = points[0]
+            x1, y1 = points[1]
+        elif x_value >= points[-1][0]:
+            x0, y0 = points[-2]
+            x1, y1 = points[-1]
+        else:
+            x0, y0 = points[0]
+            x1, y1 = points[-1]
+            for left, right in zip(points, points[1:]):
+                if left[0] <= x_value <= right[0]:
+                    x0, y0 = left
+                    x1, y1 = right
+                    break
+        slope = (y1 - y0) / (x1 - x0) if abs(x1 - x0) > 1.0e-15 else 0.0
+        value = y0 + slope * (x_value - x0)
+        return value, slope
+
+
 def _component_from_mapping(name: str, payload: dict[str, Any]) -> MIVMComponent:
     volume = finite_float(
         payload.get("molar_volume")
@@ -470,6 +576,35 @@ def reference_gibbs_j_mol(composition: dict[str, float], params: MIVMParameters)
 def ideal_gibbs_j_mol(temperature_k: float, composition: dict[str, float], params: MIVMParameters) -> float:
     x = normalize_composition(composition, params)
     return R_J_MOLK * temperature_k * sum(value * math.log(value) for value in x.values() if value > 0.0)
+
+
+def ideal_config_entropy_j_mol_k(composition: dict[str, float], params: MIVMParameters) -> float:
+    x = normalize_composition(composition, params)
+    return -R_J_MOLK * sum(value * math.log(value) for value in x.values() if value > 0.0)
+
+
+def sconf_gibbs_j_mol(temperature_k: float, sconf_j_mol_k: float) -> float:
+    return -temperature_k * sconf_j_mol_k
+
+
+def config_gibbs_with_sconf_j_mol(
+    temperature_k: float,
+    composition: dict[str, float],
+    params: MIVMParameters,
+    sconf_j_mol_k: float | None,
+    *,
+    mode: str,
+) -> float:
+    if mode == "off" or sconf_j_mol_k is None:
+        return ideal_gibbs_j_mol(temperature_k, composition, params)
+    if mode == "replace-ideal":
+        return sconf_gibbs_j_mol(temperature_k, sconf_j_mol_k)
+    if mode == "excess-correction":
+        return ideal_gibbs_j_mol(temperature_k, composition, params) + sconf_gibbs_j_mol(
+            temperature_k,
+            sconf_j_mol_k,
+        )
+    raise ValueError(f"Unsupported Sconf mode: {mode!r}.")
 
 
 def total_gibbs_j_mol(
@@ -781,21 +916,45 @@ def sample_rows(
     params: MIVMParameters,
     temperatures: list[float],
     compositions: list[dict[str, float]],
+    *,
+    sconf_curve: SconfCurve | None = None,
+    sconf_x_component: str | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for temp in temperatures:
         for composition in compositions:
             x = normalize_composition(composition, params)
             activities = activity_report(temp, x, params)
+            sconf_value = None
+            g_config = ideal_gibbs_j_mol(temp, x, params)
+            g_total_sconf = None
+            if sconf_curve is not None:
+                component = sconf_x_component or params.component_names[-1]
+                if component not in x:
+                    raise ValueError(f"Sconf x-component {component!r} is not in the MIVM composition basis.")
+                sconf_value, _ = sconf_curve.value_derivative(x[component])
+                g_config = config_gibbs_with_sconf_j_mol(
+                    temp,
+                    x,
+                    params,
+                    sconf_value,
+                    mode=sconf_curve.mode,
+                )
+                g_total_sconf = reference_gibbs_j_mol(x, params) + g_config + excess_gibbs_j_mol(temp, x, params)
             row: dict[str, Any] = {
                 "T_K": temp,
                 "composition": composition_label(x),
                 "phase": params.phase,
                 "G_reference_J_mol": reference_gibbs_j_mol(x, params),
                 "G_ideal_J_mol": ideal_gibbs_j_mol(temp, x, params),
+                "S_ideal_config_J_mol_K": ideal_config_entropy_j_mol_k(x, params),
+                "Sconf_SLUSCHI_J_mol_K": sconf_value,
+                "G_config_SLUSCHI_J_mol": g_config if sconf_curve is not None else None,
                 "G_excess_MIVM_J_mol": excess_gibbs_j_mol(temp, x, params),
                 "H_excess_MIVM_J_mol": excess_enthalpy_j_mol(temp, x, params),
                 "G_total_MIVM_J_mol": total_gibbs_j_mol(temp, x, params),
+                "G_total_MIVM_SLUSCHI_J_mol": g_total_sconf,
+                "Sconf_mode": sconf_curve.mode if sconf_curve is not None else "off",
             }
             for name in params.component_names:
                 row[f"x_{name}"] = x[name]
@@ -813,9 +972,14 @@ def sample_fields(params: MIVMParameters) -> list[str]:
         "composition",
         "G_reference_J_mol",
         "G_ideal_J_mol",
+        "S_ideal_config_J_mol_K",
+        "Sconf_SLUSCHI_J_mol_K",
+        "G_config_SLUSCHI_J_mol",
         "G_excess_MIVM_J_mol",
         "H_excess_MIVM_J_mol",
         "G_total_MIVM_J_mol",
+        "G_total_MIVM_SLUSCHI_J_mol",
+        "Sconf_mode",
     ]
     for name in params.component_names:
         fields.extend([f"x_{name}", f"mu_{name}_J_mol", f"activity_{name}", f"gamma_{name}"])
@@ -1274,19 +1438,21 @@ def _fusion_gibbs_j_mol(temperature_k: float, *, tm_k: float, dhfus_kj_mol: floa
 
 def _solve_liquidus_temperature(
     x: float,
-    mu_ex_j_mol: float,
+    mu_ex_j_mol: float | Any,
     *,
     tm_k: float,
     dhfus_kj_mol: float,
     dcp_j_mol_k: float = 0.0,
+    ideal_scale: float = 1.0,
 ) -> float:
     if x <= 0.0:
         return math.nan
 
     def residual(temp: float) -> float:
+        mu_ex = mu_ex_j_mol(temp) if callable(mu_ex_j_mol) else mu_ex_j_mol
         return _fusion_gibbs_j_mol(temp, tm_k=tm_k, dhfus_kj_mol=dhfus_kj_mol, dcp_j_mol_k=dcp_j_mol_k) + (
-            R_J_MOLK * temp * math.log(max(x, 1.0e-15))
-        ) + mu_ex_j_mol
+            ideal_scale * R_J_MOLK * temp * math.log(max(x, 1.0e-15))
+        ) + mu_ex
 
     low = 1.0
     high = max(tm_k * 1.5, tm_k + 1000.0)
@@ -1331,8 +1497,8 @@ def _line_compound_gform_j_mol(
 
 def _solve_line_compound_liquidus_temperature(
     x_liquid_b: float,
-    mu_a_ex_j_mol: float,
-    mu_b_ex_j_mol: float,
+    mu_a_ex_j_mol: float | Any,
+    mu_b_ex_j_mol: float | Any,
     *,
     x_compound_b: float,
     tm_a_k: float,
@@ -1344,6 +1510,7 @@ def _solve_line_compound_liquidus_temperature(
     gform_ref_kj_mol: float,
     gform_tref_k: float,
     dcp_form_j_mol_k: float = 0.0,
+    ideal_scale: float = 1.0,
 ) -> float:
     x_a = 1.0 - x_liquid_b
     x_b = x_liquid_b
@@ -1351,18 +1518,20 @@ def _solve_line_compound_liquidus_temperature(
         return math.nan
 
     def residual(temp: float) -> float:
+        mu_a_ex = mu_a_ex_j_mol(temp) if callable(mu_a_ex_j_mol) else mu_a_ex_j_mol
+        mu_b_ex = mu_b_ex_j_mol(temp) if callable(mu_b_ex_j_mol) else mu_b_ex_j_mol
         term_a = _fusion_gibbs_j_mol(
             temp,
             tm_k=tm_a_k,
             dhfus_kj_mol=dhfus_a_kj_mol,
             dcp_j_mol_k=dcp_a_j_mol_k,
-        ) + R_J_MOLK * temp * math.log(max(x_a, 1.0e-15)) + mu_a_ex_j_mol
+        ) + ideal_scale * R_J_MOLK * temp * math.log(max(x_a, 1.0e-15)) + mu_a_ex
         term_b = _fusion_gibbs_j_mol(
             temp,
             tm_k=tm_b_k,
             dhfus_kj_mol=dhfus_b_kj_mol,
             dcp_j_mol_k=dcp_b_j_mol_k,
-        ) + R_J_MOLK * temp * math.log(max(x_b, 1.0e-15)) + mu_b_ex_j_mol
+        ) + ideal_scale * R_J_MOLK * temp * math.log(max(x_b, 1.0e-15)) + mu_b_ex
         gform = _line_compound_gform_j_mol(
             temp,
             gform_ref_kj_mol=gform_ref_kj_mol,
@@ -1448,6 +1617,7 @@ def _binary_liquidus_from_gex_curve(
     dcp_a_j_mol_k: float = 0.0,
     dcp_b_j_mol_k: float = 0.0,
     line_compounds: list[dict[str, Any]] | None = None,
+    sconf_curve: SconfCurve | None = None,
     x_min: float = 1.0e-6,
     x_max: float = 1.0 - 1.0e-6,
 ) -> list[dict[str, float]]:
@@ -1468,26 +1638,52 @@ def _binary_liquidus_from_gex_curve(
         dgdx_j_mol = dgdx_kj_mol * 1000.0
         mu_a_ex = g_j_mol - x_b * dgdx_j_mol
         mu_b_ex = g_j_mol + x_a * dgdx_j_mol
+        sconf_j_mol_k = math.nan
+        dsconf_dx_j_mol_k = math.nan
+        g_sconf_j_mol_at_1k = math.nan
+        ideal_scale = 1.0
+        if sconf_curve is not None:
+            sconf_j_mol_k, dsconf_dx_j_mol_k = sconf_curve.value_derivative(x_b)
+            ideal_scale = 0.0 if sconf_curve.mode == "replace-ideal" else 1.0
+            if sconf_curve.mode in {"replace-ideal", "excess-correction"} and math.isfinite(sconf_j_mol_k):
+                g_sconf_j_mol_at_1k = -sconf_j_mol_k
+
+                def mu_a_dynamic(temp: float, base: float = mu_a_ex, x_b_value: float = x_b) -> float:
+                    return base - temp * (sconf_j_mol_k - x_b_value * dsconf_dx_j_mol_k)
+
+                def mu_b_dynamic(temp: float, base: float = mu_b_ex, x_a_value: float = x_a) -> float:
+                    return base - temp * (sconf_j_mol_k + x_a_value * dsconf_dx_j_mol_k)
+
+                mu_a_ex_for_solve: float | Any = mu_a_dynamic
+                mu_b_ex_for_solve: float | Any = mu_b_dynamic
+            else:
+                mu_a_ex_for_solve = mu_a_ex
+                mu_b_ex_for_solve = mu_b_ex
+        else:
+            mu_a_ex_for_solve = mu_a_ex
+            mu_b_ex_for_solve = mu_b_ex
         t_a = _solve_liquidus_temperature(
             x_a,
-            mu_a_ex,
+            mu_a_ex_for_solve,
             tm_k=tm_a_k,
             dhfus_kj_mol=dhfus_a_kj_mol,
             dcp_j_mol_k=dcp_a_j_mol_k,
+            ideal_scale=ideal_scale,
         )
         t_b = _solve_liquidus_temperature(
             x_b,
-            mu_b_ex,
+            mu_b_ex_for_solve,
             tm_k=tm_b_k,
             dhfus_kj_mol=dhfus_b_kj_mol,
             dcp_j_mol_k=dcp_b_j_mol_k,
+            ideal_scale=ideal_scale,
         )
         compound_temperatures: dict[str, float] = {}
         for compound in line_compounds or []:
             t_c = _solve_line_compound_liquidus_temperature(
                 x_b,
-                mu_a_ex,
-                mu_b_ex,
+                mu_a_ex_for_solve,
+                mu_b_ex_for_solve,
                 x_compound_b=float(compound["x_B"]),
                 tm_a_k=tm_a_k,
                 tm_b_k=tm_b_k,
@@ -1498,6 +1694,7 @@ def _binary_liquidus_from_gex_curve(
                 gform_ref_kj_mol=float(compound["gform_ref_kJ_mol"]),
                 gform_tref_k=float(compound["tref_K"]),
                 dcp_form_j_mol_k=float(compound["dCp_form_J_mol_K"]),
+                ideal_scale=ideal_scale,
             )
             tmin_k = compound.get("tmin_K")
             tmax_k = compound.get("tmax_K")
@@ -1515,6 +1712,10 @@ def _binary_liquidus_from_gex_curve(
                 "x": x_b,
                 "Gex_kJ_mol": g_kj_mol,
                 "dGex_dx_kJ_mol": dgdx_kj_mol,
+                "Sconf_SLUSCHI_J_mol_K": sconf_j_mol_k,
+                "dSconf_dx_SLUSCHI_J_mol_K": dsconf_dx_j_mol_k,
+                "Gconf_SLUSCHI_per_K_J_mol": g_sconf_j_mol_at_1k,
+                "Sconf_mode": sconf_curve.mode if sconf_curve is not None else "off",
                 "mu_A_ex_J_mol": mu_a_ex,
                 "mu_B_ex_J_mol": mu_b_ex,
                 "liquidus_A_K": t_a,
@@ -1714,6 +1915,16 @@ def write_benchmarked_uq_phase(args: argparse.Namespace) -> dict[str, Any]:
     dcp_a_values = _numeric_grid_spec(args.dcp_a_grid, default=args.dcp_a)
     dcp_b_values = _numeric_grid_spec(args.dcp_b_grid, default=args.dcp_b)
     line_compounds = _parse_line_compounds(args.line_compound, default_tref_k=args.eutectic_t)
+    sconf_curve = load_sconf_curve(
+        args.sconf_csv,
+        x_column=args.sconf_x_column,
+        sconf_column=args.sconf_column,
+        unit=args.sconf_unit,
+        atoms_per_formula=args.sconf_atoms_per_formula,
+        t_column=args.sconf_t_column,
+        temperature_k=args.sconf_temperature or args.eutectic_t,
+        mode=args.sconf_mode,
+    )
     if args.line_compound_prior:
         from atomi.thermo_prior import load_line_compound_priors
 
@@ -1731,11 +1942,14 @@ def write_benchmarked_uq_phase(args: argparse.Namespace) -> dict[str, Any]:
                     dcp_a_j_mol_k=dcp_a,
                     dcp_b_j_mol_k=dcp_b,
                     line_compounds=line_compounds,
+                    sconf_curve=sconf_curve,
                 )
                 base_label = str(curve["label"])
                 label = base_label
                 if len(dcp_a_values) > 1 or len(dcp_b_values) > 1:
                     label = f"{base_label} dCpA={dcp_a:g} dCpB={dcp_b:g}"
+                if sconf_curve is not None:
+                    label = f"{label} Sconf={sconf_curve.mode}"
                 per_curve_liquidus[label] = liquidus
                 for row in liquidus:
                     out = dict(row)
@@ -1772,6 +1986,8 @@ def write_benchmarked_uq_phase(args: argparse.Namespace) -> dict[str, Any]:
                         "y_column": curve["y_column"],
                         "dCp_A_liq_minus_solid_J_mol_K": dcp_a,
                         "dCp_B_liq_minus_solid_J_mol_K": dcp_b,
+                        "Sconf_mode": sconf_curve.mode if sconf_curve is not None else "off",
+                        "Sconf_source": sconf_curve.source if sconf_curve is not None else "",
                         "hmix_min_x": min_x,
                         "hmix_min_kJ_mol": min_h,
                         "hmix_rmse_kJ_mol": rmse,
@@ -1816,6 +2032,8 @@ def write_benchmarked_uq_phase(args: argparse.Namespace) -> dict[str, Any]:
             "y_column",
             "dCp_A_liq_minus_solid_J_mol_K",
             "dCp_B_liq_minus_solid_J_mol_K",
+            "Sconf_mode",
+            "Sconf_source",
             "hmix_min_x",
             "hmix_min_kJ_mol",
             "hmix_rmse_kJ_mol",
@@ -1836,6 +2054,10 @@ def write_benchmarked_uq_phase(args: argparse.Namespace) -> dict[str, Any]:
         "x",
         "Gex_kJ_mol",
         "dGex_dx_kJ_mol",
+        "Sconf_SLUSCHI_J_mol_K",
+        "dSconf_dx_SLUSCHI_J_mol_K",
+        "Gconf_SLUSCHI_per_K_J_mol",
+        "Sconf_mode",
         "mu_A_ex_J_mol",
         "mu_B_ex_J_mol",
         "liquidus_A_K",
@@ -1923,6 +2145,19 @@ failure to match the eutectic does not uniquely implicate the liquid Hmix/Cp mod
             "component_b": {"Tm_K": args.tm_b, "dHfus_kJ_mol": args.dhfus_b},
         },
         "dCp_grid_J_mol_K": {"component_a": dcp_a_values, "component_b": dcp_b_values},
+        "sconf": {
+            "mode": args.sconf_mode,
+            "csv": str(args.sconf_csv.resolve()) if args.sconf_csv else "",
+            "x_column": args.sconf_x_column,
+            "sconf_column": args.sconf_column,
+            "unit": args.sconf_unit,
+            "atoms_per_formula": args.sconf_atoms_per_formula,
+            "reference_temperature_K": sconf_curve.reference_temperature_k if sconf_curve else None,
+            "interpretation": (
+                "replace-ideal uses SLUSCHI Sconf as the liquid configurational entropy term and disables RT ln x; "
+                "excess-correction keeps RT ln x and adds -T*Sconf as an excess Gibbs correction."
+            ),
+        },
         "line_compounds": line_compounds,
         "line_compound_prior_paths": [str(path.resolve()) for path in args.line_compound_prior or []],
         "best_hmix_label": best_hmix.get("label", ""),
@@ -2222,6 +2457,24 @@ def build_parser() -> argparse.ArgumentParser:
     sample.add_argument("--T-step", type=float, default=100.0)
     sample.add_argument("--composition", action="append", help="Composition like A=0.25,B=0.75. Repeatable.")
     sample.add_argument("--binary-grid", help="Composition grid: A,B,step or A,B,xmin,xmax,step.")
+    sample.add_argument("--sconf-csv", type=Path, help="Optional SLUSCHI Sconf CSV to replace or correct ideal entropy.")
+    sample.add_argument("--sconf-x-column", default="x", help="Sconf CSV composition column.")
+    sample.add_argument("--sconf-column", default="Sconf_J_mol_formula_K", help="Sconf CSV entropy column.")
+    sample.add_argument(
+        "--sconf-unit",
+        choices=("J/mol/K", "kJ/mol/K", "J/mol-atom/K", "kJ/mol-atom/K"),
+        default="J/mol/K",
+    )
+    sample.add_argument("--sconf-atoms-per-formula", type=float, default=1.0)
+    sample.add_argument("--sconf-t-column", default="temperature_K")
+    sample.add_argument("--sconf-temperature", type=float)
+    sample.add_argument("--sconf-x-component", help="MIVM component whose mole fraction maps to the Sconf x column.")
+    sample.add_argument(
+        "--sconf-mode",
+        choices=("off", "replace-ideal", "excess-correction"),
+        default="off",
+        help="How to use SLUSCHI Sconf: replace ideal configurational entropy or add an excess correction.",
+    )
 
     compare = subparsers.add_parser(
         "compare-binary",
@@ -2258,6 +2511,23 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--curve-columns", required=True, help="Comma-separated Hmix/Gex candidate columns.")
     benchmark.add_argument("--curve-labels", help="Optional comma-separated labels matching --curve-columns.")
     benchmark.add_argument("--curve-y-unit", choices=("kJ/mol", "J/mol"), default="kJ/mol")
+    benchmark.add_argument("--sconf-csv", type=Path, help="Optional SLUSCHI Sconf CSV for liquid entropy sensitivity.")
+    benchmark.add_argument("--sconf-x-column", default="x", help="Sconf CSV composition column.")
+    benchmark.add_argument("--sconf-column", default="Sconf_J_mol_formula_K", help="Sconf CSV entropy column.")
+    benchmark.add_argument(
+        "--sconf-unit",
+        choices=("J/mol/K", "kJ/mol/K", "J/mol-atom/K", "kJ/mol-atom/K"),
+        default="J/mol/K",
+    )
+    benchmark.add_argument("--sconf-atoms-per-formula", type=float, default=1.0)
+    benchmark.add_argument("--sconf-t-column", default="temperature_K")
+    benchmark.add_argument("--sconf-temperature", type=float)
+    benchmark.add_argument(
+        "--sconf-mode",
+        choices=("off", "replace-ideal", "excess-correction"),
+        default="off",
+        help="Use SLUSCHI Sconf in the fast liquidus model. replace-ideal disables RT ln x; excess-correction keeps it.",
+    )
     benchmark.add_argument(
         "--extra-curve-csv",
         action="append",
@@ -2401,7 +2671,23 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
         warnings = validate_parameters(params)
         temperatures = temperature_grid(args)
         compositions = binary_grid(args.binary_grid, params) if args.binary_grid else parse_compositions(args.composition, params)
-        rows = sample_rows(params, temperatures, compositions)
+        sconf_curve = load_sconf_curve(
+            args.sconf_csv,
+            x_column=args.sconf_x_column,
+            sconf_column=args.sconf_column,
+            unit=args.sconf_unit,
+            atoms_per_formula=args.sconf_atoms_per_formula,
+            t_column=args.sconf_t_column,
+            temperature_k=args.sconf_temperature,
+            mode=args.sconf_mode,
+        )
+        rows = sample_rows(
+            params,
+            temperatures,
+            compositions,
+            sconf_curve=sconf_curve,
+            sconf_x_component=args.sconf_x_component,
+        )
         outdir = args.outdir.resolve()
         table = outdir / "mivm_property_table.csv"
         write_csv(table, rows, sample_fields(params))
@@ -2414,6 +2700,15 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
             "n_compositions": len(compositions),
             "n_rows": len(rows),
             "warnings": warnings,
+            "sconf": {
+                "mode": args.sconf_mode,
+                "csv": str(args.sconf_csv.resolve()) if args.sconf_csv else "",
+                "x_column": args.sconf_x_column,
+                "sconf_column": args.sconf_column,
+                "unit": args.sconf_unit,
+                "atoms_per_formula": args.sconf_atoms_per_formula,
+                "reference_temperature_K": sconf_curve.reference_temperature_k if sconf_curve else None,
+            },
             "outputs": {"property_table": str(table)},
         }
         write_json(outdir / "mivm_sample_metadata.json", metadata)

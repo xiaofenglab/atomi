@@ -126,6 +126,45 @@ def test_mivm_sample_writes_bridge_table(tmp_path: Path):
     assert metadata["schema"] == "atomi.calphad.mivm.sample.v1"
 
 
+def test_mivm_sample_can_replace_ideal_entropy_with_sluschi_sconf(tmp_path: Path):
+    path = tmp_path / "params.json"
+    write_simple_params(path)
+    sconf = tmp_path / "sconf.csv"
+    sconf.write_text("x,Sconf_J_mol_formula_K\n0,0\n0.5,10\n1,0\n", encoding="utf-8")
+    outdir = tmp_path / "sample_sconf"
+
+    mivm_main(
+        [
+            "sample",
+            "--params",
+            str(path),
+            "--outdir",
+            str(outdir),
+            "--temperature",
+            "1000",
+            "--binary-grid",
+            "A,B,0,1,0.5",
+            "--sconf-csv",
+            str(sconf),
+            "--sconf-x-column",
+            "x",
+            "--sconf-mode",
+            "replace-ideal",
+            "--sconf-x-component",
+            "B",
+        ]
+    )
+
+    rows = list(csv.DictReader((outdir / "mivm_property_table.csv").open(encoding="utf-8")))
+    mid = rows[1]
+    assert float(mid["Sconf_SLUSCHI_J_mol_K"]) == pytest.approx(10.0)
+    assert float(mid["G_config_SLUSCHI_J_mol"]) == pytest.approx(-10000.0)
+    assert float(mid["G_total_MIVM_SLUSCHI_J_mol"]) == pytest.approx(-10000.0)
+    assert mid["Sconf_mode"] == "replace-ideal"
+    metadata = json.loads((outdir / "mivm_sample_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["sconf"]["mode"] == "replace-ideal"
+
+
 def test_mivm_compare_binary_writes_metrics_and_plot(tmp_path: Path):
     params_path = tmp_path / "params.json"
     write_simple_params(params_path)
@@ -245,6 +284,60 @@ def test_benchmark_uq_phase_weights_hmix_and_eutectic(tmp_path: Path):
     assert sum(float(row["posterior_weight"]) for row in rows) == pytest.approx(1.0)
     assert any(float(row["hmix_rmse_kJ_mol"]) < 1.0 for row in rows)
     assert all("dCp_B_liq_minus_solid_J_mol_K" in row for row in rows)
+
+
+def test_benchmark_uq_phase_accepts_sluschi_sconf_replace_ideal(tmp_path: Path):
+    curves = tmp_path / "curves.csv"
+    curves.write_text("x_B,hmix\n0.1,-1\n0.3,-3\n0.5,-2\n0.7,-1\n0.9,0\n", encoding="utf-8")
+    sconf = tmp_path / "sconf.csv"
+    sconf.write_text("x,Sconf_J_mol_formula_K\n0.1,1\n0.5,6\n0.9,1\n", encoding="utf-8")
+    outdir = tmp_path / "bench_sconf"
+
+    metadata = mivm_main(
+        [
+            "benchmark-uq-phase",
+            "--curve-csv",
+            str(curves),
+            "--x-column",
+            "x_B",
+            "--curve-columns",
+            "hmix",
+            "--component-a",
+            "A",
+            "--component-b",
+            "B",
+            "--x-component",
+            "B",
+            "--tm-a",
+            "1000",
+            "--tm-b",
+            "1100",
+            "--dhfus-a",
+            "20",
+            "--dhfus-b",
+            "22",
+            "--eutectic-x",
+            "0.35",
+            "--eutectic-t",
+            "800",
+            "--sconf-csv",
+            str(sconf),
+            "--sconf-x-column",
+            "x",
+            "--sconf-mode",
+            "replace-ideal",
+            "--outdir",
+            str(outdir),
+        ]
+    )
+
+    assert metadata is not None
+    assert metadata["sconf"]["mode"] == "replace-ideal"
+    rows = list(csv.DictReader((outdir / "candidate_phase_diagrams.csv").open(encoding="utf-8")))
+    assert rows[0]["Sconf_mode"] == "replace-ideal"
+    assert any(float(row["Sconf_SLUSCHI_J_mol_K"]) > 1.0 for row in rows)
+    weights = list(csv.DictReader((outdir / "posterior_model_weights.csv").open(encoding="utf-8")))
+    assert weights[0]["Sconf_mode"] == "replace-ideal"
 
 
 def test_benchmark_uq_phase_scans_dcp_grid(tmp_path: Path):
