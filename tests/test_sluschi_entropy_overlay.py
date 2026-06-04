@@ -1,8 +1,11 @@
 import csv
 import json
+from argparse import Namespace
 from pathlib import Path
 
 from atomi.cli.main import main as atomi_main
+from atomi.lammps.sluschi_entropy_overlay import EntropyPoint
+from atomi.vasp.qha_md_compare import resolve_entropy_anchor
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
@@ -101,3 +104,29 @@ def test_lammps_sconfig_summary_includes_uq_columns(tmp_path: Path):
     assert rows[0]["sem_pair_sconfig_J_mol_atom_K"].startswith("0.577")
     assert rows[0]["min_pair_sconfig_J_mol_atom_K"] == "1.0"
     assert rows[0]["max_pair_sconfig_J_mol_atom_K"] == "3.0"
+
+
+def test_thermo_qha_md_can_use_sluschi_entropy_anchor():
+    args = Namespace(
+        entropy_anchor_temperature=None,
+        entropy_anchor_value=None,
+        entropy_anchor_unit="J/mol-formula/K",
+        entropy_anchor_source="sluschi",
+        sluschi_entropy_anchor_temperature=300.0,
+        sluschi_entropy_anchor_tolerance=5.0,
+        sluschi_entropy_csv=[Path("sluschi_entropy_summary.csv")],
+        sluschi_entropy_kind="total",
+        energy_basis="per-formula",
+        target_z=4.0,
+    )
+    points = [
+        EntropyPoint("SLUSCHI", "SLUSCHI", 300.0, 72.58),
+        EntropyPoint("SLUSCHI", "SLUSCHI", 900.0, 163.27),
+    ]
+
+    temp, value, metadata = resolve_entropy_anchor(args, {}, points)
+
+    assert temp == 300.0
+    assert value == 72.58
+    assert metadata["source"] == "SLUSCHI"
+    assert metadata["used_as_entropy_anchor"] is True

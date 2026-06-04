@@ -693,7 +693,11 @@ def entropy_anchor_to_j_per_basis(
     return out
 
 
-def resolve_entropy_anchor(args: argparse.Namespace, record: dict) -> tuple[float | None, float | None, dict]:
+def resolve_entropy_anchor(
+    args: argparse.Namespace,
+    record: dict,
+    sluschi_points: list[EntropyPoint] | None = None,
+) -> tuple[float | None, float | None, dict]:
     if args.entropy_anchor_temperature is not None and args.entropy_anchor_value is not None:
         value = entropy_anchor_to_j_per_basis(
             args.entropy_anchor_value,
@@ -709,6 +713,39 @@ def resolve_entropy_anchor(args: argparse.Namespace, record: dict) -> tuple[floa
             "value_J_mol_basis_K": value,
             "basis": args.energy_basis,
         }
+    if args.entropy_anchor_source == "none":
+        return None, None, {"source": None, "reason": "entropy anchoring disabled by --entropy-anchor-source none"}
+    if args.entropy_anchor_source == "sluschi":
+        if not sluschi_points:
+            raise ValueError("--entropy-anchor-source sluschi requires --sluschi-entropy-csv")
+        anchor_t = args.sluschi_entropy_anchor_temperature
+        value = interpolate(
+            [(point.temperature_K, point.entropy_J_mol_formula_K) for point in sluschi_points],
+            anchor_t,
+        )
+        if value is None:
+            nearest = min(sluschi_points, key=lambda point: abs(point.temperature_K - anchor_t))
+            if abs(nearest.temperature_K - anchor_t) <= args.sluschi_entropy_anchor_tolerance:
+                value = nearest.entropy_J_mol_formula_K
+                anchor_t = nearest.temperature_K
+        if value is None:
+            raise ValueError(
+                "Could not find/interpolate a SLUSCHI entropy anchor near "
+                f"{args.sluschi_entropy_anchor_temperature:g} K"
+            )
+        return anchor_t, value, {
+            "source": "SLUSCHI",
+            "T_K": anchor_t,
+            "value_J_mol_basis_K": value,
+            "basis": args.energy_basis,
+            "used_as_entropy_anchor": True,
+            "used_for_blend_calibration": True,
+            "input_csv": [str(path.resolve()) for path in args.sluschi_entropy_csv],
+            "kind": args.sluschi_entropy_kind,
+            "reason": "SLUSCHI entropy selected as the entropy anchor source",
+        }
+    if args.entropy_anchor_source == "thermo-db" and not record:
+        raise ValueError("--entropy-anchor-source thermo-db requires --thermo-db and a matching record")
     if record:
         if args.neel_correction == "on":
             factor = args.target_z if args.energy_basis == "target-cell" else 1.0
@@ -744,7 +781,7 @@ def resolve_entropy_anchor(args: argparse.Namespace, record: dict) -> tuple[floa
             "value_J_mol_basis_K": value,
             "basis": args.energy_basis,
         }
-    return None, None, {"source": None}
+    return None, None, {"source": None, "reason": "no entropy anchor source available"}
 
 
 def entropy_at_temperature_from_cp_rows(
@@ -1614,9 +1651,11 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
     qha_enthalpy = filter_range(qha_derived_enthalpy(args), args.t_min, args.t_max)
     enthalpy_anchor_kj_mol, thermo_db_anchor = resolve_enthalpy_anchor(args)
     db_plot_points = thermo_db_plot_points(args, thermo_db_anchor)
+    sluschi_entropy_points = sluschi_entropy_points_for_hybrid(args)
     entropy_anchor_t, entropy_anchor_value, entropy_anchor_metadata = resolve_entropy_anchor(
         args,
         thermo_db_anchor,
+        sluschi_entropy_points,
     )
     blend_start, entropy_blend_calibration = calibrate_blend_start_for_entropy(
         qha_cp,
@@ -1654,7 +1693,6 @@ def write_hybrid_outputs(args: argparse.Namespace) -> tuple[list[dict], dict]:
         entropy_anchor_metadata,
         thermo_db_anchor,
     )
-    sluschi_entropy_points = sluschi_entropy_points_for_hybrid(args)
     hybrid_entropy_key = "S_neel_corrected" if neel_metadata.get("applied") else "S_integrated"
     sluschi_overlay_csv = args.outdir / "hybrid_S_QHA_MD_sluschi_overlay.csv"
     write_sluschi_entropy_overlay_csv(
@@ -2471,6 +2509,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Lowest allowed blend-start temperature when calibrating S to an experimental/database anchor.",
     )
     parser.add_argument(
+        "--entropy-anchor-source",
+        choices=("auto", "sluschi", "thermo-db", "none"),
+        default="auto",
+        help=(
+            "Entropy anchor source when explicit --entropy-anchor-temperature/value is not provided. "
+            "auto preserves the historical thermo-db behavior."
+        ),
+    )
+    parser.add_argument(
         "--neel-correction",
         choices=("off", "on"),
         default="off",
@@ -2616,6 +2663,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional symmetric SLUSCHI entropy error column.",
     )
+    parser.add_argument(
+        "--sluschi-entropy-anchor-temperature",
+        type=float,
+        default=300.0,
+        help="Temperature used when --entropy-anchor-source sluschi is selected.",
+    )
+    parser.add_argument(
+        "--sluschi-entropy-anchor-tolerance",
+        type=float,
+        default=25.0,
+        help="Allowed nearest-point tolerance in K if the SLUSCHI entropy anchor cannot be interpolated.",
+    )
     return parser
 
 
@@ -2634,6 +2693,12 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--entropy-anchor-temperature and --entropy-anchor-value must be used together")
     if args.entropy_anchor_min_blend_start < 0.0:
         parser.error("--entropy-anchor-min-blend-start must be non-negative")
+    if args.sluschi_entropy_anchor_temperature < 0.0:
+        parser.error("--sluschi-entropy-anchor-temperature must be non-negative")
+    if args.sluschi_entropy_anchor_tolerance < 0.0:
+        parser.error("--sluschi-entropy-anchor-tolerance must be non-negative")
+    if args.entropy_anchor_source == "sluschi" and not args.sluschi_entropy_csv:
+        parser.error("--entropy-anchor-source sluschi requires --sluschi-entropy-csv")
     if args.neel_T <= 0.0:
         parser.error("--neel-T must be positive")
     if args.neel_entropy < 0.0:
