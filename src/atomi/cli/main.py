@@ -105,6 +105,13 @@ def build_parser() -> argparse.ArgumentParser:
     lammps_summary.add_argument("logfile", type=Path)
     lammps_summary.add_argument("--last-fraction", type=float, default=0.5)
 
+    for command_name in ("cell-plot", "cell_plot", "md-cell-plot", "trajectory-cell-plot"):
+        cell_plot = subparsers.add_parser(
+            command_name,
+            help="Render generic LAMMPS/AIMD cells or trajectory frames as an SVG.",
+        )
+        cell_plot.add_argument("cell_plot_args", nargs=argparse.REMAINDER)
+
     md_engine_init = subparsers.add_parser(
         "md-engine-init",
         help="Copy LAMMPS MD engine templates into a project directory.",
@@ -772,6 +779,13 @@ def build_parser() -> argparse.ArgumentParser:
             help="Overlay VASP QHA and LAMMPS MD thermodynamic functions.",
         )
         vasp_qha_md_compare.add_argument("compare_args", nargs=argparse.REMAINDER)
+
+    for command_name in ("thermo-routes", "thermo_routes", "condensed-thermo-routes"):
+        thermo_routes = subparsers.add_parser(
+            command_name,
+            help="Plan condensed-matter thermodynamics routes and CALPHAD handoff metadata.",
+        )
+        thermo_routes.add_argument("thermo_routes_args", nargs=argparse.REMAINDER)
 
     mace_build_dataset = subparsers.add_parser(
         "mace-build-dataset",
@@ -1551,6 +1565,12 @@ def main(argv: list[str] | None = None) -> None:
         thermo_series_main(args.analysis_args)
         return
 
+    if args.subcommand in ("cell-plot", "cell_plot", "md-cell-plot", "trajectory-cell-plot"):
+        from atomi.viz.cell import main as cell_plot_main
+
+        cell_plot_main(args.cell_plot_args)
+        return
+
     if args.subcommand in ("thermal_k_lammps", "thermal-k-lammps", "thermal_k_crosscheck", "thermal-k-crosscheck"):
         from atomi.lammps.thermal_conductivity import main as thermal_k_lammps_main
 
@@ -2023,6 +2043,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.qha_md_compare import main as vasp_qha_md_compare_main
 
         vasp_qha_md_compare_main(args.compare_args)
+        return
+
+    if args.subcommand in ("thermo-routes", "thermo_routes", "condensed-thermo-routes"):
+        from atomi.thermo.routes import main as thermo_routes_main
+
+        thermo_routes_main(args.thermo_routes_args)
         return
 
     if args.subcommand == "mace-energy-outliers":
