@@ -1154,12 +1154,12 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
     return None
 
 
-def sconfig_cli_main(argv: list[str] | None = None) -> dict[str, Any] | None:
-    return main(["sconfig", *(sys.argv[1:] if argv is None else argv)])
+def sconfig_cli_main(argv: list[str] | None = None) -> None:
+    main(["sconfig", *(sys.argv[1:] if argv is None else argv)])
 
 
-def entropy_summary_cli_main(argv: list[str] | None = None) -> dict[str, Any] | None:
-    return main(["entropy-summary", *(sys.argv[1:] if argv is None else argv)])
+def entropy_summary_cli_main(argv: list[str] | None = None) -> None:
+    main(["entropy-summary", *(sys.argv[1:] if argv is None else argv)])
 
 
 if __name__ == "__main__":
