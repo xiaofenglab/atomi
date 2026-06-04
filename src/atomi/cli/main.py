@@ -721,6 +721,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         vasp_project_poscar.add_argument("project_poscar_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("rand-cell", "rand_cell"):
+        rand_cell = subparsers.add_parser(
+            command_name,
+            help="Randomize cation/anion occupations on an existing POSCAR lattice.",
+        )
+        rand_cell.add_argument("rand_cell_args", nargs=argparse.REMAINDER)
+
     for command_name in ("vasp-assign-spins", "assign-spins"):
         vasp_assign_spins = subparsers.add_parser(
             command_name,
@@ -1345,6 +1352,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.poscar_project import main as vasp_project_poscar_main
 
         vasp_project_poscar_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in ("rand-cell", "rand_cell"):
+        from atomi.vasp.random_cell import main as rand_cell_main
+
+        rand_cell_main(raw_args[1:])
         return
     if raw_args and raw_args[0] in ("vasp-assign-spins", "assign-spins"):
         from atomi.vasp.spin_assign import main as vasp_assign_spins_main
