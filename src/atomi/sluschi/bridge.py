@@ -1408,7 +1408,7 @@ def build_melting_prior_payload(args: argparse.Namespace, anchors: list[MeltingA
 
 def melting_anchor_main(args: argparse.Namespace) -> dict[str, Any]:
     root = args.root.resolve()
-    anchors = find_melting_anchors(root, args.quality)
+    anchors = [] if args.skip_root_scan else find_melting_anchors(root, args.quality)
     if args.phase_health_json:
         bracket_anchor = melting_anchor_from_phase_health(args.phase_health_json, args.quality)
         if bracket_anchor is not None:
@@ -1884,6 +1884,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Confidence tier for downstream CALPHAD/thermo-prior use.",
     )
     melting.add_argument("--allow-empty", action="store_true", help="Write empty outputs instead of failing.")
+    melting.add_argument(
+        "--skip-root-scan",
+        action="store_true",
+        help="Do not walk --root for SLUSCHI.out/MPFit.out; useful when building an anchor only from phase-health JSONs.",
+    )
 
     return parser
 
