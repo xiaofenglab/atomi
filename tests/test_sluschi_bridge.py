@@ -131,6 +131,31 @@ def test_sluschi_supersalt_example_uses_profile_model(tmp_path: Path):
     assert 'export LD_LIBRARY_PATH="/apps/lammps/lib:/apps/lammps/lib64:${LD_LIBRARY_PATH:-}"' in probe
 
 
+def test_sluschi_lammps_prep_scripts_use_requested_type_basis(tmp_path: Path):
+    out = tmp_path / "kcl_prep"
+
+    result = bridge.main(
+        [
+            "lammps-prep-scripts",
+            "--outdir",
+            str(out),
+            "--type-elements",
+            "1=K,2=Cl",
+        ]
+    )
+
+    pos_script = (out / "lmp_pos.py").read_text(encoding="utf-8")
+    prep_script = (out / "lmp_prep.csh").read_text(encoding="utf-8")
+    manifest = json.loads((out / "sluschi_lammps_prep_manifest.json").read_text(encoding="utf-8"))
+    assert result["type_elements"] == {"1": "K", "2": "Cl"}
+    assert manifest["elements"] == ["K", "Cl"]
+    assert "symbols_by_type = {1: 'K', 2: 'Cl'}" in pos_script
+    assert "@ nelms = 2" in prep_script
+    assert "echo K >> param" in prep_script
+    assert "echo Cl >> param" in prep_script
+    assert "echo Li >> param" not in prep_script
+
+
 def test_sluschi_parse_collects_calphad_handoff_values(tmp_path: Path):
     root = tmp_path / "run"
     root.mkdir()
@@ -258,6 +283,9 @@ def test_confighpc_exports_sluschi_profile_values(tmp_path: Path):
     assert "ATOMI_SLUSCHI_BIN=/home/user/SLUSCHI/src" in env_text
     assert "ATOMI_SUPERSALT_MODEL=/models/supersalt.pt" in env_text
     assert "ATOMI_MLIP_PROVIDER=SuperSalt" in env_text
+    assert "ATOMI_LMP_EXE=/apps/lammps/bin/lmp" in env_text
+    assert "ATOMI_SLUSCHI_ENV=/envs/m_lammps_env" in env_text
+    assert "ATOMI_SLUSCHI_LAMMPS_PREFIX=/apps/lammps" in env_text
 
 
 def test_sluschi_entropy_summary_combines_svib_and_sconf(tmp_path: Path):
@@ -305,6 +333,3 @@ def test_sluschi_entropy_summary_combines_svib_and_sconf(tmp_path: Path):
     assert data[0]["Stotal_J_mol_formula_K"] == "72.57897529"
     assert data[0]["Svib_type1_J_mol_atom_K"] == "13.0397"
     assert data[0]["type1_stoich"] == "2.0"
-    assert "ATOMI_LMP_EXE=/apps/lammps/bin/lmp" in env_text
-    assert "ATOMI_SLUSCHI_ENV=/envs/m_lammps_env" in env_text
-    assert "ATOMI_SLUSCHI_LAMMPS_PREFIX=/apps/lammps" in env_text

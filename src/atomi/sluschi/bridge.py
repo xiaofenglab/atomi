@@ -30,6 +30,24 @@ SUPERSALT_DOI = "10.5281/zenodo.15734798"
 SUPERSALT_DOWNLOAD_URL = "https://zenodo.org/records/15734798/files/SuperSalt.zip?download=1"
 SUPERSALT_CITATION = "Shen et al., Nat. Commun. 16, 7280 (2025), doi:10.1038/s41467-025-62450-1"
 SUPERSALT_ELEMENTS = ["Li", "Na", "K", "Rb", "Cs", "Mg", "Ca", "Sr", "Ba", "Zn", "Zr", "Cl"]
+DEFAULT_ELEMENT_MASSES = {
+    "Li": 6.941,
+    "Na": 22.98976928,
+    "K": 39.0983,
+    "Rb": 85.4678,
+    "Cs": 132.90545196,
+    "Mg": 24.305,
+    "Ca": 40.078,
+    "Sr": 87.62,
+    "Ba": 137.327,
+    "Zn": 65.38,
+    "Zr": 91.224,
+    "Cl": 35.453,
+    "F": 18.998403163,
+    "O": 15.999,
+    "U": 238.02891,
+    "Gd": 157.25,
+}
 
 OBSERVABLE_UNITS = {
     "melting_temperature_K": "K",
@@ -301,6 +319,194 @@ def render_supersalt_probe_sbatch(plan: dict[str, Any]) -> str:
         "${{ATOMI_LMP_EXE}}" -in in.supersalt_probe
         """
     )
+
+
+def parse_type_element_map(value: str) -> dict[int, str]:
+    if not value.strip():
+        raise ValueError("--type-elements is required, e.g. '1=K,2=Cl'")
+    out: dict[int, str] = {}
+    for item in parse_csv_list(value):
+        if "=" not in item:
+            raise ValueError(f"Expected type=Element item, got {item!r}")
+        raw_idx, raw_element = item.split("=", 1)
+        try:
+            idx = int(raw_idx.strip())
+        except ValueError as exc:
+            raise ValueError(f"LAMMPS type indices must be integers, got {raw_idx!r}") from exc
+        if idx <= 0:
+            raise ValueError(f"LAMMPS type indices must be positive, got {idx}")
+        element = raw_element.strip()
+        if not element:
+            raise ValueError(f"Missing element symbol for type {idx}")
+        out[idx] = element
+    expected = list(range(1, len(out) + 1))
+    observed = sorted(out)
+    if observed != expected:
+        raise ValueError(f"--type-elements must define contiguous types {expected}; got {observed}")
+    return out
+
+
+def parse_element_mass_map(value: str | None) -> dict[str, float]:
+    masses = dict(DEFAULT_ELEMENT_MASSES)
+    for item in parse_csv_list(value):
+        if "=" not in item:
+            raise ValueError(f"Expected Element=mass item, got {item!r}")
+        element, raw_mass = item.split("=", 1)
+        masses[element.strip()] = float(raw_mass)
+    return masses
+
+
+def render_lammps_dump_pos_py(type_elements: dict[int, str]) -> str:
+    order = {element: i for i, element in enumerate(type_elements.values())}
+    return textwrap.dedent(
+        f"""\
+        from pathlib import Path
+
+        from ase import Atoms
+        from ase.io import write
+
+
+        symbols_by_type = {dict(type_elements)!r}
+        order = {order!r}
+
+        lines = Path("lmp.dump").read_text().splitlines()
+        frames = []
+        i = 0
+        while i < len(lines):
+            if not lines[i].startswith("ITEM: TIMESTEP"):
+                i += 1
+                continue
+            i += 2
+            if not lines[i].startswith("ITEM: NUMBER OF ATOMS"):
+                raise RuntimeError("unexpected dump format near atom count")
+            nat = int(lines[i + 1].strip())
+            i += 2
+            if not lines[i].startswith("ITEM: BOX BOUNDS"):
+                raise RuntimeError("unexpected dump format near box")
+            bounds = []
+            for j in range(3):
+                lo, hi, *_ = map(float, lines[i + 1 + j].split())
+                bounds.append((lo, hi))
+            cell = [
+                bounds[0][1] - bounds[0][0],
+                bounds[1][1] - bounds[1][0],
+                bounds[2][1] - bounds[2][0],
+            ]
+            i += 4
+            header = lines[i].split()[2:]
+            idx = {{name: n for n, name in enumerate(header)}}
+            i += 1
+            rows = [lines[i + j].split() for j in range(nat)]
+            i += nat
+            atoms = []
+            for row in rows:
+                typ = int(row[idx["type"]])
+                sym = symbols_by_type[typ]
+                xkey = "x" if "x" in idx else "xu"
+                ykey = "y" if "y" in idx else "yu"
+                zkey = "z" if "z" in idx else "zu"
+                atoms.append(
+                    (
+                        sym,
+                        (
+                            float(row[idx[xkey]]),
+                            float(row[idx[ykey]]),
+                            float(row[idx[zkey]]),
+                        ),
+                    )
+                )
+            atoms.sort(key=lambda item: order[item[0]])
+            frames.append(
+                Atoms(
+                    [atom[0] for atom in atoms],
+                    positions=[atom[1] for atom in atoms],
+                    cell=cell,
+                    pbc=True,
+                )
+            )
+
+        for n, atoms in enumerate(frames):
+            write(f"POSCAR_{{n}}", atoms, format="vasp", direct=True, vasp5=True, sort=False)
+        print(f"wrote {{len(frames)}} POSCAR frames")
+        """
+    )
+
+
+def render_lammps_dump_prep_csh(type_elements: dict[int, str], masses: dict[str, float]) -> str:
+    missing = [element for element in type_elements.values() if element not in masses]
+    if missing:
+        raise ValueError(f"No masses available for element(s): {', '.join(missing)}")
+    lines = [
+        "#!/bin/csh",
+        "",
+        "if ( ! -e POSCAR_0 ) then",
+        "  python lmp_pos.py",
+        "endif",
+        "",
+        "set datafile = `grep '^read_data' ../in* | awk '{print $2}'`",
+        "@ natoms = `head -3 ../$datafile | tail -1 | awk '{print $1}'`",
+        "set step = `grep '^timestep[[:space:]]' ../in* | head -1 | awk '{print $2}'`",
+        f"@ nelms = {len(type_elements)}",
+        "rm -f pos latt step param",
+        "",
+        "echo $nelms > param",
+        "head -7 POSCAR_0 | tail -1 >> param",
+    ]
+    lines.extend(f"echo {masses[element]} >> param" for element in type_elements.values())
+    lines.extend(["echo $step >> param", "echo $natoms >> param"])
+    lines.extend(f"echo {element} >> param" for element in type_elements.values())
+    lines.extend("echo 0.0 >> param" for _ in range(8))
+    lines.extend(
+        [
+            "",
+            "@ iter = $1",
+            "while ( -e POSCAR_$iter )",
+            "  head -5 POSCAR_$iter | tail -3 | awk '{print $1,$2,$3,0,0,0}' >> latt",
+            "  tail -$natoms POSCAR_$iter | awk '{print $1,$2,$3,0,0,0}' >> pos",
+            "  echo $step >> step",
+            "  @ iter = $iter + 1",
+            "end",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def prep_scripts_main(args: argparse.Namespace) -> dict[str, Any]:
+    type_elements = parse_type_element_map(args.type_elements)
+    masses = parse_element_mass_map(args.element_masses)
+    outdir = args.outdir.resolve()
+    outdir.mkdir(parents=True, exist_ok=True)
+    pos_path = outdir / args.pos_script
+    prep_path = outdir / args.prep_script
+    manifest_path = outdir / "sluschi_lammps_prep_manifest.json"
+    pos_path.write_text(render_lammps_dump_pos_py(type_elements), encoding="utf-8")
+    prep_path.write_text(render_lammps_dump_prep_csh(type_elements, masses), encoding="utf-8")
+    try:
+        prep_path.chmod(0o755)
+    except OSError:
+        pass
+    manifest = {
+        "schema": "atomi.sluschi.lammps_prep_scripts.v1",
+        "type_elements": {str(k): v for k, v in type_elements.items()},
+        "elements": list(type_elements.values()),
+        "masses": {element: masses[element] for element in type_elements.values()},
+        "pos_script": str(pos_path),
+        "prep_script": str(prep_path),
+        "usage": [
+            "copy lmp.dump, lmp_pos.py, and lmp_prep.csh into a SLUSCHI run01 folder",
+            "copy the matching LAMMPS input/read_data files one level above run01",
+            "run `csh lmp_prep.csh <frame_start_index>` before MATLAB entropy/main.m",
+        ],
+        "guard": (
+            "The type_elements basis must match the LAMMPS data/dump type map. "
+            "Do not reuse Li,K,Cl scripts for pure KCl or other element subsets."
+        ),
+    }
+    write_json(manifest_path, manifest)
+    print(f"Wrote SLUSCHI LAMMPS prep scripts: {outdir}")
+    print(f"Type basis: {', '.join(f'{idx}={element}' for idx, element in type_elements.items())}")
+    return manifest
 
 
 def default_kcl_licl_compositions() -> list[str]:
@@ -1061,6 +1267,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="KCl-LiCl composition states separated by semicolons.",
     )
 
+    prep = sub.add_parser(
+        "lammps-prep-scripts",
+        help="Write type-safe LAMMPS dump to SLUSCHI prep scripts for one element basis.",
+    )
+    prep.add_argument("--outdir", type=Path, default=Path("sluschi_lammps_prep"))
+    prep.add_argument(
+        "--type-elements",
+        required=True,
+        help="LAMMPS type map, e.g. '1=K,2=Cl' for pure KCl or '1=Li,2=K,3=Cl' for LiCl-KCl.",
+    )
+    prep.add_argument(
+        "--element-masses",
+        default="",
+        help="Optional Element=mass overrides, e.g. 'K=39.0983,Cl=35.453'.",
+    )
+    prep.add_argument("--pos-script", default="lmp_pos.py")
+    prep.add_argument("--prep-script", default="lmp_prep.csh")
+
     parse = sub.add_parser("parse", help="Parse SLUSCHI-like text outputs for CALPHAD handoff observables.")
     parse.add_argument("--root", type=Path, default=Path("."))
     parse.add_argument("--outdir", type=Path, default=Path("results"))
@@ -1144,6 +1368,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
         return init_workspace(args)
     if args.command == "supersalt-example":
         return supersalt_example_main(args)
+    if args.command == "lammps-prep-scripts":
+        return prep_scripts_main(args)
     if args.command == "parse":
         return parse_main(args)
     if args.command == "sconfig":
