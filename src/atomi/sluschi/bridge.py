@@ -23,6 +23,8 @@ SCHEMA_STATUS = "atomi.sluschi.bridge.status.v1"
 SCHEMA_RESULTS = "atomi.sluschi.bridge.results.v1"
 SCHEMA_SCONFIG = "atomi.sluschi.lammps_sconfig.v1"
 SCHEMA_ENTROPY_SUMMARY = "atomi.sluschi.lammps_entropy_summary.v1"
+SCHEMA_PHASE_HEALTH = "atomi.sluschi.phase_health.v1"
+SCHEMA_WORKFLOW_GUIDE = "atomi.sluschi.workflow_guide.v1"
 
 DEFAULT_REPO = "https://github.com/qjhong/SLUSCHI.git"
 DEFAULT_SUPERSALT_REF = "SuperSalt chloride MLIP; install/provide externally, not vendored by Atomi."
@@ -976,6 +978,7 @@ def entropy_summary_main(args: argparse.Namespace) -> dict[str, Any]:
     )
     payload = {
         "schema": SCHEMA_ENTROPY_SUMMARY,
+        "workflow_lane": "entropy_prior",
         "root": str(root),
         "collect_file": str(collect_used) if collect_used else None,
         "n_svib_types": len(svib_values),
@@ -985,14 +988,270 @@ def entropy_summary_main(args: argparse.Namespace) -> dict[str, Any]:
         "summary": row,
         "sconfig_summary": sconfig_summary,
         "notes": [
+            "This command parses an existing SLUSCHI/LAMMPS postprocess folder as an entropy prior.",
+            "It is not, by itself, a small-cell solid-liquid coexistence melting calculation.",
             "Svib values are taken from the constrained/use-this-value SLUSCHI line when present.",
             "Sconf is the mean SLUSCHI pair recommendation multiplied by atoms_per_formula.",
-            "For production entropy, validate dense NVT sampling, type ordering, and SLUSCHI frame spacing.",
+            "For production entropy, validate dense NVT sampling, type ordering, SLUSCHI frame spacing, and phase health.",
         ],
     }
     write_json(outdir / "sluschi_entropy_summary.json", payload)
     print(f"Wrote SLUSCHI entropy summary: {summary_csv}")
     return payload
+
+
+def _pair_counts_from_summary(summary: dict[str, Any]) -> tuple[int, int, int]:
+    n_pairs = int(summary.get("n_pair_recommendations") or 0)
+    n_liquid = int(summary.get("n_liquid_like_pairs") or 0)
+    n_solid = int(summary.get("n_solid_like_pairs") or 0)
+    if not n_pairs:
+        n_pairs = n_liquid + n_solid
+    return n_pairs, n_liquid, n_solid
+
+
+def assess_phase_health(
+    *,
+    expected_phase: str,
+    n_pair_recommendations: int,
+    n_liquid_like_pairs: int,
+    n_solid_like_pairs: int,
+    max_mixed_fraction: float = 0.25,
+    min_classified_fraction: float = 0.75,
+) -> dict[str, Any]:
+    """Classify SLUSCHI phase health from solid/liquid pair recommendations."""
+    expected = expected_phase.strip().lower()
+    classified = n_liquid_like_pairs + n_solid_like_pairs
+    denominator = n_pair_recommendations or classified
+    liquid_fraction = n_liquid_like_pairs / classified if classified else None
+    solid_fraction = n_solid_like_pairs / classified if classified else None
+    classified_fraction = classified / denominator if denominator else None
+    warnings: list[str] = []
+    if not classified:
+        label = "unknown"
+        warnings.append("No solid/liquid pair classifications were found.")
+    elif classified_fraction is not None and classified_fraction < min_classified_fraction:
+        label = "under-classified"
+        warnings.append("Too few pair recommendations were classified as solid-like or liquid-like.")
+    elif expected in {"solid", "crystal", "crystalline"}:
+        mixed_fraction = liquid_fraction or 0.0
+        label = "solid-like" if mixed_fraction <= max_mixed_fraction else "mixed"
+        if label == "mixed":
+            warnings.append("Solid-labeled trajectory has too many liquid-like pair recommendations.")
+    elif expected in {"liquid", "melt", "molten"}:
+        mixed_fraction = solid_fraction or 0.0
+        label = "liquid-like" if mixed_fraction <= max_mixed_fraction else "mixed"
+        if label == "mixed":
+            warnings.append("Liquid-labeled trajectory has too many solid-like pair recommendations.")
+    elif expected in {"solid-liquid", "solid-liquid-coexistence", "coexist", "coexistence"}:
+        has_both = n_liquid_like_pairs > 0 and n_solid_like_pairs > 0
+        label = "coexistence-like" if has_both else "single-phase-like"
+        if not has_both:
+            warnings.append("Coexistence-labeled trajectory did not show both solid-like and liquid-like pairs.")
+    else:
+        if liquid_fraction is not None and liquid_fraction > 1.0 - max_mixed_fraction:
+            label = "liquid-like"
+        elif solid_fraction is not None and solid_fraction > 1.0 - max_mixed_fraction:
+            label = "solid-like"
+        else:
+            label = "mixed"
+    accepted = label in {"solid-like", "liquid-like", "coexistence-like"} and not warnings
+    if label == "mixed":
+        warnings.append("Treat this row as screening-prior until RDF/MSD/order checks validate the phase state.")
+    return {
+        "schema": SCHEMA_PHASE_HEALTH,
+        "expected_phase": expected_phase,
+        "phase_health_label": label,
+        "accepted_for_phase_label": accepted,
+        "n_pair_recommendations": n_pair_recommendations,
+        "n_liquid_like_pairs": n_liquid_like_pairs,
+        "n_solid_like_pairs": n_solid_like_pairs,
+        "liquid_like_fraction": liquid_fraction,
+        "solid_like_fraction": solid_fraction,
+        "classified_fraction": classified_fraction,
+        "max_mixed_fraction": max_mixed_fraction,
+        "min_classified_fraction": min_classified_fraction,
+        "warnings": warnings,
+        "recommended_use": "production" if accepted else "screening-prior",
+    }
+
+
+def phase_health_from_payload(
+    payload: dict[str, Any],
+    expected_phase: str | None = None,
+    *,
+    max_mixed_fraction: float = 0.25,
+    min_classified_fraction: float = 0.75,
+) -> dict[str, Any]:
+    sconfig_summary = payload.get("sconfig_summary") if isinstance(payload.get("sconfig_summary"), dict) else {}
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    source = sconfig_summary or summary or payload
+    n_pairs, n_liquid, n_solid = _pair_counts_from_summary(source)
+    phase = expected_phase or str(source.get("phase") or summary.get("phase") or "")
+    health = assess_phase_health(
+        expected_phase=phase,
+        n_pair_recommendations=n_pairs,
+        n_liquid_like_pairs=n_liquid,
+        n_solid_like_pairs=n_solid,
+        max_mixed_fraction=max_mixed_fraction,
+        min_classified_fraction=min_classified_fraction,
+    )
+    health.update(
+        {
+            "system": source.get("system") or summary.get("system") or "",
+            "formula": source.get("formula") or summary.get("formula") or "",
+            "temperature_K": source.get("temperature_K") or summary.get("temperature_K"),
+            "composition": source.get("composition") or summary.get("composition") or "",
+            "source_summary_schema": payload.get("schema", ""),
+        }
+    )
+    return health
+
+
+def phase_health_main(args: argparse.Namespace) -> dict[str, Any]:
+    outdir = args.outdir.resolve()
+    outdir.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any]
+    if args.summary_json:
+        payload = json.loads(args.summary_json.read_text(encoding="utf-8"))
+        health = phase_health_from_payload(
+            payload,
+            args.expected_phase or None,
+            max_mixed_fraction=args.max_mixed_fraction,
+            min_classified_fraction=args.min_classified_fraction,
+        )
+    else:
+        root = args.root.resolve()
+        pairs = parse_sconfig_pairs(root)
+        n_liquid = sum(1 for pair in pairs if "liquid" in pair.state)
+        n_solid = sum(1 for pair in pairs if "solid" in pair.state)
+        health = assess_phase_health(
+            expected_phase=args.expected_phase,
+            n_pair_recommendations=len(pairs),
+            n_liquid_like_pairs=n_liquid,
+            n_solid_like_pairs=n_solid,
+            max_mixed_fraction=args.max_mixed_fraction,
+            min_classified_fraction=args.min_classified_fraction,
+        )
+        health.update(
+            {
+                "system": args.system,
+                "formula": args.formula,
+                "temperature_K": args.temperature_k,
+                "composition": args.composition,
+                "source": str(root),
+                "source_summary_schema": "",
+            }
+        )
+    if args.summary_json:
+        health["source"] = str(args.summary_json.resolve())
+    health["max_mixed_fraction"] = args.max_mixed_fraction
+    health["min_classified_fraction"] = args.min_classified_fraction
+    fields = [
+        "system",
+        "formula",
+        "temperature_K",
+        "composition",
+        "expected_phase",
+        "phase_health_label",
+        "accepted_for_phase_label",
+        "recommended_use",
+        "n_pair_recommendations",
+        "n_liquid_like_pairs",
+        "n_solid_like_pairs",
+        "liquid_like_fraction",
+        "solid_like_fraction",
+        "classified_fraction",
+        "warnings",
+        "source",
+    ]
+    csv_row = {**health, "warnings": "; ".join(health.get("warnings", []))}
+    write_csv(outdir / "sluschi_phase_health.csv", [csv_row], fields)
+    write_json(outdir / "sluschi_phase_health.json", health)
+    print(f"Phase health: {health['phase_health_label']} ({health['recommended_use']})")
+    print(f"Wrote phase-health JSON: {outdir / 'sluschi_phase_health.json'}")
+    return health
+
+
+def workflow_guide_main(args: argparse.Namespace) -> dict[str, Any]:
+    guide = {
+        "schema": SCHEMA_WORKFLOW_GUIDE,
+        "system": args.system,
+        "lanes": {
+            "coexistence": {
+                "purpose": "melting point / solid-liquid phase boundary",
+                "method": "small-cell solid-liquid coexistence with hovering interfaces",
+                "steps": [
+                    "optimize and validate the solid unit cell",
+                    "estimate target-temperature volume, commonly with NPT or thermal expansion",
+                    "construct a half-solid/half-liquid coexistence cell",
+                    "run coexistence trajectories near candidate melting temperatures",
+                    "classify whether the small cell remains coexistence-like, fully melts, or fully solidifies",
+                    "use coexistence statistics to bracket or estimate the melting temperature",
+                ],
+                "required_outputs": ["coexistence trajectory", "phase-label history", "melting-temperature estimate"],
+            },
+            "entropy_prior": {
+                "purpose": "Svib/Sconf/Stotal rows for zentropy, CALPHAD, QHA/MD overlay, or screening",
+                "method": "parse existing phase-specific MD postprocess output; not a melting calculation by itself",
+                "steps": [
+                    "stage type-safe LAMMPS dump conversion with explicit type-elements",
+                    "run SLUSCHI postprocess on dense NVT frames",
+                    "parse Svib and Sconf with entropy-summary",
+                    "run phase-health before using the row as production thermodynamics",
+                ],
+                "required_outputs": ["entropy summary CSV/JSON", "phase-health CSV/JSON", "type-basis manifest"],
+            },
+        },
+        "decision_rules": [
+            "Use coexistence lane for melting point or solid-liquid boundary claims.",
+            "Use entropy-prior lane for independent MD entropy data only after phase-health passes.",
+            "A mixed solid/liquid pair classification in a solid or liquid row is a warning, not automatic proof of failure.",
+            "For production, complement pair classification with RDF, MSD/diffusion, and order-parameter checks.",
+        ],
+    }
+    if args.outdir:
+        outdir = args.outdir.resolve()
+        outdir.mkdir(parents=True, exist_ok=True)
+        write_json(outdir / "sluschi_workflow_guide.json", guide)
+        (outdir / "SLUSCHI_WORKFLOW_GUIDE.md").write_text(
+            textwrap.dedent(
+                f"""\
+                # SLUSCHI Workflow Guide
+
+                System: {args.system}
+
+                SLUSCHI should be interpreted as a small-cell solid-liquid coexistence
+                method first. Atomi separates this from the entropy-prior workflow that
+                parses existing MD postprocess output.
+
+                ## Coexistence Lane
+
+                Purpose: melting point and solid-liquid phase boundaries.
+
+                Steps:
+                - optimize and validate the solid unit cell
+                - estimate target-temperature volume
+                - construct a half-solid/half-liquid coexistence cell
+                - run coexistence trajectories near candidate melting temperatures
+                - classify whether trajectories remain coexistence-like, melt, or solidify
+                - estimate or bracket the melting point
+
+                ## Entropy-Prior Lane
+
+                Purpose: Svib/Sconf/Stotal rows for zentropy, CALPHAD, or QHA/MD overlays.
+                This is not a melting calculation by itself.
+
+                Required guard: run `sluschi-bridge phase-health` on every parsed entropy row.
+                """
+            ),
+            encoding="utf-8",
+        )
+    if args.json:
+        print(json.dumps(guide, indent=2, sort_keys=True))
+    else:
+        print("SLUSCHI has two Atomi lanes: coexistence for melting, entropy-prior for parsed MD entropy rows.")
+        print("Run phase-health before accepting entropy-prior rows as production thermodynamics.")
+    return guide
 
 
 def infer_phase(path: Path, line: str, default: str = "") -> str:
@@ -1234,6 +1493,14 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--profile", default="sluschi")
     status.add_argument("--json", action="store_true")
 
+    guide = sub.add_parser(
+        "workflow-guide",
+        help="Write or print the Atomi interpretation of SLUSCHI coexistence vs entropy-prior workflows.",
+    )
+    guide.add_argument("--system", default="", help="Optional system label for the guide.")
+    guide.add_argument("--outdir", type=Path, help="Optional directory for JSON/Markdown guide files.")
+    guide.add_argument("--json", action="store_true", help="Print the guide JSON to stdout.")
+
     init = sub.add_parser("init", help="Create a SLUSCHI bridge workspace.")
     init.add_argument("--outdir", type=Path, default=Path("sluschi_kcl_licl_bridge"))
     init.add_argument("--system", default="KCl-LiCl")
@@ -1357,6 +1624,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Trajectory/dump-stride note stored in the summary JSON.",
     )
 
+    health = sub.add_parser(
+        "phase-health",
+        help="Classify whether a SLUSCHI entropy/Sconfig row is solid-like, liquid-like, coexistence-like, or mixed.",
+    )
+    health.add_argument("--summary-json", type=Path, help="Existing sluschi_entropy_summary.json or Sconfig summary JSON.")
+    health.add_argument("--root", type=Path, default=Path("."), help="Fallback run folder to parse collect.stdout files.")
+    health.add_argument("--outdir", type=Path, default=Path("sluschi_phase_health"))
+    health.add_argument("--expected-phase", default="", help="Expected phase label: solid, liquid, or solid-liquid-coexistence.")
+    health.add_argument("--system", default="")
+    health.add_argument("--formula", default="")
+    health.add_argument("--temperature-k", type=float)
+    health.add_argument("--composition", default="")
+    health.add_argument("--max-mixed-fraction", type=float, default=0.25)
+    health.add_argument("--min-classified-fraction", type=float, default=0.75)
+
     return parser
 
 
@@ -1364,6 +1646,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
     args = build_parser().parse_args(argv)
     if args.command == "status":
         return status_main(args)
+    if args.command == "workflow-guide":
+        return workflow_guide_main(args)
     if args.command == "init":
         return init_workspace(args)
     if args.command == "supersalt-example":
@@ -1376,6 +1660,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
         return sconfig_main(args)
     if args.command == "entropy-summary":
         return entropy_summary_main(args)
+    if args.command == "phase-health":
+        return phase_health_main(args)
     build_parser().print_help()
     return None
 
@@ -1386,6 +1672,14 @@ def sconfig_cli_main(argv: list[str] | None = None) -> None:
 
 def entropy_summary_cli_main(argv: list[str] | None = None) -> None:
     main(["entropy-summary", *(sys.argv[1:] if argv is None else argv)])
+
+
+def phase_health_cli_main(argv: list[str] | None = None) -> None:
+    main(["phase-health", *(sys.argv[1:] if argv is None else argv)])
+
+
+def workflow_guide_cli_main(argv: list[str] | None = None) -> None:
+    main(["workflow-guide", *(sys.argv[1:] if argv is None else argv)])
 
 
 if __name__ == "__main__":

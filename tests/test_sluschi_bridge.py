@@ -328,8 +328,92 @@ def test_sluschi_entropy_summary_combines_svib_and_sconf(tmp_path: Path):
 
     data = rows(out / "sluschi_entropy_summary.csv")
     assert result["schema"] == bridge.SCHEMA_ENTROPY_SUMMARY
+    assert result["workflow_lane"] == "entropy_prior"
     assert data[0]["Svib_J_mol_formula_K"] == "72.5791"
     assert data[0]["Sconf_J_mol_formula_K"] == "-0.00012471"
     assert data[0]["Stotal_J_mol_formula_K"] == "72.57897529"
     assert data[0]["Svib_type1_J_mol_atom_K"] == "13.0397"
     assert data[0]["type1_stoich"] == "2.0"
+
+
+def test_sluschi_phase_health_flags_mixed_solid_entropy_row(tmp_path: Path):
+    summary = {
+        "schema": bridge.SCHEMA_ENTROPY_SUMMARY,
+        "summary": {
+            "system": "KCl",
+            "formula": "KCl",
+            "phase": "solid",
+            "temperature_K": 1100.0,
+            "composition": "x_KCl=1.0",
+        },
+        "sconfig_summary": {
+            "system": "KCl",
+            "formula": "KCl",
+            "phase": "solid",
+            "temperature_K": 1100.0,
+            "composition": "x_KCl=1.0",
+            "n_pair_recommendations": 4,
+            "n_liquid_like_pairs": 2,
+            "n_solid_like_pairs": 2,
+        },
+    }
+    summary_json = tmp_path / "sluschi_entropy_summary.json"
+    summary_json.write_text(json.dumps(summary), encoding="utf-8")
+    out = tmp_path / "phase_health"
+
+    result = bridge.main(["phase-health", "--summary-json", str(summary_json), "--outdir", str(out)])
+
+    assert result["schema"] == bridge.SCHEMA_PHASE_HEALTH
+    assert result["phase_health_label"] == "mixed"
+    assert result["accepted_for_phase_label"] is False
+    assert result["recommended_use"] == "screening-prior"
+    data = rows(out / "sluschi_phase_health.csv")
+    assert data[0]["phase_health_label"] == "mixed"
+    assert "Solid-labeled trajectory" in data[0]["warnings"]
+
+
+def test_sluschi_phase_health_accepts_solid_like_entropy_row(tmp_path: Path):
+    root = tmp_path / "run01"
+    root.mkdir()
+    (root / "collect.stdout").write_text(
+        "\n".join(
+            [
+                "The pair between element 1-1 appears to be solid. I suggest that you take the minimum: 0.1",
+                "The pair between element 1-2 appears to be solid. I suggest that you take the minimum: 0.2",
+                "The pair between element 2-1 appears to be solid. I suggest that you take the minimum: 0.2",
+                "The pair between element 2-2 appears to be solid. I suggest that you take the minimum: 0.1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = bridge.main(
+        [
+            "phase-health",
+            "--root",
+            str(root),
+            "--outdir",
+            str(tmp_path / "health"),
+            "--expected-phase",
+            "solid",
+            "--system",
+            "KCl",
+            "--formula",
+            "KCl",
+        ]
+    )
+
+    assert result["phase_health_label"] == "solid-like"
+    assert result["accepted_for_phase_label"] is True
+
+
+def test_sluschi_workflow_guide_writes_two_lane_semantics(tmp_path: Path):
+    out = tmp_path / "guide"
+
+    result = bridge.main(["workflow-guide", "--system", "KCl", "--outdir", str(out)])
+
+    assert result["schema"] == bridge.SCHEMA_WORKFLOW_GUIDE
+    assert "coexistence" in result["lanes"]
+    assert "entropy_prior" in result["lanes"]
+    text = (out / "SLUSCHI_WORKFLOW_GUIDE.md").read_text(encoding="utf-8")
+    assert "small-cell solid-liquid coexistence" in text
