@@ -417,3 +417,98 @@ def test_sluschi_workflow_guide_writes_two_lane_semantics(tmp_path: Path):
     assert "entropy_prior" in result["lanes"]
     text = (out / "SLUSCHI_WORKFLOW_GUIDE.md").read_text(encoding="utf-8")
     assert "small-cell solid-liquid coexistence" in text
+
+
+def test_sluschi_melting_anchor_parses_mpfit_output(tmp_path: Path):
+    root = tmp_path / "coex"
+    root.mkdir()
+    (root / "SLUSCHI.out").write_text(
+        "\n".join(
+            [
+                "=== running MPFit ===",
+                "Melting temperature and std error: 1044.0 12.5",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "anchor"
+
+    result = bridge.main(
+        [
+            "melting-anchor",
+            "--root",
+            str(root),
+            "--outdir",
+            str(out),
+            "--system",
+            "KCl",
+            "--formula",
+            "KCl",
+            "--components",
+            "KCl",
+            "--composition",
+            "x_KCl=1.0",
+        ]
+    )
+
+    assert result["schema"] == bridge.SCHEMA_MELTING_ANCHOR
+    data = rows(out / "sluschi_melting_anchor.csv")
+    assert data[0]["melting_temperature_K"] == "1044.0"
+    assert data[0]["temperature_std_error_K"] == "12.5"
+    assert data[0]["method"] == "sluschi_mpfit"
+    prior = json.loads((out / "sluschi_melting_anchor_thermo_prior.json").read_text(encoding="utf-8"))
+    assert prior["kind"] == "sluschi_melting_anchor"
+    assert prior["thermo"]["observables"][0]["observable"] == "melting_temperature_K"
+
+
+def test_sluschi_melting_anchor_can_use_phase_health_bracket(tmp_path: Path):
+    paths = []
+    for name, temp, label in [
+        ("solid_T1000", 1000.0, "single-phase-like"),
+        ("solid_T1100", 1100.0, "coexistence-like"),
+        ("solid_T1200", 1200.0, "single-phase-like"),
+    ]:
+        path = tmp_path / name / "sluschi_phase_health.json"
+        path.parent.mkdir()
+        path.write_text(
+            json.dumps(
+                {
+                    "schema": bridge.SCHEMA_PHASE_HEALTH,
+                    "system": "KCl",
+                    "formula": "KCl",
+                    "temperature_K": temp,
+                    "phase_health_label": label,
+                }
+            ),
+            encoding="utf-8",
+        )
+        paths.extend(["--phase-health-json", str(path)])
+    out = tmp_path / "anchor"
+
+    result = bridge.main(
+        [
+            "melting-anchor",
+            "--root",
+            str(tmp_path),
+            "--outdir",
+            str(out),
+            "--system",
+            "KCl",
+            "--formula",
+            "KCl",
+            "--components",
+            "KCl",
+            "--composition",
+            "x_KCl=1.0",
+            "--quality",
+            "screening-prior",
+            *paths,
+        ]
+    )
+
+    data = rows(out / "sluschi_melting_anchor.csv")
+    assert result["n_anchors"] == 1
+    assert data[0]["melting_temperature_K"] == "1100.0"
+    assert data[0]["temperature_std_error_K"] == "100.0"
+    assert data[0]["method"] == "phase_health_bracket"
+    assert data[0]["quality"] == "screening-prior"

@@ -25,6 +25,7 @@ SCHEMA_SCONFIG = "atomi.sluschi.lammps_sconfig.v1"
 SCHEMA_ENTROPY_SUMMARY = "atomi.sluschi.lammps_entropy_summary.v1"
 SCHEMA_PHASE_HEALTH = "atomi.sluschi.phase_health.v1"
 SCHEMA_WORKFLOW_GUIDE = "atomi.sluschi.workflow_guide.v1"
+SCHEMA_MELTING_ANCHOR = "atomi.sluschi.melting_anchor.v1"
 
 DEFAULT_REPO = "https://github.com/qjhong/SLUSCHI.git"
 DEFAULT_SUPERSALT_REF = "SuperSalt chloride MLIP; install/provide externally, not vendored by Atomi."
@@ -672,6 +673,16 @@ class SconfigPair:
     line: str
 
 
+@dataclass
+class MeltingAnchor:
+    source_file: str
+    melting_temperature_K: float
+    temperature_std_error_K: float | None
+    method: str
+    quality: str
+    line: str
+
+
 def parse_numeric_file(path: Path) -> list[float]:
     if not path.exists() or not path.is_file():
         return []
@@ -1254,6 +1265,215 @@ def workflow_guide_main(args: argparse.Namespace) -> dict[str, Any]:
     return guide
 
 
+def parse_melting_anchors_from_text(path: Path, text: str, quality: str) -> list[MeltingAnchor]:
+    anchors: list[MeltingAnchor] = []
+    line_pattern = re.compile(
+        r"Melting\s+temperature\s+and\s+std\s+error:\s*"
+        r"([-+]?\d+(?:\.\d+)?)\s+([-+]?\d+(?:\.\d+)?)",
+        re.IGNORECASE,
+    )
+    for match in line_pattern.finditer(text):
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", match.end())
+        if line_end < 0:
+            line_end = len(text)
+        anchors.append(
+            MeltingAnchor(
+                source_file=str(path),
+                melting_temperature_K=float(match.group(1)),
+                temperature_std_error_K=float(match.group(2)),
+                method="sluschi_mpfit",
+                quality=quality,
+                line=text[line_start:line_end].strip(),
+            )
+        )
+    if path.name == "MPFit.out":
+        values: list[float] = []
+        for token in re.split(r"[\s,]+", text.strip()):
+            if not token:
+                continue
+            try:
+                values.append(float(token))
+            except ValueError:
+                values = []
+                break
+        if len(values) >= 2:
+            anchors.append(
+                MeltingAnchor(
+                    source_file=str(path),
+                    melting_temperature_K=values[0],
+                    temperature_std_error_K=values[1],
+                    method="sluschi_mpfit",
+                    quality=quality,
+                    line=text.strip().splitlines()[0] if text.strip() else "",
+                )
+            )
+    return anchors
+
+
+def find_melting_anchors(root: Path, quality: str) -> list[MeltingAnchor]:
+    anchors: list[MeltingAnchor] = []
+    target_names = {"SLUSCHI.out", "MPFit.out"}
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.name not in target_names:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        anchors.extend(parse_melting_anchors_from_text(path, text, quality))
+    return anchors
+
+
+def melting_anchor_from_phase_health(paths: list[Path], quality: str) -> MeltingAnchor | None:
+    rows: list[dict[str, Any]] = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            rows.append(data)
+    coexistence = [
+        row
+        for row in rows
+        if str(row.get("phase_health_label", "")).lower() == "coexistence-like"
+        and row.get("temperature_K") is not None
+    ]
+    if not coexistence:
+        return None
+    temperatures = [float(row["temperature_K"]) for row in coexistence]
+    tm = sum(temperatures) / len(temperatures)
+    all_temperatures = sorted(float(row["temperature_K"]) for row in rows if row.get("temperature_K") is not None)
+    lower = max((temp for temp in all_temperatures if temp < tm), default=None)
+    upper = min((temp for temp in all_temperatures if temp > tm), default=None)
+    if lower is not None and upper is not None:
+        stderr = (upper - lower) / 2.0
+        bracket = f"bracket=[{lower:g},{upper:g}] K"
+    elif len(temperatures) > 1:
+        mean = tm
+        variance = sum((temp - mean) ** 2 for temp in temperatures) / (len(temperatures) - 1)
+        stderr = variance**0.5
+        bracket = "coexistence_temperature_std"
+    else:
+        stderr = None
+        bracket = "coexistence_temperature_only"
+    return MeltingAnchor(
+        source_file=",".join(str(path) for path in paths),
+        melting_temperature_K=tm,
+        temperature_std_error_K=stderr,
+        method="phase_health_bracket",
+        quality=quality,
+        line=f"coexistence-like phase-health at {','.join(str(t) for t in temperatures)} K; {bracket}",
+    )
+
+
+def build_melting_prior_payload(args: argparse.Namespace, anchors: list[MeltingAnchor]) -> dict[str, Any]:
+    observables = []
+    for anchor in anchors:
+        observables.append(
+            {
+                "observable": "melting_temperature_K",
+                "value": anchor.melting_temperature_K,
+                "unit": "K",
+                "phase": "solid-liquid",
+                "temperature_std_error_K": anchor.temperature_std_error_K,
+                "composition": args.composition,
+                "quality": anchor.quality,
+                "source_engine": "sluschi",
+                "method": anchor.method,
+                "file": str(Path(anchor.source_file).resolve()) if "," not in anchor.source_file else anchor.source_file,
+                "line": anchor.line,
+            }
+        )
+    return {
+        "schema": PRIOR_SCHEMA,
+        "kind": "sluschi_melting_anchor",
+        "system": args.system or args.root.resolve().name,
+        "formula": args.formula or "",
+        "components": parse_csv_list(args.components),
+        "thermo": {"observables": observables},
+        "source": {
+            "method": "sluschi_melting_anchor",
+            "root": str(args.root.resolve()),
+            "sluschi_repo": DEFAULT_REPO,
+            "bridge_schema": SCHEMA_MELTING_ANCHOR,
+        },
+        "notes": [
+            "SLUSCHI determines melting temperature from small-cell solid-liquid coexistence outcomes.",
+            "Preferred anchors come from SLUSCHI MPFit output: 'Melting temperature and std error: Tm sigma'.",
+            "Phase-health bracket anchors are useful screening constraints but should be lower weight than MPFit anchors.",
+        ],
+    }
+
+
+def melting_anchor_main(args: argparse.Namespace) -> dict[str, Any]:
+    root = args.root.resolve()
+    anchors = find_melting_anchors(root, args.quality)
+    if args.phase_health_json:
+        bracket_anchor = melting_anchor_from_phase_health(args.phase_health_json, args.quality)
+        if bracket_anchor is not None:
+            anchors.append(bracket_anchor)
+    if not anchors and not args.allow_empty:
+        raise FileNotFoundError(
+            f"No SLUSCHI melting anchors found under {root}; expected SLUSCHI.out/MPFit.out or --phase-health-json."
+        )
+    outdir = args.outdir.resolve()
+    rows = [
+        {
+            "system": args.system,
+            "formula": args.formula,
+            "components": args.components,
+            "composition": args.composition,
+            "melting_temperature_K": anchor.melting_temperature_K,
+            "temperature_std_error_K": anchor.temperature_std_error_K,
+            "temperature_low_K": (
+                anchor.melting_temperature_K - anchor.temperature_std_error_K
+                if anchor.temperature_std_error_K is not None
+                else ""
+            ),
+            "temperature_high_K": (
+                anchor.melting_temperature_K + anchor.temperature_std_error_K
+                if anchor.temperature_std_error_K is not None
+                else ""
+            ),
+            "method": anchor.method,
+            "quality": anchor.quality,
+            "source_file": anchor.source_file,
+            "line": anchor.line,
+        }
+        for anchor in anchors
+    ]
+    fields = [
+        "system",
+        "formula",
+        "components",
+        "composition",
+        "melting_temperature_K",
+        "temperature_std_error_K",
+        "temperature_low_K",
+        "temperature_high_K",
+        "method",
+        "quality",
+        "source_file",
+        "line",
+    ]
+    anchor_csv = outdir / "sluschi_melting_anchor.csv"
+    anchor_json = outdir / "sluschi_melting_anchor.json"
+    prior_json = args.prior_out or outdir / "sluschi_melting_anchor_thermo_prior.json"
+    write_csv(anchor_csv, rows, fields)
+    payload = {
+        "schema": SCHEMA_MELTING_ANCHOR,
+        "root": str(root),
+        "n_anchors": len(anchors),
+        "outputs": {"anchor_csv": str(anchor_csv), "thermo_prior_json": str(prior_json)},
+        "anchors": rows,
+    }
+    write_json(anchor_json, payload)
+    write_json(prior_json, build_melting_prior_payload(args, anchors))
+    print(f"Wrote SLUSCHI melting anchor CSV: {anchor_csv}")
+    return payload
+
+
 def infer_phase(path: Path, line: str, default: str = "") -> str:
     haystack = f"{path} {line}".lower()
     if "coexist" in haystack or "solid-liquid" in haystack or "solid_liquid" in haystack:
@@ -1639,6 +1859,32 @@ def build_parser() -> argparse.ArgumentParser:
     health.add_argument("--max-mixed-fraction", type=float, default=0.25)
     health.add_argument("--min-classified-fraction", type=float, default=0.75)
 
+    melting = sub.add_parser(
+        "melting-anchor",
+        help="Parse SLUSCHI MPFit/coexistence outputs into a CALPHAD-ready melting-temperature anchor.",
+    )
+    melting.add_argument("--root", type=Path, default=Path("."))
+    melting.add_argument("--outdir", type=Path, default=Path("sluschi_melting_anchor"))
+    melting.add_argument("--prior-out", type=Path, help="Optional thermo-prior JSON output path.")
+    melting.add_argument("--system", default="")
+    melting.add_argument("--formula", default="")
+    melting.add_argument("--components", default="")
+    melting.add_argument("--composition", default="")
+    melting.add_argument(
+        "--phase-health-json",
+        type=Path,
+        action="append",
+        default=[],
+        help="Optional phase-health JSON files used to build a lower-confidence coexistence bracket anchor.",
+    )
+    melting.add_argument(
+        "--quality",
+        choices=("descriptor", "screening-prior", "production"),
+        default="production",
+        help="Confidence tier for downstream CALPHAD/thermo-prior use.",
+    )
+    melting.add_argument("--allow-empty", action="store_true", help="Write empty outputs instead of failing.")
+
     return parser
 
 
@@ -1662,6 +1908,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
         return entropy_summary_main(args)
     if args.command == "phase-health":
         return phase_health_main(args)
+    if args.command == "melting-anchor":
+        return melting_anchor_main(args)
     build_parser().print_help()
     return None
 
@@ -1680,6 +1928,10 @@ def phase_health_cli_main(argv: list[str] | None = None) -> None:
 
 def workflow_guide_cli_main(argv: list[str] | None = None) -> None:
     main(["workflow-guide", *(sys.argv[1:] if argv is None else argv)])
+
+
+def melting_anchor_cli_main(argv: list[str] | None = None) -> None:
+    main(["melting-anchor", *(sys.argv[1:] if argv is None else argv)])
 
 
 if __name__ == "__main__":
