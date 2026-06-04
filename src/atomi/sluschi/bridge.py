@@ -26,6 +26,7 @@ SCHEMA_ENTROPY_SUMMARY = "atomi.sluschi.lammps_entropy_summary.v1"
 SCHEMA_PHASE_HEALTH = "atomi.sluschi.phase_health.v1"
 SCHEMA_WORKFLOW_GUIDE = "atomi.sluschi.workflow_guide.v1"
 SCHEMA_MELTING_ANCHOR = "atomi.sluschi.melting_anchor.v1"
+SCHEMA_CP2K_PREP = "atomi.sluschi.cp2k_prep.v1"
 
 DEFAULT_REPO = "https://github.com/qjhong/SLUSCHI.git"
 DEFAULT_SUPERSALT_REF = "SuperSalt chloride MLIP; install/provide externally, not vendored by Atomi."
@@ -99,6 +100,103 @@ def parse_key_float_map(value: str | None) -> dict[str, float]:
         key, raw = item.split("=", 1)
         out[key.strip()] = float(raw)
     return out
+
+
+def parse_element_list(value: str | None) -> list[str]:
+    return [item.strip() for item in parse_csv_list(value)]
+
+
+def parse_cell_abc(value: str | None) -> list[list[float]] | None:
+    parts = parse_csv_list(value)
+    if not parts:
+        return None
+    if len(parts) != 3:
+        raise ValueError("--cell must have exactly three lengths, e.g. '12.58,12.58,18.87'.")
+    a, b, c = (float(item) for item in parts)
+    return [[a, 0.0, 0.0], [0.0, b, 0.0], [0.0, 0.0, c]]
+
+
+def parse_cell_vector(value: str) -> list[float]:
+    parts = [item for item in re.split(r"[\s,]+", value.strip()) if item]
+    if len(parts) != 3:
+        raise ValueError(f"Cell vector must have three components, got {value!r}.")
+    return [float(item) for item in parts]
+
+
+def cell_from_cp2k_input(path: Path | None) -> list[list[float]] | None:
+    if path is None:
+        return None
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    abc_match = re.search(r"(?im)^\s*ABC\s+([0-9eE.+\-]+)\s+([0-9eE.+\-]+)\s+([0-9eE.+\-]+)", text)
+    if abc_match:
+        return parse_cell_abc(",".join(abc_match.groups()))
+    vectors: dict[str, list[float]] = {}
+    for key in ("A", "B", "C"):
+        match = re.search(rf"(?im)^\s*{key}\s+([0-9eE.+\-]+)\s+([0-9eE.+\-]+)\s+([0-9eE.+\-]+)", text)
+        if match:
+            vectors[key] = [float(item) for item in match.groups()]
+    if {"A", "B", "C"} <= set(vectors):
+        return [vectors["A"], vectors["B"], vectors["C"]]
+    return None
+
+
+def cell_from_xyz_comment(comment: str) -> list[list[float]] | None:
+    match = re.search(r'Lattice="([^"]+)"', comment)
+    if not match:
+        return None
+    values = [float(item) for item in match.group(1).split()]
+    if len(values) != 9:
+        return None
+    return [values[0:3], values[3:6], values[6:9]]
+
+
+def read_cp2k_xyz_frames(path: Path) -> list[dict[str, Any]]:
+    frames: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as handle:
+        while True:
+            line = handle.readline()
+            if not line:
+                break
+            if not line.strip():
+                continue
+            natoms = int(line.strip())
+            comment = handle.readline().rstrip("\n")
+            symbols: list[str] = []
+            coords: list[list[float]] = []
+            for _ in range(natoms):
+                parts = handle.readline().split()
+                if len(parts) < 4:
+                    raise ValueError(f"Malformed XYZ atom line in {path}")
+                symbols.append(parts[0])
+                coords.append([float(parts[1]), float(parts[2]), float(parts[3])])
+            frames.append({"comment": comment, "symbols": symbols, "coords": coords})
+    return frames
+
+
+def mat_det(matrix: list[list[float]]) -> float:
+    a, b, c = matrix
+    return (
+        a[0] * (b[1] * c[2] - b[2] * c[1])
+        - a[1] * (b[0] * c[2] - b[2] * c[0])
+        + a[2] * (b[0] * c[1] - b[1] * c[0])
+    )
+
+
+def cart_to_frac(coord: list[float], cell: list[list[float]]) -> list[float]:
+    # Cell vectors are rows. Fractional coordinates f solve f @ cell = coord.
+    det = mat_det(cell)
+    if abs(det) < 1.0e-15:
+        raise ValueError("Cell matrix is singular.")
+    a, b, c = cell
+    inv = [
+        [(b[1] * c[2] - b[2] * c[1]) / det, (a[2] * c[1] - a[1] * c[2]) / det, (a[1] * b[2] - a[2] * b[1]) / det],
+        [(b[2] * c[0] - b[0] * c[2]) / det, (a[0] * c[2] - a[2] * c[0]) / det, (a[2] * b[0] - a[0] * b[2]) / det],
+        [(b[0] * c[1] - b[1] * c[0]) / det, (a[1] * c[0] - a[0] * c[1]) / det, (a[0] * b[1] - a[1] * b[0]) / det],
+    ]
+    return [
+        coord[0] * inv[0][i] + coord[1] * inv[1][i] + coord[2] * inv[2][i]
+        for i in range(3)
+    ]
 
 
 def parse_composition_states(value: str | None) -> list[str]:
@@ -509,6 +607,123 @@ def prep_scripts_main(args: argparse.Namespace) -> dict[str, Any]:
     write_json(manifest_path, manifest)
     print(f"Wrote SLUSCHI LAMMPS prep scripts: {outdir}")
     print(f"Type basis: {', '.join(f'{idx}={element}' for idx, element in type_elements.items())}")
+    return manifest
+
+
+def cp2k_prep_main(args: argparse.Namespace) -> dict[str, Any]:
+    frames = read_cp2k_xyz_frames(args.xyz)
+    if not frames:
+        raise ValueError(f"No frames found in CP2K XYZ trajectory: {args.xyz}")
+    elements = parse_element_list(args.elements)
+    if not elements:
+        seen: list[str] = []
+        for symbol in frames[0]["symbols"]:
+            if symbol not in seen:
+                seen.append(symbol)
+        elements = seen
+    masses = parse_element_mass_map(args.element_masses)
+    missing = [element for element in elements if element not in masses]
+    if missing:
+        raise ValueError(f"No masses available for element(s): {', '.join(missing)}")
+    cell = None
+    if args.cell_vector:
+        vectors = [parse_cell_vector(item) for item in args.cell_vector]
+        if len(vectors) != 3:
+            raise ValueError("--cell-vector must be supplied exactly three times for A, B, C.")
+        cell = vectors
+    if cell is None:
+        cell = parse_cell_abc(args.cell)
+    if cell is None:
+        cell = cell_from_cp2k_input(args.inp)
+    if cell is None:
+        cell = cell_from_xyz_comment(frames[0]["comment"])
+    if cell is None:
+        raise ValueError("No cell found. Pass --cell, three --cell-vector values, --inp with &CELL, or extxyz Lattice metadata.")
+
+    start = max(args.start_frame, 0)
+    stop = args.stop_frame if args.stop_frame is not None else len(frames)
+    stride = max(args.stride, 1)
+    selected = frames[start:stop:stride]
+    if not selected:
+        raise ValueError("Frame selection is empty.")
+    outdir = args.outdir.resolve()
+    outdir.mkdir(parents=True, exist_ok=True)
+    order = {element: idx for idx, element in enumerate(elements)}
+    counts = {element: 0 for element in elements}
+    for symbol in selected[0]["symbols"]:
+        if symbol not in counts:
+            raise ValueError(f"Frame contains element {symbol!r}, not listed in --elements={','.join(elements)!r}.")
+        counts[symbol] += 1
+    natoms = len(selected[0]["symbols"])
+    timestep_fs = args.timestep_fs
+    if timestep_fs is None:
+        timestep_fs = 1.0
+    step_interval_fs = timestep_fs * args.frame_stride_md_steps
+
+    with (outdir / "param").open("w", encoding="utf-8") as handle:
+        handle.write(f"{len(elements)}\n")
+        handle.write(" ".join(str(counts[element]) for element in elements) + "\n")
+        for element in elements:
+            handle.write(f"{masses[element]}\n")
+        handle.write(f"{step_interval_fs / 1000.0:.12g}\n")
+        handle.write(f"{natoms}\n")
+        for element in elements:
+            handle.write(f"{element}\n")
+        for _ in range(8):
+            handle.write("0.0\n")
+
+    with (outdir / "latt").open("w", encoding="utf-8") as latt, (outdir / "pos").open("w", encoding="utf-8") as pos, (
+        outdir / "step"
+    ).open("w", encoding="utf-8") as step:
+        for frame_index, frame in enumerate(selected):
+            if len(frame["symbols"]) != natoms:
+                raise ValueError("All selected frames must have the same atom count.")
+            frame_cell = cell_from_xyz_comment(frame["comment"]) or cell
+            for vector in frame_cell:
+                latt.write(f"{vector[0]:.12g} {vector[1]:.12g} {vector[2]:.12g} 0 0 0\n")
+            atoms = sorted(zip(frame["symbols"], frame["coords"]), key=lambda item: order[item[0]])
+            for symbol, coord in atoms:
+                frac = cart_to_frac(coord, frame_cell)
+                pos.write(f"{frac[0] % 1.0:.12g} {frac[1] % 1.0:.12g} {frac[2] % 1.0:.12g} 0 0 0\n")
+            step.write(f"{step_interval_fs / 1000.0:.12g}\n")
+
+    if args.phase:
+        (outdir / "phase_temp").write_text(f"{args.phase}\n", encoding="utf-8")
+    manifest = {
+        "schema": SCHEMA_CP2K_PREP,
+        "source_engine": "cp2k",
+        "xyz": str(args.xyz.resolve()),
+        "inp": str(args.inp.resolve()) if args.inp else "",
+        "outdir": str(outdir),
+        "elements": elements,
+        "counts": counts,
+        "natoms": natoms,
+        "n_source_frames": len(frames),
+        "n_selected_frames": len(selected),
+        "start_frame": start,
+        "stop_frame": stop,
+        "stride": stride,
+        "timestep_fs": timestep_fs,
+        "frame_stride_md_steps": args.frame_stride_md_steps,
+        "sluschi_step_ps": step_interval_fs / 1000.0,
+        "phase": args.phase,
+        "cell_angstrom": cell,
+        "outputs": {
+            "param": str(outdir / "param"),
+            "latt": str(outdir / "latt"),
+            "pos": str(outdir / "pos"),
+            "step": str(outdir / "step"),
+            "phase_temp": str(outdir / "phase_temp") if args.phase else "",
+        },
+        "notes": [
+            "This command prepares existing CP2K AIMD XYZ frames for the SLUSCHI entropy-prior lane.",
+            "It does not run CP2K and it does not run true SLUSCHI coexistence/MPFit melting.",
+            "Use separate solid and liquid AIMD trajectories when benchmarking against Hong/Shang entropy values.",
+        ],
+    }
+    write_json(outdir / "sluschi_cp2k_prep_manifest.json", manifest)
+    print(f"Wrote CP2K-to-SLUSCHI prep files: {outdir}")
+    print(f"Selected frames: {len(selected)} / {len(frames)}")
     return manifest
 
 
@@ -1772,6 +1987,38 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument("--pos-script", default="lmp_pos.py")
     prep.add_argument("--prep-script", default="lmp_prep.csh")
 
+    cp2k_prep = sub.add_parser(
+        "cp2k-prep",
+        help="Prepare CP2K AIMD XYZ frames as SLUSCHI pos/latt/step/param files.",
+    )
+    cp2k_prep.add_argument("--xyz", type=Path, required=True, help="CP2K multi-frame *-pos.xyz trajectory.")
+    cp2k_prep.add_argument("--inp", type=Path, help="Optional CP2K input used to read &CELL ABC/A/B/C.")
+    cp2k_prep.add_argument("--outdir", type=Path, default=Path("sluschi_cp2k_prep"))
+    cp2k_prep.add_argument("--elements", default="", help="Element order for SLUSCHI param/pos grouping, e.g. K,Cl.")
+    cp2k_prep.add_argument(
+        "--element-masses",
+        default="",
+        help="Optional Element=mass overrides, e.g. K=39.0983,Cl=35.453.",
+    )
+    cp2k_prep.add_argument("--cell", default="", help="Orthorhombic cell lengths in A: a,b,c.")
+    cp2k_prep.add_argument(
+        "--cell-vector",
+        action="append",
+        default=[],
+        help="Cell vector in A; repeat exactly three times for A, B, C.",
+    )
+    cp2k_prep.add_argument("--timestep-fs", type=float, help="CP2K MD timestep in fs.")
+    cp2k_prep.add_argument(
+        "--frame-stride-md-steps",
+        type=float,
+        default=1.0,
+        help="MD steps between consecutive written XYZ frames; CP2K &TRAJECTORY &EACH MD N usually sets this.",
+    )
+    cp2k_prep.add_argument("--start-frame", type=int, default=0)
+    cp2k_prep.add_argument("--stop-frame", type=int)
+    cp2k_prep.add_argument("--stride", type=int, default=1)
+    cp2k_prep.add_argument("--phase", default="", help="Optional SLUSCHI phase label written to phase_temp, e.g. solid or liquid.")
+
     parse = sub.add_parser("parse", help="Parse SLUSCHI-like text outputs for CALPHAD handoff observables.")
     parse.add_argument("--root", type=Path, default=Path("."))
     parse.add_argument("--outdir", type=Path, default=Path("results"))
@@ -1905,6 +2152,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
         return supersalt_example_main(args)
     if args.command == "lammps-prep-scripts":
         return prep_scripts_main(args)
+    if args.command == "cp2k-prep":
+        return cp2k_prep_main(args)
     if args.command == "parse":
         return parse_main(args)
     if args.command == "sconfig":
@@ -1937,6 +2186,10 @@ def workflow_guide_cli_main(argv: list[str] | None = None) -> None:
 
 def melting_anchor_cli_main(argv: list[str] | None = None) -> None:
     main(["melting-anchor", *(sys.argv[1:] if argv is None else argv)])
+
+
+def cp2k_prep_cli_main(argv: list[str] | None = None) -> None:
+    main(["cp2k-prep", *(sys.argv[1:] if argv is None else argv)])
 
 
 if __name__ == "__main__":

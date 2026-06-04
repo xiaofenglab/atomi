@@ -156,6 +156,76 @@ def test_sluschi_lammps_prep_scripts_use_requested_type_basis(tmp_path: Path):
     assert "echo Li >> param" not in prep_script
 
 
+def test_sluschi_cp2k_prep_writes_native_entropy_inputs(tmp_path: Path):
+    xyz = tmp_path / "kcl-pos.xyz"
+    xyz.write_text(
+        "\n".join(
+            [
+                "4",
+                "i = 0",
+                "K 0.0 0.0 0.0",
+                "Cl 1.0 0.0 0.0",
+                "K 0.0 1.0 0.0",
+                "Cl 1.0 1.0 0.0",
+                "4",
+                "i = 1",
+                "K 0.1 0.0 0.0",
+                "Cl 1.1 0.0 0.0",
+                "K 0.0 1.1 0.0",
+                "Cl 1.0 1.1 0.0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    inp = tmp_path / "kcl.inp"
+    inp.write_text("&FORCE_EVAL\n&SUBSYS\n&CELL\nABC 2.0 2.0 2.0\n&END CELL\n&END SUBSYS\n&END FORCE_EVAL\n", encoding="utf-8")
+    out = tmp_path / "cp2k_prep"
+
+    result = bridge.main(
+        [
+            "cp2k-prep",
+            "--xyz",
+            str(xyz),
+            "--inp",
+            str(inp),
+            "--outdir",
+            str(out),
+            "--elements",
+            "K,Cl",
+            "--timestep-fs",
+            "3",
+            "--frame-stride-md-steps",
+            "10",
+            "--phase",
+            "liquid",
+        ]
+    )
+
+    assert result["schema"] == bridge.SCHEMA_CP2K_PREP
+    assert result["n_selected_frames"] == 2
+    assert result["sluschi_step_ps"] == 0.03
+    assert (out / "param").read_text(encoding="utf-8").splitlines()[:7] == [
+        "2",
+        "2 2",
+        "39.0983",
+        "35.453",
+        "0.03",
+        "4",
+        "K",
+    ]
+    assert (out / "phase_temp").read_text(encoding="utf-8").strip() == "liquid"
+    assert len((out / "latt").read_text(encoding="utf-8").splitlines()) == 6
+    pos_lines = (out / "pos").read_text(encoding="utf-8").splitlines()
+    assert len(pos_lines) == 8
+    assert pos_lines[0].startswith("0 ")
+    assert pos_lines[2].startswith("0.5 ")
+    assert pos_lines[4].startswith("0.05 ")
+    manifest = json.loads((out / "sluschi_cp2k_prep_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["source_engine"] == "cp2k"
+    assert manifest["counts"] == {"Cl": 2, "K": 2}
+
+
 def test_sluschi_parse_collects_calphad_handoff_values(tmp_path: Path):
     root = tmp_path / "run"
     root.mkdir()
