@@ -181,6 +181,56 @@ def test_sluschi_parse_collects_calphad_handoff_values(tmp_path: Path):
     assert any(item["observable"] == "heat_capacity_J_mol_K" for item in prior["thermo"]["observables"])
 
 
+def test_lammps_sconfig_parses_sluschi_pair_recommendations(tmp_path: Path):
+    root = tmp_path / "solid_T900"
+    root.mkdir()
+    (root / "collect.stdout").write_text(
+        "\n".join(
+            [
+                "The pair between element 1-1 appears to be solid. I suggest that you take the mean:  1.25",
+                "The pair between element 1-2 appears to be liquid. I suggest that you take the median:  2.50",
+                "The pair between element 2-2 appears to be solid. I suggest that you take the mean:  0.75",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (root / "Sconf.txt").write_text("1.0 2.0 3.0\n", encoding="utf-8")
+    (root / "Sconf_min.txt").write_text("0.5 0.7\n", encoding="utf-8")
+    out = tmp_path / "sconfig"
+
+    result = bridge.main(
+        [
+            "sconfig",
+            "--root",
+            str(root),
+            "--outdir",
+            str(out),
+            "--system",
+            "UO2",
+            "--formula",
+            "UO2",
+            "--phase",
+            "fluorite",
+            "--temperature-k",
+            "900",
+            "--quality",
+            "screening-prior",
+        ]
+    )
+
+    pair_rows = rows(out / "lammps_sconfig_pairs.csv")
+    assert result["n_pair_recommendations"] == 3
+    assert {row["pair"] for row in pair_rows} == {"1-1", "1-2", "2-2"}
+    summary = json.loads((out / "lammps_sconfig_summary.json").read_text(encoding="utf-8"))
+    assert summary["n_liquid_like_pairs"] == 1
+    assert summary["n_solid_like_pairs"] == 2
+    assert summary["mean_pair_sconfig_J_mol_atom_K"] == 1.5
+    prior = json.loads((out / "lammps_sconfig_thermo_prior.json").read_text(encoding="utf-8"))
+    assert prior["kind"] == "sluschi_lammps_sconfig"
+    assert prior["thermo"]["observables"][0]["observable"] == "configurational_entropy_J_mol_atom_K"
+    assert prior["thermo"]["observables"][0]["quality"] == "screening-prior"
+
+
 def test_confighpc_exports_sluschi_profile_values(tmp_path: Path):
     config = tmp_path / "atomi_hpc_config.kit.local.json"
     config.write_text(

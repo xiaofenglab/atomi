@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from atomi.thermo_prior import PRIOR_SCHEMA
 SCHEMA_PLAN = "atomi.sluschi.bridge.plan.v1"
 SCHEMA_STATUS = "atomi.sluschi.bridge.status.v1"
 SCHEMA_RESULTS = "atomi.sluschi.bridge.results.v1"
+SCHEMA_SCONFIG = "atomi.sluschi.lammps_sconfig.v1"
 
 DEFAULT_REPO = "https://github.com/qjhong/SLUSCHI.git"
 DEFAULT_SUPERSALT_REF = "SuperSalt chloride MLIP; install/provide externally, not vendored by Atomi."
@@ -441,6 +443,183 @@ class ParsedResult:
     line: str
 
 
+@dataclass
+class SconfigPair:
+    file: str
+    pair: str
+    state: str
+    recommended_statistic: str
+    sconfig_J_mol_atom_K: float
+    line: str
+
+
+def parse_numeric_file(path: Path) -> list[float]:
+    if not path.exists() or not path.is_file():
+        return []
+    values: list[float] = []
+    for token in re.split(r"[\s,]+", path.read_text(encoding="utf-8", errors="replace").strip()):
+        if not token:
+            continue
+        try:
+            values.append(float(token))
+        except ValueError:
+            continue
+    return values
+
+
+def parse_sconfig_pairs(root: Path) -> list[SconfigPair]:
+    rows: list[SconfigPair] = []
+    pattern = re.compile(
+        r"The\s+pair\s+between\s+element\s+([^\s]+)\s+appears\s+to\s+be\s+([^.]+)\.\s+"
+        r"I\s+suggest\s+that\s+you\s+take\s+the\s+([^:]+):\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)",
+        re.IGNORECASE,
+    )
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.name not in {"collect.stdout", "collect.out", "sluschi_collect.out"}:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for match in pattern.finditer(text):
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.end())
+            if line_end < 0:
+                line_end = len(text)
+            rows.append(
+                SconfigPair(
+                    file=str(path),
+                    pair=match.group(1).strip(),
+                    state=match.group(2).strip().lower(),
+                    recommended_statistic=match.group(3).strip().lower(),
+                    sconfig_J_mol_atom_K=float(match.group(4)),
+                    line=text[line_start:line_end].strip(),
+                )
+            )
+    return rows
+
+
+def summarize_sconfig_case(args: argparse.Namespace, pairs: list[SconfigPair]) -> dict[str, Any]:
+    root = args.root.resolve()
+    sconf = parse_numeric_file(root / "Sconf.txt")
+    sconf_min = parse_numeric_file(root / "Sconf_min.txt")
+    pair_values = [row.sconfig_J_mol_atom_K for row in pairs]
+    liquid_like = sum(1 for row in pairs if "liquid" in row.state)
+    solid_like = sum(1 for row in pairs if "solid" in row.state)
+    mean_pair = sum(pair_values) / len(pair_values) if pair_values else None
+    return {
+        "schema": SCHEMA_SCONFIG,
+        "root": str(root),
+        "system": args.system,
+        "formula": args.formula,
+        "components": parse_csv_list(args.components),
+        "phase": args.phase,
+        "temperature_K": args.temperature_k,
+        "composition": args.composition,
+        "source_engine": "lammps",
+        "method": "sluschi_sconfig_from_lammps_nvt",
+        "quality": args.quality,
+        "n_pair_recommendations": len(pairs),
+        "n_liquid_like_pairs": liquid_like,
+        "n_solid_like_pairs": solid_like,
+        "mean_pair_sconfig_J_mol_atom_K": mean_pair,
+        "sconf_values_J_mol_atom_K": sconf,
+        "sconf_min_values_J_mol_atom_K": sconf_min,
+        "dump_stride_note": args.dump_stride_note,
+        "warnings": [
+            warning
+            for warning in [
+                "No SLUSCHI pair recommendations found." if not pairs else "",
+                "Sconf.txt not found or empty." if not sconf else "",
+                "Sconf_min.txt not found or empty." if not sconf_min else "",
+            ]
+            if warning
+        ],
+    }
+
+
+def build_sconfig_prior_payload(args: argparse.Namespace, summary: dict[str, Any], pairs: list[SconfigPair]) -> dict[str, Any]:
+    observable = {
+        "observable": "configurational_entropy_J_mol_atom_K",
+        "value": summary["mean_pair_sconfig_J_mol_atom_K"],
+        "unit": "J/mol-atom/K",
+        "phase": args.phase,
+        "temperature_K": args.temperature_k,
+        "composition": args.composition,
+        "quality": args.quality,
+        "source_engine": "lammps",
+        "method": "sluschi_sconfig_pair_recommendation",
+        "n_pair_recommendations": len(pairs),
+    }
+    return {
+        "schema": PRIOR_SCHEMA,
+        "kind": "sluschi_lammps_sconfig",
+        "system": args.system or args.root.resolve().name,
+        "formula": args.formula or "",
+        "components": parse_csv_list(args.components),
+        "thermo": {"observables": [observable] if observable["value"] is not None else []},
+        "source": {
+            "method": "lammps_sconfig",
+            "root": str(args.root.resolve()),
+            "bridge_schema": SCHEMA_SCONFIG,
+        },
+        "notes": [
+            "This is a SLUSCHI configurational-entropy descriptor from LAMMPS NVT trajectory post-processing.",
+            "Use as a screening prior unless the trajectory length, volume, dump stride, and type mapping were validated for production.",
+            "For Svib, generate dense uniformly spaced NVT frames after equilibration at the target volume/phase state.",
+        ],
+    }
+
+
+def sconfig_main(args: argparse.Namespace) -> dict[str, Any]:
+    root = args.root.resolve()
+    outdir = args.outdir.resolve()
+    pairs = parse_sconfig_pairs(root)
+    summary = summarize_sconfig_case(args, pairs)
+    pair_rows = [row.__dict__ for row in pairs]
+    pair_csv = outdir / "lammps_sconfig_pairs.csv"
+    summary_csv = outdir / "lammps_sconfig_summary.csv"
+    summary_json = outdir / "lammps_sconfig_summary.json"
+    prior_json = args.prior_out or outdir / "lammps_sconfig_thermo_prior.json"
+    write_csv(
+        pair_csv,
+        pair_rows,
+        ["file", "pair", "state", "recommended_statistic", "sconfig_J_mol_atom_K", "line"],
+    )
+    write_csv(
+        summary_csv,
+        [summary],
+        [
+            "root",
+            "system",
+            "formula",
+            "phase",
+            "temperature_K",
+            "composition",
+            "quality",
+            "n_pair_recommendations",
+            "n_liquid_like_pairs",
+            "n_solid_like_pairs",
+            "mean_pair_sconfig_J_mol_atom_K",
+        ],
+    )
+    write_json(summary_json, {**summary, "pairs": pair_rows})
+    write_json(prior_json, build_sconfig_prior_payload(args, summary, pairs))
+    print(f"Parsed SLUSCHI/LAMMPS Sconfig pair recommendations: {len(pairs)}")
+    print(f"Wrote pair CSV             : {pair_csv}")
+    print(f"Wrote summary CSV          : {summary_csv}")
+    print(f"Wrote summary JSON         : {summary_json}")
+    print(f"Wrote thermo-prior JSON    : {prior_json}")
+    return {
+        "schema": SCHEMA_SCONFIG,
+        "n_pair_recommendations": len(pairs),
+        "outputs": {
+            "pairs_csv": str(pair_csv),
+            "summary_csv": str(summary_csv),
+            "summary_json": str(summary_json),
+            "thermo_prior_json": str(prior_json),
+        },
+        "summary": summary,
+    }
+
+
 def infer_phase(path: Path, line: str, default: str = "") -> str:
     haystack = f"{path} {line}".lower()
     if "coexist" in haystack or "solid-liquid" in haystack or "solid_liquid" in haystack:
@@ -724,6 +903,31 @@ def build_parser() -> argparse.ArgumentParser:
     parse.add_argument("--temperature-k", type=float, help="Default temperature for parsed observables.")
     parse.add_argument("--composition", default="", help="Default composition label for parsed observables.")
 
+    sconfig = sub.add_parser(
+        "sconfig",
+        help="Parse SLUSCHI configurational-entropy outputs from a LAMMPS NVT case folder.",
+    )
+    sconfig.add_argument("--root", type=Path, default=Path("."))
+    sconfig.add_argument("--outdir", type=Path, default=Path("sconfig_results"))
+    sconfig.add_argument("--prior-out", type=Path, help="Optional thermo-prior JSON output path.")
+    sconfig.add_argument("--system", default="", help="System label, e.g. KCl-LiCl or UO2.")
+    sconfig.add_argument("--formula", default="", help="Formula label for unary or defect-compound priors.")
+    sconfig.add_argument("--components", default="", help="Comma-separated component labels for mixture priors.")
+    sconfig.add_argument("--phase", default="", help="Phase label, e.g. solid, liquid, fluorite, defective-fluorite.")
+    sconfig.add_argument("--temperature-k", type=float, help="Trajectory temperature in K.")
+    sconfig.add_argument("--composition", default="", help="Composition label for mixture or defect priors.")
+    sconfig.add_argument(
+        "--quality",
+        choices=("descriptor", "screening-prior", "production"),
+        default="descriptor",
+        help="Confidence tier for downstream thermo-prior use.",
+    )
+    sconfig.add_argument(
+        "--dump-stride-note",
+        default="Dense uniformly spaced NVT frames are required for Svib; Sconfig parsing records the SLUSCHI pair recommendation only.",
+        help="Trajectory/dump-stride note stored in the summary JSON.",
+    )
+
     return parser
 
 
@@ -737,8 +941,14 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
         return supersalt_example_main(args)
     if args.command == "parse":
         return parse_main(args)
+    if args.command == "sconfig":
+        return sconfig_main(args)
     build_parser().print_help()
     return None
+
+
+def sconfig_cli_main(argv: list[str] | None = None) -> dict[str, Any] | None:
+    return main(["sconfig", *(sys.argv[1:] if argv is None else argv)])
 
 
 if __name__ == "__main__":

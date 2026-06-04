@@ -434,6 +434,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         sluschi_bridge.add_argument("sluschi_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("lammps_sconfig", "lammps-sconfig"):
+        lammps_sconfig = subparsers.add_parser(
+            command_name,
+            help="Parse SLUSCHI configurational-entropy outputs from LAMMPS NVT trajectories.",
+        )
+        lammps_sconfig.add_argument("sconfig_args", nargs=argparse.REMAINDER)
+
     for command_name in ("paper-draft", "report-draft", "atomi-paper-draft"):
         paper_draft = subparsers.add_parser(
             command_name,
@@ -1109,6 +1116,11 @@ def main(argv: list[str] | None = None) -> None:
 
         sluschi_bridge_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("lammps_sconfig", "lammps-sconfig"):
+        from atomi.sluschi.bridge import main as sluschi_bridge_main
+
+        sluschi_bridge_main(["sconfig", *raw_args[1:]])
+        return
     if raw_args and raw_args[0] in ("atat-bridge", "atat_bridge"):
         from atomi.atat.bridge import main as atat_bridge_main
 
@@ -1722,6 +1734,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.sluschi.bridge import main as sluschi_bridge_main
 
         sluschi_bridge_main(args.sluschi_args)
+        return
+
+    if args.subcommand in ("lammps_sconfig", "lammps-sconfig"):
+        from atomi.sluschi.bridge import main as sluschi_bridge_main
+
+        sluschi_bridge_main(["sconfig", *args.sconfig_args])
         return
 
     if args.subcommand in ("atat-bridge", "atat_bridge"):
