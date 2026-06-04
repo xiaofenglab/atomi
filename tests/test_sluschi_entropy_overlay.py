@@ -116,6 +116,7 @@ def test_thermo_qha_md_can_use_sluschi_entropy_anchor():
         sluschi_entropy_anchor_tolerance=5.0,
         sluschi_entropy_csv=[Path("sluschi_entropy_summary.csv")],
         sluschi_entropy_kind="total",
+        sluschi_entropy_anchor_role="total",
         energy_basis="per-formula",
         target_z=4.0,
     )
@@ -130,3 +131,4 @@ def test_thermo_qha_md_can_use_sluschi_entropy_anchor():
     assert value == 72.58
     assert metadata["source"] == "SLUSCHI"
     assert metadata["used_as_entropy_anchor"] is True
+    assert metadata["anchor_role"] == "total"

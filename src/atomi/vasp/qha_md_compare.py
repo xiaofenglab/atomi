@@ -740,6 +740,7 @@ def resolve_entropy_anchor(
             "basis": args.energy_basis,
             "used_as_entropy_anchor": True,
             "used_for_blend_calibration": True,
+            "anchor_role": args.sluschi_entropy_anchor_role,
             "input_csv": [str(path.resolve()) for path in args.sluschi_entropy_csv],
             "kind": args.sluschi_entropy_kind,
             "reason": "SLUSCHI entropy selected as the entropy anchor source",
@@ -1014,6 +1015,12 @@ def apply_neel_correction_to_rows(
         return metadata
     if entropy_anchor_metadata.get("source") == "user":
         metadata["reason"] = "skipped because a direct experimental entropy anchor was supplied"
+        return metadata
+    if (
+        entropy_anchor_metadata.get("source") == "SLUSCHI"
+        and entropy_anchor_metadata.get("anchor_role") == "total"
+    ):
+        metadata["reason"] = "skipped because SLUSCHI was selected as a direct total-entropy anchor"
         return metadata
     entropy_scale = args.target_z if args.energy_basis == "target-cell" else 1.0
     delta_s = args.neel_entropy * entropy_scale
@@ -2674,6 +2681,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=25.0,
         help="Allowed nearest-point tolerance in K if the SLUSCHI entropy anchor cannot be interpolated.",
+    )
+    parser.add_argument(
+        "--sluschi-entropy-anchor-role",
+        choices=("total", "nonmagnetic"),
+        default="total",
+        help=(
+            "Meaning of the SLUSCHI entropy anchor. total treats it like an experimental "
+            "benchmark and skips extra Neel entropy; nonmagnetic adds Neel correction afterward."
+        ),
     )
     return parser
 
