@@ -22,6 +22,7 @@ SCHEMA_PLAN = "atomi.sluschi.bridge.plan.v1"
 SCHEMA_STATUS = "atomi.sluschi.bridge.status.v1"
 SCHEMA_RESULTS = "atomi.sluschi.bridge.results.v1"
 SCHEMA_SCONFIG = "atomi.sluschi.lammps_sconfig.v1"
+SCHEMA_ENTROPY_SUMMARY = "atomi.sluschi.lammps_entropy_summary.v1"
 
 DEFAULT_REPO = "https://github.com/qjhong/SLUSCHI.git"
 DEFAULT_SUPERSALT_REF = "SuperSalt chloride MLIP; install/provide externally, not vendored by Atomi."
@@ -67,6 +68,16 @@ def parse_csv_list(value: str | None) -> list[str]:
 
 def parse_float_list(value: str | None) -> list[float]:
     return [float(item) for item in parse_csv_list(value)]
+
+
+def parse_key_float_map(value: str | None) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for item in parse_csv_list(value):
+        if "=" not in item:
+            raise ValueError(f"Expected key=value item, got {item!r}")
+        key, raw = item.split("=", 1)
+        out[key.strip()] = float(raw)
+    return out
 
 
 def parse_composition_states(value: str | None) -> list[str]:
@@ -635,6 +646,149 @@ def sconfig_main(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def parse_sluschi_svib_from_text(text: str) -> tuple[list[float], str]:
+    svib_lines = []
+    for line in text.splitlines():
+        match = re.search(r"Svib:\s+(.+)", line)
+        if not match:
+            continue
+        values = []
+        for token in match.group(1).split():
+            try:
+                values.append(float(token))
+            except ValueError:
+                break
+        if values:
+            svib_lines.append((values, line.strip()))
+    for values, line in svib_lines:
+        if "constrained" in line.lower():
+            return values, line
+    for values, line in svib_lines:
+        lowered = line.lower()
+        if "use this value" in lowered and "do not use" not in lowered:
+            return values, line
+    if svib_lines:
+        return svib_lines[-1]
+    return [], ""
+
+
+def load_collect_text(root: Path, collect_path: Path | None = None) -> tuple[str, Path | None]:
+    candidates = [collect_path] if collect_path else [
+        root / "collect.stdout",
+        root / "collect.out",
+        root / "sluschi_collect.out",
+        root / "entropy" / "entropy.out",
+    ]
+    chunks = []
+    used: list[Path] = []
+    for path in candidates:
+        if path and path.is_file():
+            chunks.append(path.read_text(encoding="utf-8", errors="replace"))
+            used.append(path)
+    return "\n".join(chunks), used[0] if used else None
+
+
+def type_stoich_weights(args: argparse.Namespace, n_types: int) -> dict[int, float]:
+    raw = parse_key_float_map(args.type_stoich)
+    weights: dict[int, float] = {}
+    for key, value in raw.items():
+        key_clean = key.strip().lower().replace("type", "")
+        try:
+            idx = int(key_clean)
+        except ValueError as exc:
+            raise ValueError(f"--type-stoich keys must be type indices such as 1=2,2=1; got {key!r}") from exc
+        weights[idx] = value
+    if not weights and args.atoms_per_formula:
+        if n_types == 1:
+            weights[1] = args.atoms_per_formula
+        else:
+            weights = {idx: args.atoms_per_formula / n_types for idx in range(1, n_types + 1)}
+    if not weights:
+        weights = {idx: 1.0 for idx in range(1, n_types + 1)}
+    missing = [idx for idx in range(1, n_types + 1) if idx not in weights]
+    if missing:
+        raise ValueError(f"--type-stoich is missing type(s): {missing}")
+    return weights
+
+
+def entropy_summary_main(args: argparse.Namespace) -> dict[str, Any]:
+    root = args.root.resolve()
+    text, collect_used = load_collect_text(root, args.collect)
+    if not text.strip():
+        raise FileNotFoundError(f"No collect/entropy text found under {root}")
+    svib_values, svib_line = parse_sluschi_svib_from_text(text)
+    pairs = parse_sconfig_pairs(root)
+    summary_ns = argparse.Namespace(
+        root=root,
+        system=args.system,
+        formula=args.formula,
+        components=args.components,
+        phase=args.phase,
+        temperature_k=args.temperature_k,
+        composition=args.composition,
+        quality=args.quality,
+        dump_stride_note=args.dump_stride_note,
+    )
+    sconfig_summary = summarize_sconfig_case(summary_ns, pairs)
+    weights = type_stoich_weights(args, len(svib_values)) if svib_values else {}
+    atoms_per_formula = sum(weights.values()) if weights else (args.atoms_per_formula or None)
+    svib_formula = sum(weights[idx] * svib_values[idx - 1] for idx in weights) if svib_values else None
+    sconf_atom = sconfig_summary.get("mean_pair_sconfig_J_mol_atom_K")
+    sconf_sem_atom = sconfig_summary.get("sem_pair_sconfig_J_mol_atom_K")
+    sconf_formula = sconf_atom * atoms_per_formula if sconf_atom is not None and atoms_per_formula else None
+    sconf_sem_formula = sconf_sem_atom * atoms_per_formula if sconf_sem_atom is not None and atoms_per_formula else None
+    total = (svib_formula or 0.0) + (sconf_formula or 0.0) if svib_formula is not None or sconf_formula is not None else None
+    row: dict[str, Any] = {
+        "temperature_K": args.temperature_k,
+        "system": args.system,
+        "formula": args.formula,
+        "phase": args.phase,
+        "composition": args.composition,
+        "atoms_per_formula": atoms_per_formula,
+        "Svib_J_mol_formula_K": svib_formula,
+        "Sconf_J_mol_formula_K": sconf_formula,
+        "Sconf_stderr_J_mol_formula_K": sconf_sem_formula,
+        "Stotal_J_mol_formula_K": total,
+        "total_entropy_stderr_J_mol_formula_K": sconf_sem_formula,
+        "quality": args.quality,
+        "source": str(root),
+        "collect_file": str(collect_used) if collect_used else "",
+        "svib_line": svib_line,
+    }
+    for idx, value in enumerate(svib_values, start=1):
+        row[f"Svib_type{idx}_J_mol_atom_K"] = value
+        row[f"type{idx}_stoich"] = weights.get(idx, "")
+    outdir = args.outdir.resolve()
+    outdir.mkdir(parents=True, exist_ok=True)
+    summary_csv = outdir / "sluschi_entropy_summary.csv"
+    fields = list(row)
+    write_csv(summary_csv, [row], fields)
+    write_csv(
+        outdir / "lammps_sconfig_pairs.csv",
+        [pair.__dict__ for pair in pairs],
+        ["file", "pair", "state", "recommended_statistic", "sconfig_J_mol_atom_K", "line"],
+    )
+    payload = {
+        "schema": SCHEMA_ENTROPY_SUMMARY,
+        "root": str(root),
+        "collect_file": str(collect_used) if collect_used else None,
+        "n_svib_types": len(svib_values),
+        "n_pair_recommendations": len(pairs),
+        "type_stoich": {str(key): value for key, value in weights.items()},
+        "outputs": {"summary_csv": str(summary_csv)},
+        "summary": row,
+        "sconfig_summary": sconfig_summary,
+        "notes": [
+            "Svib values are taken from the constrained/use-this-value SLUSCHI line when present.",
+            "Sconf is the mean SLUSCHI pair recommendation multiplied by atoms_per_formula.",
+            "For production entropy, validate dense NVT sampling, type ordering, and SLUSCHI frame spacing.",
+        ],
+    }
+    write_json(outdir / "sluschi_entropy_summary.json", payload)
+    print(f"Wrote SLUSCHI entropy summary: {summary_csv}")
+    return payload
+
+
 def infer_phase(path: Path, line: str, default: str = "") -> str:
     haystack = f"{path} {line}".lower()
     if "coexist" in haystack or "solid-liquid" in haystack or "solid_liquid" in haystack:
@@ -943,6 +1097,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Trajectory/dump-stride note stored in the summary JSON.",
     )
 
+    entropy = sub.add_parser(
+        "entropy-summary",
+        help="Parse constrained SLUSCHI Svib plus Sconf from one prepared LAMMPS NVT postprocess folder.",
+    )
+    entropy.add_argument("--root", type=Path, default=Path("."))
+    entropy.add_argument("--collect", type=Path, default=None, help="Optional collect.stdout/entropy.out path.")
+    entropy.add_argument("--outdir", type=Path, default=Path("sluschi_entropy_results"))
+    entropy.add_argument("--system", default="", help="System label, e.g. UO2.")
+    entropy.add_argument("--formula", default="", help="Formula label, e.g. UO2.")
+    entropy.add_argument("--components", default="", help="Comma-separated component labels for mixture priors.")
+    entropy.add_argument("--phase", default="", help="Phase label, e.g. fluorite, liquid.")
+    entropy.add_argument("--temperature-k", type=float, required=True, help="NVT trajectory temperature in K.")
+    entropy.add_argument("--composition", default="", help="Composition label for mixture or defect priors.")
+    entropy.add_argument(
+        "--type-stoich",
+        default="",
+        help="LAMMPS/SLUSCHI type stoichiometry per formula, e.g. UO2 with type1=O,type2=U uses '1=2,2=1'.",
+    )
+    entropy.add_argument(
+        "--atoms-per-formula",
+        type=float,
+        default=None,
+        help="Fallback atoms per formula if --type-stoich is omitted. For multiple types this evenly weights types.",
+    )
+    entropy.add_argument(
+        "--quality",
+        choices=("descriptor", "screening-prior", "production"),
+        default="screening-prior",
+        help="Confidence tier for downstream thermo-prior use.",
+    )
+    entropy.add_argument(
+        "--dump-stride-note",
+        default="Svib requires dense uniformly spaced NVT frames; this command parses existing SLUSCHI postprocess output only.",
+        help="Trajectory/dump-stride note stored in the summary JSON.",
+    )
+
     return parser
 
 
@@ -958,12 +1148,18 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
         return parse_main(args)
     if args.command == "sconfig":
         return sconfig_main(args)
+    if args.command == "entropy-summary":
+        return entropy_summary_main(args)
     build_parser().print_help()
     return None
 
 
 def sconfig_cli_main(argv: list[str] | None = None) -> dict[str, Any] | None:
     return main(["sconfig", *(sys.argv[1:] if argv is None else argv)])
+
+
+def entropy_summary_cli_main(argv: list[str] | None = None) -> dict[str, Any] | None:
+    return main(["entropy-summary", *(sys.argv[1:] if argv is None else argv)])
 
 
 if __name__ == "__main__":

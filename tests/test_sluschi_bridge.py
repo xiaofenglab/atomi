@@ -258,6 +258,53 @@ def test_confighpc_exports_sluschi_profile_values(tmp_path: Path):
     assert "ATOMI_SLUSCHI_BIN=/home/user/SLUSCHI/src" in env_text
     assert "ATOMI_SUPERSALT_MODEL=/models/supersalt.pt" in env_text
     assert "ATOMI_MLIP_PROVIDER=SuperSalt" in env_text
+
+
+def test_sluschi_entropy_summary_combines_svib_and_sconf(tmp_path: Path):
+    root = tmp_path / "run01"
+    root.mkdir()
+    (root / "collect.stdout").write_text(
+        "\n".join(
+            [
+                "Svib:  13.1601 47.1196  J/K/mol atom. Do NOT use this value.",
+                "Svib:  13.0397 46.4997  Constrained by ideal gas entropy. Use this value, not the line above.",
+                "The pair between element 1-1 appears to be solid. I suggest that you take the minimum: -4.157e-05",
+                "The pair between element 1-2 appears to be solid. I suggest that you take the minimum: -4.157e-05",
+                "The pair between element 2-1 appears to be solid. I suggest that you take the minimum: -4.157e-05",
+                "The pair between element 2-2 appears to be solid. I suggest that you take the minimum: -4.157e-05",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "entropy"
+
+    result = bridge.main(
+        [
+            "entropy-summary",
+            "--root",
+            str(root),
+            "--outdir",
+            str(out),
+            "--system",
+            "UO2",
+            "--formula",
+            "UO2",
+            "--phase",
+            "fluorite",
+            "--temperature-k",
+            "300",
+            "--type-stoich",
+            "1=2,2=1",
+        ]
+    )
+
+    data = rows(out / "sluschi_entropy_summary.csv")
+    assert result["schema"] == bridge.SCHEMA_ENTROPY_SUMMARY
+    assert data[0]["Svib_J_mol_formula_K"] == "72.5791"
+    assert data[0]["Sconf_J_mol_formula_K"] == "-0.00012471"
+    assert data[0]["Stotal_J_mol_formula_K"] == "72.57897529"
+    assert data[0]["Svib_type1_J_mol_atom_K"] == "13.0397"
+    assert data[0]["type1_stoich"] == "2.0"
     assert "ATOMI_LMP_EXE=/apps/lammps/bin/lmp" in env_text
     assert "ATOMI_SLUSCHI_ENV=/envs/m_lammps_env" in env_text
     assert "ATOMI_SLUSCHI_LAMMPS_PREFIX=/apps/lammps" in env_text
