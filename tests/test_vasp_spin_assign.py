@@ -63,6 +63,23 @@ def write_u_o_poscar(path: Path) -> None:
     )
 
 
+def write_u8_o2_poscar(path: Path) -> None:
+    path.write_text(
+        "U8 O2 target\n"
+        "1.0\n"
+        "8 0 0\n"
+        "0 8 0\n"
+        "0 0 8\n"
+        "U O\n"
+        "8 2\n"
+        "Direct\n"
+        + "".join(f"{0.1 * i:.8f} 0.00000000 0.00000000\n" for i in range(8))
+        + "0.10000000 0.50000000 0.50000000\n"
+        + "0.20000000 0.50000000 0.50000000\n",
+        encoding="utf-8",
+    )
+
+
 def write_o_u_cif(path: Path) -> None:
     path.write_text(
         "data_ou\n"
@@ -232,6 +249,53 @@ def test_assign_spins_uses_template_poscar_for_incar_ldau_order(tmp_path: Path) 
     assert plan["source_species_order"] == ["U", "O"]
     assert plan["source_incar_species_order"] == ["O", "U"]
     assert plan["output_species_order"] == ["U", "O"]
+
+
+def test_assign_spins_can_seed_balance_existing_magmom_counts(tmp_path: Path) -> None:
+    poscar = tmp_path / "POSCAR"
+    incar = tmp_path / "INCAR"
+    out = tmp_path / "balanced"
+    write_u8_o2_poscar(poscar)
+    incar.write_text(
+        "ENCUT = 520\n"
+        "MAGMOM = 2 -2 1 -1 1 -1 2 -2 2*0\n",
+        encoding="utf-8",
+    )
+
+    spin_assign_main(
+        [
+            "--poscar",
+            str(poscar),
+            "--incar",
+            str(incar),
+            "--outdir",
+            str(out),
+            "--species-order",
+            "U,O",
+            "--base-magmom-from-incar",
+            "--special-moment",
+            "U:3-4=2",
+            "--balance-moment",
+            "U:1=4,2=4",
+            "--balance-seed",
+            "20260605",
+            "--magnetic-order",
+            "afm",
+        ]
+    )
+
+    moments = existing_magmom_values(out / "INCAR", 10)
+    assert moments is not None
+    u_moments = moments[:8]
+    assert u_moments[2:4] == pytest.approx([2, -2])
+    assert sum(1 for value in u_moments if abs(value) == 1) == 4
+    assert sum(1 for value in u_moments if abs(value) == 2) == 4
+    assert moments[8:] == pytest.approx([0, 0])
+    plan = json.loads((out / "spin_assignment_plan.json").read_text(encoding="utf-8"))
+    assert plan["base_magmom_from_incar"] is True
+    assert plan["balance_rules"] == {"U": {"1.0": 4, "2.0": 4}}
+    assert len(plan["balance_changes"]) == 2
+    assert {change["element_index_1based"] for change in plan["balance_changes"]}.isdisjoint({3, 4})
 
 
 def test_assign_spins_atomi_alias(tmp_path: Path) -> None:

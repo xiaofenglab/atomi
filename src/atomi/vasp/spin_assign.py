@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
 import re
 import shutil
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from pathlib import Path
 from atomi.vasp.magmom import (
     PoscarStructure,
     PoscarSpecies,
+    existing_magmom_values,
     find_magmom_line,
     format_magmom_line,
     parse_element_list,
@@ -34,6 +36,12 @@ class MomentRule:
     symbol: str
     ranges: list[tuple[int, int]]
     magnitude: float
+
+
+@dataclass(frozen=True)
+class BalanceRule:
+    symbol: str
+    targets: dict[float, int]
 
 
 def atom_symbols(species: PoscarSpecies) -> list[str]:
@@ -252,6 +260,28 @@ def parse_moment_rule(raw: str) -> MomentRule:
     return MomentRule(symbol=symbol.strip(), ranges=parse_index_ranges(ranges), magnitude=abs(float(value)))
 
 
+def parse_balance_rule(raw: str) -> BalanceRule:
+    if ":" not in raw:
+        raise ValueError(f"Expected balance rule like U:1=60,2=68, got {raw!r}.")
+    symbol, body = raw.split(":", 1)
+    targets: dict[float, int] = {}
+    for part in body.replace(";", ",").split(","):
+        text = part.strip()
+        if not text:
+            continue
+        if "=" not in text:
+            raise ValueError(f"Expected moment=count in balance rule {raw!r}, got {text!r}.")
+        moment_text, count_text = text.split("=", 1)
+        magnitude = abs(float(moment_text))
+        count = int(count_text)
+        if count < 0:
+            raise ValueError(f"Balance count must be non-negative in {raw!r}.")
+        targets[magnitude] = count
+    if not targets:
+        raise ValueError(f"Balance rule has no targets: {raw!r}.")
+    return BalanceRule(symbol=symbol.strip(), targets=targets)
+
+
 def special_rule_indices(rules: list[MomentRule]) -> dict[str, dict[int, float]]:
     by_symbol: dict[str, dict[int, float]] = {}
     for rule in rules:
@@ -260,6 +290,15 @@ def special_rule_indices(rules: list[MomentRule]) -> dict[str, dict[int, float]]
             for index in range(start, end + 1):
                 target[index] = rule.magnitude
     return by_symbol
+
+
+def protected_element_indices(rules: list[MomentRule]) -> dict[str, set[int]]:
+    protected: dict[str, set[int]] = {}
+    for rule in rules:
+        target = protected.setdefault(rule.symbol, set())
+        for start, end in rule.ranges:
+            target.update(range(start, end + 1))
+    return protected
 
 
 def default_species_order(
@@ -306,12 +345,50 @@ def afm_sign(index_within_element: int) -> float:
     return 1.0 if index_within_element % 2 == 1 else -1.0
 
 
+def sign_for_order(magnetic_order: str, occurrence: int, current_value: float | None = None) -> float:
+    if magnetic_order in {"afm", "afm-like", "afmlike"}:
+        return afm_sign(occurrence)
+    if magnetic_order in {"fm", "positive"}:
+        return 1.0
+    if magnetic_order == "negative":
+        return -1.0
+    if magnetic_order == "preserve-sign" and current_value is not None and abs(current_value) > 1.0e-12:
+        return 1.0 if current_value > 0.0 else -1.0
+    raise ValueError(f"Unsupported magnetic order: {magnetic_order!r}.")
+
+
+def map_moments_between_species(
+    values: list[float],
+    value_species: PoscarSpecies,
+    target_symbols: list[str],
+) -> list[float]:
+    by_symbol: dict[str, list[float]] = {}
+    cursor = 0
+    for symbol, count in zip(value_species.symbols, value_species.counts):
+        by_symbol.setdefault(symbol, []).extend(values[cursor : cursor + count])
+        cursor += count
+    mapped: list[float] = []
+    used: dict[str, int] = {}
+    for symbol in target_symbols:
+        index = used.get(symbol, 0)
+        available = by_symbol.get(symbol, [])
+        if index >= len(available):
+            raise ValueError(
+                f"Existing INCAR MAGMOM cannot be mapped: missing {symbol} "
+                f"occurrence {index + 1} in source species order {value_species.symbols}."
+            )
+        mapped.append(available[index])
+        used[symbol] = index + 1
+    return mapped
+
+
 def ordered_moments(
     source_symbols: list[str],
     output_indices: list[int],
     default_moments: dict[str, float],
     rules: list[MomentRule],
     magnetic_order: str,
+    base_moments: list[float] | None = None,
 ) -> tuple[list[float], list[dict[str, object]]]:
     special = special_rule_indices(rules)
     source_occurrence: dict[str, int] = {}
@@ -334,19 +411,16 @@ def ordered_moments(
     assigned_rules: list[dict[str, object]] = []
     for index, symbol in enumerate(source_symbols):
         occurrence = source_occurrences[index]
-        magnitude = abs(default_moments.get(symbol, 0.0))
+        magnitude = abs(base_moments[index]) if base_moments is not None else abs(default_moments.get(symbol, 0.0))
         rule_applied = False
         if occurrence in special.get(symbol, {}):
             magnitude = special[symbol][occurrence]
             rule_applied = True
-        if magnetic_order in {"afm", "afm-like", "afmlike"}:
-            sign = afm_sign(occurrence)
-        elif magnetic_order in {"fm", "positive"}:
-            sign = 1.0
-        elif magnetic_order == "negative":
-            sign = -1.0
-        else:
-            raise ValueError(f"Unsupported magnetic order: {magnetic_order!r}.")
+        sign = sign_for_order(
+            magnetic_order,
+            occurrence,
+            None if base_moments is None else base_moments[index],
+        )
         value = 0.0 if magnitude == 0.0 else sign * magnitude
         moments_by_source.append(value)
         if rule_applied:
@@ -359,6 +433,91 @@ def ordered_moments(
                 }
             )
     return [moments_by_source[index] for index in output_indices], assigned_rules
+
+
+def apply_balance_rules(
+    species: PoscarSpecies,
+    moments: list[float],
+    rules: list[BalanceRule],
+    *,
+    seed: int,
+    magnetic_order: str,
+    protected: dict[str, set[int]],
+    tol: float = 1.0e-6,
+) -> tuple[list[float], list[dict[str, object]]]:
+    if not rules:
+        return moments, []
+    rng = random.Random(seed)
+    balanced = list(moments)
+    changes: list[dict[str, object]] = []
+    cursor = 0
+    starts: dict[str, int] = {}
+    counts: dict[str, int] = {}
+    for symbol, count in zip(species.symbols, species.counts):
+        starts[symbol] = cursor
+        counts[symbol] = count
+        cursor += count
+
+    for rule in rules:
+        if rule.symbol not in starts:
+            raise ValueError(f"Balance rule references absent element {rule.symbol!r}.")
+        start = starts[rule.symbol]
+        count = counts[rule.symbol]
+        protected_indices = protected.get(rule.symbol, set())
+
+        def current_counts() -> dict[float, int]:
+            observed: dict[float, int] = {magnitude: 0 for magnitude in rule.targets}
+            for value in balanced[start : start + count]:
+                magnitude = round(abs(value), 6)
+                observed[magnitude] = observed.get(magnitude, 0) + 1
+            return observed
+
+        observed = current_counts()
+        if sum(rule.targets.values()) > count:
+            raise ValueError(
+                f"Balance targets for {rule.symbol} request {sum(rule.targets.values())} "
+                f"atoms but only {count} are present."
+            )
+        for target_magnitude, target_count in sorted(rule.targets.items()):
+            observed = current_counts()
+            deficit = target_count - observed.get(round(target_magnitude, 6), 0)
+            if deficit <= 0:
+                continue
+            donors: list[int] = []
+            for occurrence in range(1, count + 1):
+                if occurrence in protected_indices:
+                    continue
+                value = balanced[start + occurrence - 1]
+                current_magnitude = round(abs(value), 6)
+                if abs(current_magnitude - target_magnitude) <= tol:
+                    continue
+                donor_target = rule.targets.get(current_magnitude)
+                if donor_target is None or observed.get(current_magnitude, 0) > donor_target:
+                    donors.append(occurrence)
+            if len(donors) < deficit:
+                raise ValueError(
+                    f"Cannot balance {rule.symbol} to |MAGMOM|={target_magnitude}: "
+                    f"need {deficit} donor sites, found {len(donors)} after protecting "
+                    f"{sorted(protected_indices)}."
+                )
+            selected = sorted(rng.sample(donors, deficit))
+            for occurrence in selected:
+                atom_index = start + occurrence - 1
+                old_value = balanced[atom_index]
+                sign = sign_for_order(magnetic_order, occurrence, old_value)
+                new_value = 0.0 if target_magnitude == 0.0 else sign * target_magnitude
+                balanced[atom_index] = new_value
+                changes.append(
+                    {
+                        "element": rule.symbol,
+                        "element_index_1based": occurrence,
+                        "output_atom_index_1based": atom_index + 1,
+                        "old_moment": old_value,
+                        "new_moment": new_value,
+                        "reason": f"seeded_balance_to_{target_magnitude:g}",
+                    }
+                )
+    return balanced, changes
 
 
 def replace_or_append_magmom_text(text: str, magmom_line: str) -> str:
@@ -455,6 +614,9 @@ def assign_spins(
     species_order: list[str] | None = None,
     default_moments: dict[str, float] | None = None,
     moment_rules: list[MomentRule] | None = None,
+    balance_rules: list[BalanceRule] | None = None,
+    balance_seed: int = 12345,
+    base_magmom_from_incar: bool = False,
     magnetic_order: str = "afm",
     magmom_decimals: int = 3,
     comment_nupdown: bool = True,
@@ -473,12 +635,35 @@ def assign_spins(
     order = species_order or default_species_order(structure.species, cation_order, cation_set, anion_set)
     output_species, output_indices = grouped_species_and_indices(source_symbols, order)
     output_positions = [structure.scaled_positions[index] for index in output_indices]
+    source_incar = incar if incar is not None else (poscar.parent / "INCAR" if (poscar.parent / "INCAR").is_file() else None)
+    incar_species, incar_species_source = infer_incar_species(
+        source_incar,
+        structure.species,
+        incar_poscar=incar_poscar,
+    )
+    base_moments: list[float] | None = None
+    if base_magmom_from_incar:
+        if source_incar is None:
+            raise ValueError("--base-magmom-from-incar requires --incar or an INCAR beside --poscar.")
+        raw_base = existing_magmom_values(source_incar, incar_species.total_atoms)
+        if raw_base is None:
+            raise ValueError(f"Could not parse MAGMOM from source INCAR: {source_incar}")
+        base_moments = map_moments_between_species(raw_base, incar_species, source_symbols)
     moments, assigned_rules = ordered_moments(
         source_symbols,
         output_indices,
         default_moments or {},
         moment_rules or [],
         magnetic_order,
+        base_moments=base_moments,
+    )
+    moments, balance_changes = apply_balance_rules(
+        output_species,
+        moments,
+        balance_rules or [],
+        seed=balance_seed,
+        magnetic_order=magnetic_order,
+        protected=protected_element_indices(moment_rules or []),
     )
     selected = [symbol for symbol, entry in summarize_moments(output_species, moments).items() if entry["unique_abs_moments"] != [0.0]]
     magmom_line = format_magmom_line(
@@ -500,12 +685,6 @@ def assign_spins(
             output_positions,
         ),
         encoding="utf-8",
-    )
-    source_incar = incar if incar is not None else (poscar.parent / "INCAR" if (poscar.parent / "INCAR").is_file() else None)
-    incar_species, incar_species_source = infer_incar_species(
-        source_incar,
-        structure.species,
-        incar_poscar=incar_poscar,
     )
     output_incar.write_text(
         write_incar(
@@ -533,7 +712,14 @@ def assign_spins(
         "output_species_counts": dict(zip(output_species.symbols, output_species.counts)),
         "magnetic_order": magnetic_order,
         "default_moments": default_moments or {},
+        "base_magmom_from_incar": base_magmom_from_incar,
         "special_rule_atoms": assigned_rules,
+        "balance_rules": {
+            rule.symbol: {str(moment): count for moment, count in rule.targets.items()}
+            for rule in (balance_rules or [])
+        },
+        "balance_seed": balance_seed,
+        "balance_changes": balance_changes,
         "magmom_count": len(moments),
         "expected_magmom_count": output_species.total_atoms,
         "magmom_count_ok": len(moments) == output_species.total_atoms,
@@ -579,9 +765,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Element-index range override, e.g. U:9-14,94-98,117-122=1.",
     )
     parser.add_argument(
+        "--base-magmom-from-incar",
+        action="store_true",
+        help=(
+            "Use the source INCAR MAGMOM as the starting moment pattern before "
+            "applying --special-moment overrides and seeded balancing."
+        ),
+    )
+    parser.add_argument(
+        "--balance-moment",
+        action="append",
+        default=[],
+        help=(
+            "Seed-balance target absolute moment counts by element, e.g. "
+            "U:1=60,2=68. Explicit --special-moment sites are protected."
+        ),
+    )
+    parser.add_argument(
+        "--balance-seed",
+        type=int,
+        default=12345,
+        help="Random seed for --balance-moment donor-site selection.",
+    )
+    parser.add_argument(
         "--magnetic-order",
         default="afm",
-        choices=("afm", "afm-like", "afmlike", "fm", "positive", "negative"),
+        choices=("afm", "afm-like", "afmlike", "fm", "positive", "negative", "preserve-sign"),
         help="Sign pattern for nonzero moments. Default: afm, alternating by element occurrence.",
     )
     parser.add_argument("--magmom-decimals", type=int, default=3)
@@ -605,6 +814,9 @@ def main(argv: list[str] | None = None) -> None:
         species_order=parse_element_list(args.species_order),
         default_moments=parse_key_values(args.moment),
         moment_rules=[parse_moment_rule(item) for item in args.special_moment],
+        balance_rules=[parse_balance_rule(item) for item in args.balance_moment],
+        balance_seed=args.balance_seed,
+        base_magmom_from_incar=args.base_magmom_from_incar,
         magnetic_order=args.magnetic_order,
         magmom_decimals=args.magmom_decimals,
         comment_nupdown=not args.keep_nupdown,
@@ -626,6 +838,11 @@ def main(argv: list[str] | None = None) -> None:
         )
     if result.summary["special_rule_atoms"]:
         print(f"Special atoms : {len(result.summary['special_rule_atoms'])}")
+    if result.summary["balance_changes"]:
+        print(
+            f"Balance swaps : {len(result.summary['balance_changes'])} "
+            f"(seed={result.summary['balance_seed']})"
+        )
 
 
 if __name__ == "__main__":
