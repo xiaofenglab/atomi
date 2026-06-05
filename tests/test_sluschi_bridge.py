@@ -226,6 +226,99 @@ def test_sluschi_cp2k_prep_writes_native_entropy_inputs(tmp_path: Path):
     assert manifest["counts"] == {"Cl": 2, "K": 2}
 
 
+def test_sluschi_vasp_prep_writes_native_entropy_inputs(tmp_path: Path):
+    poscar = tmp_path / "POSCAR"
+    poscar.write_text(
+        "\n".join(
+            [
+                "KCl AIMD",
+                "1.0",
+                "2.0 0.0 0.0",
+                "0.0 2.0 0.0",
+                "0.0 0.0 2.0",
+                "K Cl",
+                "2 2",
+                "Direct",
+                "0.0 0.0 0.0",
+                "0.0 0.5 0.0",
+                "0.5 0.0 0.0",
+                "0.5 0.5 0.0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    xdatcar = tmp_path / "XDATCAR"
+    xdatcar.write_text(
+        "\n".join(
+            [
+                "KCl AIMD",
+                "1.0",
+                "2.0 0.0 0.0",
+                "0.0 2.0 0.0",
+                "0.0 0.0 2.0",
+                "K Cl",
+                "2 2",
+                "Direct configuration=     1",
+                "0.0 0.0 0.0",
+                "0.0 0.5 0.0",
+                "0.5 0.0 0.0",
+                "0.5 0.5 0.0",
+                "Direct configuration=     2",
+                "0.1 0.0 0.0",
+                "0.0 0.6 0.0",
+                "0.6 0.0 0.0",
+                "0.5 0.6 0.0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "vasp_prep"
+
+    result = bridge.main(
+        [
+            "vasp-prep",
+            "--poscar",
+            str(poscar),
+            "--xdatcar",
+            str(xdatcar),
+            "--outdir",
+            str(out),
+            "--temperature-k",
+            "1250",
+            "--phase",
+            "liquid",
+            "--timestep-fs",
+            "1",
+            "--frame-stride-md-steps",
+            "5",
+        ]
+    )
+
+    assert result["schema"] == bridge.SCHEMA_VASP_PREP
+    assert result["n_selected_frames"] == 2
+    assert result["sluschi_step_ps"] == 0.005
+    assert (out / "phase_temp").read_text(encoding="utf-8").strip() == "liquid_1250"
+    assert (out / "param").read_text(encoding="utf-8").splitlines()[:7] == [
+        "2",
+        "2 2",
+        "39.0983",
+        "35.453",
+        "0.005",
+        "4",
+        "K",
+    ]
+    assert len((out / "latt").read_text(encoding="utf-8").splitlines()) == 6
+    pos_lines = (out / "pos").read_text(encoding="utf-8").splitlines()
+    assert len(pos_lines) == 8
+    assert pos_lines[0].startswith("0 ")
+    assert pos_lines[4].startswith("0.1 ")
+    manifest = json.loads((out / "sluschi_vasp_prep_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["source_engine"] == "vasp"
+    assert manifest["counts"] == {"Cl": 2, "K": 2}
+
+
 def test_sluschi_parse_collects_calphad_handoff_values(tmp_path: Path):
     root = tmp_path / "run"
     root.mkdir()

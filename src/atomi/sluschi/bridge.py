@@ -27,6 +27,7 @@ SCHEMA_PHASE_HEALTH = "atomi.sluschi.phase_health.v1"
 SCHEMA_WORKFLOW_GUIDE = "atomi.sluschi.workflow_guide.v1"
 SCHEMA_MELTING_ANCHOR = "atomi.sluschi.melting_anchor.v1"
 SCHEMA_CP2K_PREP = "atomi.sluschi.cp2k_prep.v1"
+SCHEMA_VASP_PREP = "atomi.sluschi.vasp_prep.v1"
 
 DEFAULT_REPO = "https://github.com/qjhong/SLUSCHI.git"
 DEFAULT_SUPERSALT_REF = "SuperSalt chloride MLIP; install/provide externally, not vendored by Atomi."
@@ -171,6 +172,100 @@ def read_cp2k_xyz_frames(path: Path) -> list[dict[str, Any]]:
                 coords.append([float(parts[1]), float(parts[2]), float(parts[3])])
             frames.append({"comment": comment, "symbols": symbols, "coords": coords})
     return frames
+
+
+def read_vasp_poscar_basis(path: Path) -> dict[str, Any]:
+    lines = [line.rstrip() for line in path.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip()]
+    if len(lines) < 8:
+        raise ValueError(f"POSCAR is too short: {path}")
+    scale = float(lines[1].split()[0])
+    lattice = [[float(value) * scale for value in lines[idx].split()[:3]] for idx in range(2, 5)]
+    token_line = lines[5].split()
+    if all(re.fullmatch(r"[-+]?\d+", token) for token in token_line):
+        raise ValueError("VASP4-style POSCAR without element symbols is not supported; pass a VASP5 POSCAR/XDATCAR header.")
+    elements = token_line
+    counts = [int(token) for token in lines[6].split()]
+    if len(elements) != len(counts):
+        raise ValueError(f"POSCAR element/count length mismatch in {path}")
+    symbols: list[str] = []
+    for element, count in zip(elements, counts):
+        symbols.extend([element] * count)
+    return {"lattice": lattice, "elements": elements, "counts": counts, "symbols": symbols, "natoms": sum(counts)}
+
+
+def read_vasp_xdatcar_frames(path: Path, natoms: int) -> list[list[list[float]]]:
+    lines = [line.strip() for line in path.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip()]
+    frames: list[list[list[float]]] = []
+    idx = 0
+    while idx < len(lines):
+        if lines[idx].lower().startswith("direct configuration"):
+            coords: list[list[float]] = []
+            for row in lines[idx + 1 : idx + 1 + natoms]:
+                parts = row.split()
+                if len(parts) < 3:
+                    break
+                coords.append([float(parts[0]) % 1.0, float(parts[1]) % 1.0, float(parts[2]) % 1.0])
+            if len(coords) == natoms:
+                frames.append(coords)
+            idx += natoms + 1
+        else:
+            idx += 1
+    return frames
+
+
+def write_sluschi_native_frames(
+    *,
+    outdir: Path,
+    elements: list[str],
+    counts: dict[str, int],
+    masses: dict[str, float],
+    lattice_frames: list[list[list[float]]],
+    symbol_frames: list[list[str]],
+    frac_frames: list[list[list[float]]],
+    step_interval_fs: float,
+    phase_temp_label: str = "",
+) -> dict[str, str]:
+    outdir.mkdir(parents=True, exist_ok=True)
+    if not frac_frames:
+        raise ValueError("No frames selected for SLUSCHI prep.")
+    natoms = len(frac_frames[0])
+    order = {element: idx for idx, element in enumerate(elements)}
+    with (outdir / "param").open("w", encoding="utf-8") as handle:
+        handle.write(f"{len(elements)}\n")
+        handle.write(" ".join(str(counts[element]) for element in elements) + "\n")
+        for element in elements:
+            handle.write(f"{masses[element]}\n")
+        handle.write(f"{step_interval_fs / 1000.0:.12g}\n")
+        handle.write(f"{natoms}\n")
+        for element in elements:
+            handle.write(f"{element}\n")
+        for _ in range(8):
+            handle.write("0.0\n")
+    with (outdir / "latt").open("w", encoding="utf-8") as latt, (outdir / "pos").open("w", encoding="utf-8") as pos, (
+        outdir / "step"
+    ).open("w", encoding="utf-8") as step:
+        for cell, symbols, frame in zip(lattice_frames, symbol_frames, frac_frames):
+            if len(symbols) != natoms or len(frame) != natoms:
+                raise ValueError("All selected frames must have the same atom count.")
+            for vector in cell:
+                latt.write(f"{vector[0]:.12g} {vector[1]:.12g} {vector[2]:.12g} 0 0 0\n")
+            atoms = sorted(zip(symbols, frame), key=lambda item: order[item[0]])
+            for symbol, frac in atoms:
+                if symbol not in order:
+                    raise ValueError(f"Frame contains element {symbol!r}, not listed in --elements={','.join(elements)!r}.")
+                pos.write(f"{frac[0] % 1.0:.12g} {frac[1] % 1.0:.12g} {frac[2] % 1.0:.12g} 0 0 0\n")
+            step.write(f"{step_interval_fs / 1000.0:.12g}\n")
+    outputs = {
+        "param": str(outdir / "param"),
+        "latt": str(outdir / "latt"),
+        "pos": str(outdir / "pos"),
+        "step": str(outdir / "step"),
+        "phase_temp": "",
+    }
+    if phase_temp_label:
+        (outdir / "phase_temp").write_text(f"{phase_temp_label}\n", encoding="utf-8")
+        outputs["phase_temp"] = str(outdir / "phase_temp")
+    return outputs
 
 
 def mat_det(matrix: list[list[float]]) -> float:
@@ -660,35 +755,23 @@ def cp2k_prep_main(args: argparse.Namespace) -> dict[str, Any]:
         timestep_fs = 1.0
     step_interval_fs = timestep_fs * args.frame_stride_md_steps
 
-    with (outdir / "param").open("w", encoding="utf-8") as handle:
-        handle.write(f"{len(elements)}\n")
-        handle.write(" ".join(str(counts[element]) for element in elements) + "\n")
-        for element in elements:
-            handle.write(f"{masses[element]}\n")
-        handle.write(f"{step_interval_fs / 1000.0:.12g}\n")
-        handle.write(f"{natoms}\n")
-        for element in elements:
-            handle.write(f"{element}\n")
-        for _ in range(8):
-            handle.write("0.0\n")
-
-    with (outdir / "latt").open("w", encoding="utf-8") as latt, (outdir / "pos").open("w", encoding="utf-8") as pos, (
-        outdir / "step"
-    ).open("w", encoding="utf-8") as step:
-        for frame_index, frame in enumerate(selected):
-            if len(frame["symbols"]) != natoms:
-                raise ValueError("All selected frames must have the same atom count.")
-            frame_cell = cell_from_xyz_comment(frame["comment"]) or cell
-            for vector in frame_cell:
-                latt.write(f"{vector[0]:.12g} {vector[1]:.12g} {vector[2]:.12g} 0 0 0\n")
-            atoms = sorted(zip(frame["symbols"], frame["coords"]), key=lambda item: order[item[0]])
-            for symbol, coord in atoms:
-                frac = cart_to_frac(coord, frame_cell)
-                pos.write(f"{frac[0] % 1.0:.12g} {frac[1] % 1.0:.12g} {frac[2] % 1.0:.12g} 0 0 0\n")
-            step.write(f"{step_interval_fs / 1000.0:.12g}\n")
-
-    if args.phase:
-        (outdir / "phase_temp").write_text(f"{args.phase}\n", encoding="utf-8")
+    lattice_frames = [cell_from_xyz_comment(frame["comment"]) or cell for frame in selected]
+    symbol_frames = [frame["symbols"] for frame in selected]
+    frac_frames = [
+        [cart_to_frac(coord, frame_cell) for coord in frame["coords"]]
+        for frame, frame_cell in zip(selected, lattice_frames)
+    ]
+    outputs = write_sluschi_native_frames(
+        outdir=outdir,
+        elements=elements,
+        counts=counts,
+        masses=masses,
+        lattice_frames=lattice_frames,
+        symbol_frames=symbol_frames,
+        frac_frames=frac_frames,
+        step_interval_fs=step_interval_fs,
+        phase_temp_label=args.phase,
+    )
     manifest = {
         "schema": SCHEMA_CP2K_PREP,
         "source_engine": "cp2k",
@@ -708,13 +791,7 @@ def cp2k_prep_main(args: argparse.Namespace) -> dict[str, Any]:
         "sluschi_step_ps": step_interval_fs / 1000.0,
         "phase": args.phase,
         "cell_angstrom": cell,
-        "outputs": {
-            "param": str(outdir / "param"),
-            "latt": str(outdir / "latt"),
-            "pos": str(outdir / "pos"),
-            "step": str(outdir / "step"),
-            "phase_temp": str(outdir / "phase_temp") if args.phase else "",
-        },
+        "outputs": outputs,
         "notes": [
             "This command prepares existing CP2K AIMD XYZ frames for the SLUSCHI entropy-prior lane.",
             "It does not run CP2K and it does not run true SLUSCHI coexistence/MPFit melting.",
@@ -723,6 +800,78 @@ def cp2k_prep_main(args: argparse.Namespace) -> dict[str, Any]:
     }
     write_json(outdir / "sluschi_cp2k_prep_manifest.json", manifest)
     print(f"Wrote CP2K-to-SLUSCHI prep files: {outdir}")
+    print(f"Selected frames: {len(selected)} / {len(frames)}")
+    return manifest
+
+
+def vasp_prep_main(args: argparse.Namespace) -> dict[str, Any]:
+    basis = read_vasp_poscar_basis(args.poscar)
+    elements = parse_element_list(args.elements) or list(basis["elements"])
+    masses = parse_element_mass_map(args.element_masses)
+    missing = [element for element in elements if element not in masses]
+    if missing:
+        raise ValueError(f"No masses available for element(s): {', '.join(missing)}")
+    natoms = int(basis["natoms"])
+    frames = read_vasp_xdatcar_frames(args.xdatcar, natoms)
+    if not frames:
+        raise ValueError(f"No Direct configuration frames found in XDATCAR: {args.xdatcar}")
+    start = max(args.start_frame, 0)
+    stop = args.stop_frame if args.stop_frame is not None else len(frames)
+    stride = max(args.stride, 1)
+    selected = frames[start:stop:stride]
+    if not selected:
+        raise ValueError("Frame selection is empty.")
+    counts = {element: 0 for element in elements}
+    for element, count in zip(basis["elements"], basis["counts"]):
+        if element not in counts:
+            raise ValueError(f"POSCAR contains element {element!r}, not listed in --elements={','.join(elements)!r}.")
+        counts[element] += int(count)
+    step_interval_fs = args.timestep_fs * args.frame_stride_md_steps
+    outdir = args.outdir.resolve()
+    phase_temp_label = args.phase_temp_label
+    if not phase_temp_label and args.phase:
+        phase_temp_label = f"{args.phase}_{int(round(args.temperature_k))}" if args.temperature_k is not None else args.phase
+    outputs = write_sluschi_native_frames(
+        outdir=outdir,
+        elements=elements,
+        counts=counts,
+        masses=masses,
+        lattice_frames=[basis["lattice"] for _ in selected],
+        symbol_frames=[basis["symbols"] for _ in selected],
+        frac_frames=selected,
+        step_interval_fs=step_interval_fs,
+        phase_temp_label=phase_temp_label,
+    )
+    manifest = {
+        "schema": SCHEMA_VASP_PREP,
+        "source_engine": "vasp",
+        "poscar": str(args.poscar.resolve()),
+        "xdatcar": str(args.xdatcar.resolve()),
+        "outdir": str(outdir),
+        "elements": elements,
+        "counts": counts,
+        "natoms": natoms,
+        "n_source_frames": len(frames),
+        "n_selected_frames": len(selected),
+        "start_frame": start,
+        "stop_frame": stop,
+        "stride": stride,
+        "timestep_fs": args.timestep_fs,
+        "frame_stride_md_steps": args.frame_stride_md_steps,
+        "sluschi_step_ps": step_interval_fs / 1000.0,
+        "temperature_K": args.temperature_k,
+        "phase": args.phase,
+        "phase_temp_label": phase_temp_label,
+        "cell_angstrom": basis["lattice"],
+        "outputs": outputs,
+        "notes": [
+            "This command prepares existing VASP XDATCAR AIMD frames for the SLUSCHI entropy-prior lane.",
+            "It does not run VASP and it does not run true SLUSCHI coexistence/MPFit melting.",
+            "For production entropy, validate thermostat equilibration, XDATCAR stride, phase health, and element order.",
+        ],
+    }
+    write_json(outdir / "sluschi_vasp_prep_manifest.json", manifest)
+    print(f"Wrote VASP XDATCAR-to-SLUSCHI prep files: {outdir}")
     print(f"Selected frames: {len(selected)} / {len(frames)}")
     return manifest
 
@@ -2019,6 +2168,37 @@ def build_parser() -> argparse.ArgumentParser:
     cp2k_prep.add_argument("--stride", type=int, default=1)
     cp2k_prep.add_argument("--phase", default="", help="Optional SLUSCHI phase label written to phase_temp, e.g. solid or liquid.")
 
+    vasp_prep = sub.add_parser(
+        "vasp-prep",
+        help="Prepare VASP XDATCAR frames as SLUSCHI pos/latt/step/param files.",
+    )
+    vasp_prep.add_argument("--poscar", type=Path, default=Path("POSCAR"), help="VASP POSCAR/CONTCAR with the XDATCAR atom basis.")
+    vasp_prep.add_argument("--xdatcar", type=Path, default=Path("XDATCAR"), help="VASP XDATCAR trajectory.")
+    vasp_prep.add_argument("--outdir", type=Path, default=Path("sluschi_vasp_prep"))
+    vasp_prep.add_argument("--elements", default="", help="Optional element order override, e.g. Na,U,Cl. Default: POSCAR order.")
+    vasp_prep.add_argument(
+        "--element-masses",
+        default="",
+        help="Optional Element=mass overrides, e.g. U=238.02891,Cl=35.453.",
+    )
+    vasp_prep.add_argument("--temperature-k", type=float, help="Trajectory temperature in K, used for manifest and default phase_temp label.")
+    vasp_prep.add_argument("--phase", default="", help="Optional phase label, e.g. solid or liquid.")
+    vasp_prep.add_argument(
+        "--phase-temp-label",
+        default="",
+        help="Exact phase_temp content. Default is '<phase>_<rounded temperature>' when both are provided, else phase.",
+    )
+    vasp_prep.add_argument("--timestep-fs", type=float, default=1.0, help="VASP POTIM timestep in fs.")
+    vasp_prep.add_argument(
+        "--frame-stride-md-steps",
+        type=float,
+        default=1.0,
+        help="MD steps between consecutive XDATCAR frames; usually NBLOCK or output stride.",
+    )
+    vasp_prep.add_argument("--start-frame", type=int, default=0)
+    vasp_prep.add_argument("--stop-frame", type=int)
+    vasp_prep.add_argument("--stride", type=int, default=1)
+
     parse = sub.add_parser("parse", help="Parse SLUSCHI-like text outputs for CALPHAD handoff observables.")
     parse.add_argument("--root", type=Path, default=Path("."))
     parse.add_argument("--outdir", type=Path, default=Path("results"))
@@ -2154,6 +2334,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
         return prep_scripts_main(args)
     if args.command == "cp2k-prep":
         return cp2k_prep_main(args)
+    if args.command == "vasp-prep":
+        return vasp_prep_main(args)
     if args.command == "parse":
         return parse_main(args)
     if args.command == "sconfig":
@@ -2190,6 +2372,10 @@ def melting_anchor_cli_main(argv: list[str] | None = None) -> None:
 
 def cp2k_prep_cli_main(argv: list[str] | None = None) -> None:
     main(["cp2k-prep", *(sys.argv[1:] if argv is None else argv)])
+
+
+def vasp_prep_cli_main(argv: list[str] | None = None) -> None:
+    main(["vasp-prep", *(sys.argv[1:] if argv is None else argv)])
 
 
 if __name__ == "__main__":
