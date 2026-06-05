@@ -6,6 +6,7 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -24,6 +25,7 @@ SCHEMA_RESULTS = "atomi.sluschi.bridge.results.v1"
 SCHEMA_SCONFIG = "atomi.sluschi.lammps_sconfig.v1"
 SCHEMA_ENTROPY_SUMMARY = "atomi.sluschi.lammps_entropy_summary.v1"
 SCHEMA_PHASE_HEALTH = "atomi.sluschi.phase_health.v1"
+SCHEMA_PHASE_WINDOW_SAMPLE = "atomi.sluschi.phase_window_sample.v1"
 SCHEMA_WORKFLOW_GUIDE = "atomi.sluschi.workflow_guide.v1"
 SCHEMA_MELTING_ANCHOR = "atomi.sluschi.melting_anchor.v1"
 SCHEMA_CP2K_PREP = "atomi.sluschi.cp2k_prep.v1"
@@ -703,6 +705,341 @@ def prep_scripts_main(args: argparse.Namespace) -> dict[str, Any]:
     print(f"Wrote SLUSCHI LAMMPS prep scripts: {outdir}")
     print(f"Type basis: {', '.join(f'{idx}={element}' for idx, element in type_elements.items())}")
     return manifest
+
+
+def _cell_lengths(cell: list[list[float]]) -> list[float]:
+    return [math.sqrt(sum(component * component for component in vector)) for vector in cell]
+
+
+def _cart_from_fractional(frac: list[float], cell: list[list[float]]) -> list[float]:
+    return [sum(frac[j] * cell[j][i] for j in range(3)) for i in range(3)]
+
+
+def _minimum_image(delta: list[float], lengths: list[float]) -> list[float]:
+    out = []
+    for value, length in zip(delta, lengths):
+        if length > 0.0:
+            value -= round(value / length) * length
+        out.append(value)
+    return out
+
+
+def _distance(a: list[float], b: list[float], lengths: list[float]) -> float:
+    delta = _minimum_image([a[i] - b[i] for i in range(3)], lengths)
+    return math.sqrt(sum(value * value for value in delta))
+
+
+def _mean(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def _std(values: list[float]) -> float | None:
+    if len(values) < 2:
+        return 0.0 if values else None
+    mean = sum(values) / len(values)
+    return math.sqrt(sum((value - mean) ** 2 for value in values) / (len(values) - 1))
+
+
+def parse_lammps_dump_frames(path: Path, type_elements: dict[int, str]) -> list[dict[str, Any]]:
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    frames: list[dict[str, Any]] = []
+    idx_line = 0
+    while idx_line < len(lines):
+        if not lines[idx_line].startswith("ITEM: TIMESTEP"):
+            idx_line += 1
+            continue
+        timestep = int(float(lines[idx_line + 1].strip()))
+        idx_line += 2
+        if not lines[idx_line].startswith("ITEM: NUMBER OF ATOMS"):
+            raise ValueError(f"Malformed LAMMPS dump near timestep {timestep}: missing atom count")
+        natoms = int(lines[idx_line + 1].strip())
+        idx_line += 2
+        if not lines[idx_line].startswith("ITEM: BOX BOUNDS"):
+            raise ValueError(f"Malformed LAMMPS dump near timestep {timestep}: missing box bounds")
+        bounds = []
+        for axis in range(3):
+            parts = lines[idx_line + 1 + axis].split()
+            lo, hi = float(parts[0]), float(parts[1])
+            bounds.append((lo, hi))
+        cell = [
+            [bounds[0][1] - bounds[0][0], 0.0, 0.0],
+            [0.0, bounds[1][1] - bounds[1][0], 0.0],
+            [0.0, 0.0, bounds[2][1] - bounds[2][0]],
+        ]
+        idx_line += 4
+        if not lines[idx_line].startswith("ITEM: ATOMS"):
+            raise ValueError(f"Malformed LAMMPS dump near timestep {timestep}: missing atom rows")
+        header = lines[idx_line].split()[2:]
+        col = {name: number for number, name in enumerate(header)}
+        idx_line += 1
+        atoms = []
+        for row_line in lines[idx_line : idx_line + natoms]:
+            parts = row_line.split()
+            atom_id = int(parts[col["id"]]) if "id" in col else len(atoms)
+            typ = int(parts[col["type"]])
+            symbol = type_elements.get(typ)
+            if symbol is None:
+                raise ValueError(f"LAMMPS dump uses type {typ}, missing from --type-elements")
+            if {"x", "y", "z"} <= set(col):
+                coords = [float(parts[col[axis]]) for axis in ("x", "y", "z")]
+            elif {"xu", "yu", "zu"} <= set(col):
+                coords = [float(parts[col[axis]]) for axis in ("xu", "yu", "zu")]
+            elif {"xs", "ys", "zs"} <= set(col):
+                frac = [float(parts[col[axis]]) for axis in ("xs", "ys", "zs")]
+                coords = [bounds[i][0] + frac[i] * (bounds[i][1] - bounds[i][0]) for i in range(3)]
+            else:
+                raise ValueError("LAMMPS dump must contain x/y/z, xu/yu/zu, or xs/ys/zs columns")
+            atoms.append((atom_id, symbol, coords))
+        idx_line += natoms
+        atoms.sort(key=lambda item: item[0])
+        frames.append(
+            {
+                "timestep": timestep,
+                "symbols": [item[1] for item in atoms],
+                "coords": [item[2] for item in atoms],
+                "cell": cell,
+            }
+        )
+    return frames
+
+
+def phase_window_frames_from_args(args: argparse.Namespace) -> list[dict[str, Any]]:
+    if args.engine == "lammps-dump":
+        type_elements = parse_type_element_map(args.type_elements)
+        frames = parse_lammps_dump_frames(args.trajectory, type_elements)
+    elif args.engine == "cp2k-xyz":
+        raw_frames = read_cp2k_xyz_frames(args.trajectory)
+        cell = None
+        if args.cell_vector:
+            vectors = [parse_cell_vector(item) for item in args.cell_vector]
+            if len(vectors) != 3:
+                raise ValueError("--cell-vector must be supplied exactly three times for A, B, C.")
+            cell = vectors
+        if cell is None:
+            cell = parse_cell_abc(args.cell)
+        if cell is None:
+            cell = cell_from_cp2k_input(args.inp)
+        if cell is None and raw_frames:
+            cell = cell_from_xyz_comment(raw_frames[0].get("comment", ""))
+        if cell is None:
+            raise ValueError("CP2K XYZ sampling needs --cell, three --cell-vector values, --inp, or extxyz Lattice metadata.")
+        frames = [
+            {"timestep": index, "symbols": frame["symbols"], "coords": frame["coords"], "cell": cell}
+            for index, frame in enumerate(raw_frames)
+        ]
+    elif args.engine == "vasp-xdatcar":
+        if args.poscar is None:
+            raise ValueError("VASP XDATCAR sampling requires --poscar")
+        basis = read_vasp_poscar_basis(args.poscar)
+        frac_frames = read_vasp_xdatcar_frames(args.trajectory, basis["natoms"])
+        frames = [
+            {
+                "timestep": index,
+                "symbols": basis["symbols"],
+                "coords": [_cart_from_fractional(frac, basis["lattice"]) for frac in coords],
+                "cell": basis["lattice"],
+            }
+            for index, coords in enumerate(frac_frames)
+        ]
+    else:
+        raise ValueError(f"Unsupported phase-window engine: {args.engine}")
+    start = max(args.start_frame, 0)
+    stop = args.stop_frame if args.stop_frame is not None else len(frames)
+    stride = max(args.stride, 1)
+    selected = frames[start:stop:stride]
+    if not selected:
+        raise ValueError(f"No trajectory frames selected from {args.trajectory}")
+    return selected
+
+
+def unwrap_window_coords(frames: list[dict[str, Any]]) -> list[list[list[float]]]:
+    if not frames:
+        return []
+    lengths = _cell_lengths(frames[0]["cell"])
+    unwrapped = [[coord[:] for coord in frames[0]["coords"]]]
+    previous_wrapped = frames[0]["coords"]
+    previous_unwrapped = unwrapped[0]
+    for frame in frames[1:]:
+        current: list[list[float]] = []
+        for atom_idx, coord in enumerate(frame["coords"]):
+            delta = _minimum_image([coord[i] - previous_wrapped[atom_idx][i] for i in range(3)], lengths)
+            current.append([previous_unwrapped[atom_idx][i] + delta[i] for i in range(3)])
+        unwrapped.append(current)
+        previous_wrapped = frame["coords"]
+        previous_unwrapped = current
+    return unwrapped
+
+
+def phase_window_metrics(
+    frames: list[dict[str, Any]],
+    *,
+    species_a: str,
+    species_b: str,
+    neighbor_cutoff_a: float,
+) -> dict[str, Any]:
+    symbols = frames[0]["symbols"]
+    idx_a = [idx for idx, symbol in enumerate(symbols) if symbol == species_a]
+    idx_b = [idx for idx, symbol in enumerate(symbols) if symbol == species_b]
+    if not idx_a or not idx_b:
+        raise ValueError(f"Selected frames do not contain requested species pair {species_a}-{species_b}")
+    lengths = _cell_lengths(frames[0]["cell"])
+    unwrapped = unwrap_window_coords(frames)
+    displacements = []
+    for atom_idx in range(len(symbols)):
+        delta = [unwrapped[-1][atom_idx][axis] - unwrapped[0][atom_idx][axis] for axis in range(3)]
+        displacements.append(math.sqrt(sum(value * value for value in delta)))
+    nearest_ab: list[float] = []
+    coord_ab: list[float] = []
+    for frame in frames:
+        coords = frame["coords"]
+        for atom_a in idx_a:
+            distances = [_distance(coords[atom_a], coords[atom_b], lengths) for atom_b in idx_b]
+            if distances:
+                nearest_ab.append(min(distances))
+                coord_ab.append(float(sum(1 for dist in distances if dist <= neighbor_cutoff_a)))
+    rms = math.sqrt(sum(value * value for value in displacements) / len(displacements)) if displacements else None
+    return {
+        "rms_displacement_A": rms,
+        "mean_displacement_A": _mean(displacements),
+        "max_displacement_A": max(displacements) if displacements else None,
+        "nearest_ab_mean_A": _mean(nearest_ab),
+        "nearest_ab_sd_A": _std(nearest_ab),
+        "coord_ab_mean": _mean(coord_ab),
+        "coord_ab_sd": _std(coord_ab),
+        "n_species_a": len(idx_a),
+        "n_species_b": len(idx_b),
+        "n_atoms": len(symbols),
+    }
+
+
+def classify_phase_window(metrics: dict[str, Any], args: argparse.Namespace) -> tuple[str, list[str]]:
+    rms = metrics.get("rms_displacement_A")
+    nearest_sd = metrics.get("nearest_ab_sd_A")
+    coord = metrics.get("coord_ab_mean")
+    solid_votes = 0
+    liquid_votes = 0
+    notes: list[str] = []
+    if rms is not None:
+        if rms <= args.solid_rms_max_a:
+            solid_votes += 1
+        if rms >= args.liquid_rms_min_a:
+            liquid_votes += 1
+    if nearest_sd is not None:
+        if nearest_sd <= args.solid_nearest_sd_max_a:
+            solid_votes += 1
+        if nearest_sd >= args.liquid_nearest_sd_min_a:
+            liquid_votes += 1
+    if coord is not None:
+        if coord >= args.solid_coord_min:
+            solid_votes += 1
+        if args.liquid_coord_max is not None and coord <= args.liquid_coord_max:
+            liquid_votes += 1
+    if solid_votes >= 2 and liquid_votes == 0:
+        return "solid-like", notes
+    if liquid_votes >= 2 and solid_votes == 0:
+        return "liquid-like", notes
+    if solid_votes and liquid_votes:
+        notes.append("Solid-like and liquid-like metrics disagree; treat as mixed/window-boundary region.")
+    else:
+        notes.append("Too few metrics crossed conservative phase thresholds.")
+    return "mixed", notes
+
+
+def phase_window_sample_main(args: argparse.Namespace) -> dict[str, Any]:
+    frames = phase_window_frames_from_args(args)
+    window_frames = max(2, int(round(args.window_ps / args.frame_step_ps)) + 1)
+    stride_frames = max(1, int(round(args.stride_ps / args.frame_step_ps)))
+    if len(frames) < window_frames:
+        raise ValueError(
+            f"Need at least {window_frames} selected frames for a {args.window_ps:g} ps window; got {len(frames)}."
+        )
+    rows: list[dict[str, Any]] = []
+    for start in range(0, len(frames) - window_frames + 1, stride_frames):
+        stop = start + window_frames
+        metrics = phase_window_metrics(
+            frames[start:stop],
+            species_a=args.species_a,
+            species_b=args.species_b,
+            neighbor_cutoff_a=args.neighbor_cutoff_a,
+        )
+        label, notes = classify_phase_window(metrics, args)
+        row = {
+            "window_index": len(rows),
+            "frame_start": start,
+            "frame_stop_exclusive": stop,
+            "time_start_ps": start * args.frame_step_ps,
+            "time_stop_ps": (stop - 1) * args.frame_step_ps,
+            "phase_window_label": label,
+            "species_a": args.species_a,
+            "species_b": args.species_b,
+            "neighbor_cutoff_A": args.neighbor_cutoff_a,
+            "notes": "; ".join(notes),
+            **metrics,
+        }
+        rows.append(row)
+    counts: dict[str, int] = {}
+    for row in rows:
+        label = str(row["phase_window_label"])
+        counts[label] = counts.get(label, 0) + 1
+    outdir = args.outdir.resolve()
+    fields = [
+        "window_index",
+        "frame_start",
+        "frame_stop_exclusive",
+        "time_start_ps",
+        "time_stop_ps",
+        "phase_window_label",
+        "species_a",
+        "species_b",
+        "neighbor_cutoff_A",
+        "rms_displacement_A",
+        "mean_displacement_A",
+        "max_displacement_A",
+        "nearest_ab_mean_A",
+        "nearest_ab_sd_A",
+        "coord_ab_mean",
+        "coord_ab_sd",
+        "n_species_a",
+        "n_species_b",
+        "n_atoms",
+        "notes",
+    ]
+    csv_path = outdir / "sluschi_phase_windows.csv"
+    json_path = outdir / "sluschi_phase_windows.json"
+    write_csv(csv_path, rows, fields)
+    payload = {
+        "schema": SCHEMA_PHASE_WINDOW_SAMPLE,
+        "engine": args.engine,
+        "trajectory": str(args.trajectory.resolve()),
+        "n_selected_frames": len(frames),
+        "window_ps": args.window_ps,
+        "stride_ps": args.stride_ps,
+        "frame_step_ps": args.frame_step_ps,
+        "window_frames": window_frames,
+        "stride_frames": stride_frames,
+        "species_pair": [args.species_a, args.species_b],
+        "thresholds": {
+            "neighbor_cutoff_A": args.neighbor_cutoff_a,
+            "solid_rms_max_A": args.solid_rms_max_a,
+            "liquid_rms_min_A": args.liquid_rms_min_a,
+            "solid_nearest_sd_max_A": args.solid_nearest_sd_max_a,
+            "liquid_nearest_sd_min_A": args.liquid_nearest_sd_min_a,
+            "solid_coord_min": args.solid_coord_min,
+            "liquid_coord_max": args.liquid_coord_max,
+        },
+        "counts": counts,
+        "outputs": {"csv": str(csv_path), "json": str(json_path)},
+        "windows": rows,
+        "notes": [
+            "This is a conservative generic phase-window screen, not a replacement for SLUSCHI coexistence analysis.",
+            "Use species/thresholds appropriate to the chemistry; alkali-halide defaults are only screening priors.",
+            "Accept phase-specific entropy only from windows whose label agrees with the intended phase and whose thermodynamics are stable.",
+        ],
+    }
+    write_json(json_path, payload)
+    print(f"Phase windows: {counts}")
+    print(f"Wrote phase-window CSV: {csv_path}")
+    return payload
 
 
 def cp2k_prep_main(args: argparse.Namespace) -> dict[str, Any]:
@@ -2286,6 +2623,68 @@ def build_parser() -> argparse.ArgumentParser:
     health.add_argument("--max-mixed-fraction", type=float, default=0.25)
     health.add_argument("--min-classified-fraction", type=float, default=0.75)
 
+    windows = sub.add_parser(
+        "phase-window-sample",
+        help="Sample trajectory windows and conservatively label solid-like, liquid-like, or mixed regions.",
+    )
+    windows.add_argument(
+        "--engine",
+        choices=("lammps-dump", "cp2k-xyz", "vasp-xdatcar"),
+        required=True,
+        help="Trajectory format to read.",
+    )
+    windows.add_argument("--trajectory", type=Path, required=True, help="LAMMPS dump, CP2K XYZ, or VASP XDATCAR path.")
+    windows.add_argument("--outdir", type=Path, default=Path("sluschi_phase_windows"))
+    windows.add_argument("--species-a", required=True, help="First species used for mobility/order screening, e.g. K or U.")
+    windows.add_argument("--species-b", required=True, help="Neighbor species used for local-order screening, e.g. Cl or O.")
+    windows.add_argument(
+        "--type-elements",
+        default="",
+        help="LAMMPS type map for --engine lammps-dump, e.g. '1=K,2=Cl'.",
+    )
+    windows.add_argument("--poscar", type=Path, help="VASP POSCAR/CONTCAR for --engine vasp-xdatcar.")
+    windows.add_argument("--inp", type=Path, help="CP2K input used to read &CELL for --engine cp2k-xyz.")
+    windows.add_argument("--cell", default="", help="Orthorhombic cell lengths in A: a,b,c for CP2K XYZ.")
+    windows.add_argument(
+        "--cell-vector",
+        action="append",
+        default=[],
+        help="Cell vector in A for CP2K XYZ; repeat exactly three times for A, B, C.",
+    )
+    windows.add_argument("--start-frame", type=int, default=0)
+    windows.add_argument("--stop-frame", type=int)
+    windows.add_argument("--stride", type=int, default=1)
+    windows.add_argument(
+        "--frame-step-ps",
+        type=float,
+        required=True,
+        help="Time in ps between selected neighboring frames after any trajectory output stride.",
+    )
+    windows.add_argument("--window-ps", type=float, default=0.5, help="Window duration in ps for each phase sample.")
+    windows.add_argument("--stride-ps", type=float, default=0.25, help="Time stride in ps between adjacent windows.")
+    windows.add_argument("--neighbor-cutoff-a", type=float, default=3.8, help="A-B coordination cutoff in Angstrom.")
+    windows.add_argument("--solid-rms-max-a", type=float, default=0.8, help="RMS displacement upper bound for solid-like windows.")
+    windows.add_argument("--liquid-rms-min-a", type=float, default=1.5, help="RMS displacement lower bound for liquid-like windows.")
+    windows.add_argument(
+        "--solid-nearest-sd-max-a",
+        type=float,
+        default=0.12,
+        help="Nearest A-B distance standard-deviation upper bound for solid-like windows.",
+    )
+    windows.add_argument(
+        "--liquid-nearest-sd-min-a",
+        type=float,
+        default=0.25,
+        help="Nearest A-B distance standard-deviation lower bound for liquid-like windows.",
+    )
+    windows.add_argument("--solid-coord-min", type=float, default=5.5, help="Mean A-B coordination lower bound for solid-like windows.")
+    windows.add_argument(
+        "--liquid-coord-max",
+        type=float,
+        default=None,
+        help="Optional mean A-B coordination upper bound contributing a liquid-like vote.",
+    )
+
     melting = sub.add_parser(
         "melting-anchor",
         help="Parse SLUSCHI MPFit/coexistence outputs into a CALPHAD-ready melting-temperature anchor.",
@@ -2344,6 +2743,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
         return entropy_summary_main(args)
     if args.command == "phase-health":
         return phase_health_main(args)
+    if args.command == "phase-window-sample":
+        return phase_window_sample_main(args)
     if args.command == "melting-anchor":
         return melting_anchor_main(args)
     build_parser().print_help()

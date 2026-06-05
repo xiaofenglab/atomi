@@ -570,6 +570,151 @@ def test_sluschi_phase_health_accepts_solid_like_entropy_row(tmp_path: Path):
     assert result["accepted_for_phase_label"] is True
 
 
+def test_sluschi_phase_window_sample_labels_cp2k_xyz_solid_window(tmp_path: Path):
+    xyz = tmp_path / "kcl-pos.xyz"
+    xyz.write_text(
+        "\n".join(
+            [
+                "4",
+                'Lattice="8 0 0 0 8 0 0 0 8"',
+                "K 1.0 1.0 1.0",
+                "Cl 2.5 1.0 1.0",
+                "K 5.0 5.0 5.0",
+                "Cl 6.5 5.0 5.0",
+                "4",
+                'Lattice="8 0 0 0 8 0 0 0 8"',
+                "K 1.02 1.0 1.0",
+                "Cl 2.52 1.0 1.0",
+                "K 5.02 5.0 5.0",
+                "Cl 6.52 5.0 5.0",
+                "4",
+                'Lattice="8 0 0 0 8 0 0 0 8"',
+                "K 1.04 1.0 1.0",
+                "Cl 2.54 1.0 1.0",
+                "K 5.04 5.0 5.0",
+                "Cl 6.54 5.0 5.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = bridge.main(
+        [
+            "phase-window-sample",
+            "--engine",
+            "cp2k-xyz",
+            "--trajectory",
+            str(xyz),
+            "--outdir",
+            str(tmp_path / "windows"),
+            "--species-a",
+            "K",
+            "--species-b",
+            "Cl",
+            "--frame-step-ps",
+            "0.1",
+            "--window-ps",
+            "0.2",
+            "--stride-ps",
+            "0.1",
+            "--neighbor-cutoff-a",
+            "2.0",
+            "--solid-coord-min",
+            "0.5",
+        ]
+    )
+
+    assert result["schema"] == bridge.SCHEMA_PHASE_WINDOW_SAMPLE
+    assert result["counts"] == {"solid-like": 1}
+    data = rows(tmp_path / "windows" / "sluschi_phase_windows.csv")
+    assert data[0]["phase_window_label"] == "solid-like"
+    assert data[0]["species_a"] == "K"
+    assert data[0]["species_b"] == "Cl"
+
+
+def test_sluschi_phase_window_sample_reads_lammps_dump_generically(tmp_path: Path):
+    dump = tmp_path / "traj.dump"
+    dump.write_text(
+        "\n".join(
+            [
+                "ITEM: TIMESTEP",
+                "0",
+                "ITEM: NUMBER OF ATOMS",
+                "4",
+                "ITEM: BOX BOUNDS pp pp pp",
+                "0 10",
+                "0 10",
+                "0 10",
+                "ITEM: ATOMS id type x y z",
+                "1 1 1.0 1.0 1.0",
+                "2 2 2.5 1.0 1.0",
+                "3 1 5.0 5.0 5.0",
+                "4 2 6.5 5.0 5.0",
+                "ITEM: TIMESTEP",
+                "1",
+                "ITEM: NUMBER OF ATOMS",
+                "4",
+                "ITEM: BOX BOUNDS pp pp pp",
+                "0 10",
+                "0 10",
+                "0 10",
+                "ITEM: ATOMS id type x y z",
+                "1 1 2.0 1.0 1.0",
+                "2 2 3.9 1.0 1.0",
+                "3 1 6.2 5.0 5.0",
+                "4 2 8.2 5.0 5.0",
+                "ITEM: TIMESTEP",
+                "2",
+                "ITEM: NUMBER OF ATOMS",
+                "4",
+                "ITEM: BOX BOUNDS pp pp pp",
+                "0 10",
+                "0 10",
+                "0 10",
+                "ITEM: ATOMS id type x y z",
+                "1 1 3.0 1.0 1.0",
+                "2 2 5.3 1.0 1.0",
+                "3 1 7.4 5.0 5.0",
+                "4 2 0.4 5.0 5.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = bridge.main(
+        [
+            "phase-window-sample",
+            "--engine",
+            "lammps-dump",
+            "--trajectory",
+            str(dump),
+            "--type-elements",
+            "1=K,2=Cl",
+            "--outdir",
+            str(tmp_path / "windows_lmp"),
+            "--species-a",
+            "K",
+            "--species-b",
+            "Cl",
+            "--frame-step-ps",
+            "0.1",
+            "--window-ps",
+            "0.2",
+            "--liquid-rms-min-a",
+            "0.5",
+            "--liquid-nearest-sd-min-a",
+            "0.01",
+            "--solid-coord-min",
+            "10.0",
+        ]
+    )
+
+    assert result["schema"] == bridge.SCHEMA_PHASE_WINDOW_SAMPLE
+    assert result["counts"] == {"liquid-like": 1}
+    data = rows(tmp_path / "windows_lmp" / "sluschi_phase_windows.csv")
+    assert data[0]["phase_window_label"] == "liquid-like"
+
+
 def test_sluschi_workflow_guide_writes_two_lane_semantics(tmp_path: Path):
     out = tmp_path / "guide"
 
