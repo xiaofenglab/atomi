@@ -168,6 +168,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         lammps_rdf_pdf.add_argument("rdf_pdf_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("md-rdf-pdf", "md_rdf_pdf", "vasp-xdatcar-rdf-pdf"):
+        md_rdf_pdf = subparsers.add_parser(
+            command_name,
+            help="Compute RDF/PDF from MD trajectories with engine-specific readers.",
+        )
+        md_rdf_pdf.add_argument("md_rdf_pdf_args", nargs=argparse.REMAINDER)
+
     for command_name in ("pdfgetx3_status", "pdfgetx3-status"):
         pdfgetx3_status = subparsers.add_parser(
             command_name,
@@ -926,6 +933,11 @@ def main(argv: list[str] | None = None) -> None:
 
         lammps_rdf_pdf_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("md-rdf-pdf", "md_rdf_pdf", "vasp-xdatcar-rdf-pdf"):
+        from atomi.md.rdf_pdf import main as md_rdf_pdf_main
+
+        md_rdf_pdf_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] in ("pdfgetx3_status", "pdfgetx3-status"):
         from atomi.lammps.pdfgetx3_status import main as pdfgetx3_status_main
 
@@ -1509,6 +1521,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.lammps.rdf_pdf import main as lammps_rdf_pdf_main
 
         lammps_rdf_pdf_main(args.rdf_pdf_args)
+        return
+    if args.subcommand in ("md-rdf-pdf", "md_rdf_pdf", "vasp-xdatcar-rdf-pdf"):
+        from atomi.md.rdf_pdf import main as md_rdf_pdf_main
+
+        md_rdf_pdf_main(args.md_rdf_pdf_args)
         return
 
     if args.subcommand in ("pdfgetx3_status", "pdfgetx3-status"):

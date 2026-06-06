@@ -10,6 +10,7 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import sys
 import textwrap
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ SCHEMA_WORKFLOW_GUIDE = "atomi.sluschi.workflow_guide.v1"
 SCHEMA_MELTING_ANCHOR = "atomi.sluschi.melting_anchor.v1"
 SCHEMA_CP2K_PREP = "atomi.sluschi.cp2k_prep.v1"
 SCHEMA_VASP_PREP = "atomi.sluschi.vasp_prep.v1"
+SCHEMA_MDS_ENTROPY_RUN = "atomi.sluschi.mds_entropy_run.v1"
 
 DEFAULT_REPO = "https://github.com/qjhong/SLUSCHI.git"
 DEFAULT_SUPERSALT_REF = "SuperSalt chloride MLIP; install/provide externally, not vendored by Atomi."
@@ -1712,6 +1714,332 @@ def entropy_summary_main(args: argparse.Namespace) -> dict[str, Any]:
     return payload
 
 
+def _read_lines(path: Path) -> list[str]:
+    return path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+
+@dataclass(frozen=True)
+class SluschiParamLayout:
+    n_elements: int
+    counts: list[int]
+    masses: list[float]
+    timestep: float
+    natoms: int
+    timestep_line_index: int
+    natoms_line_index: int
+
+
+def _format_sluschi_float(value: float) -> str:
+    return f"{value:.12g}"
+
+
+def _sluschi_param_layout(param_path: Path) -> SluschiParamLayout:
+    lines = _read_lines(param_path)
+    if len(lines) < 6:
+        raise ValueError(f"SLUSCHI param file is too short: {param_path}")
+    try:
+        n_elements = int(float(lines[0].split()[0]))
+    except (IndexError, ValueError) as exc:
+        raise ValueError(f"Could not parse SLUSCHI element count from {param_path}") from exc
+    counts_line_index = 1
+    masses_start = 2
+    timestep_line_index = masses_start + n_elements
+    natoms_line_index = timestep_line_index + 1
+    if len(lines) <= natoms_line_index:
+        raise ValueError(
+            f"SLUSCHI param file {param_path} is too short for {n_elements} element(s); "
+            f"expected natoms on line {natoms_line_index + 1}"
+        )
+    try:
+        counts = [int(float(item)) for item in lines[counts_line_index].split()]
+        masses = [float(lines[masses_start + idx].split()[0]) for idx in range(n_elements)]
+        timestep = float(lines[timestep_line_index].split()[0])
+        natoms = int(float(lines[natoms_line_index].split()[0]))
+    except (IndexError, ValueError) as exc:
+        raise ValueError(f"Could not parse SLUSCHI param layout from {param_path}") from exc
+    if len(counts) != n_elements:
+        raise ValueError(f"SLUSCHI param counts length {len(counts)} does not match n_elements={n_elements}")
+    if sum(counts) != natoms:
+        raise ValueError(f"SLUSCHI param natoms={natoms} does not match sum(counts)={sum(counts)}")
+    return SluschiParamLayout(
+        n_elements=n_elements,
+        counts=counts,
+        masses=masses,
+        timestep=timestep,
+        natoms=natoms,
+        timestep_line_index=timestep_line_index,
+        natoms_line_index=natoms_line_index,
+    )
+
+
+def _sluschi_param_natoms(param_path: Path) -> int:
+    return _sluschi_param_layout(param_path).natoms
+
+
+def _sluschi_step_multiplier_to_fs(unit: str) -> float:
+    normalized = unit.strip().lower()
+    if normalized == "fs":
+        return 1.0
+    if normalized == "ps":
+        return 1000.0
+    raise ValueError(f"Unsupported prepared step unit {unit!r}; expected 'ps' or 'fs'")
+
+
+def _convert_sluschi_step_lines_to_fs(lines: list[str], *, prepared_step_unit: str) -> list[str]:
+    multiplier = _sluschi_step_multiplier_to_fs(prepared_step_unit)
+    converted: list[str] = []
+    for line in lines:
+        parts = line.split()
+        if not parts:
+            continue
+        try:
+            value = float(parts[0]) * multiplier
+        except ValueError as exc:
+            raise ValueError(f"Could not parse SLUSCHI step value {line!r}") from exc
+        converted.append(_format_sluschi_float(value))
+    return converted
+
+
+def _write_mds_param_with_step_fs(param: Path, target: Path, *, prepared_step_unit: str) -> tuple[float, float]:
+    layout = _sluschi_param_layout(param)
+    multiplier = _sluschi_step_multiplier_to_fs(prepared_step_unit)
+    converted_timestep = layout.timestep * multiplier
+    lines = _read_lines(param)
+    lines[layout.timestep_line_index] = _format_sluschi_float(converted_timestep)
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return layout.timestep, converted_timestep
+
+
+def _write_legacy_mds_latt_step(
+    *,
+    prepared_root: Path,
+    workdir: Path,
+    block_size: int,
+    prepared_step_unit: str,
+) -> dict[str, Any]:
+    if block_size <= 0:
+        raise ValueError("--legacy-mds-block-size must be positive")
+    param = prepared_root / "param"
+    pos = prepared_root / "pos"
+    latt = prepared_root / "latt"
+    step = prepared_root / "step"
+    for path in (param, pos, latt, step):
+        if not path.is_file():
+            raise FileNotFoundError(f"Missing prepared SLUSCHI file: {path}")
+    param_layout = _sluschi_param_layout(param)
+    natoms = param_layout.natoms
+    pos_lines = _read_lines(pos)
+    latt_lines = _read_lines(latt)
+    step_lines = [line for line in _read_lines(step) if line.strip()]
+    if len(pos_lines) % natoms != 0:
+        raise ValueError(f"pos line count {len(pos_lines)} is not divisible by natoms={natoms}")
+    n_frames = len(pos_lines) // natoms
+    if n_frames % block_size != 0:
+        raise ValueError(f"selected frame count {n_frames} is not divisible by legacy MDS block size {block_size}")
+    n_blocks = n_frames // block_size
+    if len(latt_lines) % 3 != 0:
+        raise ValueError(f"latt line count {len(latt_lines)} is not divisible by 3")
+    n_latt_records = len(latt_lines) // 3
+    if n_latt_records == n_frames:
+        block_latt = []
+        for block in range(n_blocks):
+            offset = block * block_size * 3
+            block_latt.extend(latt_lines[offset : offset + 3])
+    elif n_latt_records == n_blocks:
+        block_latt = latt_lines
+    else:
+        raise ValueError(
+            f"latt has {n_latt_records} records; expected either frame-level {n_frames} "
+            f"or legacy block-level {n_blocks}"
+        )
+    if len(step_lines) == n_frames:
+        block_step = [step_lines[block * block_size] for block in range(n_blocks)]
+    elif len(step_lines) == n_blocks:
+        block_step = step_lines
+    else:
+        raise ValueError(
+            f"step has {len(step_lines)} records; expected either frame-level {n_frames} "
+            f"or legacy block-level {n_blocks}"
+        )
+    workdir.mkdir(parents=True, exist_ok=True)
+    input_param_timestep, legacy_param_timestep_fs = _write_mds_param_with_step_fs(
+        param,
+        workdir / "param",
+        prepared_step_unit=prepared_step_unit,
+    )
+    shutil.copy2(pos, workdir / "pos")
+    (workdir / "latt").write_text("\n".join(block_latt) + "\n", encoding="utf-8")
+    legacy_block_step_fs = _convert_sluschi_step_lines_to_fs(block_step, prepared_step_unit=prepared_step_unit)
+    (workdir / "step").write_text("\n".join(legacy_block_step_fs) + "\n", encoding="utf-8")
+    step_multiplier_to_fs = _sluschi_step_multiplier_to_fs(prepared_step_unit)
+    return {
+        "natoms": natoms,
+        "n_elements": param_layout.n_elements,
+        "counts": param_layout.counts,
+        "n_frames": n_frames,
+        "legacy_mds_block_size": block_size,
+        "n_legacy_blocks": n_blocks,
+        "input_latt_records": n_latt_records,
+        "input_step_records": len(step_lines),
+        "prepared_step_unit": prepared_step_unit,
+        "legacy_mds_step_unit": "fs",
+        "step_unit_multiplier_to_fs": step_multiplier_to_fs,
+        "input_param_timestep": input_param_timestep,
+        "legacy_param_timestep_fs": legacy_param_timestep_fs,
+        "legacy_step_values_fs": legacy_block_step_fs,
+    }
+
+
+def _copy_sluschi_entropy_template(sluschi_src: Path, workdir: Path, label: str) -> None:
+    entropy_src = sluschi_src / "mds_src" / "entropy"
+    if not entropy_src.is_dir():
+        raise FileNotFoundError(f"SLUSCHI entropy template directory not found: {entropy_src}")
+    entropy_dir = workdir / "entropy"
+    entropy_dir.mkdir(parents=True, exist_ok=True)
+    for source in entropy_src.iterdir():
+        if source.is_file():
+            shutil.copy2(source, entropy_dir / source.name)
+    for name in ("pos", "param", "latt", "step"):
+        shutil.copy2(workdir / name, entropy_dir / f"{name}_{label}")
+    main_m = entropy_dir / "main.m"
+    jobsub = entropy_dir / "jobsub_master"
+    if main_m.is_file():
+        text = main_m.read_text(encoding="utf-8", errors="replace")
+        text = text.replace("replace_here", label).replace("replace_folder_here", str(sluschi_src / "mds_src"))
+        main_m.write_text(text, encoding="utf-8")
+    if jobsub.is_file():
+        jobsub.write_text(jobsub.read_text(encoding="utf-8", errors="replace").replace("replace_here", label), encoding="utf-8")
+
+
+def _render_mds_run_script(args: argparse.Namespace, sluschi_src: Path, label: str) -> str:
+    atomi_bin = args.atomi_bin or "$HOME/m_lammps_env/bin/atomi"
+    matlab_command = args.matlab_command or "matlab -batch main"
+    module_line = f"module load {args.matlab_module}\n" if args.matlab_module else ""
+    env_exports = textwrap.dedent(
+        f"""\
+        export ATOMI_SLUSCHI_ROOT="{args.sluschi_root or '$HOME/SLUSCHI'}"
+        export ATOMI_SLUSCHI_BIN="{args.sluschi_bin or '$HOME/SLUSCHI/src'}"
+        export ATOMI_SLUSCHI_ENV="{args.atomi_env or '$HOME/m_lammps_env'}"
+        export PATH="$ATOMI_SLUSCHI_ENV/bin:$ATOMI_SLUSCHI_BIN:$PATH"
+        printf "sluschipath=%s\\n" "{sluschi_src}" > "$HOME/.sluschi.rc"
+        """
+    )
+    summary_cmd = textwrap.dedent(
+        f"""\
+        "{atomi_bin}" sluschi-bridge entropy-summary \\
+          --root "$WORKDIR" \\
+          --collect "$WORKDIR/collect.stdout" \\
+          --outdir "$WORKDIR/atomi_entropy_summary" \\
+          --system {args.system!r} \\
+          --formula {args.formula!r} \\
+          --components {args.components!r} \\
+          --phase {args.phase!r} \\
+          --temperature-k {args.temperature_k} \\
+          --quality {args.quality!r} \\
+          --dump-stride-note {args.dump_stride_note!r}"""
+    )
+    if args.type_stoich:
+        summary_cmd += f" \\\n  --type-stoich {args.type_stoich!r}"
+    elif args.atoms_per_formula is not None:
+        summary_cmd += f" \\\n  --atoms-per-formula {args.atoms_per_formula}"
+    return textwrap.dedent(
+        f"""\
+        #!/usr/bin/env bash
+        set -euo pipefail
+        WORKDIR="{args.workdir.resolve()}"
+        {env_exports}
+        cd "$WORKDIR/entropy"
+        {module_line}{matlab_command} > entropy.out
+        cd "$WORKDIR"
+        cp pos param latt step entropy/
+        cd entropy
+        "{sluschi_src}/mds_src/summary.csh" > ../collect.stdout || true
+        cd "$WORKDIR"
+        {summary_cmd}
+        echo "WORKDIR=$WORKDIR"
+        """
+    )
+
+
+def _render_mds_sbatch(args: argparse.Namespace) -> str:
+    return textwrap.dedent(
+        f"""\
+        #!/bin/bash
+        #SBATCH --job-name={args.job_name}
+        #SBATCH --output={args.job_name}_%j.out
+        #SBATCH --error={args.job_name}_%j.err
+        #SBATCH --partition={args.partition}
+        #SBATCH --nodes={args.nodes}
+        #SBATCH --ntasks={args.ntasks}
+        #SBATCH --cpus-per-task={args.cpus_per_task}
+        #SBATCH --time={args.walltime}
+        #SBATCH --mem={args.mem}
+
+        bash run_mds_entropy.sh
+        """
+    )
+
+
+def mds_entropy_run_main(args: argparse.Namespace) -> dict[str, Any]:
+    prepared_root = args.prepared_root.resolve()
+    workdir = args.workdir.resolve()
+    sluschi_src = Path(args.sluschi_bin or args.sluschi_root or os.environ.get("ATOMI_SLUSCHI_BIN", "") or "$HOME/SLUSCHI/src").expanduser()
+    if sluschi_src.name != "src" and (sluschi_src / "src" / "mds_src").is_dir():
+        sluschi_src = sluschi_src / "src"
+    label = args.label or f"s_{int(round(args.temperature_k))}"
+    layout = _write_legacy_mds_latt_step(
+        prepared_root=prepared_root,
+        workdir=workdir,
+        block_size=args.legacy_mds_block_size,
+        prepared_step_unit=args.prepared_step_unit,
+    )
+    _copy_sluschi_entropy_template(sluschi_src, workdir, label)
+    run_script = workdir / "run_mds_entropy.sh"
+    sbatch_script = workdir / "submit_mds_entropy.sbatch"
+    run_script.write_text(_render_mds_run_script(args, sluschi_src, label), encoding="utf-8")
+    sbatch_script.write_text(_render_mds_sbatch(args), encoding="utf-8")
+    try:
+        run_script.chmod(0o755)
+    except OSError:
+        pass
+    manifest = {
+        "schema": SCHEMA_MDS_ENTROPY_RUN,
+        "workflow_lane": "entropy_prior",
+        "prepared_root": str(prepared_root),
+        "workdir": str(workdir),
+        "label": label,
+        "sluschi_src": str(sluschi_src),
+        "environment_rule": {
+            "primary_atomi_env": args.atomi_env or "$HOME/m_lammps_env",
+            "mliap_lammps_env": "$HOME/m_lammps_gk_v2 for MLIAP/LAMMPS-specific runs only",
+        },
+        "layout": layout,
+        "outputs": {
+            "run_script": str(run_script),
+            "sbatch_script": str(sbatch_script),
+            "collect_stdout": str(workdir / "collect.stdout"),
+            "entropy_summary_dir": str(workdir / "atomi_entropy_summary"),
+        },
+        "notes": [
+            "This command prepares a legacy SLUSCHI MDS entropy run from Atomi pos/param/latt/step files.",
+            "Legacy MDS expects position frames per MD frame, but latt/step one record per 80-frame block by default.",
+            "Atomi VASP/CP2K prep writes native step/param timestep in ps; legacy SLUSCHI MDS MATLAB expects fs, so mds-entropy-run converts the prepared units before writing the workdir.",
+            "Run through sbatch for MATLAB/SLUSCHI workloads that may take more than a quick interactive parse.",
+            "After completion, use the constrained/use-this-value Svib line and phase-health/phase-window checks before accepting entropy.",
+        ],
+    }
+    write_json(workdir / "sluschi_mds_entropy_run_manifest.json", manifest)
+    if args.submit:
+        completed = subprocess.run(["sbatch", str(sbatch_script)], cwd=workdir, text=True, capture_output=True, check=True)
+        manifest["submission_stdout"] = completed.stdout.strip()
+        write_json(workdir / "sluschi_mds_entropy_run_manifest.json", manifest)
+        print(completed.stdout.strip())
+    else:
+        print(f"Wrote SLUSCHI MDS entropy run: {workdir}")
+        print(f"Submit with: cd {workdir} && sbatch {sbatch_script.name}")
+    return manifest
+
+
 def _pair_counts_from_summary(summary: dict[str, Any]) -> tuple[int, int, int]:
     n_pairs = int(summary.get("n_pair_recommendations") or 0)
     n_liquid = int(summary.get("n_liquid_like_pairs") or 0)
@@ -2608,6 +2936,56 @@ def build_parser() -> argparse.ArgumentParser:
         help="Trajectory/dump-stride note stored in the summary JSON.",
     )
 
+    mds = sub.add_parser(
+        "mds-entropy-run",
+        help="Prepare and optionally submit a legacy SLUSCHI MDS Svib/Sconf entropy run from Atomi-prepared pos/latt/step files.",
+    )
+    mds.add_argument("--prepared-root", type=Path, required=True, help="Folder containing Atomi-prepared pos/param/latt/step files.")
+    mds.add_argument("--workdir", type=Path, required=True, help="Output run folder for legacy SLUSCHI MDS entropy calculation.")
+    mds.add_argument("--temperature-k", type=float, required=True, help="NVT trajectory temperature in K.")
+    mds.add_argument("--system", default="", help="System label, e.g. UC2 or KCl.")
+    mds.add_argument("--formula", default="", help="Formula label, e.g. UC2.")
+    mds.add_argument("--components", default="", help="Comma-separated components/species labels.")
+    mds.add_argument("--phase", default="", help="Phase label, e.g. solid or liquid.")
+    mds.add_argument("--label", default="", help="SLUSCHI filename label. Default: s_<rounded temperature>.")
+    mds.add_argument("--sluschi-root", default="", help="SLUSCHI root, e.g. $HOME/SLUSCHI.")
+    mds.add_argument("--sluschi-bin", default="", help="SLUSCHI src/bin folder containing mds_src, e.g. $HOME/SLUSCHI/src.")
+    mds.add_argument("--atomi-env", default="$HOME/m_lammps_env", help="Primary Atomi environment path.")
+    mds.add_argument("--atomi-bin", default="$HOME/m_lammps_env/bin/atomi", help="Atomi executable used by the generated run script.")
+    mds.add_argument("--matlab-module", default="math/matlab/R2022a", help="Module loaded before MATLAB. Empty string disables module load.")
+    mds.add_argument("--matlab-command", default="matlab -batch main", help="MATLAB command run inside the entropy folder.")
+    mds.add_argument("--legacy-mds-block-size", type=int, default=80, help="SLUSCHI MDS block size for latt/step records.")
+    mds.add_argument(
+        "--prepared-step-unit",
+        choices=["ps", "fs"],
+        default="ps",
+        help=(
+            "Unit used by the prepared-root param/step files. Atomi vasp-prep/cp2k-prep write ps; "
+            "legacy SLUSCHI MDS MATLAB expects fs in the generated work folder."
+        ),
+    )
+    mds.add_argument("--type-stoich", default="", help="Type stoichiometry per formula for entropy-summary, e.g. '1=1,2=2'.")
+    mds.add_argument("--atoms-per-formula", type=float, default=None, help="Fallback atoms per formula for entropy-summary.")
+    mds.add_argument(
+        "--quality",
+        choices=("descriptor", "screening-prior", "production"),
+        default="screening-prior",
+        help="Confidence tier for parsed entropy rows.",
+    )
+    mds.add_argument(
+        "--dump-stride-note",
+        default="Dense uniformly spaced NVT frames; legacy MDS latt/step one record per block.",
+        help="Trajectory/dump-stride note stored in parsed entropy summary.",
+    )
+    mds.add_argument("--submit", action="store_true", help="Submit the generated sbatch immediately.")
+    mds.add_argument("--job-name", default="sluschi_mds_entropy")
+    mds.add_argument("--partition", default="single")
+    mds.add_argument("--nodes", type=int, default=1)
+    mds.add_argument("--ntasks", type=int, default=1)
+    mds.add_argument("--cpus-per-task", type=int, default=4)
+    mds.add_argument("--walltime", default="06:00:00")
+    mds.add_argument("--mem", default="16G")
+
     health = sub.add_parser(
         "phase-health",
         help="Classify whether a SLUSCHI entropy/Sconfig row is solid-like, liquid-like, coexistence-like, or mixed.",
@@ -2741,6 +3119,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
         return sconfig_main(args)
     if args.command == "entropy-summary":
         return entropy_summary_main(args)
+    if args.command == "mds-entropy-run":
+        return mds_entropy_run_main(args)
     if args.command == "phase-health":
         return phase_health_main(args)
     if args.command == "phase-window-sample":

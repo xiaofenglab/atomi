@@ -499,6 +499,77 @@ def test_sluschi_entropy_summary_combines_svib_and_sconf(tmp_path: Path):
     assert data[0]["type1_stoich"] == "2.0"
 
 
+def test_sluschi_mds_entropy_run_prepares_legacy_block_layout(tmp_path: Path):
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    (prepared / "param").write_text(
+        "\n".join(["2", "1 2", "238.02891", "12.011", "0.0005", "3", "U", "C", "0.0", "0.0", "0.0", "0.0", "0.0", "0.0", "0.0", "0.0"])
+        + "\n",
+        encoding="utf-8",
+    )
+    (prepared / "pos").write_text(
+        "0.0 0.0 0.0 0 0 0\n0.25 0.25 0.25 0 0 0\n0.5 0.5 0.5 0 0 0\n" * 160,
+        encoding="utf-8",
+    )
+    (prepared / "latt").write_text(("2.0 0.0 0.0 0 0 0\n0.0 2.0 0.0 0 0 0\n0.0 0.0 2.0 0 0 0\n") * 160, encoding="utf-8")
+    (prepared / "step").write_text("0.0005\n" * 160, encoding="utf-8")
+    sluschi_src = tmp_path / "SLUSCHI" / "src"
+    entropy_src = sluschi_src / "mds_src" / "entropy"
+    entropy_src.mkdir(parents=True)
+    (entropy_src / "main.m").write_text("addpath('replace_folder_here')\nsystem = ['replace_here'];\n", encoding="utf-8")
+    (entropy_src / "jobsub_master").write_text("# replace_here\n", encoding="utf-8")
+    work = tmp_path / "work"
+
+    result = bridge.main(
+        [
+            "mds-entropy-run",
+            "--prepared-root",
+            str(prepared),
+            "--workdir",
+            str(work),
+            "--temperature-k",
+            "300",
+            "--system",
+            "UC2",
+            "--formula",
+            "UC2",
+            "--phase",
+            "solid",
+            "--sluschi-bin",
+            str(sluschi_src),
+            "--type-stoich",
+            "1=1,2=2",
+        ]
+    )
+
+    assert result["schema"] == bridge.SCHEMA_MDS_ENTROPY_RUN
+    assert result["layout"]["natoms"] == 3
+    assert result["layout"]["n_elements"] == 2
+    assert result["layout"]["counts"] == [1, 2]
+    assert result["layout"]["n_frames"] == 160
+    assert result["layout"]["n_legacy_blocks"] == 2
+    assert result["layout"]["prepared_step_unit"] == "ps"
+    assert result["layout"]["legacy_mds_step_unit"] == "fs"
+    assert result["layout"]["input_param_timestep"] == 0.0005
+    assert result["layout"]["legacy_param_timestep_fs"] == 0.5
+    assert result["layout"]["legacy_step_values_fs"] == ["0.5", "0.5"]
+    assert len((work / "latt").read_text(encoding="utf-8").splitlines()) == 6
+    assert (work / "step").read_text(encoding="utf-8").splitlines() == ["0.5", "0.5"]
+    assert (work / "param").read_text(encoding="utf-8").splitlines()[:8] == [
+        "2",
+        "1 2",
+        "238.02891",
+        "12.011",
+        "0.5",
+        "3",
+        "U",
+        "C",
+    ]
+    assert (work / "entropy" / "pos_s_300").exists()
+    assert "UC2" in (work / "run_mds_entropy.sh").read_text(encoding="utf-8")
+    assert (work / "submit_mds_entropy.sbatch").exists()
+
+
 def test_sluschi_phase_health_flags_mixed_solid_entropy_row(tmp_path: Path):
     summary = {
         "schema": bridge.SCHEMA_ENTROPY_SUMMARY,
