@@ -257,7 +257,8 @@ def write_sluschi_native_frames(
             for symbol, frac in atoms:
                 if symbol not in order:
                     raise ValueError(f"Frame contains element {symbol!r}, not listed in --elements={','.join(elements)!r}.")
-                pos.write(f"{frac[0] % 1.0:.12g} {frac[1] % 1.0:.12g} {frac[2] % 1.0:.12g} 0 0 0\n")
+                cart = _cart_from_fractional(frac, cell)
+                pos.write(f"{cart[0]:.12g} {cart[1]:.12g} {cart[2]:.12g} 0 0 0\n")
             step.write(f"{step_interval_fs / 1000.0:.12g}\n")
     outputs = {
         "param": str(outdir / "param"),

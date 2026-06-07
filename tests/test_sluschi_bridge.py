@@ -219,8 +219,8 @@ def test_sluschi_cp2k_prep_writes_native_entropy_inputs(tmp_path: Path):
     pos_lines = (out / "pos").read_text(encoding="utf-8").splitlines()
     assert len(pos_lines) == 8
     assert pos_lines[0].startswith("0 ")
-    assert pos_lines[2].startswith("0.5 ")
-    assert pos_lines[4].startswith("0.05 ")
+    assert pos_lines[2].startswith("1 ")
+    assert pos_lines[4].startswith("0.1 ")
     manifest = json.loads((out / "sluschi_cp2k_prep_manifest.json").read_text(encoding="utf-8"))
     assert manifest["source_engine"] == "cp2k"
     assert manifest["counts"] == {"Cl": 2, "K": 2}
@@ -313,7 +313,8 @@ def test_sluschi_vasp_prep_writes_native_entropy_inputs(tmp_path: Path):
     pos_lines = (out / "pos").read_text(encoding="utf-8").splitlines()
     assert len(pos_lines) == 8
     assert pos_lines[0].startswith("0 ")
-    assert pos_lines[4].startswith("0.1 ")
+    assert pos_lines[2].startswith("1 ")
+    assert pos_lines[4].startswith("0.2 ")
     manifest = json.loads((out / "sluschi_vasp_prep_manifest.json").read_text(encoding="utf-8"))
     assert manifest["source_engine"] == "vasp"
     assert manifest["counts"] == {"Cl": 2, "K": 2}
