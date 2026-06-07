@@ -605,6 +605,8 @@ def test_sluschi_mds_entropy_run_prepares_legacy_block_layout(tmp_path: Path):
     assert result["layout"]["input_param_timestep"] == 0.0005
     assert result["layout"]["legacy_param_timestep_fs"] == 0.5
     assert result["layout"]["legacy_step_values_fs"] == ["0.5", "0.5"]
+    assert result["svib_preflight"]["onephase_v6_nsteps"] == -20
+    assert result["svib_preflight"]["svib_window_valid"] is False
     assert result["sluschi_template_compatibility_patches"] == [
         "onephase_v6_init_correction_terms",
         "pdf_v6_r_cut_first_minimum_fallback",
@@ -626,6 +628,45 @@ def test_sluschi_mds_entropy_run_prepares_legacy_block_layout(tmp_path: Path):
     assert "if ~exist('R_cut','var')" in (work / "entropy" / "pdf_v6.m").read_text(encoding="utf-8")
     assert "UC2" in (work / "run_mds_entropy.sh").read_text(encoding="utf-8")
     assert (work / "submit_mds_entropy.sbatch").exists()
+
+
+def test_sluschi_mds_entropy_run_rejects_non_80_legacy_block(tmp_path: Path):
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    (prepared / "param").write_text("1\n1\n39.0983\n0.003\n1\nK\n0\n0\n0\n0\n0\n0\n0\n0\n", encoding="utf-8")
+    (prepared / "pos").write_text(("0 0 0 0 0 0\n") * 160, encoding="utf-8")
+    (prepared / "latt").write_text(("2 0 0 0 0 0\n0 2 0 0 0 0\n0 0 2 0 0 0\n") * 160, encoding="utf-8")
+    (prepared / "step").write_text("0.003\n" * 160, encoding="utf-8")
+    sluschi_src = tmp_path / "SLUSCHI" / "src" / "mds_src" / "entropy"
+    sluschi_src.mkdir(parents=True)
+    (sluschi_src / "main.m").write_text("system = ['replace_here'];\n", encoding="utf-8")
+
+    try:
+        bridge.main(
+            [
+                "mds-entropy-run",
+                "--prepared-root",
+                str(prepared),
+                "--workdir",
+                str(tmp_path / "work"),
+                "--temperature-k",
+                "300",
+                "--system",
+                "K",
+                "--formula",
+                "K",
+                "--phase",
+                "solid",
+                "--sluschi-bin",
+                str(tmp_path / "SLUSCHI" / "src"),
+                "--legacy-mds-block-size",
+                "160",
+            ]
+        )
+    except ValueError as exc:
+        assert "one latt/step record per 80 frames" in str(exc)
+    else:
+        raise AssertionError("Expected non-80 legacy block size to fail")
 
 
 def test_sluschi_phase_health_flags_mixed_solid_entropy_row(tmp_path: Path):

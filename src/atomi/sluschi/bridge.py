@@ -1873,6 +1873,8 @@ def _write_legacy_mds_latt_step(
     for path in (param, pos, latt, step):
         if not path.is_file():
             raise FileNotFoundError(f"Missing prepared SLUSCHI file: {path}")
+    if block_size != 80:
+        raise ValueError("Legacy SLUSCHI MDS read_files.m hard-codes one latt/step record per 80 frames; use --legacy-mds-block-size 80.")
     param_layout = _sluschi_param_layout(param)
     natoms = param_layout.natoms
     pos_lines = _read_lines(pos)
@@ -2015,6 +2017,21 @@ def _copy_sluschi_entropy_template(sluschi_src: Path, workdir: Path, label: str)
     return _patch_sluschi_mds_entropy_template(entropy_dir)
 
 
+def sluschi_onephase_svib_preflight(n_frames: int) -> dict[str, Any]:
+    """Mirror the upstream onephase_v6 vibrational window sizing."""
+    nsteps = math.floor(n_frames / 2) - 100
+    tau = nsteps / 2 if nsteps > 0 else 0
+    return {
+        "n_frames": n_frames,
+        "onephase_v6_nsteps": nsteps,
+        "onephase_v6_tau": tau,
+        "svib_window_valid": nsteps > 0,
+        "minimum_frames_for_svib_window": 202,
+        "recommended_minimum_frames": 320,
+        "rule": "SLUSCHI onephase_v6 uses nsteps=floor(niter/2)-100; nsteps must be positive for a vibrational DOS window.",
+    }
+
+
 def _render_mds_run_script(args: argparse.Namespace, sluschi_src: Path, label: str) -> str:
     atomi_bin = args.atomi_bin or "$HOME/m_lammps_env/bin/atomi"
     matlab_command = args.matlab_command or "matlab -batch main"
@@ -2098,6 +2115,7 @@ def mds_entropy_run_main(args: argparse.Namespace) -> dict[str, Any]:
         block_size=args.legacy_mds_block_size,
         prepared_step_unit=args.prepared_step_unit,
     )
+    svib_preflight = sluschi_onephase_svib_preflight(int(layout["n_frames"]))
     compatibility_patches = _copy_sluschi_entropy_template(sluschi_src, workdir, label)
     run_script = workdir / "run_mds_entropy.sh"
     sbatch_script = workdir / "submit_mds_entropy.sbatch"
@@ -2119,6 +2137,7 @@ def mds_entropy_run_main(args: argparse.Namespace) -> dict[str, Any]:
             "mliap_lammps_env": "$HOME/m_lammps_gk_v2 for MLIAP/LAMMPS-specific runs only",
         },
         "layout": layout,
+        "svib_preflight": svib_preflight,
         "outputs": {
             "run_script": str(run_script),
             "sbatch_script": str(sbatch_script),
@@ -2132,6 +2151,7 @@ def mds_entropy_run_main(args: argparse.Namespace) -> dict[str, Any]:
             "Atomi VASP/CP2K prep writes native step/param timestep in ps; legacy SLUSCHI MDS MATLAB expects fs, so mds-entropy-run converts the prepared units before writing the workdir.",
             "Run through sbatch for MATLAB/SLUSCHI workloads that may take more than a quick interactive parse.",
             "After completion, use the constrained/use-this-value Svib line and phase-health/phase-window checks before accepting entropy.",
+            "Svib requires a positive onephase_v6 vibrational window; use at least 202 frames and preferably 320+ frames for screening.",
             "The copied legacy MATLAB template is locally patched when needed for undefined MDS correction variables and missing RDF cutoff fallbacks; the upstream SLUSCHI installation is not modified.",
         ],
     }
