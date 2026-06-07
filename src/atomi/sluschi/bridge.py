@@ -1890,7 +1890,59 @@ def _write_legacy_mds_latt_step(
     }
 
 
-def _copy_sluschi_entropy_template(sluschi_src: Path, workdir: Path, label: str) -> None:
+def _patch_sluschi_mds_entropy_template(entropy_dir: Path) -> list[str]:
+    """Patch copied legacy SLUSCHI MDS MATLAB helpers for robust batch runs.
+
+    The upstream MATLAB files are copied into each work directory first; these
+    edits are intentionally local to the generated run folder and do not modify
+    the user's SLUSCHI installation.
+    """
+    patches: list[str] = []
+    onephase = entropy_dir / "onephase_v6.m"
+    if onephase.is_file():
+        text = onephase.read_text(encoding="utf-8", errors="replace")
+        if "E_1_c = 0;" not in text and "flag_correction=1;" in text:
+            text = text.replace(
+                "flag_correction=1;\n",
+                "flag_correction=1;\narea_c = 0;\nE_1_c = 0;\nF_1_c = 0;\nF_2_c = 0;\n",
+                1,
+            )
+            onephase.write_text(text, encoding="utf-8")
+            patches.append("onephase_v6_init_correction_terms")
+
+    pdf = entropy_dir / "pdf_v6.m"
+    if pdf.is_file():
+        text = pdf.read_text(encoding="utf-8", errors="replace")
+        needle = "end\nn_NN;\nR_cut0 = R_cut;\n"
+        fallback = """end
+if ~exist('R_cut','var')
+    half_n_R = floor(n_R/2);
+    [~, peak_idx] = max(R_anal(1:half_n_R));
+    search_start = min(peak_idx + 1, half_n_R);
+    search_end = half_n_R;
+    if search_start <= search_end
+        [~, local_min_idx] = min(R_anal(search_start:search_end));
+        cut_idx = search_start + local_min_idx - 1;
+    else
+        cut_idx = min(n_R, peak_idx + 1);
+    end
+    R_cut = R_x(cut_idx);
+    n_NN = 0;
+    for j = 1:cut_idx
+        n_NN = n_NN + 4*pi*R_x(j)^2*dR * (n_atoms_total-1)/V * R_anal(j);
+    end
+end
+n_NN;
+R_cut0 = R_cut;
+"""
+        if "if ~exist('R_cut','var')" not in text and needle in text:
+            text = text.replace(needle, fallback, 1)
+            pdf.write_text(text, encoding="utf-8")
+            patches.append("pdf_v6_r_cut_first_minimum_fallback")
+    return patches
+
+
+def _copy_sluschi_entropy_template(sluschi_src: Path, workdir: Path, label: str) -> list[str]:
     entropy_src = sluschi_src / "mds_src" / "entropy"
     if not entropy_src.is_dir():
         raise FileNotFoundError(f"SLUSCHI entropy template directory not found: {entropy_src}")
@@ -1909,6 +1961,7 @@ def _copy_sluschi_entropy_template(sluschi_src: Path, workdir: Path, label: str)
         main_m.write_text(text, encoding="utf-8")
     if jobsub.is_file():
         jobsub.write_text(jobsub.read_text(encoding="utf-8", errors="replace").replace("replace_here", label), encoding="utf-8")
+    return _patch_sluschi_mds_entropy_template(entropy_dir)
 
 
 def _render_mds_run_script(args: argparse.Namespace, sluschi_src: Path, label: str) -> str:
@@ -1993,7 +2046,7 @@ def mds_entropy_run_main(args: argparse.Namespace) -> dict[str, Any]:
         block_size=args.legacy_mds_block_size,
         prepared_step_unit=args.prepared_step_unit,
     )
-    _copy_sluschi_entropy_template(sluschi_src, workdir, label)
+    compatibility_patches = _copy_sluschi_entropy_template(sluschi_src, workdir, label)
     run_script = workdir / "run_mds_entropy.sh"
     sbatch_script = workdir / "submit_mds_entropy.sbatch"
     run_script.write_text(_render_mds_run_script(args, sluschi_src, label), encoding="utf-8")
@@ -2020,12 +2073,14 @@ def mds_entropy_run_main(args: argparse.Namespace) -> dict[str, Any]:
             "collect_stdout": str(workdir / "collect.stdout"),
             "entropy_summary_dir": str(workdir / "atomi_entropy_summary"),
         },
+        "sluschi_template_compatibility_patches": compatibility_patches,
         "notes": [
             "This command prepares a legacy SLUSCHI MDS entropy run from Atomi pos/param/latt/step files.",
             "Legacy MDS expects position frames per MD frame, but latt/step one record per 80-frame block by default.",
             "Atomi VASP/CP2K prep writes native step/param timestep in ps; legacy SLUSCHI MDS MATLAB expects fs, so mds-entropy-run converts the prepared units before writing the workdir.",
             "Run through sbatch for MATLAB/SLUSCHI workloads that may take more than a quick interactive parse.",
             "After completion, use the constrained/use-this-value Svib line and phase-health/phase-window checks before accepting entropy.",
+            "The copied legacy MATLAB template is locally patched when needed for undefined MDS correction variables and missing RDF cutoff fallbacks; the upstream SLUSCHI installation is not modified.",
         ],
     }
     write_json(workdir / "sluschi_mds_entropy_run_manifest.json", manifest)

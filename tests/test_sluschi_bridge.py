@@ -518,6 +518,8 @@ def test_sluschi_mds_entropy_run_prepares_legacy_block_layout(tmp_path: Path):
     entropy_src.mkdir(parents=True)
     (entropy_src / "main.m").write_text("addpath('replace_folder_here')\nsystem = ['replace_here'];\n", encoding="utf-8")
     (entropy_src / "jobsub_master").write_text("# replace_here\n", encoding="utf-8")
+    (entropy_src / "onephase_v6.m").write_text("flag_correction=1;\nE_1 = E_1_c;\n", encoding="utf-8")
+    (entropy_src / "pdf_v6.m").write_text("end\nn_NN;\nR_cut0 = R_cut;\n", encoding="utf-8")
     work = tmp_path / "work"
 
     result = bridge.main(
@@ -553,6 +555,10 @@ def test_sluschi_mds_entropy_run_prepares_legacy_block_layout(tmp_path: Path):
     assert result["layout"]["input_param_timestep"] == 0.0005
     assert result["layout"]["legacy_param_timestep_fs"] == 0.5
     assert result["layout"]["legacy_step_values_fs"] == ["0.5", "0.5"]
+    assert result["sluschi_template_compatibility_patches"] == [
+        "onephase_v6_init_correction_terms",
+        "pdf_v6_r_cut_first_minimum_fallback",
+    ]
     assert len((work / "latt").read_text(encoding="utf-8").splitlines()) == 6
     assert (work / "step").read_text(encoding="utf-8").splitlines() == ["0.5", "0.5"]
     assert (work / "param").read_text(encoding="utf-8").splitlines()[:8] == [
@@ -566,6 +572,8 @@ def test_sluschi_mds_entropy_run_prepares_legacy_block_layout(tmp_path: Path):
         "C",
     ]
     assert (work / "entropy" / "pos_s_300").exists()
+    assert "E_1_c = 0;" in (work / "entropy" / "onephase_v6.m").read_text(encoding="utf-8")
+    assert "if ~exist('R_cut','var')" in (work / "entropy" / "pdf_v6.m").read_text(encoding="utf-8")
     assert "UC2" in (work / "run_mds_entropy.sh").read_text(encoding="utf-8")
     assert (work / "submit_mds_entropy.sbatch").exists()
 
