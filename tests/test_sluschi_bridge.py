@@ -499,6 +499,54 @@ def test_sluschi_entropy_summary_combines_svib_and_sconf(tmp_path: Path):
     assert data[0]["type1_stoich"] == "2.0"
 
 
+def test_sluschi_entropy_summary_rejects_empty_zero_svib(tmp_path: Path):
+    root = tmp_path / "run01"
+    root.mkdir()
+    (root / "collect.stdout").write_text(
+        "\n".join(
+            [
+                "Svib:  0 0  J/K/mol atom. 1,2,...,n. Do NOT use this value.",
+                "Svib:  0 0  Constrained by ideal gas entropy. Use this value, not the line above.",
+                "The pair between element 1-1 appears to be solid. I suggest that you take the minimum: -4.157e-05",
+                "The pair between element 1-2 appears to be solid. I suggest that you take the minimum: -4.157e-05",
+                "The pair between element 2-1 appears to be solid. I suggest that you take the minimum: -4.157e-05",
+                "The pair between element 2-2 appears to be solid. I suggest that you take the minimum: -4.157e-05",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (root / "vib.out").write_text("", encoding="utf-8")
+    (root / "entropy.out").write_text("", encoding="utf-8")
+    out = tmp_path / "entropy"
+
+    result = bridge.main(
+        [
+            "entropy-summary",
+            "--root",
+            str(root),
+            "--outdir",
+            str(out),
+            "--system",
+            "UC2",
+            "--formula",
+            "UC2",
+            "--phase",
+            "solid",
+            "--temperature-k",
+            "300",
+            "--type-stoich",
+            "1=1,2=2",
+        ]
+    )
+
+    data = rows(out / "sluschi_entropy_summary.csv")
+    assert result["svib_valid"] is False
+    assert result["svib_status"] == "zero_constrained_svib_with_empty_support"
+    assert data[0]["Svib_J_mol_formula_K"] == ""
+    assert data[0]["Stotal_J_mol_formula_K"] == ""
+    assert data[0]["Svib_status"] == "zero_constrained_svib_with_empty_support"
+
+
 def test_sluschi_mds_entropy_run_prepares_legacy_block_layout(tmp_path: Path):
     prepared = tmp_path / "prepared"
     prepared.mkdir()
@@ -518,8 +566,8 @@ def test_sluschi_mds_entropy_run_prepares_legacy_block_layout(tmp_path: Path):
     entropy_src.mkdir(parents=True)
     (entropy_src / "main.m").write_text("addpath('replace_folder_here')\nsystem = ['replace_here'];\n", encoding="utf-8")
     (entropy_src / "jobsub_master").write_text("# replace_here\n", encoding="utf-8")
-    (entropy_src / "onephase_v6.m").write_text("flag_correction=1;\nE_1 = E_1_c;\n", encoding="utf-8")
-    (entropy_src / "pdf_v6.m").write_text("end\nn_NN;\nR_cut0 = R_cut;\n", encoding="utf-8")
+    (sluschi_src / "mds_src" / "onephase_v6.m").write_text("flag_correction=1;\nE_1 = E_1_c;\n", encoding="utf-8")
+    (sluschi_src / "mds_src" / "pdf_v6.m").write_text("end\nn_NN;\nR_cut0 = R_cut;\n", encoding="utf-8")
     work = tmp_path / "work"
 
     result = bridge.main(

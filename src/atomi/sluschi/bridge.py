@@ -1594,6 +1594,35 @@ def parse_sluschi_svib_from_text(text: str) -> tuple[list[float], str]:
     return [], ""
 
 
+def validate_sluschi_svib_outputs(root: Path, values: list[float], line: str) -> tuple[list[float], bool, str]:
+    """Guard against SLUSCHI's zero-valued fallback being parsed as real Svib."""
+    if not values:
+        return values, False, "missing_svib_line"
+    if not all(math.isfinite(value) for value in values):
+        return [], False, "nonfinite_svib_line"
+    all_zero = all(abs(value) < 1.0e-12 for value in values)
+    vib_candidates = [root / "vib.out", root / "entropy" / "vib.out"]
+    entropy_candidates = [root / "entropy.out", root / "entropy" / "entropy.out"]
+    existing = [path for path in vib_candidates + entropy_candidates if path.is_file()]
+    empty_support = bool(existing) and all(path.stat().st_size == 0 for path in existing)
+    nonfinite_support = False
+    for path in existing:
+        if path.stat().st_size == 0:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace").lower()
+        if re.search(r"(^|[^a-z])nan([^a-z]|$)|(^|[^a-z])inf([^a-z]|$)", text):
+            nonfinite_support = True
+            break
+    lowered = line.lower()
+    constrained_zero = all_zero and ("constrained" in lowered or "use this value" in lowered)
+    if constrained_zero and (empty_support or nonfinite_support):
+        reason = "zero_constrained_svib_with_empty_support" if empty_support else "zero_constrained_svib_with_nonfinite_support"
+        return [], False, reason
+    if constrained_zero:
+        return [], False, "zero_constrained_svib"
+    return values, True, "ok"
+
+
 def load_collect_text(root: Path, collect_path: Path | None = None) -> tuple[str, Path | None]:
     candidates = [collect_path] if collect_path else [
         root / "collect.stdout",
@@ -1639,6 +1668,7 @@ def entropy_summary_main(args: argparse.Namespace) -> dict[str, Any]:
     if not text.strip():
         raise FileNotFoundError(f"No collect/entropy text found under {root}")
     svib_values, svib_line = parse_sluschi_svib_from_text(text)
+    svib_values, svib_valid, svib_status = validate_sluschi_svib_outputs(root, svib_values, svib_line)
     pairs = parse_sconfig_pairs(root)
     summary_ns = argparse.Namespace(
         root=root,
@@ -1659,7 +1689,7 @@ def entropy_summary_main(args: argparse.Namespace) -> dict[str, Any]:
     sconf_sem_atom = sconfig_summary.get("sem_pair_sconfig_J_mol_atom_K")
     sconf_formula = sconf_atom * atoms_per_formula if sconf_atom is not None and atoms_per_formula else None
     sconf_sem_formula = sconf_sem_atom * atoms_per_formula if sconf_sem_atom is not None and atoms_per_formula else None
-    total = (svib_formula or 0.0) + (sconf_formula or 0.0) if svib_formula is not None or sconf_formula is not None else None
+    total = (svib_formula + (sconf_formula or 0.0)) if svib_formula is not None else None
     row: dict[str, Any] = {
         "temperature_K": args.temperature_k,
         "system": args.system,
@@ -1676,6 +1706,8 @@ def entropy_summary_main(args: argparse.Namespace) -> dict[str, Any]:
         "source": str(root),
         "collect_file": str(collect_used) if collect_used else "",
         "svib_line": svib_line,
+        "Svib_valid": svib_valid,
+        "Svib_status": svib_status,
     }
     for idx, value in enumerate(svib_values, start=1):
         row[f"Svib_type{idx}_J_mol_atom_K"] = value
@@ -1696,6 +1728,8 @@ def entropy_summary_main(args: argparse.Namespace) -> dict[str, Any]:
         "root": str(root),
         "collect_file": str(collect_used) if collect_used else None,
         "n_svib_types": len(svib_values),
+        "svib_valid": svib_valid,
+        "svib_status": svib_status,
         "n_pair_recommendations": len(pairs),
         "type_stoich": {str(key): value for key, value in weights.items()},
         "outputs": {"summary_csv": str(summary_csv)},
@@ -1704,7 +1738,7 @@ def entropy_summary_main(args: argparse.Namespace) -> dict[str, Any]:
         "notes": [
             "This command parses an existing SLUSCHI/LAMMPS postprocess folder as an entropy prior.",
             "It is not, by itself, a small-cell solid-liquid coexistence melting calculation.",
-            "Svib values are taken from the constrained/use-this-value SLUSCHI line when present.",
+            "Svib values are taken from the constrained/use-this-value SLUSCHI line when present and rejected if SLUSCHI only emitted a zero fallback with empty/non-finite vibrational support files.",
             "Sconf is the mean SLUSCHI pair recommendation multiplied by atoms_per_formula.",
             "For production entropy, validate dense NVT sampling, type ordering, SLUSCHI frame spacing, and phase health.",
         ],
@@ -1951,6 +1985,10 @@ def _copy_sluschi_entropy_template(sluschi_src: Path, workdir: Path, label: str)
     for source in entropy_src.iterdir():
         if source.is_file():
             shutil.copy2(source, entropy_dir / source.name)
+    for helper_name in ("onephase_v6.m", "pdf_v6.m"):
+        helper = sluschi_src / "mds_src" / helper_name
+        if helper.is_file() and not (entropy_dir / helper_name).is_file():
+            shutil.copy2(helper, entropy_dir / helper_name)
     for name in ("pos", "param", "latt", "step"):
         shutil.copy2(workdir / name, entropy_dir / f"{name}_{label}")
     main_m = entropy_dir / "main.m"
@@ -2036,7 +2074,8 @@ def _render_mds_sbatch(args: argparse.Namespace) -> str:
 def mds_entropy_run_main(args: argparse.Namespace) -> dict[str, Any]:
     prepared_root = args.prepared_root.resolve()
     workdir = args.workdir.resolve()
-    sluschi_src = Path(args.sluschi_bin or args.sluschi_root or os.environ.get("ATOMI_SLUSCHI_BIN", "") or "$HOME/SLUSCHI/src").expanduser()
+    sluschi_raw = args.sluschi_bin or args.sluschi_root or os.environ.get("ATOMI_SLUSCHI_BIN", "") or "$HOME/SLUSCHI/src"
+    sluschi_src = Path(os.path.expandvars(sluschi_raw)).expanduser()
     if sluschi_src.name != "src" and (sluschi_src / "src" / "mds_src").is_dir():
         sluschi_src = sluschi_src / "src"
     label = args.label or f"s_{int(round(args.temperature_k))}"
