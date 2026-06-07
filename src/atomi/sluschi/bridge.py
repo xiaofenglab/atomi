@@ -29,6 +29,7 @@ SCHEMA_PHASE_HEALTH = "atomi.sluschi.phase_health.v1"
 SCHEMA_PHASE_WINDOW_SAMPLE = "atomi.sluschi.phase_window_sample.v1"
 SCHEMA_WORKFLOW_GUIDE = "atomi.sluschi.workflow_guide.v1"
 SCHEMA_MELTING_ANCHOR = "atomi.sluschi.melting_anchor.v1"
+SCHEMA_LAMMPS_PREP = "atomi.sluschi.lammps_prep.v1"
 SCHEMA_CP2K_PREP = "atomi.sluschi.cp2k_prep.v1"
 SCHEMA_VASP_PREP = "atomi.sluschi.vasp_prep.v1"
 SCHEMA_MDS_ENTROPY_RUN = "atomi.sluschi.mds_entropy_run.v1"
@@ -743,7 +744,71 @@ def _std(values: list[float]) -> float | None:
     return math.sqrt(sum((value - mean) ** 2 for value in values) / (len(values) - 1))
 
 
-def parse_lammps_dump_frames(path: Path, type_elements: dict[int, str]) -> list[dict[str, Any]]:
+def _lammps_cell_from_bounds(
+    header_line: str, bound_rows: list[list[float]]
+) -> tuple[list[list[float]], list[float]]:
+    has_tilt = any(token in header_line.split()[3:] for token in ("xy", "xz", "yz"))
+    if not has_tilt:
+        origin = [bound_rows[0][0], bound_rows[1][0], bound_rows[2][0]]
+        cell = [
+            [bound_rows[0][1] - bound_rows[0][0], 0.0, 0.0],
+            [0.0, bound_rows[1][1] - bound_rows[1][0], 0.0],
+            [0.0, 0.0, bound_rows[2][1] - bound_rows[2][0]],
+        ]
+        return cell, origin
+    xy = bound_rows[0][2] if len(bound_rows[0]) >= 3 else 0.0
+    xz = bound_rows[1][2] if len(bound_rows[1]) >= 3 else 0.0
+    yz = bound_rows[2][2] if len(bound_rows[2]) >= 3 else 0.0
+    xlo_bound, xhi_bound = bound_rows[0][:2]
+    ylo_bound, yhi_bound = bound_rows[1][:2]
+    zlo, zhi = bound_rows[2][:2]
+    xlo = xlo_bound - min(0.0, xy, xz, xy + xz)
+    xhi = xhi_bound - max(0.0, xy, xz, xy + xz)
+    ylo = ylo_bound - min(0.0, yz)
+    yhi = yhi_bound - max(0.0, yz)
+    return [[xhi - xlo, 0.0, 0.0], [xy, yhi - ylo, 0.0], [xz, yz, zhi - zlo]], [xlo, ylo, zlo]
+
+
+def _coords_from_lammps_atom_row(
+    parts: list[str],
+    col: dict[str, int],
+    *,
+    cell: list[list[float]],
+    origin: list[float],
+    coordinate_preference: str,
+) -> list[float]:
+    def shifted(keys: tuple[str, str, str]) -> list[float]:
+        return [float(parts[col[key]]) - origin[idx] for idx, key in enumerate(keys)]
+
+    def scaled(keys: tuple[str, str, str]) -> list[float]:
+        frac = [float(parts[col[key]]) for key in keys]
+        return _cart_from_fractional(frac, cell)
+
+    ordered_modes = (
+        (("xu", "yu", "zu"), "cart"),
+        (("xsu", "ysu", "zsu"), "scaled"),
+        (("x", "y", "z"), "cart"),
+        (("xs", "ys", "zs"), "scaled"),
+    )
+    if coordinate_preference == "wrapped":
+        ordered_modes = (
+            (("x", "y", "z"), "cart"),
+            (("xs", "ys", "zs"), "scaled"),
+            (("xu", "yu", "zu"), "cart"),
+            (("xsu", "ysu", "zsu"), "scaled"),
+        )
+    for keys, mode in ordered_modes:
+        if set(keys) <= set(col):
+            return shifted(keys) if mode == "cart" else scaled(keys)
+    raise ValueError("LAMMPS dump must contain x/y/z, xu/yu/zu, xs/ys/zs, or xsu/ysu/zsu columns")
+
+
+def parse_lammps_dump_frames(
+    path: Path,
+    type_elements: dict[int, str],
+    *,
+    coordinate_preference: str = "wrapped",
+) -> list[dict[str, Any]]:
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     frames: list[dict[str, Any]] = []
     idx_line = 0
@@ -759,16 +824,11 @@ def parse_lammps_dump_frames(path: Path, type_elements: dict[int, str]) -> list[
         idx_line += 2
         if not lines[idx_line].startswith("ITEM: BOX BOUNDS"):
             raise ValueError(f"Malformed LAMMPS dump near timestep {timestep}: missing box bounds")
-        bounds = []
+        box_header = lines[idx_line]
+        bound_rows = []
         for axis in range(3):
-            parts = lines[idx_line + 1 + axis].split()
-            lo, hi = float(parts[0]), float(parts[1])
-            bounds.append((lo, hi))
-        cell = [
-            [bounds[0][1] - bounds[0][0], 0.0, 0.0],
-            [0.0, bounds[1][1] - bounds[1][0], 0.0],
-            [0.0, 0.0, bounds[2][1] - bounds[2][0]],
-        ]
+            bound_rows.append([float(value) for value in lines[idx_line + 1 + axis].split()[:3]])
+        cell, origin = _lammps_cell_from_bounds(box_header, bound_rows)
         idx_line += 4
         if not lines[idx_line].startswith("ITEM: ATOMS"):
             raise ValueError(f"Malformed LAMMPS dump near timestep {timestep}: missing atom rows")
@@ -783,15 +843,13 @@ def parse_lammps_dump_frames(path: Path, type_elements: dict[int, str]) -> list[
             symbol = type_elements.get(typ)
             if symbol is None:
                 raise ValueError(f"LAMMPS dump uses type {typ}, missing from --type-elements")
-            if {"x", "y", "z"} <= set(col):
-                coords = [float(parts[col[axis]]) for axis in ("x", "y", "z")]
-            elif {"xu", "yu", "zu"} <= set(col):
-                coords = [float(parts[col[axis]]) for axis in ("xu", "yu", "zu")]
-            elif {"xs", "ys", "zs"} <= set(col):
-                frac = [float(parts[col[axis]]) for axis in ("xs", "ys", "zs")]
-                coords = [bounds[i][0] + frac[i] * (bounds[i][1] - bounds[i][0]) for i in range(3)]
-            else:
-                raise ValueError("LAMMPS dump must contain x/y/z, xu/yu/zu, or xs/ys/zs columns")
+            coords = _coords_from_lammps_atom_row(
+                parts,
+                col,
+                cell=cell,
+                origin=origin,
+                coordinate_preference=coordinate_preference,
+            )
             atoms.append((atom_id, symbol, coords))
         idx_line += natoms
         atoms.sort(key=lambda item: item[0])
@@ -804,6 +862,107 @@ def parse_lammps_dump_frames(path: Path, type_elements: dict[int, str]) -> list[
             }
         )
     return frames
+
+
+def _infer_lammps_frame_stride_md_steps(frames: list[dict[str, Any]], fallback: float | None) -> float:
+    if fallback is not None:
+        return float(fallback)
+    if len(frames) >= 2:
+        delta = float(frames[1]["timestep"] - frames[0]["timestep"])
+        if delta > 0:
+            return delta
+    return 1.0
+
+
+def lammps_prep_main(args: argparse.Namespace) -> dict[str, Any]:
+    type_elements = parse_type_element_map(args.type_elements)
+    frames = parse_lammps_dump_frames(args.trajectory, type_elements, coordinate_preference=args.coordinate_preference)
+    if not frames:
+        raise ValueError(f"No frames found in LAMMPS dump trajectory: {args.trajectory}")
+    elements = parse_element_list(args.elements)
+    if not elements:
+        elements = []
+        for idx in sorted(type_elements):
+            element = type_elements[idx]
+            if element not in elements:
+                elements.append(element)
+    masses = parse_element_mass_map(args.element_masses)
+    missing = [element for element in elements if element not in masses]
+    if missing:
+        raise ValueError(f"No masses available for element(s): {', '.join(missing)}")
+    if args.timestep_ps is None and args.timestep_fs is None:
+        raise ValueError("LAMMPS prep requires --timestep-ps for units metal runs or --timestep-fs.")
+    if args.timestep_ps is not None and args.timestep_fs is not None:
+        raise ValueError("Pass only one of --timestep-ps or --timestep-fs.")
+    start = max(args.start_frame, 0)
+    stop = args.stop_frame if args.stop_frame is not None else len(frames)
+    stride = max(args.stride, 1)
+    selected = frames[start:stop:stride]
+    if not selected:
+        raise ValueError("Frame selection is empty.")
+    frame_stride_md_steps = _infer_lammps_frame_stride_md_steps(selected, args.frame_stride_md_steps)
+    timestep_fs = float(args.timestep_fs) if args.timestep_fs is not None else float(args.timestep_ps) * 1000.0
+    step_interval_fs = timestep_fs * frame_stride_md_steps
+    counts = {element: 0 for element in elements}
+    for symbol in selected[0]["symbols"]:
+        if symbol not in counts:
+            raise ValueError(f"Frame contains element {symbol!r}, not listed in --elements={','.join(elements)!r}.")
+        counts[symbol] += 1
+    phase_temp_label = args.phase_temp_label
+    if not phase_temp_label and args.phase:
+        phase_temp_label = f"{args.phase}_{int(round(args.temperature_k))}" if args.temperature_k is not None else args.phase
+    outdir = args.outdir.resolve()
+    lattice_frames = [frame["cell"] for frame in selected]
+    symbol_frames = [frame["symbols"] for frame in selected]
+    frac_frames = [
+        [cart_to_frac(coord, frame["cell"]) for coord in frame["coords"]]
+        for frame in selected
+    ]
+    outputs = write_sluschi_native_frames(
+        outdir=outdir,
+        elements=elements,
+        counts=counts,
+        masses=masses,
+        lattice_frames=lattice_frames,
+        symbol_frames=symbol_frames,
+        frac_frames=frac_frames,
+        step_interval_fs=step_interval_fs,
+        phase_temp_label=phase_temp_label,
+    )
+    manifest = {
+        "schema": SCHEMA_LAMMPS_PREP,
+        "source_engine": "lammps",
+        "trajectory": str(args.trajectory.resolve()),
+        "outdir": str(outdir),
+        "type_elements": {str(key): value for key, value in type_elements.items()},
+        "elements": elements,
+        "counts": counts,
+        "natoms": len(selected[0]["symbols"]),
+        "n_source_frames": len(frames),
+        "n_selected_frames": len(selected),
+        "start_frame": start,
+        "stop_frame": stop,
+        "stride": stride,
+        "timestep_ps": float(args.timestep_ps) if args.timestep_ps is not None else timestep_fs / 1000.0,
+        "timestep_fs": timestep_fs,
+        "frame_stride_md_steps": frame_stride_md_steps,
+        "sluschi_step_ps": step_interval_fs / 1000.0,
+        "coordinate_preference": args.coordinate_preference,
+        "temperature_K": args.temperature_k,
+        "phase": args.phase,
+        "phase_temp_label": phase_temp_label,
+        "outputs": outputs,
+        "notes": [
+            "This command prepares existing LAMMPS dump frames for the SLUSCHI entropy-prior lane.",
+            "The SLUSCHI pos file is written as Cartesian Angstrom coordinates regardless of whether the dump stores x/y/z, xu/yu/zu, xs/ys/zs, or xsu/ysu/zsu.",
+            "For Svib, prefer unwrapped LAMMPS dump columns (xu/yu/zu or xsu/ysu/zsu) to avoid periodic-boundary velocity spikes.",
+            "Use separate validated NVT solid/liquid windows; this is not a true SLUSCHI coexistence melting calculation.",
+        ],
+    }
+    write_json(outdir / "sluschi_lammps_prep_manifest.json", manifest)
+    print(f"Wrote LAMMPS dump-to-SLUSCHI prep files: {outdir}")
+    print(f"Selected frames: {len(selected)} / {len(frames)}")
+    return manifest
 
 
 def phase_window_frames_from_args(args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -1083,7 +1242,6 @@ def cp2k_prep_main(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("Frame selection is empty.")
     outdir = args.outdir.resolve()
     outdir.mkdir(parents=True, exist_ok=True)
-    order = {element: idx for idx, element in enumerate(elements)}
     counts = {element: 0 for element in elements}
     for symbol in selected[0]["symbols"]:
         if symbol not in counts:
@@ -2928,6 +3086,52 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument("--pos-script", default="lmp_pos.py")
     prep.add_argument("--prep-script", default="lmp_prep.csh")
 
+    lammps_prep = sub.add_parser(
+        "lammps-prep",
+        help="Prepare LAMMPS dump frames as SLUSCHI pos/latt/step/param files.",
+    )
+    lammps_prep.add_argument("--trajectory", type=Path, required=True, help="LAMMPS dump trajectory.")
+    lammps_prep.add_argument("--outdir", type=Path, default=Path("sluschi_lammps_prep"))
+    lammps_prep.add_argument(
+        "--type-elements",
+        required=True,
+        help="LAMMPS type map, e.g. '1=K,2=Cl' for pure KCl or '1=Li,2=K,3=Cl' for LiCl-KCl.",
+    )
+    lammps_prep.add_argument("--elements", default="", help="Optional element order override. Default follows type-elements.")
+    lammps_prep.add_argument(
+        "--element-masses",
+        default="",
+        help="Optional Element=mass overrides, e.g. K=39.0983,Cl=35.453.",
+    )
+    lammps_prep.add_argument("--temperature-k", type=float, help="Trajectory temperature in K, used for manifest and phase_temp label.")
+    lammps_prep.add_argument("--phase", default="", help="Optional phase label, e.g. solid or liquid.")
+    lammps_prep.add_argument(
+        "--phase-temp-label",
+        default="",
+        help="Exact phase_temp content. Default is '<phase>_<rounded temperature>' when both are provided, else phase.",
+    )
+    lammps_prep.add_argument(
+        "--timestep-ps",
+        type=float,
+        help="LAMMPS timestep in ps for units metal runs, e.g. 0.00025. Mutually exclusive with --timestep-fs.",
+    )
+    lammps_prep.add_argument("--timestep-fs", type=float, help="LAMMPS timestep in fs. Mutually exclusive with --timestep-ps.")
+    lammps_prep.add_argument(
+        "--frame-stride-md-steps",
+        type=float,
+        default=None,
+        help="MD steps between consecutive selected dump frames. Default infers from dump timestep differences.",
+    )
+    lammps_prep.add_argument(
+        "--coordinate-preference",
+        choices=("unwrapped", "wrapped"),
+        default="unwrapped",
+        help="Prefer unwrapped or wrapped dump columns when both are present.",
+    )
+    lammps_prep.add_argument("--start-frame", type=int, default=0)
+    lammps_prep.add_argument("--stop-frame", type=int)
+    lammps_prep.add_argument("--stride", type=int, default=1)
+
     cp2k_prep = sub.add_parser(
         "cp2k-prep",
         help="Prepare CP2K AIMD XYZ frames as SLUSCHI pos/latt/step/param files.",
@@ -3236,6 +3440,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
         return supersalt_example_main(args)
     if args.command == "lammps-prep-scripts":
         return prep_scripts_main(args)
+    if args.command == "lammps-prep":
+        return lammps_prep_main(args)
     if args.command == "cp2k-prep":
         return cp2k_prep_main(args)
     if args.command == "vasp-prep":

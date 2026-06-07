@@ -156,6 +156,76 @@ def test_sluschi_lammps_prep_scripts_use_requested_type_basis(tmp_path: Path):
     assert "echo Li >> param" not in prep_script
 
 
+def test_sluschi_lammps_prep_writes_cartesian_from_scaled_dump(tmp_path: Path):
+    dump = tmp_path / "traj.dump"
+    dump.write_text(
+        "\n".join(
+            [
+                "ITEM: TIMESTEP",
+                "0",
+                "ITEM: NUMBER OF ATOMS",
+                "4",
+                "ITEM: BOX BOUNDS pp pp pp",
+                "0 10",
+                "0 20",
+                "0 30",
+                "ITEM: ATOMS id type xs ys zs",
+                "1 1 0.1 0.1 0.1",
+                "2 2 0.2 0.1 0.1",
+                "3 1 0.5 0.5 0.5",
+                "4 2 0.6 0.5 0.5",
+                "ITEM: TIMESTEP",
+                "20",
+                "ITEM: NUMBER OF ATOMS",
+                "4",
+                "ITEM: BOX BOUNDS pp pp pp",
+                "0 10",
+                "0 20",
+                "0 30",
+                "ITEM: ATOMS id type xs ys zs",
+                "1 1 0.11 0.1 0.1",
+                "2 2 0.21 0.1 0.1",
+                "3 1 0.51 0.5 0.5",
+                "4 2 0.61 0.5 0.5",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "lammps_native"
+
+    result = bridge.main(
+        [
+            "lammps-prep",
+            "--trajectory",
+            str(dump),
+            "--outdir",
+            str(out),
+            "--type-elements",
+            "1=K,2=Cl",
+            "--timestep-ps",
+            "0.00025",
+            "--phase",
+            "liquid",
+            "--temperature-k",
+            "1100",
+        ]
+    )
+
+    assert result["schema"] == bridge.SCHEMA_LAMMPS_PREP
+    assert result["n_selected_frames"] == 2
+    assert result["frame_stride_md_steps"] == 20.0
+    assert result["sluschi_step_ps"] == 0.005
+    assert (out / "phase_temp").read_text(encoding="utf-8").strip() == "liquid_1100"
+    pos_lines = (out / "pos").read_text(encoding="utf-8").splitlines()
+    assert pos_lines[0].startswith("1 ")
+    assert pos_lines[1].startswith("5 ")
+    assert pos_lines[2].startswith("2 ")
+    assert pos_lines[4].startswith("1.1 ")
+    manifest = json.loads((out / "sluschi_lammps_prep_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["coordinate_preference"] == "unwrapped"
+
+
 def test_sluschi_cp2k_prep_writes_native_entropy_inputs(tmp_path: Path):
     xyz = tmp_path / "kcl-pos.xyz"
     xyz.write_text(
