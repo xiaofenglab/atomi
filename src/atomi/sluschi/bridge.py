@@ -1662,6 +1662,17 @@ def type_stoich_weights(args: argparse.Namespace, n_types: int) -> dict[int, flo
     return weights
 
 
+def infer_n_types_from_type_stoich(raw_type_stoich: str) -> int:
+    max_type = 0
+    for key in parse_key_float_map(raw_type_stoich):
+        key_clean = key.strip().lower().replace("type", "")
+        try:
+            max_type = max(max_type, int(key_clean))
+        except ValueError:
+            continue
+    return max_type
+
+
 def entropy_summary_main(args: argparse.Namespace) -> dict[str, Any]:
     root = args.root.resolve()
     text, collect_used = load_collect_text(root, args.collect)
@@ -1682,7 +1693,8 @@ def entropy_summary_main(args: argparse.Namespace) -> dict[str, Any]:
         dump_stride_note=args.dump_stride_note,
     )
     sconfig_summary = summarize_sconfig_case(summary_ns, pairs)
-    weights = type_stoich_weights(args, len(svib_values)) if svib_values else {}
+    n_weight_types = len(svib_values) or infer_n_types_from_type_stoich(args.type_stoich)
+    weights = type_stoich_weights(args, n_weight_types) if n_weight_types else {}
     atoms_per_formula = sum(weights.values()) if weights else (args.atoms_per_formula or None)
     svib_formula = sum(weights[idx] * svib_values[idx - 1] for idx in weights) if svib_values else None
     sconf_atom = sconfig_summary.get("mean_pair_sconfig_J_mol_atom_K")

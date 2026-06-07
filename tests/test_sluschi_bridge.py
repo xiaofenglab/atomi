@@ -543,6 +543,7 @@ def test_sluschi_entropy_summary_rejects_empty_zero_svib(tmp_path: Path):
     assert result["svib_valid"] is False
     assert result["svib_status"] == "zero_constrained_svib_with_empty_support"
     assert data[0]["Svib_J_mol_formula_K"] == ""
+    assert data[0]["Sconf_J_mol_formula_K"] == "-0.00012471"
     assert data[0]["Stotal_J_mol_formula_K"] == ""
     assert data[0]["Svib_status"] == "zero_constrained_svib_with_empty_support"
 
