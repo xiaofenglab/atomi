@@ -175,6 +175,26 @@ def build_parser() -> argparse.ArgumentParser:
         )
         md_rdf_pdf.add_argument("md_rdf_pdf_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("pdfxrd-manual", "pdfxrd_manual"):
+        pdfxrd_manual = subparsers.add_parser(
+            command_name,
+            help="Manual PDF/RDF and powder-XRD inspection for static structures or selected MD frames.",
+        )
+        pdfxrd_manual.add_argument("pdfxrd_manual_args", nargs=argparse.REMAINDER)
+
+    for command_name in (
+        "pdfxrd-run",
+        "pdfxrd_run",
+        "md-phase-order-guard",
+        "md_phase_order_guard",
+        "vasp-xdatcar-phase-order-guard",
+    ):
+        md_phase_order_guard = subparsers.add_parser(
+            command_name,
+            help="Compare early/tail MD PDFs as a long-range-order liquid/solid guard.",
+        )
+        md_phase_order_guard.add_argument("md_phase_order_guard_args", nargs=argparse.REMAINDER)
+
     for command_name in ("pdfgetx3_status", "pdfgetx3-status"):
         pdfgetx3_status = subparsers.add_parser(
             command_name,
@@ -447,6 +467,13 @@ def build_parser() -> argparse.ArgumentParser:
             help="Prepare and inspect Atomi handoffs to external SLUSCHI/MLIP melting workflows.",
         )
         sluschi_bridge.add_argument("sluschi_args", nargs=argparse.REMAINDER)
+
+    for command_name in ("molten_salt_liquid_guidance", "molten-salt-liquid-guidance"):
+        molten_salt_liquid_guidance = subparsers.add_parser(
+            command_name,
+            help="Write molten-salt liquid AIMD -> SLUSCHI -> MIVM workflow guidance.",
+        )
+        molten_salt_liquid_guidance.add_argument("molten_salt_liquid_args", nargs=argparse.REMAINDER)
 
     for command_name in ("lammps_sconfig", "lammps-sconfig"):
         lammps_sconfig = subparsers.add_parser(
@@ -938,6 +965,22 @@ def main(argv: list[str] | None = None) -> None:
 
         md_rdf_pdf_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("pdfxrd-manual", "pdfxrd_manual"):
+        from atomi.md.pdfxrd_manual import main as pdfxrd_manual_main
+
+        pdfxrd_manual_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in (
+        "pdfxrd-run",
+        "pdfxrd_run",
+        "md-phase-order-guard",
+        "md_phase_order_guard",
+        "vasp-xdatcar-phase-order-guard",
+    ):
+        from atomi.md.pdfxrd_run import main as md_phase_order_guard_main
+
+        md_phase_order_guard_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] in ("pdfgetx3_status", "pdfgetx3-status"):
         from atomi.lammps.pdfgetx3_status import main as pdfgetx3_status_main
 
@@ -1159,6 +1202,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.sluschi.bridge import main as sluschi_bridge_main
 
         sluschi_bridge_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in ("molten_salt_liquid_guidance", "molten-salt-liquid-guidance"):
+        from atomi.md.molten_salt_liquid import main as molten_salt_liquid_main
+
+        molten_salt_liquid_main(raw_args[1:])
         return
     if raw_args and raw_args[0] in ("lammps_sconfig", "lammps-sconfig"):
         from atomi.sluschi.bridge import main as sluschi_bridge_main
@@ -1527,6 +1575,22 @@ def main(argv: list[str] | None = None) -> None:
 
         md_rdf_pdf_main(args.md_rdf_pdf_args)
         return
+    if args.subcommand in ("pdfxrd-manual", "pdfxrd_manual"):
+        from atomi.md.pdfxrd_manual import main as pdfxrd_manual_main
+
+        pdfxrd_manual_main(args.pdfxrd_manual_args)
+        return
+    if args.subcommand in (
+        "pdfxrd-run",
+        "pdfxrd_run",
+        "md-phase-order-guard",
+        "md_phase_order_guard",
+        "vasp-xdatcar-phase-order-guard",
+    ):
+        from atomi.md.pdfxrd_run import main as md_phase_order_guard_main
+
+        md_phase_order_guard_main(args.md_phase_order_guard_args)
+        return
 
     if args.subcommand in ("pdfgetx3_status", "pdfgetx3-status"):
         from atomi.lammps.pdfgetx3_status import main as pdfgetx3_status_main
@@ -1803,6 +1867,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.sluschi.bridge import main as sluschi_bridge_main
 
         sluschi_bridge_main(args.sluschi_args)
+        return
+
+    if args.subcommand in ("molten_salt_liquid_guidance", "molten-salt-liquid-guidance"):
+        from atomi.md.molten_salt_liquid import main as molten_salt_liquid_main
+
+        molten_salt_liquid_main(args.molten_salt_liquid_args)
         return
 
     if args.subcommand in ("lammps_sconfig", "lammps-sconfig"):

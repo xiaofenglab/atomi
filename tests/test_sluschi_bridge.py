@@ -619,6 +619,55 @@ def test_sluschi_entropy_summary_rejects_empty_zero_svib(tmp_path: Path):
     assert data[0]["Svib_status"] == "zero_constrained_svib_with_empty_support"
 
 
+def test_sluschi_entropy_summary_can_use_same_species_liquid_reduction(tmp_path: Path):
+    root = tmp_path / "kcl_liquid"
+    root.mkdir()
+    (root / "collect.stdout").write_text(
+        "\n".join(
+            [
+                "Svib:  80.0 78.0  J/K/mol atom. 1,2,...,n. Do NOT use this value.",
+                "Svib:  79.0 77.0  Constrained by ideal gas entropy. Use this value, not the line above.",
+                "The pair between element 1-1 appears to be liquid. I suggest that you take the median: 6.4",
+                "The pair between element 1-2 appears to be liquid. I suggest that you take the median: 4.6",
+                "The pair between element 2-1 appears to be liquid. I suggest that you take the median: 4.8",
+                "The pair between element 2-2 appears to be liquid. I suggest that you take the median: 6.6",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "entropy"
+
+    bridge.main(
+        [
+            "entropy-summary",
+            "--root",
+            str(root),
+            "--outdir",
+            str(out),
+            "--system",
+            "KCl",
+            "--formula",
+            "KCl",
+            "--phase",
+            "liquid",
+            "--temperature-k",
+            "1100",
+            "--type-stoich",
+            "1=1,2=1",
+            "--sconf-reduction",
+            "same-species-liquid",
+        ]
+    )
+
+    data = rows(out / "sluschi_entropy_summary.csv")
+    assert data[0]["Svib_J_mol_formula_K"] == "156.0"
+    assert data[0]["Sconf_J_mol_formula_K"] == "13.0"
+    assert data[0]["Sconf_reduction"] == "same-species-liquid"
+    assert data[0]["Sconf_selected_pairs"] == "1-1,2-2"
+    assert data[0]["Sconf_selected_mean_J_mol_atom_K"] == "6.5"
+    assert data[0]["Sconf_all_pair_mean_J_mol_atom_K"] == "5.6"
+
+
 def test_sluschi_mds_entropy_run_prepares_legacy_block_layout(tmp_path: Path):
     prepared = tmp_path / "prepared"
     prepared.mkdir()
@@ -661,6 +710,7 @@ def test_sluschi_mds_entropy_run_prepares_legacy_block_layout(tmp_path: Path):
             str(sluschi_src),
             "--type-stoich",
             "1=1,2=2",
+            "--allow-invalid-svib-window",
         ]
     )
 
@@ -698,6 +748,49 @@ def test_sluschi_mds_entropy_run_prepares_legacy_block_layout(tmp_path: Path):
     assert "if ~exist('R_cut','var')" in (work / "entropy" / "pdf_v6.m").read_text(encoding="utf-8")
     assert "UC2" in (work / "run_mds_entropy.sh").read_text(encoding="utf-8")
     assert (work / "submit_mds_entropy.sbatch").exists()
+
+
+def test_sluschi_mds_entropy_run_rejects_short_svib_window(tmp_path: Path):
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    (prepared / "param").write_text(
+        "\n".join(["2", "1 1", "39.0983", "35.453", "0.006", "2", "K", "Cl", "0", "0", "0", "0", "0", "0", "0", "0"])
+        + "\n",
+        encoding="utf-8",
+    )
+    (prepared / "pos").write_text(("0 0 0 0 0 0\n0.5 0.5 0.5 0 0 0\n") * 80, encoding="utf-8")
+    (prepared / "latt").write_text(("5 0 0 0 0 0\n0 5 0 0 0 0\n0 0 5 0 0 0\n") * 80, encoding="utf-8")
+    (prepared / "step").write_text("0.006\n" * 80, encoding="utf-8")
+    sluschi_src = tmp_path / "SLUSCHI" / "src"
+    entropy_src = sluschi_src / "mds_src" / "entropy"
+    entropy_src.mkdir(parents=True)
+    (entropy_src / "main.m").write_text("system = ['replace_here'];\n", encoding="utf-8")
+
+    try:
+        bridge.main(
+            [
+                "mds-entropy-run",
+                "--prepared-root",
+                str(prepared),
+                "--workdir",
+                str(tmp_path / "work"),
+                "--temperature-k",
+                "1100",
+                "--system",
+                "KCl",
+                "--formula",
+                "KCl",
+                "--phase",
+                "liquid",
+                "--sluschi-bin",
+                str(sluschi_src),
+            ]
+        )
+    except ValueError as exc:
+        assert "Svib preflight failed" in str(exc)
+        assert "recommended" in str(exc)
+    else:
+        raise AssertionError("Expected short SLUSCHI MDS Svib window to fail")
 
 
 def test_sluschi_mds_entropy_run_rejects_non_80_legacy_block(tmp_path: Path):
@@ -870,6 +963,63 @@ def test_sluschi_phase_window_sample_labels_cp2k_xyz_solid_window(tmp_path: Path
     assert data[0]["phase_window_label"] == "solid-like"
     assert data[0]["species_a"] == "K"
     assert data[0]["species_b"] == "Cl"
+
+
+def test_sluschi_phase_window_sample_network_mode_does_not_veto_liquid_network(tmp_path: Path):
+    xyz = tmp_path / "network.xyz"
+    xyz.write_text(
+        "\n".join(
+            [
+                "2",
+                'Lattice="8 0 0 0 8 0 0 0 8"',
+                "U 1.0 1.0 1.0",
+                "Cl 2.5 1.0 1.0",
+                "2",
+                'Lattice="8 0 0 0 8 0 0 0 8"',
+                "U 1.5 1.0 1.0",
+                "Cl 3.0 1.0 1.0",
+                "2",
+                'Lattice="8 0 0 0 8 0 0 0 8"',
+                "U 2.0 1.0 1.0",
+                "Cl 3.5 1.0 1.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = bridge.main(
+        [
+            "phase-window-sample",
+            "--engine",
+            "cp2k-xyz",
+            "--trajectory",
+            str(xyz),
+            "--outdir",
+            str(tmp_path / "windows_network"),
+            "--species-a",
+            "U",
+            "--species-b",
+            "Cl",
+            "--frame-step-ps",
+            "0.1",
+            "--window-ps",
+            "0.2",
+            "--stride-ps",
+            "0.1",
+            "--neighbor-cutoff-a",
+            "2.0",
+            "--solid-coord-min",
+            "0.5",
+            "--liquid-check-mode",
+            "network",
+        ]
+    )
+
+    assert result["counts"] == {"mixed": 1}
+    assert result["thresholds"]["liquid_check_mode"] == "network"
+    data = rows(tmp_path / "windows_network" / "sluschi_phase_windows.csv")
+    assert data[0]["phase_window_label"] == "mixed"
+    assert "coordination is reported as a network descriptor" in data[0]["notes"]
 
 
 def test_sluschi_phase_window_sample_reads_lammps_dump_generically(tmp_path: Path):

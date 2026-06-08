@@ -1078,9 +1078,32 @@ def classify_phase_window(metrics: dict[str, Any], args: argparse.Namespace) -> 
     rms = metrics.get("rms_displacement_A")
     nearest_sd = metrics.get("nearest_ab_sd_A")
     coord = metrics.get("coord_ab_mean")
+    mode = getattr(args, "liquid_check_mode", "generic")
     solid_votes = 0
     liquid_votes = 0
     notes: list[str] = []
+    if mode == "network":
+        if coord is not None and coord >= args.solid_coord_min:
+            notes.append(
+                "Network-liquid mode: high A-B coordination is reported as a network descriptor, not a solid-like vote."
+            )
+        if nearest_sd is not None and nearest_sd <= args.solid_nearest_sd_max_a:
+            notes.append(
+                "Network-liquid mode: narrow A-B nearest-neighbor spread can persist in molten actinide/lanthanide chloride networks."
+            )
+        if rms is None:
+            notes.append("Network-liquid mode requires a mobility metric; label remains mixed.")
+            return "mixed", notes
+        if rms <= args.solid_rms_max_a:
+            notes.append("Network-liquid mode: bounded window RMS is still treated as solid-like or unequilibrated.")
+            return "solid-like", notes
+        if rms >= args.liquid_rms_min_a:
+            notes.append("Network-liquid mode: mobility threshold crossed; confirm with longer MSD/tail-window checks.")
+            return "liquid-like", notes
+        notes.append(
+            "Network-liquid mode: mobility is intermediate; keep as mixed until longer MSD and thermodynamic stability support a liquid tail."
+        )
+        return "mixed", notes
     if rms is not None:
         if rms <= args.solid_rms_max_a:
             solid_votes += 1
@@ -1182,6 +1205,7 @@ def phase_window_sample_main(args: argparse.Namespace) -> dict[str, Any]:
         "species_pair": [args.species_a, args.species_b],
         "thresholds": {
             "neighbor_cutoff_A": args.neighbor_cutoff_a,
+            "liquid_check_mode": args.liquid_check_mode,
             "solid_rms_max_A": args.solid_rms_max_a,
             "liquid_rms_min_A": args.liquid_rms_min_a,
             "solid_nearest_sd_max_A": args.solid_nearest_sd_max_a,
@@ -1195,6 +1219,7 @@ def phase_window_sample_main(args: argparse.Namespace) -> dict[str, Any]:
         "notes": [
             "This is a conservative generic phase-window screen, not a replacement for SLUSCHI coexistence analysis.",
             "Use species/thresholds appropriate to the chemistry; alkali-halide defaults are only screening priors.",
+            "For actinide/lanthanide chloride network liquids, use --liquid-check-mode network so cation-Cl coordination is not misused as a solidness veto.",
             "Accept phase-specific entropy only from windows whose label agrees with the intended phase and whose thermodynamics are stable.",
         ],
     }
@@ -1832,6 +1857,49 @@ def infer_n_types_from_type_stoich(raw_type_stoich: str) -> int:
     return max_type
 
 
+def _pair_type_indices(pair: str) -> tuple[int, int] | None:
+    match = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", pair)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def select_sconfig_pair_values(pairs: list[SconfigPair], mode: str) -> tuple[list[SconfigPair], str]:
+    if mode == "mean-all-pairs":
+        return pairs, "mean of all SLUSCHI pair recommendations"
+    if mode == "same-species-liquid":
+        same_liquid = [
+            pair
+            for pair in pairs
+            if (indices := _pair_type_indices(pair.pair)) is not None
+            and indices[0] == indices[1]
+            and "liquid" in pair.state
+        ]
+        if same_liquid:
+            return same_liquid, "Hong/Shang liquid rule: same-species liquid pair recommendations"
+        same_any = [
+            pair
+            for pair in pairs
+            if (indices := _pair_type_indices(pair.pair)) is not None and indices[0] == indices[1]
+        ]
+        if same_any:
+            return same_any, "fallback same-species pair recommendations"
+        return pairs, "fallback mean of all SLUSCHI pair recommendations"
+    raise ValueError(f"Unsupported Sconf reduction mode: {mode!r}")
+
+
+def mean_sem(values: list[float]) -> tuple[float | None, float | None, float | None]:
+    if not values:
+        return None, None, None
+    mean_value = sum(values) / len(values)
+    if len(values) == 1:
+        return mean_value, None, None
+    variance = sum((value - mean_value) ** 2 for value in values) / (len(values) - 1)
+    std_value = variance**0.5
+    sem_value = std_value / (len(values) ** 0.5)
+    return mean_value, std_value, sem_value
+
+
 def entropy_summary_main(args: argparse.Namespace) -> dict[str, Any]:
     root = args.root.resolve()
     text, collect_used = load_collect_text(root, args.collect)
@@ -1852,12 +1920,15 @@ def entropy_summary_main(args: argparse.Namespace) -> dict[str, Any]:
         dump_stride_note=args.dump_stride_note,
     )
     sconfig_summary = summarize_sconfig_case(summary_ns, pairs)
+    selected_pairs, sconf_reduction_note = select_sconfig_pair_values(pairs, args.sconf_reduction)
+    selected_values = [pair.sconfig_J_mol_atom_K for pair in selected_pairs]
+    selected_sconf_atom, selected_sconf_std_atom, selected_sconf_sem_atom = mean_sem(selected_values)
     n_weight_types = len(svib_values) or infer_n_types_from_type_stoich(args.type_stoich)
     weights = type_stoich_weights(args, n_weight_types) if n_weight_types else {}
     atoms_per_formula = sum(weights.values()) if weights else (args.atoms_per_formula or None)
     svib_formula = sum(weights[idx] * svib_values[idx - 1] for idx in weights) if svib_values else None
-    sconf_atom = sconfig_summary.get("mean_pair_sconfig_J_mol_atom_K")
-    sconf_sem_atom = sconfig_summary.get("sem_pair_sconfig_J_mol_atom_K")
+    sconf_atom = selected_sconf_atom
+    sconf_sem_atom = selected_sconf_sem_atom
     sconf_formula = sconf_atom * atoms_per_formula if sconf_atom is not None and atoms_per_formula else None
     sconf_sem_formula = sconf_sem_atom * atoms_per_formula if sconf_sem_atom is not None and atoms_per_formula else None
     total = (svib_formula + (sconf_formula or 0.0)) if svib_formula is not None else None
@@ -1873,6 +1944,15 @@ def entropy_summary_main(args: argparse.Namespace) -> dict[str, Any]:
         "Sconf_stderr_J_mol_formula_K": sconf_sem_formula,
         "Stotal_J_mol_formula_K": total,
         "total_entropy_stderr_J_mol_formula_K": sconf_sem_formula,
+        "Sconf_reduction": args.sconf_reduction,
+        "Sconf_reduction_note": sconf_reduction_note,
+        "Sconf_selected_n_pairs": len(selected_pairs),
+        "Sconf_selected_pairs": ",".join(pair.pair for pair in selected_pairs),
+        "Sconf_selected_mean_J_mol_atom_K": selected_sconf_atom,
+        "Sconf_selected_std_J_mol_atom_K": selected_sconf_std_atom,
+        "Sconf_selected_sem_J_mol_atom_K": selected_sconf_sem_atom,
+        "Sconf_all_pair_mean_J_mol_atom_K": sconfig_summary.get("mean_pair_sconfig_J_mol_atom_K"),
+        "Sconf_all_pair_sem_J_mol_atom_K": sconfig_summary.get("sem_pair_sconfig_J_mol_atom_K"),
         "quality": args.quality,
         "source": str(root),
         "collect_file": str(collect_used) if collect_used else "",
@@ -1896,6 +1976,13 @@ def entropy_summary_main(args: argparse.Namespace) -> dict[str, Any]:
     payload = {
         "schema": SCHEMA_ENTROPY_SUMMARY,
         "workflow_lane": "entropy_prior",
+        "method_contract": {
+            "phase_gate": "Use only accepted single-phase, stable NVT tail windows; RDF/PDF alone is insufficient.",
+            "svib": "Constrained/use-this-value Svib line from collect.stdout; reject zero fallback, NaN, empty support files, or invalid MDS frame windows.",
+            "sconf": "SLUSCHI pair-channel recommendations reduced with explicit Sconf_reduction; same-species-liquid is for pure binary liquid KCl/Hong-Shang style benchmarks, not a universal mixed-salt rule.",
+            "units": "Record coordinate/lattice/time units and report entropy basis explicitly before plotting or MIVM/pycalphad handoff.",
+            "quality": "Use block/tail uncertainty and quality tiers; screening-prior rows are not final thermodynamic anchors.",
+        },
         "root": str(root),
         "collect_file": str(collect_used) if collect_used else None,
         "n_svib_types": len(svib_values),
@@ -1910,7 +1997,9 @@ def entropy_summary_main(args: argparse.Namespace) -> dict[str, Any]:
             "This command parses an existing SLUSCHI/LAMMPS postprocess folder as an entropy prior.",
             "It is not, by itself, a small-cell solid-liquid coexistence melting calculation.",
             "Svib values are taken from the constrained/use-this-value SLUSCHI line when present and rejected if SLUSCHI only emitted a zero fallback with empty/non-finite vibrational support files.",
-            "Sconf is the mean SLUSCHI pair recommendation multiplied by atoms_per_formula.",
+            "Sconf is reduced from SLUSCHI pair recommendations according to Sconf_reduction, then multiplied by atoms_per_formula.",
+            "For pure binary liquid KCl benchmarking against Hong/Shang Fig. 3, use --sconf-reduction same-species-liquid; keep mean-all-pairs as a diagnostic.",
+            "For mixed salts, choose a chemically documented pair selector; do not blindly apply KCl same-species-liquid to networked multicomponent systems.",
             "For production entropy, validate dense NVT sampling, type ordering, SLUSCHI frame spacing, and phase health.",
         ],
     }
@@ -2274,6 +2363,17 @@ def mds_entropy_run_main(args: argparse.Namespace) -> dict[str, Any]:
         prepared_step_unit=args.prepared_step_unit,
     )
     svib_preflight = sluschi_onephase_svib_preflight(int(layout["n_frames"]))
+    if not svib_preflight["svib_window_valid"] and not args.allow_invalid_svib_window:
+        raise ValueError(
+            "SLUSCHI MDS Svib preflight failed: "
+            f"n_frames={svib_preflight['n_frames']} gives "
+            f"onephase_v6_nsteps={svib_preflight['onephase_v6_nsteps']}. "
+            "onephase_v6 requires at least "
+            f"{svib_preflight['minimum_frames_for_svib_window']} frames and "
+            f"{svib_preflight['recommended_minimum_frames']}+ frames are recommended. "
+            "Increase the prepared trajectory window, or pass "
+            "--allow-invalid-svib-window only for explicit Sconf/descriptor-only debugging."
+        )
     compatibility_patches = _copy_sluschi_entropy_template(sluschi_src, workdir, label)
     run_script = workdir / "run_mds_entropy.sh"
     sbatch_script = workdir / "submit_mds_entropy.sbatch"
@@ -3256,6 +3356,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fallback atoms per formula if --type-stoich is omitted. For multiple types this evenly weights types.",
     )
     entropy.add_argument(
+        "--sconf-reduction",
+        choices=("mean-all-pairs", "same-species-liquid"),
+        default="mean-all-pairs",
+        help=(
+            "How to reduce SLUSCHI pair-channel Sconf recommendations. "
+            "mean-all-pairs is a conservative diagnostic default; same-species-liquid matches the "
+            "Hong/Shang liquid KCl guideline by using liquid same-species pair channels."
+        ),
+    )
+    entropy.add_argument(
         "--quality",
         choices=("descriptor", "screening-prior", "production"),
         default="screening-prior",
@@ -3307,6 +3417,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--dump-stride-note",
         default="Dense uniformly spaced NVT frames; legacy MDS latt/step one record per block.",
         help="Trajectory/dump-stride note stored in parsed entropy summary.",
+    )
+    mds.add_argument(
+        "--allow-invalid-svib-window",
+        action="store_true",
+        help=(
+            "Allow preparing/submitting a run whose frame count cannot produce a positive SLUSCHI onephase_v6 "
+            "Svib window. Use only for Sconf/descriptor debugging; production entropy should not set this."
+        ),
     )
     mds.add_argument("--submit", action="store_true", help="Submit the generated sbatch immediately.")
     mds.add_argument("--job-name", default="sluschi_mds_entropy")
@@ -3372,6 +3490,16 @@ def build_parser() -> argparse.ArgumentParser:
     windows.add_argument("--window-ps", type=float, default=0.5, help="Window duration in ps for each phase sample.")
     windows.add_argument("--stride-ps", type=float, default=0.25, help="Time stride in ps between adjacent windows.")
     windows.add_argument("--neighbor-cutoff-a", type=float, default=3.8, help="A-B coordination cutoff in Angstrom.")
+    windows.add_argument(
+        "--liquid-check-mode",
+        choices=("generic", "network"),
+        default="generic",
+        help=(
+            "Phase-window classifier. generic uses RMS, nearest-neighbor spread, and coordination votes. "
+            "network uses mobility as the classifier and reports persistent A-B network coordination without "
+            "treating it as a solidness veto, useful for UCl3/CeCl3-rich chloride liquids."
+        ),
+    )
     windows.add_argument("--solid-rms-max-a", type=float, default=0.8, help="RMS displacement upper bound for solid-like windows.")
     windows.add_argument("--liquid-rms-min-a", type=float, default=1.5, help="RMS displacement lower bound for liquid-like windows.")
     windows.add_argument(
