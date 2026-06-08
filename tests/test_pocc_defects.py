@@ -6,9 +6,11 @@ from pathlib import Path
 
 from atomi.zentropy.pocc_defects import (
     DefectConfiguration,
+    build_degeneracy_table,
     effective_charge,
     gduo2_observables,
     ingest_vasp_runs,
+    raw_supercell_degeneracy,
     solve_static_zentropy,
 )
 
@@ -111,6 +113,49 @@ def test_cli_solve_static_outputs_tables(tmp_path: Path) -> None:
         rows = list(csv.DictReader(handle))
     assert rows
     assert rows[0]["dominant_config_id"] in {"gd_u5", "gd2_vo"}
+
+
+def test_degeneracy_table_uses_raw_supercell_counts(tmp_path: Path) -> None:
+    rows, metadata = build_degeneracy_table(
+        [
+            {
+                "motif_id": "2Gd_2U5_sc32",
+                "N_cation": 32,
+                "N_anion_sites": 64,
+                "Gd3": 2,
+                "U5": 2,
+                "VaO": 0,
+            },
+            {
+                "motif_id": "2Gd_VaO_sc32",
+                "N_cation": 32,
+                "N_anion_sites": 64,
+                "Gd3": 2,
+                "U5": 0,
+                "VaO": 1,
+            },
+        ]
+    )
+
+    assert metadata["n_motifs"] == 2
+    by_id = {row["motif_id"]: row for row in rows}
+    assert by_id["2Gd_2U5_sc32"]["g_raw_supercell"] == raw_supercell_degeneracy(
+        {"U4": 28, "U5": 2, "Gd3": 2, "O": 64, "VaO": 0}
+    )
+    assert by_id["2Gd_2U5_sc32"]["g_raw_supercell"] == 215760
+    assert by_id["2Gd_VaO_sc32"]["g_raw_supercell"] == 31744
+
+    from atomi.zentropy.pocc_defects import main
+
+    motif_csv = tmp_path / "motifs.csv"
+    motif_csv.write_text(
+        "motif_id,N_cation,N_anion_sites,Gd3,U5,VaO\n"
+        "2Gd_2U5_sc32,32,64,2,2,0\n",
+        encoding="utf-8",
+    )
+    outdir = tmp_path / "deg"
+    main(["degeneracy-table", "--motif-csv", str(motif_csv), "--outdir", str(outdir)])
+    assert (outdir / "motif_degeneracy_gk.csv").exists()
 
 
 def test_vasp_ingest_builds_auditable_pocc_ensemble(tmp_path: Path) -> None:

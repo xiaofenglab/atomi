@@ -544,6 +544,112 @@ def gduo2_observables(counts: dict[str, int]) -> dict[str, float | int]:
     }
 
 
+def multinomial_count(total: int, parts: list[int]) -> int:
+    """Return total! / prod(parts!) using exact integer arithmetic."""
+    if total < 0 or any(part < 0 for part in parts) or sum(parts) != total:
+        return 0
+    value = math.factorial(total)
+    for part in parts:
+        value //= math.factorial(part)
+    return value
+
+
+def raw_supercell_degeneracy(counts: dict[str, int]) -> int:
+    """Raw decoration count for the Gd-UO2 finite supercell composition."""
+    n_cat = counts.get("U4", 0) + counts.get("U5", 0) + counts.get("Gd3", 0)
+    n_an = counts.get("O", 0) + counts.get("VaO", 0)
+    cat = multinomial_count(n_cat, [counts.get("U4", 0), counts.get("U5", 0), counts.get("Gd3", 0)])
+    an = multinomial_count(n_an, [counts.get("O", 0), counts.get("VaO", 0)])
+    return cat * an
+
+
+def _counts_from_motif_row(row: dict[str, Any], *, oxygen_sites_per_cation: float) -> dict[str, int]:
+    n_cation = _as_int(row.get("N_cation") or row.get("n_cation") or row.get("cation_sites"), 32)
+    n_anion = _as_int(
+        row.get("N_anion_sites") or row.get("N_anion") or row.get("anion_sites"),
+        int(round(n_cation * oxygen_sites_per_cation)),
+    )
+    n_gd = _as_int(row.get("N_Gd3") or row.get("Gd3") or row.get("N_Gd") or row.get("Gd"), 0)
+    n_u5 = _as_int(row.get("N_U5") or row.get("U5"), 0)
+    n_vo = _as_int(row.get("N_VaO") or row.get("VaO") or row.get("VO") or row.get("V_O"), 0)
+    n_o = _as_int(row.get("N_O") or row.get("O"), n_anion - n_vo)
+    n_u4 = _as_int(row.get("N_U4") or row.get("U4"), n_cation - n_gd - n_u5)
+    return {"U4": n_u4, "U5": n_u5, "Gd3": n_gd, "O": n_o, "VaO": n_vo}
+
+
+def build_degeneracy_table(
+    rows: list[dict[str, Any]],
+    *,
+    oxygen_sites_per_cation: float = 2.0,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Build an auditable g_k seed table from explicit motif count rows."""
+    table: list[dict[str, Any]] = []
+    for idx, row in enumerate(rows, start=1):
+        motif_id = str(row.get("motif_id") or row.get("config_id") or row.get("id") or f"motif_{idx:04d}")
+        counts = _counts_from_motif_row(row, oxygen_sites_per_cation=oxygen_sites_per_cation)
+        obs = gduo2_observables(counts)
+        raw_g = raw_supercell_degeneracy(counts)
+        supplied_g = finite_float(row.get("g_k") or row.get("degeneracy") or row.get("g_sigma"))
+        if supplied_g is None:
+            g_value = raw_g
+            degeneracy_kind = "raw_supercell_combinatorial"
+            degeneracy_status = "raw_not_symmetry_reduced"
+        else:
+            g_value = supplied_g
+            degeneracy_kind = str(row.get("degeneracy_kind") or row.get("degeneracy_type") or "supplied")
+            degeneracy_status = str(row.get("degeneracy_status") or "supplied")
+        warnings: list[str] = []
+        if obs["effective_charge"] != 0:
+            warnings.append("non_neutral")
+        if raw_g <= 0:
+            warnings.append("invalid_raw_degeneracy")
+        if supplied_g is None:
+            warnings.append("symmetry_reduction_not_applied")
+        table.append(
+            {
+                "motif_id": motif_id,
+                "motif_label": row.get("motif_label") or row.get("motif_labels") or motif_id,
+                "motif_family": row.get("motif_family") or "",
+                "N_cation": obs["N_cation"],
+                "N_anion_sites": counts.get("O", 0) + counts.get("VaO", 0),
+                "N_U4": counts.get("U4", 0),
+                "N_U5": counts.get("U5", 0),
+                "N_Gd3": counts.get("Gd3", 0),
+                "N_O": counts.get("O", 0),
+                "N_VaO": counts.get("VaO", 0),
+                "x_Gd": obs["x_Gd"],
+                "h_U5": obs["h_U5"],
+                "delta": obs["delta"],
+                "effective_charge": obs["effective_charge"],
+                "charge_neutral": obs["effective_charge"] == 0,
+                "g_k": g_value,
+                "g_raw_supercell": raw_g,
+                "ln_g_k": math.log(float(g_value)) if g_value and float(g_value) > 0 else math.nan,
+                "log10_g_k": math.log10(float(g_value)) if g_value and float(g_value) > 0 else math.nan,
+                "degeneracy_kind": degeneracy_kind,
+                "degeneracy_basis": row.get("degeneracy_basis") or "finite_supercell",
+                "degeneracy_status": degeneracy_status,
+                "enumeration_method": row.get("enumeration_method") or "composition_multinomial",
+                "symmetry_tolerance": row.get("symmetry_tolerance") or "",
+                "coverage_warning": row.get("coverage_warning")
+                or "raw composition count; symmetry-reduced POCC/enumlib degeneracy not yet applied",
+                "source": row.get("source") or "",
+                "notes": row.get("notes") or "",
+                "warnings": ";".join(warnings),
+            }
+        )
+    metadata = {
+        "schema": f"{SCHEMA}.degeneracy_table",
+        "n_motifs": len(table),
+        "notes": [
+            "g_k is a counting quantity and is not a Boltzmann probability.",
+            "Rows without supplied degeneracy use raw finite-supercell multinomial decoration counts.",
+            "Raw finite-supercell counts are useful as a seed table but are not symmetry-reduced thermodynamic-limit densities of states.",
+        ],
+    }
+    return table, metadata
+
+
 def validate_configurations(configs: list[DefectConfiguration]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     bad_charge = 0
@@ -822,6 +928,36 @@ VASP_INGEST_FIELDS = [
     "motif_labels",
     "warnings",
 ]
+DEGENERACY_FIELDS = [
+    "motif_id",
+    "motif_label",
+    "motif_family",
+    "N_cation",
+    "N_anion_sites",
+    "N_U4",
+    "N_U5",
+    "N_Gd3",
+    "N_O",
+    "N_VaO",
+    "x_Gd",
+    "h_U5",
+    "delta",
+    "effective_charge",
+    "charge_neutral",
+    "g_k",
+    "g_raw_supercell",
+    "ln_g_k",
+    "log10_g_k",
+    "degeneracy_kind",
+    "degeneracy_basis",
+    "degeneracy_status",
+    "enumeration_method",
+    "symmetry_tolerance",
+    "coverage_warning",
+    "source",
+    "notes",
+    "warnings",
+]
 
 
 def _parse_grid(values: list[str] | None, *, default: list[float | None]) -> list[float | None]:
@@ -867,6 +1003,12 @@ def build_parser() -> argparse.ArgumentParser:
     validate = sub.add_parser("validate", help="Validate charge, degeneracy, and energy metadata.")
     _add_common_input(validate)
 
+    degeneracy = sub.add_parser("degeneracy-table", help="Build an auditable motif degeneracy g_k table.")
+    degeneracy.add_argument("--motif-csv", type=Path, required=True, help="CSV with motif_id and species/site counts.")
+    degeneracy.add_argument("--outdir", type=Path, default=Path("pocc_zentropy_degeneracy"))
+    degeneracy.add_argument("--output", type=Path, default=Path("motif_degeneracy_gk.csv"))
+    degeneracy.add_argument("--oxygen-sites-per-cation", type=float, default=2.0)
+
     ingest = sub.add_parser("ingest-vasp", help="Scan VASP motif folders into a POCC defect ensemble JSONL.")
     ingest.add_argument("--root", type=Path, action="append", default=[], help="Root searched recursively for VASP runs.")
     ingest.add_argument("--run-dir", type=Path, action="append", default=[], help="Explicit VASP run directory.")
@@ -896,6 +1038,20 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         write_json(args.output.resolve(), gduo2_default_config())
         print(f"Wrote Gd-UO2 defect-engine template: {args.output.resolve()}")
         return {"output": str(args.output.resolve())}
+
+    if args.command == "degeneracy-table":
+        motif_rows = _csv_dict(args.motif_csv.resolve())
+        table, table_metadata = build_degeneracy_table(
+            motif_rows,
+            oxygen_sites_per_cation=args.oxygen_sites_per_cation,
+        )
+        outdir = args.outdir.resolve()
+        table_path = args.output if args.output.is_absolute() else outdir / args.output
+        write_csv(table_path, table, DEGENERACY_FIELDS)
+        write_json(outdir / "motif_degeneracy_gk.metadata.json", table_metadata)
+        print(f"Motifs          : {len(table)}")
+        print(f"Degeneracy table: {table_path}")
+        return table_metadata
 
     if args.command == "ingest-vasp":
         metadata = read_run_metadata(args.metadata_csv.resolve() if args.metadata_csv else None)
