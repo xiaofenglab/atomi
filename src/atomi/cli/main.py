@@ -593,6 +593,14 @@ def build_parser() -> argparse.ArgumentParser:
         )
         defect_thermo.add_argument("defect_thermo_args", nargs=argparse.REMAINDER)
 
+    pocc_defect_commands = ("pocc-zentropy-defects", "pocc_zentropy_defects", "atomi-defects")
+    for command_name in pocc_defect_commands:
+        pocc_defects = subparsers.add_parser(
+            command_name,
+            help="Run POCC/zentropy defect population thermodynamics.",
+        )
+        pocc_defects.add_argument("pocc_defect_args", nargs=argparse.REMAINDER)
+
     sd_dd_commands = ("sd-dd-thermo", "sd_dd_thermo", "defect-sd-dd", "defect-chem")
     for command_name in sd_dd_commands:
         sd_dd = subparsers.add_parser(
@@ -1313,6 +1321,12 @@ def main(argv: list[str] | None = None) -> None:
 
         defect_thermo_main(raw_args[1:])
         return
+    pocc_defect_commands = ("pocc-zentropy-defects", "pocc_zentropy_defects", "atomi-defects")
+    if raw_args and raw_args[0] in pocc_defect_commands:
+        from atomi.zentropy.pocc_defects import main as pocc_defects_main
+
+        pocc_defects_main(raw_args[1:])
+        return
     sd_dd_commands = ("sd-dd-thermo", "sd_dd_thermo", "defect-sd-dd", "defect-chem")
     if raw_args and raw_args[0] in sd_dd_commands:
         from atomi.zentropy.sd_dd_thermo import main as sd_dd_main
@@ -1980,6 +1994,13 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.zentropy.defect_thermo import main as defect_thermo_main
 
         defect_thermo_main(args.defect_thermo_args)
+        return
+
+    pocc_defect_commands = ("pocc-zentropy-defects", "pocc_zentropy_defects", "atomi-defects")
+    if args.subcommand in pocc_defect_commands:
+        from atomi.zentropy.pocc_defects import main as pocc_defects_main
+
+        pocc_defects_main(args.pocc_defect_args)
         return
 
     if args.subcommand in sd_dd_commands:
