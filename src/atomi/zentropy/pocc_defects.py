@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import json
 import math
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from atomi.vasp.qha_summary import parse_calc_folder
 from atomi.zentropy.stage_utils import K_B_EV_PER_K, finite_float, format_value
 
 
@@ -172,6 +175,274 @@ def write_csv(path: Path, rows: Iterable[dict[str, Any]], fields: list[str]) -> 
 def _csv_dict(path: Path) -> list[dict[str, str]]:
     with path.open("r", newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
+
+
+def _open_text(path: Path):
+    if path.suffix == ".gz":
+        return gzip.open(path, "rt", encoding="utf-8", errors="replace")
+    return path.open("rt", encoding="utf-8", errors="replace")
+
+
+def _finite_or_none(value: Any) -> float | None:
+    number = finite_float(value)
+    return None if number is None or not math.isfinite(float(number)) else float(number)
+
+
+def _jsonish(value: Any, default: Any) -> Any:
+    if value in (None, ""):
+        return default
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return default
+    return value
+
+
+def _split_labels(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [part.strip() for part in str(value).replace(";", ",").split(",") if part.strip()]
+
+
+def read_run_metadata(path: Path | None) -> dict[str, dict[str, str]]:
+    if path is None:
+        return {}
+    rows: dict[str, dict[str, str]] = {}
+    for row in _csv_dict(path):
+        keys = [
+            row.get("run"),
+            row.get("run_dir"),
+            row.get("path"),
+            row.get("structure_path"),
+            row.get("config_id"),
+            row.get("motif_id"),
+            row.get("id"),
+        ]
+        clean = {key: value for key, value in row.items() if value not in (None, "")}
+        for key in keys:
+            if key:
+                rows[str(key)] = clean
+                rows[Path(str(key)).name] = clean
+                try:
+                    rows[str(Path(str(key)).expanduser().resolve())] = clean
+                except OSError:
+                    pass
+    return rows
+
+
+def metadata_for_run(run_dir: Path, metadata: dict[str, dict[str, str]]) -> dict[str, str]:
+    aliases = {
+        str(run_dir),
+        run_dir.name,
+        str(run_dir.expanduser()),
+    }
+    try:
+        aliases.add(str(run_dir.expanduser().resolve()))
+    except OSError:
+        pass
+    for alias in aliases:
+        if alias in metadata:
+            return metadata[alias]
+    return {}
+
+
+def parse_vasp_poscar_counts(path: Path) -> tuple[dict[str, int], float | None]:
+    """Parse element counts and volume from a VASP POSCAR/CONTCAR-like file."""
+    with _open_text(path) as handle:
+        lines = [line.strip() for line in handle if line.strip()]
+    if len(lines) < 7:
+        raise ValueError(f"Not enough POSCAR/CONTCAR lines in {path}")
+    scale = float(lines[1].split()[0])
+    lattice = [[float(value) * scale for value in lines[idx].split()[:3]] for idx in range(2, 5)]
+    volume = abs(
+        lattice[0][0] * (lattice[1][1] * lattice[2][2] - lattice[1][2] * lattice[2][1])
+        - lattice[0][1] * (lattice[1][0] * lattice[2][2] - lattice[1][2] * lattice[2][0])
+        + lattice[0][2] * (lattice[1][0] * lattice[2][1] - lattice[1][1] * lattice[2][0])
+    )
+    symbols_line = lines[5].split()
+    if all(re.match(r"^[A-Z][a-z]?$", token) for token in symbols_line):
+        symbols = symbols_line
+        count_tokens = lines[6].split()
+    else:
+        raise ValueError(
+            f"{path} appears to be VASP4-style without element symbols; provide metadata CSV counts instead."
+        )
+    counts = {symbol: int(round(float(raw))) for symbol, raw in zip(symbols, count_tokens)}
+    return counts, volume
+
+
+def find_vasp_run_dirs(roots: list[Path]) -> list[Path]:
+    markers = ("vasprun.xml", "vasprun.xml.gz", "OUTCAR", "OUTCAR.gz")
+    found: set[Path] = set()
+    for root in roots:
+        root = root.expanduser()
+        if not root.exists():
+            continue
+        if root.is_file():
+            found.add(root.parent.resolve())
+            continue
+        if any((root / marker).exists() for marker in markers):
+            found.add(root.resolve())
+        for marker in markers:
+            for path in root.rglob(marker):
+                found.add(path.parent.resolve())
+    return sorted(found)
+
+
+def _structure_path_for_run(run_dir: Path, meta: dict[str, str]) -> Path | None:
+    explicit = meta.get("structure_path") or meta.get("contcar") or meta.get("poscar")
+    if explicit:
+        path = Path(explicit).expanduser()
+        if path.exists():
+            return path
+        candidate = run_dir / explicit
+        if candidate.exists():
+            return candidate
+    for name in ("CONTCAR", "CONTCAR.gz", "POSCAR", "POSCAR.gz"):
+        path = run_dir / name
+        if path.exists():
+            return path
+    return None
+
+
+def _species_counts_from_structure(
+    element_counts: dict[str, int],
+    meta: dict[str, str],
+    *,
+    oxygen_sites_per_cation: float,
+) -> tuple[dict[str, int], list[str]]:
+    warnings: list[str] = []
+    n_u_total = _as_int(meta.get("U_total"), element_counts.get("U", 0))
+    n_gd = _as_int(meta.get("Gd3") or meta.get("Gd"), element_counts.get("Gd", 0))
+    n_o = _as_int(meta.get("O"), element_counts.get("O", 0))
+    n_cation = _as_int(meta.get("N_cation"), n_u_total + n_gd)
+    n_anion_sites = _as_int(meta.get("N_anion_sites"), round(oxygen_sites_per_cation * n_cation))
+    n_vo = _as_int(meta.get("VaO") or meta.get("VO") or meta.get("V_O"), max(n_anion_sites - n_o, 0))
+    if n_anion_sites and n_o + n_vo != n_anion_sites:
+        warnings.append("anion_count_inconsistent")
+    explicit_u5 = meta.get("U5") not in (None, "")
+    n_u5 = _as_int(meta.get("U5"), 0)
+    n_u4 = _as_int(meta.get("U4"), n_u_total - n_u5)
+    if n_u4 + n_u5 != n_u_total:
+        warnings.append("uranium_count_inconsistent")
+    if not explicit_u5 and n_u_total:
+        warnings.append("u5_count_missing_assumed_zero_for_audit")
+    return {"U4": n_u4, "U5": n_u5, "Gd3": n_gd, "O": n_o, "VaO": n_vo}, warnings
+
+
+def ingest_vasp_runs(
+    run_dirs: list[Path],
+    *,
+    metadata: dict[str, dict[str, str]] | None = None,
+    phase: str = "fluorite",
+    oxygen_sites_per_cation: float = 2.0,
+    strict_oxidation: bool = False,
+) -> tuple[list[DefectConfiguration], list[dict[str, Any]]]:
+    metadata = metadata or {}
+    configs: list[DefectConfiguration] = []
+    audit_rows: list[dict[str, Any]] = []
+    for idx, run_dir in enumerate(sorted(run_dirs), start=1):
+        meta = metadata_for_run(run_dir, metadata)
+        structure_path = _structure_path_for_run(run_dir, meta)
+        warnings: list[str] = []
+        element_counts: dict[str, int] = {}
+        structure_volume = None
+        if structure_path is None:
+            warnings.append("missing_structure")
+        else:
+            try:
+                element_counts, structure_volume = parse_vasp_poscar_counts(structure_path)
+            except Exception as exc:
+                warnings.append(f"structure_parse_failed:{exc}")
+        counts, count_warnings = _species_counts_from_structure(
+            element_counts,
+            meta,
+            oxygen_sites_per_cation=oxygen_sites_per_cation,
+        )
+        warnings.extend(count_warnings)
+        calc = parse_calc_folder(run_dir)
+        energy = _finite_or_none(meta.get("E_static_eV") or meta.get("energy_eV") or calc.get("energy_eV"))
+        volume = _finite_or_none(meta.get("volume_A3") or calc.get("volume_A3") or structure_volume)
+        config_id = str(meta.get("config_id") or meta.get("motif_id") or run_dir.name or f"vasp_{idx:04d}")
+        degeneracy = _as_float(meta.get("degeneracy"), 1.0)
+        oxidation_assignment = (
+            meta.get("oxidation_assignment")
+            or meta.get("u5_assignment")
+            or meta.get("valence_assignment")
+            or ""
+        )
+        if counts.get("U5", 0) and not oxidation_assignment:
+            warnings.append("u5_assignment_not_declared")
+        if strict_oxidation and counts.get("U4", 0) + counts.get("U5", 0) and not oxidation_assignment:
+            warnings.append("strict_oxidation_missing")
+        config_metadata: dict[str, Any] = {
+            "run_dir": str(run_dir),
+            "calc_parser": calc.get("parser_used", ""),
+            "calc_source_file": calc.get("source_file", ""),
+            "volume_A3": volume,
+            "force_rms_eVA": _finite_or_none(calc.get("force_rms_eVA")),
+            "force_max_eVA": _finite_or_none(calc.get("force_max_eVA")),
+            "source_metadata": meta,
+            "ingest_warnings": warnings,
+        }
+        if oxidation_assignment:
+            config_metadata["oxidation_assignment"] = oxidation_assignment
+        config = DefectConfiguration(
+            config_id=config_id,
+            phase=str(meta.get("phase") or phase),
+            species_counts=counts,
+            sublattice_counts={
+                "cation": counts.get("U4", 0) + counts.get("U5", 0) + counts.get("Gd3", 0),
+                "anion": counts.get("O", 0) + counts.get("VaO", 0),
+            },
+            degeneracy=degeneracy,
+            degeneracy_type=str(meta.get("degeneracy_type") or "input_or_unity"),
+            degeneracy_basis=str(meta.get("degeneracy_basis") or "finite_supercell"),
+            E_static_eV=energy,
+            motif_labels=_split_labels(meta.get("motif_labels") or meta.get("motif_label") or meta.get("defect_label")),
+            motif_features=dict(_jsonish(meta.get("motif_features"), {})),
+            structure_path=str(structure_path) if structure_path else None,
+            source="vasp_ingest",
+            energy_status=str(meta.get("energy_status") or ("static" if energy is not None else "missing")),
+            uncertainty_eV=finite_float(meta.get("uncertainty_eV")),
+            metadata=config_metadata,
+        )
+        obs = gduo2_observables(counts)
+        if obs["effective_charge"] != 0:
+            warnings.append("non_neutral")
+        if energy is None:
+            warnings.append("missing_energy")
+        configs.append(config)
+        audit_rows.append(
+            {
+                "config_id": config_id,
+                "run_dir": str(run_dir),
+                "structure_path": str(structure_path) if structure_path else "",
+                "energy_eV": energy,
+                "volume_A3": volume,
+                "U4": counts.get("U4", 0),
+                "U5": counts.get("U5", 0),
+                "Gd3": counts.get("Gd3", 0),
+                "O": counts.get("O", 0),
+                "VaO": counts.get("VaO", 0),
+                "effective_charge": obs["effective_charge"],
+                "x_Gd": obs["x_Gd"],
+                "delta": obs["delta"],
+                "h_U5": obs["h_U5"],
+                "degeneracy": degeneracy,
+                "oxidation_assignment": oxidation_assignment,
+                "motif_labels": ";".join(config.motif_labels),
+                "warnings": ";".join(warnings),
+            }
+        )
+    if strict_oxidation:
+        missing = [row for row in audit_rows if "strict_oxidation_missing" in str(row.get("warnings", ""))]
+        if missing:
+            raise ValueError(f"{len(missing)} VASP rows are missing explicit oxidation/U5 assignment.")
+    return configs, audit_rows
 
 
 def load_configurations(path: Path) -> list[DefectConfiguration]:
@@ -531,6 +802,26 @@ VALIDATION_FIELDS = [
     "motif_labels",
     "warnings",
 ]
+VASP_INGEST_FIELDS = [
+    "config_id",
+    "run_dir",
+    "structure_path",
+    "energy_eV",
+    "volume_A3",
+    "U4",
+    "U5",
+    "Gd3",
+    "O",
+    "VaO",
+    "effective_charge",
+    "x_Gd",
+    "delta",
+    "h_U5",
+    "degeneracy",
+    "oxidation_assignment",
+    "motif_labels",
+    "warnings",
+]
 
 
 def _parse_grid(values: list[str] | None, *, default: list[float | None]) -> list[float | None]:
@@ -576,6 +867,20 @@ def build_parser() -> argparse.ArgumentParser:
     validate = sub.add_parser("validate", help="Validate charge, degeneracy, and energy metadata.")
     _add_common_input(validate)
 
+    ingest = sub.add_parser("ingest-vasp", help="Scan VASP motif folders into a POCC defect ensemble JSONL.")
+    ingest.add_argument("--root", type=Path, action="append", default=[], help="Root searched recursively for VASP runs.")
+    ingest.add_argument("--run-dir", type=Path, action="append", default=[], help="Explicit VASP run directory.")
+    ingest.add_argument("--metadata-csv", type=Path, help="CSV with run/config_id/counts/degeneracy/oxidation metadata.")
+    ingest.add_argument("--outdir", type=Path, default=Path("pocc_zentropy_defects_ingest"))
+    ingest.add_argument("--output", type=Path, default=Path("ensemble.jsonl"))
+    ingest.add_argument("--phase", default="fluorite")
+    ingest.add_argument("--oxygen-sites-per-cation", type=float, default=2.0)
+    ingest.add_argument(
+        "--strict-oxidation",
+        action="store_true",
+        help="Fail when U-bearing rows lack explicit oxidation/U5 assignment metadata.",
+    )
+
     solve = sub.add_parser("solve-static", help="Compute static oxygen semi-grand zentropy populations.")
     _add_common_input(solve)
     solve.add_argument("--temperature", action="append", default=[], help="T in K or start:stop:step.")
@@ -591,6 +896,51 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         write_json(args.output.resolve(), gduo2_default_config())
         print(f"Wrote Gd-UO2 defect-engine template: {args.output.resolve()}")
         return {"output": str(args.output.resolve())}
+
+    if args.command == "ingest-vasp":
+        metadata = read_run_metadata(args.metadata_csv.resolve() if args.metadata_csv else None)
+        explicit = [path.expanduser().resolve() for path in args.run_dir]
+        discovered = find_vasp_run_dirs(args.root) if args.root else []
+        run_dirs = sorted({*explicit, *discovered})
+        if not run_dirs:
+            raise ValueError("No VASP run directories found. Use --root or --run-dir.")
+        configs, ingest_rows = ingest_vasp_runs(
+            run_dirs,
+            metadata=metadata,
+            phase=args.phase,
+            oxygen_sites_per_cation=args.oxygen_sites_per_cation,
+            strict_oxidation=args.strict_oxidation,
+        )
+        outdir = args.outdir.resolve()
+        ensemble_path = args.output if args.output.is_absolute() else outdir / args.output
+        write_jsonl(ensemble_path, [asdict(config) for config in configs])
+        write_csv(outdir / "vasp_ingest_audit.csv", ingest_rows, VASP_INGEST_FIELDS)
+        validation_rows, validation_metadata = validate_configurations(configs)
+        write_csv(outdir / "configuration_audit.csv", validation_rows, VALIDATION_FIELDS)
+        metadata_payload = {
+            "schema": f"{SCHEMA}.vasp_ingest",
+            "inputs": {
+                "roots": [str(path.expanduser()) for path in args.root],
+                "run_dirs": [str(path) for path in args.run_dir],
+                "metadata_csv": str(args.metadata_csv.resolve()) if args.metadata_csv else "",
+            },
+            "outputs": {
+                "ensemble": str(ensemble_path),
+                "vasp_ingest_audit": str(outdir / "vasp_ingest_audit.csv"),
+                "configuration_audit": str(outdir / "configuration_audit.csv"),
+            },
+            "n_runs": len(run_dirs),
+            "validation": validation_metadata,
+            "notes": [
+                "VASP POSCAR/CONTCAR can provide element counts, but U4/U5 oxidation must come from metadata, Bader, magnetic-polaron analysis, or manual review.",
+                "Rows with u5_count_missing_assumed_zero_for_audit are counting placeholders until oxidation metadata is supplied.",
+            ],
+        }
+        write_json(outdir / "vasp_ingest_metadata.json", metadata_payload)
+        print(f"VASP runs       : {len(run_dirs)}")
+        print(f"Ensemble        : {ensemble_path}")
+        print(f"Ingest audit    : {outdir / 'vasp_ingest_audit.csv'}")
+        return metadata_payload
 
     configs = load_configurations(args.ensemble.resolve())
     validation_rows, validation_metadata = validate_configurations(configs)

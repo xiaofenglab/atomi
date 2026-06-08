@@ -8,6 +8,7 @@ from atomi.zentropy.pocc_defects import (
     DefectConfiguration,
     effective_charge,
     gduo2_observables,
+    ingest_vasp_runs,
     solve_static_zentropy,
 )
 
@@ -110,3 +111,51 @@ def test_cli_solve_static_outputs_tables(tmp_path: Path) -> None:
         rows = list(csv.DictReader(handle))
     assert rows
     assert rows[0]["dominant_config_id"] in {"gd_u5", "gd2_vo"}
+
+
+def test_vasp_ingest_builds_auditable_pocc_ensemble(tmp_path: Path) -> None:
+    from atomi.zentropy.pocc_defects import main
+
+    run = tmp_path / "gd_u5_run"
+    run.mkdir()
+    (run / "CONTCAR").write_text(
+        """Gd-UO2 defect motif
+1.0
+4 0 0
+0 4 0
+0 0 4
+U Gd O
+30 2 64
+Direct
+""",
+        encoding="utf-8",
+    )
+    (run / "OUTCAR").write_text(
+        """NIONS =     96 ions
+ free  energy   TOTEN  =      -123.456789 eV
+ volume of cell :       64.0000
+""",
+        encoding="utf-8",
+    )
+    metadata = tmp_path / "metadata.csv"
+    metadata.write_text(
+        "run,config_id,U5,degeneracy,motif_labels,oxidation_assignment\n"
+        f"{run},gd_u5_nn,2,3,Gd_U5_NN,manual_review\n",
+        encoding="utf-8",
+    )
+
+    configs, audit = ingest_vasp_runs([run], metadata={str(run): {"U5": "2", "oxidation_assignment": "manual"}})
+    assert configs[0].species_counts == {"U4": 28, "U5": 2, "Gd3": 2, "O": 64, "VaO": 0}
+    assert audit[0]["effective_charge"] == 0
+
+    outdir = tmp_path / "ingest"
+    main(["ingest-vasp", "--run-dir", str(run), "--metadata-csv", str(metadata), "--outdir", str(outdir)])
+
+    assert (outdir / "ensemble.jsonl").exists()
+    record = json.loads((outdir / "ensemble.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["config_id"] == "gd_u5_nn"
+    assert record["E_static_eV"] == -123.456789
+    assert record["species_counts"]["U4"] == 28
+    with (outdir / "vasp_ingest_audit.csv").open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows[0]["warnings"] == ""
