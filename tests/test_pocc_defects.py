@@ -7,7 +7,10 @@ from pathlib import Path
 from atomi.zentropy.pocc_defects import (
     DefectConfiguration,
     build_degeneracy_table,
+    build_magnetic_initialization_rows,
     effective_charge,
+    fluorite_fm3m_orbit_degeneracy,
+    gduo2_charge_neutral_motif_rows,
     gduo2_observables,
     ingest_vasp_runs,
     raw_supercell_degeneracy,
@@ -63,6 +66,9 @@ def test_static_zentropy_population_keeps_degeneracy_separate_from_energy() -> N
     assert len(motifs) == 2
     probs = {row["config_id"]: row["probability"] for row in population}
     assert probs["gd2_vo_nn"] > probs["gd_u5_nn"]
+    assert surface[0]["surface_builder_mode"] == "pocc_static_logsum"
+    assert surface[0]["surface_kind"] == "bulk_F_from_static_logsum"
+    assert surface[0]["configuration_energy_kind"] == "E_static_DFT"
     assert surface[0]["S_population_J_molK"] > 0
     assert "S_site_ideal_J_molK" in surface[0]
     assert "S_excess_conf_J_molK" in surface[0]
@@ -94,7 +100,7 @@ def test_cli_solve_static_outputs_tables(tmp_path: Path) -> None:
 
     main(
         [
-            "solve-static",
+            "static-logsum",
             "--ensemble",
             str(ensemble),
             "--outdir",
@@ -109,6 +115,7 @@ def test_cli_solve_static_outputs_tables(tmp_path: Path) -> None:
 
     assert (outdir / "configuration_audit.csv").exists()
     assert (outdir / "population_vector.csv").exists()
+    assert (outdir / "static_logsum_surface.csv").exists()
     with (outdir / "zentropy_surface.csv").open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert rows
@@ -116,7 +123,7 @@ def test_cli_solve_static_outputs_tables(tmp_path: Path) -> None:
 
 
 def test_degeneracy_table_uses_raw_supercell_counts(tmp_path: Path) -> None:
-    rows, metadata = build_degeneracy_table(
+    rows, metadata, symmetry_rows = build_degeneracy_table(
         [
             {
                 "motif_id": "2Gd_2U5_sc32",
@@ -138,6 +145,7 @@ def test_degeneracy_table_uses_raw_supercell_counts(tmp_path: Path) -> None:
     )
 
     assert metadata["n_motifs"] == 2
+    assert symmetry_rows == []
     by_id = {row["motif_id"]: row for row in rows}
     assert by_id["2Gd_2U5_sc32"]["g_raw_supercell"] == raw_supercell_degeneracy(
         {"U4": 28, "U5": 2, "Gd3": 2, "O": 64, "VaO": 0}
@@ -156,6 +164,177 @@ def test_degeneracy_table_uses_raw_supercell_counts(tmp_path: Path) -> None:
     outdir = tmp_path / "deg"
     main(["degeneracy-table", "--motif-csv", str(motif_csv), "--outdir", str(outdir)])
     assert (outdir / "motif_degeneracy_gk.csv").exists()
+
+
+def test_gduo2_generated_charge_neutral_degeneracy_grid(tmp_path: Path) -> None:
+    rows = gduo2_charge_neutral_motif_rows(n_cation=32, gd_counts=[1, 2, 4])
+    assert [row["motif_id"] for row in rows] == [
+        "1Gd_1U5_sc32",
+        "2Gd_2U5_sc32",
+        "2Gd_1VaO_sc32",
+        "4Gd_4U5_sc32",
+        "4Gd_2U5_1VaO_sc32",
+        "4Gd_2VaO_sc32",
+    ]
+    table, metadata, _ = build_degeneracy_table(rows)
+    assert metadata["n_motifs"] == 6
+    assert all(row["charge_neutral"] for row in table)
+    by_id = {row["motif_id"]: row for row in table}
+    assert by_id["1Gd_1U5_sc32"]["g_raw_supercell"] == 992
+    assert by_id["4Gd_2U5_1VaO_sc32"]["g_raw_supercell"] == raw_supercell_degeneracy(
+        {"U4": 26, "U5": 2, "Gd3": 4, "O": 63, "VaO": 1}
+    )
+
+    from atomi.zentropy.pocc_defects import main
+
+    outdir = tmp_path / "generated_grid"
+    main(
+        [
+            "degeneracy-table",
+            "--gduo2-all-charge-neutral",
+            "--n-cation",
+            "32",
+            "--gd-count",
+            "1",
+            "--gd-count",
+            "2",
+            "--gd-count",
+            "4",
+            "--outdir",
+            str(outdir),
+        ]
+    )
+    assert (outdir / "motif_degeneracy_gk.csv").exists()
+
+
+def test_fluorite_fm3m_symmetry_reduction_keeps_orbit_degeneracy_auditable() -> None:
+    summary, orbit_rows = fluorite_fm3m_orbit_degeneracy(
+        {"U4": 30, "U5": 1, "Gd3": 1, "O": 64, "VaO": 0},
+        motif_id="1Gd_1U5_sc32",
+    )
+
+    assert summary["symmetry_reduction_status"] == "exact"
+    assert summary["g_sigma_sum"] == 992
+    assert summary["g_raw_supercell"] == 992
+    assert summary["n_symmetry_distinct_configs"] > 1
+    assert sum(row["g_sigma"] for row in orbit_rows) == 992
+
+
+def test_degeneracy_table_can_write_fluorite_symmetry_orbits(tmp_path: Path) -> None:
+    rows = gduo2_charge_neutral_motif_rows(n_cation=32, gd_counts=[1])
+    table, _, symmetry_rows = build_degeneracy_table(
+        rows,
+        symmetry_reduce_fluorite_fm3m=True,
+    )
+
+    assert table[0]["degeneracy_kind"] == "motif_sum_of_symmetry_orbits"
+    assert table[0]["degeneracy_status"] == "symmetry_reduced_audited_sum"
+    assert table[0]["g_sigma_sum"] == table[0]["g_raw_supercell"]
+    assert symmetry_rows
+
+    from atomi.zentropy.pocc_defects import main
+
+    outdir = tmp_path / "sym"
+    main(
+        [
+            "degeneracy-table",
+            "--gduo2-all-charge-neutral",
+            "--n-cation",
+            "32",
+            "--gd-count",
+            "1",
+            "--fluorite-fm3m-symmetry-reduce",
+            "--outdir",
+            str(outdir),
+        ]
+    )
+    assert (outdir / "motif_degeneracy_gk.csv").exists()
+    assert (outdir / "symmetry_reduced_configurations.csv").exists()
+
+
+def test_fluorite_layered_symmetry_reduction_handles_larger_motif() -> None:
+    summary, orbit_rows = fluorite_fm3m_orbit_degeneracy(
+        {"U4": 28, "U5": 0, "Gd3": 4, "O": 62, "VaO": 2},
+        motif_id="4Gd_2VaO_sc32",
+        max_raw_enumerate=100,
+    )
+
+    assert summary["symmetry_reduction_status"] == "exact_layered_stabilizer"
+    assert summary["g_raw_supercell"] == 72495360
+    assert summary["g_sigma_sum"] == 72495360
+    assert summary["n_symmetry_distinct_configs"] == len(orbit_rows)
+    assert orbit_rows
+
+
+def test_magnetic_initialization_rows_follow_gd_u_o_order() -> None:
+    rows, metadata = build_magnetic_initialization_rows(
+        [
+            {
+                "motif_id": "2Gd_2U5_sc32",
+                "config_id": "2Gd_2U5_sc32_orbit_0001",
+                "g_sigma": 384,
+                "representative_Gd3_sites": "0 1",
+                "representative_U5_sites": "2 3",
+                "representative_VaO_sites": "",
+            }
+        ],
+        include_time_reversal=True,
+    )
+
+    assert metadata["poscar_element_order"] == "Gd U O"
+    assert len(rows) == 2
+    first = rows[0]
+    second = rows[1]
+    assert first["poscar_element_order"] == "Gd U O"
+    assert first["recommended_ldau"].startswith("LDAUTYPE=1")
+    moments = first["magmom_poscar_order"].split()
+    assert moments[:2] == ["+7", "+7"]
+    assert moments[2:6] == ["+1", "-1", "+2", "-2"]
+    assert moments[-1] == "0"
+    assert first["n_Gd3_up"] == 2
+    assert first["n_U5_up"] == 1
+    assert first["n_U5_down"] == 1
+    assert second["time_reversal_of"] == "2Gd_2U5_sc32_orbit_0001_gd_fm_up"
+    assert second["magmom_poscar_order"].split()[:2] == ["-7", "-7"]
+
+
+def test_cli_magnetic_init_table_outputs_magmom_rows(tmp_path: Path) -> None:
+    from atomi.zentropy.pocc_defects import main
+
+    config_csv = tmp_path / "symmetry_configs.csv"
+    with config_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "motif_id",
+                "config_id",
+                "g_sigma",
+                "representative_Gd3_sites",
+                "representative_U5_sites",
+                "representative_VaO_sites",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "motif_id": "1Gd_1U5_sc32",
+                "config_id": "1Gd_1U5_sc32_orbit_0001",
+                "g_sigma": "32",
+                "representative_Gd3_sites": "0",
+                "representative_U5_sites": "1",
+                "representative_VaO_sites": "",
+            }
+        )
+    outdir = tmp_path / "mag"
+    main(["magnetic-init-table", "--config-csv", str(config_csv), "--outdir", str(outdir)])
+
+    table = outdir / "magnetic_initialization_table.csv"
+    assert table.exists()
+    with table.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 2
+    assert rows[0]["magmom_poscar_order"].split()[0] == "+7"
+    assert rows[1]["magmom_poscar_order"].split()[0] == "-7"
 
 
 def test_vasp_ingest_builds_auditable_pocc_ensemble(tmp_path: Path) -> None:
