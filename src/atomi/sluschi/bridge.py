@@ -41,6 +41,19 @@ SUPERSALT_DOWNLOAD_URL = "https://zenodo.org/records/15734798/files/SuperSalt.zi
 SUPERSALT_CITATION = "Shen et al., Nat. Commun. 16, 7280 (2025), doi:10.1038/s41467-025-62450-1"
 SUPERSALT_ELEMENTS = ["Li", "Na", "K", "Rb", "Cs", "Mg", "Ca", "Sr", "Ba", "Zn", "Zr", "Cl"]
 DEFAULT_ELEMENT_MASSES = {
+    # Light/common nonmetals and gases used in carbide, nitride, oxide, and salt workflows.
+    "H": 1.008,
+    "B": 10.81,
+    "C": 12.011,
+    "N": 14.007,
+    "O": 15.999,
+    "F": 18.998403163,
+    "Ne": 20.1797,
+    "P": 30.973761998,
+    "S": 32.06,
+    "Cl": 35.453,
+    "Ar": 39.948,
+    # Alkali/alkaline-earth/chloride-melt cations.
     "Li": 6.941,
     "Na": 22.98976928,
     "K": 39.0983,
@@ -50,13 +63,27 @@ DEFAULT_ELEMENT_MASSES = {
     "Ca": 40.078,
     "Sr": 87.62,
     "Ba": 137.327,
+    # Transition metals commonly appearing in current Atomi tests/projects.
+    "Ti": 47.867,
+    "V": 50.9415,
+    "Cr": 51.9961,
+    "Mn": 54.938044,
+    "Fe": 55.845,
+    "Co": 58.933194,
+    "Ni": 58.6934,
+    "Cu": 63.546,
     "Zn": 65.38,
     "Zr": 91.224,
-    "Cl": 35.453,
-    "F": 18.998403163,
-    "O": 15.999,
-    "U": 238.02891,
+    "Mo": 95.95,
+    "Hf": 178.49,
+    "W": 183.84,
+    # Rare-earth/actinide elements used in oxide defect and molten-salt studies.
+    "Ce": 140.116,
     "Gd": 157.25,
+    "Th": 232.0377,
+    "U": 238.02891,
+    "Np": 237.0,
+    "Pu": 244.0,
 }
 
 OBSERVABLE_UNITS = {
@@ -548,8 +575,31 @@ def parse_type_element_map(value: str) -> dict[int, str]:
     return out
 
 
-def parse_element_mass_map(value: str | None) -> dict[str, float]:
+def default_element_masses() -> dict[str, float]:
+    """Return built-in masses, enriched from ASE when available.
+
+    SLUSCHI prep should work for ordinary chemical symbols without forcing users
+    to pass --element-masses for every new chemistry. ASE is optional in Atomi,
+    so keep a local fallback table for the projects we commonly run.
+    """
+
     masses = dict(DEFAULT_ELEMENT_MASSES)
+    try:
+        from ase.data import atomic_masses, atomic_numbers
+    except Exception:
+        return masses
+    for symbol, number in atomic_numbers.items():
+        try:
+            mass = float(atomic_masses[number])
+        except Exception:
+            continue
+        if mass > 0:
+            masses.setdefault(symbol, mass)
+    return masses
+
+
+def parse_element_mass_map(value: str | None) -> dict[str, float]:
+    masses = default_element_masses()
     for item in parse_csv_list(value):
         if "=" not in item:
             raise ValueError(f"Expected Element=mass item, got {item!r}")

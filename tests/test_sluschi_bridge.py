@@ -12,6 +12,19 @@ def rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def test_sluschi_element_masses_include_uc2_and_allow_overrides():
+    masses = bridge.parse_element_mass_map(None)
+
+    assert masses["C"] == 12.011
+    assert masses["U"] == 238.02891
+    assert masses["Gd"] == 157.25
+
+    overridden = bridge.parse_element_mass_map("C=12.0,U=238.1")
+
+    assert overridden["C"] == 12.0
+    assert overridden["U"] == 238.1
+
+
 def test_sluschi_bridge_init_writes_kcl_licl_handoff(tmp_path: Path):
     model = tmp_path / "supersalt.model"
     model.write_text("model", encoding="utf-8")
