@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import tarfile
 from pathlib import Path
 
 from atomi.zentropy.pocc_defects import (
@@ -9,6 +10,7 @@ from atomi.zentropy.pocc_defects import (
     build_degeneracy_table,
     build_magnetic_initialization_rows,
     effective_charge,
+    find_vasp_run_dirs,
     fluorite_fm3m_orbit_degeneracy,
     gduo2_charge_neutral_motif_rows,
     gduo2_observables,
@@ -383,3 +385,43 @@ Direct
     with (outdir / "vasp_ingest_audit.csv").open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert rows[0]["warnings"] == ""
+
+
+def test_vasp_ingest_reads_canonical_tgz_archive(tmp_path: Path) -> None:
+    run = tmp_path / "archived_case"
+    run.mkdir()
+    archive_root = tmp_path / "scratch_result"
+    archive_root.mkdir()
+    (archive_root / "CONTCAR").write_text(
+        """Gd-UO2 archived motif
+1.0
+4 0 0
+0 4 0
+0 0 4
+U Gd O
+30 2 64
+Direct
+""",
+        encoding="utf-8",
+    )
+    (archive_root / "OSZICAR").write_text(
+        "DAV: 1 -0.123E+03\n   1 F= -.12345679E+03 E0= -.12340000E+03  d E =-.1E-02  mag= 14.0\n",
+        encoding="utf-8",
+    )
+    archive = run / "bwforcluster-bulk_48.sbatch.12345.tgz"
+    with tarfile.open(archive, "w:gz") as handle:
+        handle.add(archive_root / "CONTCAR", arcname="scratch_result/CONTCAR")
+        handle.add(archive_root / "OSZICAR", arcname="scratch_result/OSZICAR")
+
+    found = find_vasp_run_dirs([tmp_path])
+    assert run.resolve() in found
+
+    configs, audit = ingest_vasp_runs(
+        [run],
+        metadata={str(run): {"U5": "2", "oxidation_assignment": "manual_review", "degeneracy": "7"}},
+    )
+    assert configs[0].E_static_eV == -123.45679
+    assert configs[0].species_counts == {"U4": 28, "U5": 2, "Gd3": 2, "O": 64, "VaO": 0}
+    assert configs[0].degeneracy == 7
+    assert "calc_from_archive" in audit[0]["warnings"]
+    assert "structure_from_archive" in audit[0]["warnings"]

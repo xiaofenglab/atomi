@@ -15,6 +15,7 @@ import itertools
 import json
 import math
 import re
+import tarfile
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -282,12 +283,9 @@ def metadata_for_run(run_dir: Path, metadata: dict[str, dict[str, str]]) -> dict
     return {}
 
 
-def parse_vasp_poscar_counts(path: Path) -> tuple[dict[str, int], float | None]:
-    """Parse element counts and volume from a VASP POSCAR/CONTCAR-like file."""
-    with _open_text(path) as handle:
-        lines = [line.strip() for line in handle if line.strip()]
+def _parse_vasp_poscar_count_lines(lines: list[str], label: str) -> tuple[dict[str, int], float | None]:
     if len(lines) < 7:
-        raise ValueError(f"Not enough POSCAR/CONTCAR lines in {path}")
+        raise ValueError(f"Not enough POSCAR/CONTCAR lines in {label}")
     scale = float(lines[1].split()[0])
     lattice = [[float(value) * scale for value in lines[idx].split()[:3]] for idx in range(2, 5)]
     volume = abs(
@@ -301,10 +299,88 @@ def parse_vasp_poscar_counts(path: Path) -> tuple[dict[str, int], float | None]:
         count_tokens = lines[6].split()
     else:
         raise ValueError(
-            f"{path} appears to be VASP4-style without element symbols; provide metadata CSV counts instead."
+            f"{label} appears to be VASP4-style without element symbols; provide metadata CSV counts instead."
         )
     counts = {symbol: int(round(float(raw))) for symbol, raw in zip(symbols, count_tokens)}
     return counts, volume
+
+
+def parse_vasp_poscar_counts(path: Path) -> tuple[dict[str, int], float | None]:
+    """Parse element counts and volume from a VASP POSCAR/CONTCAR-like file."""
+    with _open_text(path) as handle:
+        lines = [line.strip() for line in handle if line.strip()]
+    return _parse_vasp_poscar_count_lines(lines, str(path))
+
+
+def parse_vasp_poscar_counts_text(text: str, label: str) -> tuple[dict[str, int], float | None]:
+    """Parse element counts and volume from POSCAR/CONTCAR text."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return _parse_vasp_poscar_count_lines(lines, label)
+
+
+def _vasp_archive_paths(run_dir: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in run_dir.glob("*.tgz")
+        if path.is_file()
+        and not path.name.startswith(".")
+    )
+
+
+def _archive_has_vasp_markers(path: Path) -> bool:
+    try:
+        with tarfile.open(path, "r:*") as archive:
+            names = {Path(member.name).name for member in archive.getmembers() if member.isfile()}
+    except (tarfile.TarError, OSError):
+        return False
+    return bool(names.intersection({"OSZICAR", "OUTCAR", "vasprun.xml"})) and bool(
+        names.intersection({"CONTCAR", "POSCAR"})
+    )
+
+
+def _read_text_from_vasp_archive(run_dir: Path, basenames: tuple[str, ...]) -> tuple[str | None, str]:
+    for archive_path in reversed(_vasp_archive_paths(run_dir)):
+        try:
+            with tarfile.open(archive_path, "r:*") as archive:
+                members = [
+                    member
+                    for member in archive.getmembers()
+                    if member.isfile() and Path(member.name).name in basenames
+                ]
+                members.sort(key=lambda member: (basenames.index(Path(member.name).name), member.name))
+                for member in members:
+                    handle = archive.extractfile(member)
+                    if handle is None:
+                        continue
+                    return handle.read().decode("utf-8", errors="replace"), f"{archive_path}:{member.name}"
+        except (tarfile.TarError, OSError):
+            continue
+    return None, ""
+
+
+def parse_vasp_archive_calc(run_dir: Path) -> dict[str, Any]:
+    oszicar_text, oszicar_source = _read_text_from_vasp_archive(run_dir, ("OSZICAR",))
+    energy = None
+    if oszicar_text:
+        for line in oszicar_text.splitlines():
+            match = re.search(r"\bF=\s*([-.0-9Ee+]+)", line)
+            if match:
+                energy = finite_float(match.group(1))
+    contcar_text, contcar_source = _read_text_from_vasp_archive(run_dir, ("CONTCAR", "POSCAR"))
+    volume = None
+    if contcar_text:
+        try:
+            _, volume = parse_vasp_poscar_counts_text(contcar_text, contcar_source)
+        except Exception:
+            volume = None
+    return {
+        "parser_used": "vasp_tgz_oszicar" if energy is not None else "none",
+        "source_file": oszicar_source,
+        "energy_eV": energy,
+        "volume_A3": volume,
+        "force_rms_eVA": None,
+        "force_max_eVA": None,
+    }
 
 
 def find_vasp_run_dirs(roots: list[Path]) -> list[Path]:
@@ -319,8 +395,13 @@ def find_vasp_run_dirs(roots: list[Path]) -> list[Path]:
             continue
         if any((root / marker).exists() for marker in markers):
             found.add(root.resolve())
+        if any(_archive_has_vasp_markers(path) for path in _vasp_archive_paths(root)):
+            found.add(root.resolve())
         for marker in markers:
             for path in root.rglob(marker):
+                found.add(path.parent.resolve())
+        for path in root.rglob("*.tgz"):
+            if _archive_has_vasp_markers(path):
                 found.add(path.parent.resolve())
     return sorted(found)
 
@@ -384,7 +465,16 @@ def ingest_vasp_runs(
         element_counts: dict[str, int] = {}
         structure_volume = None
         if structure_path is None:
-            warnings.append("missing_structure")
+            text, source = _read_text_from_vasp_archive(run_dir, ("CONTCAR", "POSCAR"))
+            if text:
+                try:
+                    element_counts, structure_volume = parse_vasp_poscar_counts_text(text, source)
+                    structure_path = Path(source)
+                    warnings.append("structure_from_archive")
+                except Exception as exc:
+                    warnings.append(f"archive_structure_parse_failed:{exc}")
+            else:
+                warnings.append("missing_structure")
         else:
             try:
                 element_counts, structure_volume = parse_vasp_poscar_counts(structure_path)
@@ -397,6 +487,11 @@ def ingest_vasp_runs(
         )
         warnings.extend(count_warnings)
         calc = parse_calc_folder(run_dir)
+        if calc.get("parser_used") == "none":
+            archive_calc = parse_vasp_archive_calc(run_dir)
+            if archive_calc.get("parser_used") != "none":
+                calc = archive_calc
+                warnings.append("calc_from_archive")
         energy = _finite_or_none(meta.get("E_static_eV") or meta.get("energy_eV") or calc.get("energy_eV"))
         volume = _finite_or_none(meta.get("volume_A3") or calc.get("volume_A3") or structure_volume)
         config_id = str(meta.get("config_id") or meta.get("motif_id") or run_dir.name or f"vasp_{idx:04d}")
