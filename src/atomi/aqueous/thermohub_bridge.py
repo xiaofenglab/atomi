@@ -176,12 +176,21 @@ def read_aimd_logk(path: Path | None) -> list[AimdLogKRow]:
         for row in reader:
             t_raw = (
                 row.get("temperature_c")
+                or row.get("temperature_C")
                 or row.get("T_C")
                 or row.get("T(C)")
-                or row.get("temperature_C")
                 or row.get("T")
+                or row.get("temperature")
             )
-            k_raw = row.get("log10_K") or row.get("logK") or row.get("log10K") or row.get("log_k")
+            k_raw = (
+                row.get("log10_K")
+                or row.get("log10K")
+                or row.get("logK")
+                or row.get("log_k")
+                or row.get("log10_k")
+                or row.get("log10K_fixed_pmf_extrapolated")
+                or row.get("corrected_conditional_log10_K4")
+            )
             if t_raw is None or k_raw is None:
                 continue
             sigma_raw = row.get("sigma") or row.get("stderr") or row.get("ci_half_width")
