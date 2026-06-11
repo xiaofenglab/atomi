@@ -455,3 +455,26 @@ def test_vasp_ingest_metadata_csv_matches_case_dir_alias(tmp_path: Path) -> None
     assert configs[0].species_counts["U5"] == 1
     assert configs[0].degeneracy == 384
     assert configs[0].motif_labels == ["1Gd_1U5_sc32"]
+
+
+def test_vasp_ingest_strict_oxidation_accepts_vacancy_redox_metadata(tmp_path: Path) -> None:
+    run = tmp_path / "case_03_2Gd_1VaO_sc32_gd_fm_up"
+    run.mkdir()
+    metadata = {
+        run.name: {
+            "n_gd": "2",
+            "n_u": "30",
+            "n_o": "63",
+            "u5_sites": "",
+            "vo_sites": "1",
+            "g_sigma": "1536",
+            "motif_id": "2Gd_1VaO_sc32",
+        }
+    }
+
+    configs, audit = ingest_vasp_runs([run], metadata=metadata, strict_oxidation=True)
+
+    assert configs[0].species_counts == {"U4": 30, "U5": 0, "Gd3": 2, "O": 63, "VaO": 1}
+    assert configs[0].degeneracy == 1536
+    assert audit[0]["effective_charge"] == 0
+    assert "strict_oxidation_missing" not in audit[0]["warnings"]

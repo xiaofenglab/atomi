@@ -456,10 +456,24 @@ def _species_counts_from_structure(
     return {"U4": n_u4, "U5": n_u5, "Gd3": n_gd, "O": n_o, "VaO": n_vo}, warnings
 
 
-def _has_explicit_u5_assignment(meta: dict[str, str]) -> bool:
+def _has_explicit_redox_assignment(meta: dict[str, str]) -> bool:
     return any(
         meta.get(key) not in (None, "")
-        for key in ("U5", "n_u5", "u5_sites", "representative_U5_sites", "oxidation_assignment", "u5_assignment", "valence_assignment")
+        for key in (
+            "U5",
+            "n_u5",
+            "u5_sites",
+            "representative_U5_sites",
+            "VaO",
+            "VO",
+            "V_O",
+            "n_vo",
+            "vo_sites",
+            "representative_VaO_sites",
+            "oxidation_assignment",
+            "u5_assignment",
+            "valence_assignment",
+        )
     )
 
 
@@ -518,10 +532,10 @@ def ingest_vasp_runs(
             or meta.get("valence_assignment")
             or ""
         )
-        has_u5_assignment = _has_explicit_u5_assignment(meta)
-        if counts.get("U5", 0) and not has_u5_assignment:
+        has_redox_assignment = _has_explicit_redox_assignment(meta)
+        if counts.get("U5", 0) and not has_redox_assignment:
             warnings.append("u5_assignment_not_declared")
-        if strict_oxidation and counts.get("U4", 0) + counts.get("U5", 0) and not has_u5_assignment:
+        if strict_oxidation and counts.get("U4", 0) + counts.get("U5", 0) and not has_redox_assignment:
             warnings.append("strict_oxidation_missing")
         config_metadata: dict[str, Any] = {
             "run_dir": str(run_dir),
