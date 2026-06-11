@@ -16,6 +16,7 @@ from atomi.ml.mace.train import main as mace_train_main
 
 
 SUPPORTED_CODES = ("vasp", "cp2k", "lammps", "turbomole", "molcas", "moose", "calphad")
+AQ_THERMO_BRIDGE_COMMANDS = ("aq-thermo-bridge", "aq_thermo_bridge", "thermofun-bridge", "thermohub-bridge")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -446,6 +447,13 @@ def build_parser() -> argparse.ArgumentParser:
             help="Create and inspect thermodynamic ML prior JSON files.",
         )
         thermo_prior.add_argument("thermo_prior_args", nargs=argparse.REMAINDER)
+
+    for command_name in AQ_THERMO_BRIDGE_COMMANDS:
+        aq_thermo_bridge = subparsers.add_parser(
+            command_name,
+            help="Bridge AIMD aqueous logK tables to ThermoHub/ThermoFun/GEMS database workflows.",
+        )
+        aq_thermo_bridge.add_argument("aq_thermo_bridge_args", nargs=argparse.REMAINDER)
 
     for command_name in ("calphad_workflow", "calphad-workflow"):
         calphad_workflow = subparsers.add_parser(
@@ -900,6 +908,11 @@ def main(argv: list[str] | None = None) -> None:
     raw_args = sys.argv[1:] if argv is None else argv
     if raw_args and raw_args[0] in ("mace-build-dataset", "mace-dataset", "build-mace-dataset"):
         mace_build_dataset_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in AQ_THERMO_BRIDGE_COMMANDS:
+        from atomi.aqueous.thermohub_bridge import main as aq_thermo_bridge_main
+
+        aq_thermo_bridge_main(raw_args[1:])
         return
     if raw_args and raw_args[0] == "mace-energy-outliers":
         from atomi.ml.mace.outliers import main as mace_energy_outliers_main
@@ -1869,6 +1882,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.thermo_prior.cli import main as thermo_prior_main
 
         thermo_prior_main(args.thermo_prior_args)
+        return
+
+    if args.subcommand in AQ_THERMO_BRIDGE_COMMANDS:
+        from atomi.aqueous.thermohub_bridge import main as aq_thermo_bridge_main
+
+        aq_thermo_bridge_main(args.aq_thermo_bridge_args)
         return
 
     if args.subcommand in ("calphad_workflow", "calphad-workflow"):
