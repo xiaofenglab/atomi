@@ -478,3 +478,4 @@ def test_vasp_ingest_strict_oxidation_accepts_vacancy_redox_metadata(tmp_path: P
     assert configs[0].degeneracy == 1536
     assert audit[0]["effective_charge"] == 0
     assert "strict_oxidation_missing" not in audit[0]["warnings"]
+    assert "u5_count_missing_assumed_zero_for_audit" not in audit[0]["warnings"]

@@ -446,7 +446,15 @@ def _species_counts_from_structure(
     if n_anion_sites and n_o + n_vo != n_anion_sites:
         warnings.append("anion_count_inconsistent")
     u5_site_tokens = _parse_site_indices(meta.get("u5_sites") or meta.get("representative_U5_sites") or "")
-    explicit_u5 = meta.get("U5") not in (None, "") or bool(u5_site_tokens)
+    explicit_u5 = (
+        meta.get("U5") not in (None, "")
+        or meta.get("n_u5") not in (None, "")
+        or bool(u5_site_tokens)
+        or any(
+            meta.get(key) not in (None, "")
+            for key in ("VaO", "VO", "V_O", "n_vo", "vo_sites", "representative_VaO_sites")
+        )
+    )
     n_u5 = _as_int(meta.get("U5") or meta.get("n_u5"), len(u5_site_tokens))
     n_u4 = _as_int(meta.get("U4"), n_u_total - n_u5)
     if n_u4 + n_u5 != n_u_total:
