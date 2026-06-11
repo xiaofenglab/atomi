@@ -429,16 +429,23 @@ def _species_counts_from_structure(
     oxygen_sites_per_cation: float,
 ) -> tuple[dict[str, int], list[str]]:
     warnings: list[str] = []
-    n_u_total = _as_int(meta.get("U_total"), element_counts.get("U", 0))
-    n_gd = _as_int(meta.get("Gd3") or meta.get("Gd"), element_counts.get("Gd", 0))
-    n_o = _as_int(meta.get("O"), element_counts.get("O", 0))
-    n_cation = _as_int(meta.get("N_cation"), n_u_total + n_gd)
-    n_anion_sites = _as_int(meta.get("N_anion_sites"), round(oxygen_sites_per_cation * n_cation))
-    n_vo = _as_int(meta.get("VaO") or meta.get("VO") or meta.get("V_O"), max(n_anion_sites - n_o, 0))
+    n_u_total = _as_int(meta.get("U_total") or meta.get("n_u"), element_counts.get("U", 0))
+    n_gd = _as_int(meta.get("Gd3") or meta.get("Gd") or meta.get("n_gd"), element_counts.get("Gd", 0))
+    n_o = _as_int(meta.get("O") or meta.get("n_o"), element_counts.get("O", 0))
+    n_cation = _as_int(meta.get("N_cation") or meta.get("n_cation"), n_u_total + n_gd)
+    n_anion_sites = _as_int(
+        meta.get("N_anion_sites") or meta.get("n_anion_sites"),
+        round(oxygen_sites_per_cation * n_cation),
+    )
+    n_vo = _as_int(
+        meta.get("VaO") or meta.get("VO") or meta.get("V_O") or meta.get("n_vo"),
+        max(n_anion_sites - n_o, 0),
+    )
     if n_anion_sites and n_o + n_vo != n_anion_sites:
         warnings.append("anion_count_inconsistent")
-    explicit_u5 = meta.get("U5") not in (None, "")
-    n_u5 = _as_int(meta.get("U5"), 0)
+    u5_site_tokens = _parse_site_indices(meta.get("u5_sites") or meta.get("representative_U5_sites") or "")
+    explicit_u5 = meta.get("U5") not in (None, "") or bool(u5_site_tokens)
+    n_u5 = _as_int(meta.get("U5") or meta.get("n_u5"), len(u5_site_tokens))
     n_u4 = _as_int(meta.get("U4"), n_u_total - n_u5)
     if n_u4 + n_u5 != n_u_total:
         warnings.append("uranium_count_inconsistent")
@@ -495,7 +502,7 @@ def ingest_vasp_runs(
         energy = _finite_or_none(meta.get("E_static_eV") or meta.get("energy_eV") or calc.get("energy_eV"))
         volume = _finite_or_none(meta.get("volume_A3") or calc.get("volume_A3") or structure_volume)
         config_id = str(meta.get("config_id") or meta.get("motif_id") or run_dir.name or f"vasp_{idx:04d}")
-        degeneracy = _as_float(meta.get("degeneracy"), 1.0)
+        degeneracy = _as_float(meta.get("degeneracy") or meta.get("g_sigma"), 1.0)
         oxidation_assignment = (
             meta.get("oxidation_assignment")
             or meta.get("u5_assignment")
@@ -531,7 +538,9 @@ def ingest_vasp_runs(
             degeneracy_basis=str(meta.get("degeneracy_basis") or "finite_supercell"),
             E_static_eV=energy,
             energy_kind=str(meta.get("energy_kind") or "E_static_DFT"),  # type: ignore[arg-type]
-            motif_labels=_split_labels(meta.get("motif_labels") or meta.get("motif_label") or meta.get("defect_label")),
+            motif_labels=_split_labels(
+                meta.get("motif_labels") or meta.get("motif_label") or meta.get("defect_label") or meta.get("motif_id")
+            ),
             motif_features=dict(_jsonish(meta.get("motif_features"), {})),
             structure_path=str(structure_path) if structure_path else None,
             source="vasp_ingest",

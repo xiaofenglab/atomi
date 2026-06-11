@@ -418,10 +418,18 @@ Direct
 
     configs, audit = ingest_vasp_runs(
         [run],
-        metadata={str(run): {"U5": "2", "oxidation_assignment": "manual_review", "degeneracy": "7"}},
+        metadata={
+            str(run): {
+                "u5_sites": "2 12",
+                "oxidation_assignment": "manual_review",
+                "g_sigma": "7",
+                "motif_id": "2Gd_2U5_sc32",
+            }
+        },
     )
     assert configs[0].E_static_eV == -123.45679
     assert configs[0].species_counts == {"U4": 28, "U5": 2, "Gd3": 2, "O": 64, "VaO": 0}
     assert configs[0].degeneracy == 7
+    assert configs[0].motif_labels == ["2Gd_2U5_sc32"]
     assert "calc_from_archive" in audit[0]["warnings"]
     assert "structure_from_archive" in audit[0]["warnings"]
