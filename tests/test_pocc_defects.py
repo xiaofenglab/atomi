@@ -16,6 +16,7 @@ from atomi.zentropy.pocc_defects import (
     gduo2_observables,
     ingest_vasp_runs,
     raw_supercell_degeneracy,
+    read_run_metadata,
     solve_static_zentropy,
 )
 
@@ -419,17 +420,38 @@ Direct
     configs, audit = ingest_vasp_runs(
         [run],
         metadata={
-            str(run): {
+            "archived_case": {
                 "u5_sites": "2 12",
-                "oxidation_assignment": "manual_review",
                 "g_sigma": "7",
                 "motif_id": "2Gd_2U5_sc32",
             }
         },
+        strict_oxidation=True,
     )
     assert configs[0].E_static_eV == -123.45679
     assert configs[0].species_counts == {"U4": 28, "U5": 2, "Gd3": 2, "O": 64, "VaO": 0}
     assert configs[0].degeneracy == 7
     assert configs[0].motif_labels == ["2Gd_2U5_sc32"]
+    assert "strict_oxidation_missing" not in audit[0]["warnings"]
+    assert "u5_assignment_not_declared" not in audit[0]["warnings"]
     assert "calc_from_archive" in audit[0]["warnings"]
     assert "structure_from_archive" in audit[0]["warnings"]
+
+
+def test_vasp_ingest_metadata_csv_matches_case_dir_alias(tmp_path: Path) -> None:
+    run = tmp_path / "case_01_1Gd_1U5_sc32_gd_fm_up"
+    run.mkdir()
+    metadata = tmp_path / "metadata.csv"
+    metadata.write_text(
+        "case_id,case_dir,motif_id,g_sigma,u5_sites\n"
+        f"case_01_1Gd_1U5_sc32_gd_fm_up,/home/example/{run.name},1Gd_1U5_sc32,384,1\n",
+        encoding="utf-8",
+    )
+
+    rows = read_run_metadata(metadata)
+
+    assert rows[run.name]["g_sigma"] == "384"
+    configs, _audit = ingest_vasp_runs([run], metadata=rows)
+    assert configs[0].species_counts["U5"] == 1
+    assert configs[0].degeneracy == 384
+    assert configs[0].motif_labels == ["1Gd_1U5_sc32"]
