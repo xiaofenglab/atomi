@@ -42,6 +42,45 @@ xafs = [
 zentropy = [
   "pyzentropy; python_version >= '3.10'",
 ]
+defects = [
+  "numpy",
+  "scipy",
+  "pandas",
+  "pydantic",
+  "networkx",
+  "spglib",
+  "pymatgen",
+  "ase>=3.23",
+  "h5py",
+  "netCDF4",
+  "xarray",
+]
+smol = [
+  "smol",
+  "pymatgen",
+  "monty",
+]
+casm_python = [
+  "casm-python",
+]
+casm_modular = [
+  "libcasm-xtal",
+  "libcasm-composition",
+  "libcasm-mapping",
+  "libcasm-configuration",
+  "libcasm-clexulator",
+  "casm-bset",
+  "libcasm-monte",
+  "libcasm-clexmonte",
+  "casm-project",
+  "casm-tools",
+]
+mode4 = [
+  "smol",
+  "pymatgen",
+  "monty",
+  "joblib",
+]
 elastic-viz = []
 
 [project.scripts]

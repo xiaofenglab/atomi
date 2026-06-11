@@ -1735,6 +1735,15 @@ def build_parser() -> argparse.ArgumentParser:
     template = sub.add_parser("template", help="Write the default Gd-UO2 defect-engine YAML/JSON template.")
     template.add_argument("--output", type=Path, default=Path("gd_uo2.defect_engine.json"))
 
+    backend = sub.add_parser("backend", help="Inspect or run large-state-space thermodynamic backends.")
+    backend_sub = backend.add_subparsers(dest="backend_command", required=True)
+    backend_doctor = backend_sub.add_parser(
+        "doctor",
+        help="Report optional POCC/GQCA, motif-MC, smol, and CASM backend availability.",
+    )
+    backend_doctor.add_argument("--backend", help="Only report one backend.")
+    backend_doctor.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+
     validate = sub.add_parser("validate", help="Validate charge, degeneracy, and energy metadata.")
     _add_common_input(validate)
 
@@ -1836,6 +1845,18 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         write_json(args.output.resolve(), gduo2_default_config())
         print(f"Wrote Gd-UO2 defect-engine template: {args.output.resolve()}")
         return {"output": str(args.output.resolve())}
+
+    if args.command == "backend":
+        if args.backend_command == "doctor":
+            from atomi.zentropy.backends.doctor import main as backend_doctor_main
+
+            doctor_args = []
+            if args.backend:
+                doctor_args.extend(["--backend", args.backend])
+            if args.json:
+                doctor_args.append("--json")
+            return backend_doctor_main(doctor_args)
+        raise ValueError(f"Unsupported backend command: {args.backend_command}")
 
     if args.command == "degeneracy-table":
         if args.gduo2_all_charge_neutral:
