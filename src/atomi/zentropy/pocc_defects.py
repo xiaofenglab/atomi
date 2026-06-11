@@ -1424,6 +1424,7 @@ def solve_static_zentropy(
     temperatures: list[float],
     mu_o_values: list[float | None],
     group_by_x_gd: bool = True,
+    group_by_composition: bool = False,
     require_neutral: bool = True,
     surface_builder_mode: str = "pocc_static_logsum",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1431,7 +1432,12 @@ def solve_static_zentropy(
     groups: dict[str, list[DefectConfiguration]] = {}
     for cfg in candidates:
         obs = gduo2_observables(cfg.species_counts)
-        key = f"x_Gd={obs['x_Gd']:.8g}" if group_by_x_gd else "all"
+        if group_by_composition:
+            key = f"x_Gd={obs['x_Gd']:.8g}|delta={obs['delta']:.8g}"
+        elif group_by_x_gd:
+            key = f"x_Gd={obs['x_Gd']:.8g}"
+        else:
+            key = "all"
         groups.setdefault(key, []).append(cfg)
 
     population_rows: list[dict[str, Any]] = []
@@ -1971,6 +1977,11 @@ def build_parser() -> argparse.ArgumentParser:
     solve.add_argument("--temperature", action="append", default=[], help="T in K or start:stop:step.")
     solve.add_argument("--mu-o", action="append", default=[], help="mu_O in eV/O, grid start:stop:step, or closed.")
     solve.add_argument("--no-group-by-x-gd", action="store_true")
+    solve.add_argument(
+        "--group-by-composition",
+        action="store_true",
+        help="Group macrostates by both x_Gd and delta_VO for G(T,x,delta) surface sketches.",
+    )
     solve.add_argument("--allow-non-neutral", action="store_true")
     return parser
 
@@ -2111,6 +2122,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         temperatures=temperatures,
         mu_o_values=mu_values,
         group_by_x_gd=not args.no_group_by_x_gd,
+        group_by_composition=args.group_by_composition,
         require_neutral=not args.allow_non_neutral,
     )
     write_csv(outdir / "population_vector.csv", population_rows, POP_FIELDS)

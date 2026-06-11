@@ -76,6 +76,18 @@ def test_static_zentropy_population_keeps_degeneracy_separate_from_energy() -> N
     assert "S_site_ideal_J_molK" in surface[0]
     assert "S_excess_conf_J_molK" in surface[0]
 
+    _, composition_surface, _ = solve_static_zentropy(
+        configs,
+        temperatures=[1200.0],
+        mu_o_values=[None],
+        group_by_composition=True,
+    )
+    assert len(composition_surface) == 2
+    assert {row["group_key"] for row in composition_surface} == {
+        "x_Gd=0.0625|delta=0",
+        "x_Gd=0.0625|delta=0.03125",
+    }
+
 
 def test_cli_solve_static_outputs_tables(tmp_path: Path) -> None:
     from atomi.zentropy.pocc_defects import main
