@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib.metadata
+import importlib.util
 import json
 import math
 import os
@@ -17,7 +19,7 @@ import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 R_GAS_CONSTANT = 8.31446261815324
 
@@ -88,6 +90,109 @@ class ThermoFunResult:
     delta_s_j_mol_k: float | None
     status: str
     message: str = ""
+
+
+@dataclass
+class GemsCapability:
+    python: str
+    modules: dict[str, dict[str, Any]]
+    gems3k_python_module: str | None
+    equilibrium_layer: str | None
+    status: str
+    message: str = ""
+
+
+def _module_status(import_name: str, distribution_name: str | None = None, include_symbols: bool = False) -> dict[str, Any]:
+    spec = importlib.util.find_spec(import_name)
+    row: dict[str, Any] = {"available": spec is not None, "origin": getattr(spec, "origin", None) if spec else None}
+    if spec is None:
+        return row
+    try:
+        row["version"] = importlib.metadata.version(distribution_name or import_name)
+    except importlib.metadata.PackageNotFoundError:
+        row["version"] = "unknown"
+    if include_symbols:
+        try:
+            module = __import__(import_name)
+            row["public_symbols"] = [name for name in dir(module) if not name.startswith("_")][:80]
+        except Exception as exc:  # optional package import can fail from missing shared libs.
+            row["import_error"] = str(exc)
+    return row
+
+
+def _probe_gems_inprocess(include_symbols: bool = False) -> GemsCapability:
+    modules = {
+        "thermofun": _module_status("thermofun", include_symbols=include_symbols),
+        "thermohubclient": _module_status("thermohubclient", include_symbols=include_symbols),
+        "chemicalfun": _module_status("chemicalfun", include_symbols=include_symbols),
+        "solmod4rkt": _module_status("solmod4rkt", include_symbols=include_symbols),
+        "easygems": _module_status("easygems", include_symbols=include_symbols),
+        "xgems": _module_status("xgems", include_symbols=include_symbols),
+        "gems3k": _module_status("gems3k", include_symbols=include_symbols),
+        "gems": _module_status("gems", include_symbols=include_symbols),
+    }
+    gems3k_module = None
+    if modules["solmod4rkt"]["available"]:
+        gems3k_module = "solmod4rkt"
+    elif modules["gems3k"]["available"]:
+        gems3k_module = "gems3k"
+    elif modules["gems"]["available"]:
+        gems3k_module = "gems"
+    equilibrium_layer = None
+    if modules["easygems"]["available"]:
+        equilibrium_layer = "easygems"
+    elif modules["xgems"]["available"]:
+        equilibrium_layer = "xgems"
+    elif gems3k_module:
+        equilibrium_layer = gems3k_module
+    status = "ready" if gems3k_module and equilibrium_layer else "partial" if gems3k_module else "missing"
+    if status == "ready":
+        message = "GEMS3K Python bindings are available; a Ga-Cl-O-H GEMS/ThermoFun database project is still required for a true equilibrium logK/speciation curve."
+    elif status == "partial":
+        message = "GEMS3K low-level bindings are available, but no higher-level equilibrium helper was detected."
+    else:
+        message = "No GEMS3K Python bindings detected in this Python environment."
+    return GemsCapability(sys.executable, modules, gems3k_module, equilibrium_layer, status, message)
+
+
+def probe_gems(gems_python: Path | None = None, include_symbols: bool = False) -> GemsCapability:
+    if gems_python is None:
+        return _probe_gems_inprocess(include_symbols=include_symbols)
+    helper = """
+import json
+from atomi.aqueous.thermohub_bridge import _probe_gems_inprocess
+capability = _probe_gems_inprocess(include_symbols=__import__('sys').argv[1] == '1')
+print(json.dumps(capability.__dict__))
+"""
+    with tempfile.TemporaryDirectory(prefix="atomi_gems_probe_") as tmp:
+        tmp_path = Path(tmp)
+        helper_path = tmp_path / "probe_gems.py"
+        helper_path.write_text(helper, encoding="utf-8")
+        env = os.environ.copy()
+        src_root = Path(__file__).resolve().parents[2]
+        env["PYTHONPATH"] = str(src_root) + os.pathsep + env.get("PYTHONPATH", "")
+        proc = subprocess.run(
+            [str(gems_python), str(helper_path), "1" if include_symbols else "0"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return GemsCapability(
+                str(gems_python),
+                {},
+                None,
+                None,
+                "probe_failed",
+                proc.stderr.strip() or proc.stdout.strip() or f"exit code {proc.returncode}",
+            )
+        json_lines = [line for line in proc.stdout.splitlines() if line.strip().startswith("{")]
+        if not json_lines:
+            return GemsCapability(str(gems_python), {}, None, None, "probe_failed", proc.stdout.strip())
+        payload = json.loads(json_lines[-1])
+        return GemsCapability(**payload)
 
 
 def _split_float_values(values: Sequence[str] | None, default: Sequence[float]) -> list[float]:
@@ -378,7 +483,8 @@ def write_species_request(path: Path, reactions: Sequence[ReactionSpec], tempera
         "```",
         "",
         "For GEMS/GEMS3K, use the same species list as the basis for equilibrium-speciation input generation.",
-        "Atomi currently records the GEMS handoff and does not assume a Python GEMS API is available.",
+        "The conda-forge `gems3k` package exposes its Python-facing bindings as `solmod4rkt`; Atomi probes that module plus `easygems` and `xgems` before attempting solver-backed workflows.",
+        "A true GEMS-refined logK/speciation curve requires a matching GEMS/ThermoFun database or project containing this Ga-Cl-O-H species basis.",
     ])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -392,6 +498,7 @@ def write_report(
     database: Path | None,
     thermofun_python: Path | None,
     pressure_bar: float,
+    gems_capability: GemsCapability | None = None,
 ) -> None:
     ok_rows = [row for row in thermofun_rows if row.status == "ok"]
     failed_rows = [row for row in thermofun_rows if row.status != "ok"]
@@ -410,11 +517,33 @@ def write_report(
         f"- AIMD logK rows: {len(aimd_rows)}",
         f"- Reaction definitions: {len(reactions)}",
         "",
+        "## GEMS / GEMS3K Capability",
+        "",
+    ]
+    if gems_capability:
+        lines.extend([
+            f"- Python: `{gems_capability.python}`",
+            f"- Status: {gems_capability.status}",
+            f"- GEMS3K Python module: {gems_capability.gems3k_python_module or 'not detected'}",
+            f"- Equilibrium layer: {gems_capability.equilibrium_layer or 'not detected'}",
+            f"- Message: {gems_capability.message}",
+            "",
+            "| module | available | version | origin |",
+            "| --- | --- | --- | --- |",
+        ])
+        for module, row in gems_capability.modules.items():
+            lines.append(
+                f"| {module} | {row.get('available')} | {row.get('version', '')} | `{row.get('origin', '')}` |"
+            )
+        lines.append("")
+    else:
+        lines.extend(["- Not probed.", ""])
+    lines.extend([
         "## AIMD Conditional Constants",
         "",
         "| T (C) | log10 K | sigma | source | note |",
         "| ---: | ---: | ---: | --- | --- |",
-    ]
+    ])
     if aimd_rows:
         for row in aimd_rows:
             sigma = "" if row.sigma is None else f"{row.sigma:.6g}"
@@ -456,6 +585,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--aimd-k", type=Path, help="CSV table with temperature_c and log10_K/logK columns.")
     parser.add_argument("--database", type=Path, help="Local ThermoFun JSON database exported/downloaded from ThermoHub.")
     parser.add_argument("--thermofun-python", type=Path, help="Sidecar Python with thermofun installed, e.g. ~/m_lammps_env_thermofun/bin/python.")
+    parser.add_argument("--gems-python", type=Path, help="Sidecar Python with GEMS3K/easygems/xgems installed. Defaults to --thermofun-python when supplied.")
+    parser.add_argument("--gems-symbols", action="store_true", help="Include public symbol lists in gems_capability_probe.json for API debugging.")
     parser.add_argument("--reactions", type=Path, help="Optional reaction CSV/JSON. Defaults to Ga-Cl-Ow request set.")
     parser.add_argument("--temperatures-c", nargs="*", help="Temperature grid in C; comma-separated values are accepted.")
     parser.add_argument("--pressure-bar", type=float, default=1.0)
@@ -475,6 +606,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     _write_csv(outdir / "reaction_request.csv", ["name", "equation", "role", "degeneracy", "note"], (asdict(r) for r in reactions))
     _write_csv(outdir / "aimd_logk_overlay.csv", ["temperature_c", "log10_k", "sigma", "source", "note"], (asdict(r) for r in aimd_rows))
     write_species_request(outdir / "thermohub_gems_species_request.md", reactions, temperatures_c)
+    gems_python = args.gems_python or args.thermofun_python
+    gems_capability = probe_gems(gems_python, include_symbols=args.gems_symbols)
+    (outdir / "gems_capability_probe.json").write_text(json.dumps(asdict(gems_capability), indent=2) + "\n", encoding="utf-8")
 
     thermofun_rows: list[ThermoFunResult] = []
     if args.database:
@@ -506,6 +640,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         "outdir": str(outdir),
         "database": str(args.database) if args.database else None,
         "thermofun_python": str(args.thermofun_python) if args.thermofun_python else None,
+        "gems_python": str(gems_python) if gems_python else None,
+        "gems_status": gems_capability.status,
+        "gems3k_python_module": gems_capability.gems3k_python_module,
+        "gems_equilibrium_layer": gems_capability.equilibrium_layer,
         "pressure_bar": args.pressure_bar,
         "temperatures_c": temperatures_c,
         "aimd_rows": len(aimd_rows),
@@ -522,6 +660,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         database=args.database,
         thermofun_python=args.thermofun_python,
         pressure_bar=args.pressure_bar,
+        gems_capability=gems_capability,
     )
     print(json.dumps(status, indent=2))
 
