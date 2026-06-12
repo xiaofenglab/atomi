@@ -3,6 +3,7 @@
 Reusable workflow tools for computational materials science on HPC systems.
 
 Atomi helps organize calculation workflows for electronic structure, atomistic structure, defect chemistry, digital twins of X-ray/neutron experiments, thermodynamic prediction, and multiphysics handoff.
+Recent extensions add database-aware aqueous thermodynamics bridges and motif-to-surface defect thermodynamics helpers for dense Gibbs-surface and active-learning workflows.
 
 ## Install
 
@@ -84,9 +85,9 @@ Atomi currently includes command families for:
 - Electronic-structure preparation, monitoring, convergence checks, and run summaries.
 - Molecular and atomistic trajectory setup, live visualization, production-array support, and post-processing.
 - Training-dataset preparation, model-validation diagnostics, and model handoff helpers.
-- Defect-chemistry motif indexing, staged workflow scaffolding, and optional runtime checks.
+- Defect-chemistry motif indexing, staged workflow scaffolding, dense Gibbs-surface fitting/sampling, and optional runtime checks.
 - Digital-twin workflows for scattering and spectroscopy comparisons with simulated structures.
-- Thermodynamic, elasticity, materials-property, and multiphysics handoff utilities.
+- Thermodynamic, aqueous database bridge, elasticity, materials-property, and multiphysics handoff utilities.
 - HPC environment discovery and local configuration helpers.
 
 Public documentation intentionally stays high-level. Use `atomi --help` and
