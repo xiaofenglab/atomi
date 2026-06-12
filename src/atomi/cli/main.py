@@ -569,6 +569,22 @@ def build_parser() -> argparse.ArgumentParser:
         )
         zentropy_export.add_argument("zentropy_export_args", nargs=argparse.REMAINDER)
 
+    zentropy_mode4_surface_commands = ("zentropy_mode4_surface", "zentropy-mode4-surface", "mode4-surface")
+    for command_name in zentropy_mode4_surface_commands:
+        zentropy_mode4_surface = subparsers.add_parser(
+            command_name,
+            help="Fit and sample dense defect Gibbs surfaces from motif/cluster features.",
+        )
+        zentropy_mode4_surface.add_argument("zentropy_mode4_surface_args", nargs=argparse.REMAINDER)
+
+    zentropy_gnn_active_commands = ("zentropy_gnn_active_learning", "zentropy-gnn-active-learning", "gnn-active-learning")
+    for command_name in zentropy_gnn_active_commands:
+        zentropy_gnn_active = subparsers.add_parser(
+            command_name,
+            help="Generate and score GNN/MLIP active-learning candidates for defect thermodynamics.",
+        )
+        zentropy_gnn_active.add_argument("zentropy_gnn_active_args", nargs=argparse.REMAINDER)
+
     zentropy_active_learning_commands = ("zentropy_active_learning", "zentropy-active-learning")
     for command_name in zentropy_active_learning_commands:
         zentropy_active_learning = subparsers.add_parser(
@@ -1310,6 +1326,18 @@ def main(argv: list[str] | None = None) -> None:
 
         zentropy_export_main(raw_args[1:])
         return
+    zentropy_mode4_surface_commands = ("zentropy_mode4_surface", "zentropy-mode4-surface", "mode4-surface")
+    if raw_args and raw_args[0] in zentropy_mode4_surface_commands:
+        from atomi.zentropy.mode4_surface import main as zentropy_mode4_surface_main
+
+        zentropy_mode4_surface_main(raw_args[1:])
+        return
+    zentropy_gnn_active_commands = ("zentropy_gnn_active_learning", "zentropy-gnn-active-learning", "gnn-active-learning")
+    if raw_args and raw_args[0] in zentropy_gnn_active_commands:
+        from atomi.zentropy.gnn_active_learning import main as zentropy_gnn_active_main
+
+        zentropy_gnn_active_main(raw_args[1:])
+        return
     zentropy_active_learning_commands = ("zentropy_active_learning", "zentropy-active-learning")
     if raw_args and raw_args[0] in zentropy_active_learning_commands:
         from atomi.zentropy.active_learning import main as zentropy_active_learning_main
@@ -1988,6 +2016,20 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.zentropy.export import main as zentropy_export_main
 
         zentropy_export_main(args.zentropy_export_args)
+        return
+
+    zentropy_mode4_surface_commands = ("zentropy_mode4_surface", "zentropy-mode4-surface", "mode4-surface")
+    if args.subcommand in zentropy_mode4_surface_commands:
+        from atomi.zentropy.mode4_surface import main as zentropy_mode4_surface_main
+
+        zentropy_mode4_surface_main(args.zentropy_mode4_surface_args)
+        return
+
+    zentropy_gnn_active_commands = ("zentropy_gnn_active_learning", "zentropy-gnn-active-learning", "gnn-active-learning")
+    if args.subcommand in zentropy_gnn_active_commands:
+        from atomi.zentropy.gnn_active_learning import main as zentropy_gnn_active_main
+
+        zentropy_gnn_active_main(args.zentropy_gnn_active_args)
         return
 
     if args.subcommand in zentropy_active_learning_commands:
