@@ -17,6 +17,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from atomi.structure.adapters import (
+    cell_from_cp2k_input,
+    cell_from_xyz_comment,
+    read_cp2k_xyz_frames,
+    read_vasp_poscar_basis,
+    read_vasp_xdatcar_frames,
+)
 from atomi.thermo_prior import PRIOR_SCHEMA
 
 
@@ -154,95 +161,6 @@ def parse_cell_vector(value: str) -> list[float]:
     if len(parts) != 3:
         raise ValueError(f"Cell vector must have three components, got {value!r}.")
     return [float(item) for item in parts]
-
-
-def cell_from_cp2k_input(path: Path | None) -> list[list[float]] | None:
-    if path is None:
-        return None
-    text = path.read_text(encoding="utf-8", errors="ignore")
-    abc_match = re.search(r"(?im)^\s*ABC\s+([0-9eE.+\-]+)\s+([0-9eE.+\-]+)\s+([0-9eE.+\-]+)", text)
-    if abc_match:
-        return parse_cell_abc(",".join(abc_match.groups()))
-    vectors: dict[str, list[float]] = {}
-    for key in ("A", "B", "C"):
-        match = re.search(rf"(?im)^\s*{key}\s+([0-9eE.+\-]+)\s+([0-9eE.+\-]+)\s+([0-9eE.+\-]+)", text)
-        if match:
-            vectors[key] = [float(item) for item in match.groups()]
-    if {"A", "B", "C"} <= set(vectors):
-        return [vectors["A"], vectors["B"], vectors["C"]]
-    return None
-
-
-def cell_from_xyz_comment(comment: str) -> list[list[float]] | None:
-    match = re.search(r'Lattice="([^"]+)"', comment)
-    if not match:
-        return None
-    values = [float(item) for item in match.group(1).split()]
-    if len(values) != 9:
-        return None
-    return [values[0:3], values[3:6], values[6:9]]
-
-
-def read_cp2k_xyz_frames(path: Path) -> list[dict[str, Any]]:
-    frames: list[dict[str, Any]] = []
-    with path.open(encoding="utf-8") as handle:
-        while True:
-            line = handle.readline()
-            if not line:
-                break
-            if not line.strip():
-                continue
-            natoms = int(line.strip())
-            comment = handle.readline().rstrip("\n")
-            symbols: list[str] = []
-            coords: list[list[float]] = []
-            for _ in range(natoms):
-                parts = handle.readline().split()
-                if len(parts) < 4:
-                    raise ValueError(f"Malformed XYZ atom line in {path}")
-                symbols.append(parts[0])
-                coords.append([float(parts[1]), float(parts[2]), float(parts[3])])
-            frames.append({"comment": comment, "symbols": symbols, "coords": coords})
-    return frames
-
-
-def read_vasp_poscar_basis(path: Path) -> dict[str, Any]:
-    lines = [line.rstrip() for line in path.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip()]
-    if len(lines) < 8:
-        raise ValueError(f"POSCAR is too short: {path}")
-    scale = float(lines[1].split()[0])
-    lattice = [[float(value) * scale for value in lines[idx].split()[:3]] for idx in range(2, 5)]
-    token_line = lines[5].split()
-    if all(re.fullmatch(r"[-+]?\d+", token) for token in token_line):
-        raise ValueError("VASP4-style POSCAR without element symbols is not supported; pass a VASP5 POSCAR/XDATCAR header.")
-    elements = token_line
-    counts = [int(token) for token in lines[6].split()]
-    if len(elements) != len(counts):
-        raise ValueError(f"POSCAR element/count length mismatch in {path}")
-    symbols: list[str] = []
-    for element, count in zip(elements, counts):
-        symbols.extend([element] * count)
-    return {"lattice": lattice, "elements": elements, "counts": counts, "symbols": symbols, "natoms": sum(counts)}
-
-
-def read_vasp_xdatcar_frames(path: Path, natoms: int) -> list[list[list[float]]]:
-    lines = [line.strip() for line in path.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip()]
-    frames: list[list[list[float]]] = []
-    idx = 0
-    while idx < len(lines):
-        if lines[idx].lower().startswith("direct configuration"):
-            coords: list[list[float]] = []
-            for row in lines[idx + 1 : idx + 1 + natoms]:
-                parts = row.split()
-                if len(parts) < 3:
-                    break
-                coords.append([float(parts[0]) % 1.0, float(parts[1]) % 1.0, float(parts[2]) % 1.0])
-            if len(coords) == natoms:
-                frames.append(coords)
-            idx += natoms + 1
-        else:
-            idx += 1
-    return frames
 
 
 def write_sluschi_native_frames(

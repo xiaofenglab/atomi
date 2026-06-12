@@ -15,7 +15,7 @@ from typing import Any
 
 import numpy as np
 
-from atomi.sluschi.bridge import read_vasp_poscar_basis, read_vasp_xdatcar_frames
+from atomi.structure.adapters import read_vasp_poscar_basis, read_vasp_xdatcar_frames
 
 
 def parse_csv_list(text: str | None) -> list[str]:

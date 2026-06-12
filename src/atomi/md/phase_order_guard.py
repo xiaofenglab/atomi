@@ -25,7 +25,7 @@ from typing import Any
 import numpy as np
 
 from atomi.md.rdf_pdf import parse_csv_list, parse_weights, rdf_pdf_from_vasp_xdatcar, vasp_frames_from_xdatcar
-from atomi.sluschi.bridge import read_vasp_poscar_basis
+from atomi.structure.adapters import read_vasp_poscar_basis
 
 
 SCHEMA_PHASE_ORDER_GUARD = "atomi.md.phase_order_guard.v3"
