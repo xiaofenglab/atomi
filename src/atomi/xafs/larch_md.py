@@ -24,6 +24,7 @@ from atomi.core.archive import archive_output_dir, default_archive_path
 from atomi.core.cell import cell_metadata, infer_formula_units
 from atomi.lammps import rdf_pdf
 from atomi.lammps.box import format_box_summary
+from atomi.structure import atomic_number as shared_atomic_number
 from atomi.xafs.status import configured_larch_python, probe_larch_python
 
 
@@ -185,15 +186,7 @@ def md_cell_metadata(args: argparse.Namespace, frames: list) -> dict:
 
 def atomic_number(symbol: str) -> int:
     try:
-        import xraydb  # type: ignore
-
-        return int(xraydb.atomic_number(symbol))
-    except Exception:
-        pass
-    try:
-        from ase.data import atomic_numbers
-
-        return int(atomic_numbers[symbol])
+        return shared_atomic_number(symbol)
     except Exception:
         pass
     if symbol not in FALLBACK_Z:

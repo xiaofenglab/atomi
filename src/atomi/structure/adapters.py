@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .elements import annotate_symbols, element_table
+
 
 @dataclass
 class StructureFrame:
@@ -34,6 +36,26 @@ class StructureFrame:
             "index": self.index,
             "metadata": self.metadata,
         }
+
+    def element_table(
+        self,
+        *,
+        include_xray_edges: bool = False,
+        edges: tuple[str, ...] = ("K", "L3", "L2", "L1"),
+    ) -> dict[str, dict[str, Any]]:
+        """Return unique element metadata for the frame symbols."""
+
+        return element_table(self.symbols, include_xray_edges=include_xray_edges, edges=edges)
+
+    def symbol_metadata(
+        self,
+        *,
+        include_xray_edges: bool = False,
+        edges: tuple[str, ...] = ("K", "L3", "L2", "L1"),
+    ) -> list[dict[str, Any]]:
+        """Return one element/vacancy metadata row per frame site."""
+
+        return annotate_symbols(self.symbols, include_xray_edges=include_xray_edges, edges=edges)
 
 
 def parse_cell_abc(value: str | None) -> list[list[float]] | None:

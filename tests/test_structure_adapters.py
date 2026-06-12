@@ -11,6 +11,14 @@ from atomi.structure.adapters import (
     read_vasp_xdatcar_frames,
     vasp_xdatcar_structure_frames,
 )
+from atomi.structure import StructureFrame
+from atomi.structure.elements import (
+    annotate_symbols,
+    atomic_number,
+    element_info,
+    element_table,
+    normalize_element_symbol,
+)
 
 
 def test_vasp_poscar_and_xdatcar_adapters(tmp_path: Path) -> None:
@@ -80,3 +88,29 @@ def test_cp2k_xyz_and_cell_adapters(tmp_path: Path) -> None:
     assert cell_from_xyz_comment(frames[0]["comment"]) == [[10.0, 0.0, 0.0], [0.0, 11.0, 0.0], [0.0, 0.0, 12.0]]
     assert frames[0]["symbols"] == ["Ga", "Cl"]
     assert frames[0]["coords"][1] == [2.0, 0.0, 0.0]
+
+
+def test_element_metadata_normalizes_charged_labels_and_vacancies() -> None:
+    assert normalize_element_symbol("u5+") == "U"
+    assert normalize_element_symbol("Gd3+") == "Gd"
+    assert normalize_element_symbol("Va") is None
+    assert atomic_number("U5+") == 92
+
+    uranium = element_info("U5+", include_xray_edges=True, edges=("L3",))
+
+    assert uranium is not None
+    assert uranium.symbol == "U"
+    assert uranium.atomic_mass_amu and uranium.atomic_mass_amu > 230.0
+    assert uranium.xray_edges_eV and uranium.xray_edges_eV["L3"] > 17000.0
+
+
+def test_element_table_and_frame_metadata_cover_all_symbols() -> None:
+    rows = annotate_symbols(["Gd3+", "U4+", "O2-", "Va"])
+    table = element_table(["Gd3+", "U4+", "O2-", "Va"])
+    frame = StructureFrame(symbols=["Gd3+", "U4+", "O2-", "Va"])
+
+    assert rows[-1]["is_vacancy"] is True
+    assert set(table) == {"Gd", "U", "O"}
+    assert table["Gd"]["atomic_number"] == 64
+    assert frame.element_table()["U"]["atomic_number"] == 92
+    assert frame.symbol_metadata()[-1]["is_vacancy"] is True
