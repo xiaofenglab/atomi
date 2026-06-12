@@ -11,17 +11,21 @@ from .adapters import (
 )
 from .elements import (
     ElementInfo,
+    ValenceMagmomInfo,
     annotate_symbols,
     atomic_mass_amu,
     atomic_number,
     element_info,
     element_table,
     normalize_element_symbol,
+    valence_magmom_info,
+    valence_magmom_table,
 )
 
 __all__ = [
     "ElementInfo",
     "StructureFrame",
+    "ValenceMagmomInfo",
     "annotate_symbols",
     "atomic_mass_amu",
     "atomic_number",
@@ -33,5 +37,7 @@ __all__ = [
     "read_cp2k_xyz_frames",
     "read_vasp_poscar_basis",
     "read_vasp_xdatcar_frames",
+    "valence_magmom_info",
+    "valence_magmom_table",
     "vasp_xdatcar_structure_frames",
 ]

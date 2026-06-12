@@ -18,6 +18,8 @@ from atomi.structure.elements import (
     element_info,
     element_table,
     normalize_element_symbol,
+    valence_magmom_info,
+    valence_magmom_table,
 )
 
 
@@ -114,3 +116,29 @@ def test_element_table_and_frame_metadata_cover_all_symbols() -> None:
     assert table["Gd"]["atomic_number"] == 64
     assert frame.element_table()["U"]["atomic_number"] == 92
     assert frame.symbol_metadata()[-1]["is_vacancy"] is True
+
+
+def test_valence_magmom_priors_are_curated_not_guessed() -> None:
+    u4 = valence_magmom_info("U4+")
+    u5 = valence_magmom_info("U5+")
+    gd3 = valence_magmom_info("Gd3+")
+    oxide = valence_magmom_info("O2-")
+    vacancy = valence_magmom_info("Va")
+
+    assert u4 is not None and u4.electron_configuration == "5f^2"
+    assert u4.initial_magmom_abs_muB == 2.0
+    assert u5 is not None and u5.electron_configuration == "5f^1"
+    assert u5.initial_magmom_abs_muB == 1.0
+    assert u5.guard_abs_range_muB and u5.guard_abs_range_muB[1] >= 2.0
+    assert gd3 is not None and gd3.electron_configuration == "4f^7"
+    assert gd3.initial_magmom_abs_muB == 7.0
+    assert oxide is not None and oxide.initial_magmom_abs_muB == 0.0
+    assert vacancy is not None and vacancy.allowed_signs == (0,)
+    assert valence_magmom_info("Fe3+") is None
+
+
+def test_valence_magmom_table_can_filter_labels() -> None:
+    rows = valence_magmom_table(["Gd3+", "U5+", "O2-", "unknown"])
+
+    assert set(rows) == {"Gd3+", "U5+", "O2-"}
+    assert rows["U5+"]["open_shell"] == "5f"

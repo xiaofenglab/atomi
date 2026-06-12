@@ -25,6 +25,221 @@ class ElementInfo:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class ValenceMagmomInfo:
+    """Curated initial-moment metadata for formal valence labels.
+
+    The moment is an initialization/guard prior for collinear DFT+U workflows,
+    not a measured ordered moment.  It follows formal open-shell electron
+    counts and Hund spin-only ``2S`` where the valence/configuration is clear.
+    """
+
+    label: str
+    element: str | None
+    oxidation_state: int | None
+    electron_configuration: str
+    open_shell: str
+    unpaired_electrons: int
+    initial_magmom_abs_muB: float
+    allowed_signs: tuple[int, ...] = (-1, 1)
+    guard_abs_range_muB: tuple[float, float] | None = None
+    sources: tuple[str, ...] = ()
+    notes: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+LANTHANIDE_3PLUS_F_COUNTS: dict[str, int] = {
+    "La": 0,
+    "Ce": 1,
+    "Pr": 2,
+    "Nd": 3,
+    "Pm": 4,
+    "Sm": 5,
+    "Eu": 6,
+    "Gd": 7,
+    "Tb": 8,
+    "Dy": 9,
+    "Ho": 10,
+    "Er": 11,
+    "Tm": 12,
+    "Yb": 13,
+    "Lu": 14,
+}
+
+LAN_THANIDE_SOURCE = (
+    "Lanthanide chemistry: Ln3+ generally [Xe]4f^n; Ce/Pr/Tb also +4 and Sm/Eu/Yb also +2 can be stable; "
+    "4f unpaired electrons and spin-orbit caveat are standard lanthanide-chemistry results."
+)
+ACTINIDE_SOURCE = (
+    "Formal uranium oxide redox model: U3+/U4+/U5+/U6+ correspond to localized 5f3/5f2/5f1/5f0 priors; "
+    "use as DFT+U initialization/guard, then verify OUTCAR moments and occupation matrices."
+)
+CLOSED_SHELL_ANION_SOURCE = "Closed-shell common anion/vacancy prior for DFT initial moments."
+
+
+def _hund_unpaired_from_f_count(count: int) -> int:
+    if count < 0 or count > 14:
+        raise ValueError(f"f-shell count must be in [0, 14], got {count}")
+    return count if count <= 7 else 14 - count
+
+
+def _f_shell_magmom(
+    *,
+    label: str,
+    element: str,
+    oxidation_state: int,
+    shell: str,
+    count: int,
+    sources: tuple[str, ...],
+    notes: str,
+) -> ValenceMagmomInfo:
+    unpaired = _hund_unpaired_from_f_count(count)
+    abs_mag = float(unpaired)
+    upper = max(abs_mag + 1.0, 1.0)
+    return ValenceMagmomInfo(
+        label=label,
+        element=element,
+        oxidation_state=oxidation_state,
+        electron_configuration=f"{shell}^{count}",
+        open_shell=shell,
+        unpaired_electrons=unpaired,
+        initial_magmom_abs_muB=abs_mag,
+        allowed_signs=(-1, 1) if unpaired else (0,),
+        guard_abs_range_muB=(0.0, upper) if unpaired else (0.0, 0.25),
+        sources=sources,
+        notes=notes,
+    )
+
+
+def _build_valence_magmom_table() -> dict[str, ValenceMagmomInfo]:
+    rows: dict[str, ValenceMagmomInfo] = {}
+
+    def add(row: ValenceMagmomInfo) -> None:
+        rows[row.label] = row
+        if row.element and row.oxidation_state is not None:
+            sign = "+" if row.oxidation_state >= 0 else "-"
+            rows[f"{row.element}{abs(row.oxidation_state)}{sign}"] = row
+
+    for element, f_count in LANTHANIDE_3PLUS_F_COUNTS.items():
+        add(
+            _f_shell_magmom(
+                label=f"{element}3+",
+                element=element,
+                oxidation_state=3,
+                shell="4f",
+                count=f_count,
+                sources=(LAN_THANIDE_SOURCE,),
+                notes="Ln3+ spin-only initialization uses the number of unpaired 4f electrons; real effective moments include spin-orbit coupling.",
+            )
+        )
+
+    for element, f_count, ox in (
+        ("Sm", 6, 2),
+        ("Eu", 7, 2),
+        ("Yb", 14, 2),
+        ("Ce", 0, 4),
+        ("Pr", 1, 4),
+        ("Tb", 7, 4),
+    ):
+        add(
+            _f_shell_magmom(
+                label=f"{element}{ox}+",
+                element=element,
+                oxidation_state=ox,
+                shell="4f",
+                count=f_count,
+                sources=(LAN_THANIDE_SOURCE,),
+                notes="Known lanthanide non-3+ stable-valence prior; validate for the host chemistry before using.",
+            )
+        )
+
+    for ox, f_count in ((3, 3), (4, 2), (5, 1), (6, 0)):
+        add(
+            _f_shell_magmom(
+                label=f"U{ox}+",
+                element="U",
+                oxidation_state=ox,
+                shell="5f",
+                count=f_count,
+                sources=(ACTINIDE_SOURCE,),
+                notes="Formal uranium redox prior for oxide DFT+U. U5+ 5f1 gives |MAGMOM_init|=1; use occupation-matrix/local-moment guards after SCF.",
+            )
+        )
+
+    for label in ("O2-", "F-", "Cl-", "Br-", "I-", "S2-", "N3-", "Va", "vacancy"):
+        add(
+            ValenceMagmomInfo(
+                label=label,
+                element=None if label.lower() in VACANCY_TOKENS or label == "Va" else normalize_element_symbol(label),
+                oxidation_state=None,
+                electron_configuration="closed-shell/vacancy",
+                open_shell="none",
+                unpaired_electrons=0,
+                initial_magmom_abs_muB=0.0,
+                allowed_signs=(0,),
+                guard_abs_range_muB=(0.0, 0.25),
+                sources=(CLOSED_SHELL_ANION_SOURCE,),
+                notes="Use zero initial MAGMOM unless explicit radical/hole-polaron chemistry is being modeled.",
+            )
+        )
+    return rows
+
+
+VALENCE_MAGMOM_TABLE: dict[str, ValenceMagmomInfo]
+
+
+def valence_magmom_info(label: str | None, *, strict: bool = False) -> ValenceMagmomInfo | None:
+    """Return a curated MAGMOM prior for a formal valence species.
+
+    Examples include ``U4+``, ``U5+``, ``Gd3+``, ``O2-``, and ``Va``.  Unknown
+    labels return ``None`` unless ``strict`` is true.
+    """
+
+    raw = str(label or "").strip()
+    aliases = {raw, raw.replace(" ", ""), raw.capitalize()}
+    normalized = None
+    try:
+        normalized = normalize_element_symbol(raw, allow_vacancy=True)
+    except Exception:
+        normalized = None
+    match = re.match(r"^\s*([A-Za-z]{1,2})\s*([0-9]+)?\s*([+-])", raw)
+    if match:
+        element = normalize_element_symbol(match.group(1), allow_vacancy=False)
+        magnitude = match.group(2) or "1"
+        sign = match.group(3)
+        aliases.add(f"{element}{magnitude}{sign}")
+    if normalized and raw in VALENCE_MAGMOM_TABLE:
+        aliases.add(raw)
+    for alias in aliases:
+        if alias in VALENCE_MAGMOM_TABLE:
+            return VALENCE_MAGMOM_TABLE[alias]
+    if strict:
+        raise ValueError(f"No curated valence MAGMOM prior is available for {label!r}.")
+    return None
+
+
+def valence_magmom_table(
+    labels: Iterable[str] | None = None,
+    *,
+    as_dict: bool = True,
+) -> dict[str, dict[str, Any]] | list[ValenceMagmomInfo]:
+    """Return curated valence MAGMOM priors.
+
+    When labels are provided, unknown labels are skipped so callers can mix
+    arbitrary species with the curated subset.
+    """
+
+    if labels is None:
+        rows = list(dict.fromkeys(VALENCE_MAGMOM_TABLE.values()))
+    else:
+        rows = [info for label in labels if (info := valence_magmom_info(label)) is not None]
+    if not as_dict:
+        return rows
+    return {row.label: row.to_dict() for row in rows}
+
+
 def normalize_element_symbol(symbol: str | None, *, allow_vacancy: bool = True) -> str | None:
     """Normalize element-like labels such as ``u``, ``U5+``, and ``Gd3+``.
 
@@ -56,6 +271,9 @@ def normalize_element_symbol(symbol: str | None, *, allow_vacancy: bool = True) 
     except Exception:
         pass
     raise ValueError(f"Unknown element symbol: {symbol!r}.")
+
+
+VALENCE_MAGMOM_TABLE = _build_valence_magmom_table()
 
 
 def _ase_element_info(symbol: str) -> tuple[dict[str, Any], list[str]]:
