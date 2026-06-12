@@ -1354,3 +1354,110 @@ def test_materials_opt_relax_seeds_handles_repeated_duplicate_species_blocks(tmp
     assert "LDAUJ = 0 0" in incar
     assert "U  C" in poscar_text
     assert "4  8" in poscar_text
+
+
+def test_materials_opt_relax_seeds_accepts_seed_root_from_generators(tmp_path: Path, capsys) -> None:
+    template = tmp_path / "VASP_TEMPLATE"
+    template.mkdir()
+    seed_root = tmp_path / "generated_candidates"
+    candidate = seed_root / "candidates" / "01_vacancy_separated"
+    candidate.mkdir(parents=True)
+    (candidate / "POSCAR").write_text(
+        "Na3U5Cl18 candidate with duplicate blocks\n"
+        "1.0\n"
+        "7.6 0 0\n"
+        "-3.8 6.6 0\n"
+        "0 0 13.0\n"
+        "Na U Cl U Cl Na U Cl\n"
+        "2 1 6 2 6 1 2 6\n"
+        "Direct\n"
+        "0 0 0\n"
+        "0.1 0 0\n"
+        "0.2 0 0\n"
+        "0.3 0 0\n"
+        "0.4 0 0\n"
+        "0.5 0 0\n"
+        "0.6 0 0\n"
+        "0.7 0 0\n"
+        "0.8 0 0\n"
+        "0.9 0 0\n"
+        "0.11 0 0\n"
+        "0.12 0 0\n"
+        "0.13 0 0\n"
+        "0.14 0 0\n"
+        "0.15 0 0\n"
+        "0.16 0 0\n"
+        "0.17 0 0\n"
+        "0.18 0 0\n"
+        "0.19 0 0\n"
+        "0.21 0 0\n"
+        "0.22 0 0\n"
+        "0.23 0 0\n"
+        "0.24 0 0\n"
+        "0.25 0 0\n"
+        "0.26 0 0\n"
+        "0.27 0 0\n",
+        encoding="utf-8",
+    )
+    for name, text in {
+        "POSCAR": (
+            "Na U Cl template\n"
+            "1.0\n"
+            "7.6 0 0\n"
+            "-3.8 6.6 0\n"
+            "0 0 13.0\n"
+            "Na U Cl\n"
+            "3 5 18\n"
+            "Direct\n"
+            + "\n".join(["0 0 0"] * 26)
+            + "\n"
+        ),
+        "INCAR": "ENCUT = 520\nLDAUL = -1 3 -1\nLDAUU = 0 4 0\nLDAUJ = 0 0 0\n",
+        "KPOINTS": "Gamma\n",
+        "POTCAR": "fake\n",
+    }.items():
+        (template / name).write_text(text, encoding="utf-8")
+    out = tmp_path / "na3u5cl18_relax"
+
+    atomi_main(
+        [
+            "materials-opt",
+            "relax-seeds",
+            "--system",
+            "Na3U5Cl18",
+            "--formula",
+            "Na3U5Cl18",
+            "--seed-root",
+            str(seed_root),
+            "--source-kind",
+            "vacancy-cif",
+            "--template",
+            str(template),
+            "--outdir",
+            str(out),
+            "--magnetic-element",
+            "U",
+            "--nonmagnetic-element",
+            "Na,Cl",
+            "--moment",
+            "U=3",
+            "--seed-spins",
+            "afm",
+            "--volume-scale",
+            "1.00",
+        ]
+    )
+
+    assert "Input POSCAR seeds    : 1" in capsys.readouterr().out
+    index_rows = rows(out / "relax_index.csv")
+    assert len(index_rows) == 1
+    assert index_rows[0]["source_kind"] == "vacancy-cif"
+    assert index_rows[0]["input_seed"] == "01_vacancy_separated"
+    assert index_rows[0]["source_poscar"].endswith("01_vacancy_separated/POSCAR")
+    run_dir = out / index_rows[0]["run_dir"]
+    assert (run_dir / "POSCAR").exists()
+    assert "Na  U  Cl" in (run_dir / "POSCAR").read_text(encoding="utf-8")
+    assert "3  5  18" in (run_dir / "POSCAR").read_text(encoding="utf-8")
+    plan = json.loads((out / "relax_plan.json").read_text(encoding="utf-8"))
+    assert plan["source_kind"] == "vacancy-cif"
+    assert plan["seed_sources"][0]["input_seed"] == "01_vacancy_separated"

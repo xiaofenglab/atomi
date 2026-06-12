@@ -709,6 +709,11 @@ def build_parser() -> argparse.ArgumentParser:
             "metastable_args",
         ),
         (
+            "vasp-relax-workflow",
+            "Prepare generalized VASP volume-scan relaxation folders from POSCAR seeds.",
+            "vasp_relax_workflow_args",
+        ),
+        (
             "vasp-selective-dynamics",
             "Apply Selective dynamics flags to a POSCAR/CONTCAR.",
             "selective_args",
@@ -1480,6 +1485,11 @@ def main(argv: list[str] | None = None) -> None:
 
         vasp_defect_cloud_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "vasp-relax-workflow":
+        from atomi.vasp.relax_workflow import main as vasp_relax_workflow_main
+
+        vasp_relax_workflow_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] in ("vasp-project-poscar", "poscar-project-elements"):
         from atomi.vasp.poscar_project import main as vasp_project_poscar_main
 
@@ -2121,6 +2131,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.vasp.metastable_relax import main as vasp_metastable_relax_main
 
         vasp_metastable_relax_main(args.metastable_args)
+        return
+
+    if args.subcommand == "vasp-relax-workflow":
+        from atomi.vasp.relax_workflow import main as vasp_relax_workflow_main
+
+        vasp_relax_workflow_main(args.vasp_relax_workflow_args)
         return
 
     if args.subcommand == "vasp-selective-dynamics":

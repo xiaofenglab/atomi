@@ -101,6 +101,9 @@ SPIN_GUARD_FIELDS = ["element", "allowed_moments", "tolerance", "role", "notes"]
 RELAX_INDEX_FIELDS = [
     "run_index",
     "stage",
+    "source_kind",
+    "input_seed",
+    "source_poscar",
     "seed",
     "spin_pattern",
     "volume_scale",
@@ -633,6 +636,68 @@ def write_runlist(path: Path, run_dirs: list[Path], root: Path) -> None:
         "\n".join(relative_run_path(run_dir, root) for run_dir in run_dirs) + ("\n" if run_dirs else ""),
         encoding="utf-8",
     )
+
+
+def collect_relax_seed_poscars(
+    *,
+    poscar: Path,
+    seed_root: Path | None,
+    seed_runlist: Path | None,
+    seed_glob: str,
+) -> list[tuple[str, Path]]:
+    """Collect POSCAR seeds from one file, a runlist, or a POSCAR-producing tree."""
+
+    def normalize_source(path: Path, base: Path | None = None) -> Path:
+        candidate = path.expanduser()
+        if not candidate.is_absolute() and base is not None:
+            candidate = base / candidate
+        candidate = candidate.resolve()
+        if candidate.is_dir():
+            candidate = candidate / "POSCAR"
+        if not candidate.is_file():
+            raise FileNotFoundError(f"Seed POSCAR not found: {candidate}")
+        return candidate
+
+    def source_label(path: Path, used: set[str]) -> str:
+        label = path.parent.name if path.name.upper().startswith("POSCAR") else path.stem
+        label = safe_name(label)
+        if label not in used:
+            used.add(label)
+            return label
+        index = 2
+        while f"{label}_{index}" in used:
+            index += 1
+        label = f"{label}_{index}"
+        used.add(label)
+        return label
+
+    base = seed_root.expanduser().resolve() if seed_root else None
+    sources: list[Path] = []
+    if seed_runlist:
+        runlist_path = seed_runlist.expanduser()
+        if not runlist_path.is_absolute() and base is not None:
+            runlist_path = base / runlist_path
+        runlist_path = runlist_path.resolve()
+        if not runlist_path.is_file():
+            raise FileNotFoundError(f"Seed runlist not found: {runlist_path}")
+        for raw in runlist_path.read_text(encoding="utf-8").splitlines():
+            text = raw.strip()
+            if not text or text.startswith("#"):
+                continue
+            sources.append(normalize_source(Path(text), base or runlist_path.parent))
+    elif seed_root:
+        root = seed_root.expanduser().resolve()
+        if not root.is_dir():
+            raise FileNotFoundError(f"Seed root not found: {root}")
+        matches = sorted(path for path in root.glob(seed_glob) if path.is_file())
+        if not matches:
+            raise FileNotFoundError(f"No seed POSCARs matched {seed_glob!r} under {root}")
+        sources.extend(path.resolve() for path in matches)
+    else:
+        sources.append(normalize_source(poscar))
+
+    used_labels: set[str] = set()
+    return [(source_label(path, used_labels), path) for path in sources]
 
 
 def parse_relax_index(path: Path) -> list[dict[str, str]]:
@@ -4230,12 +4295,43 @@ def quick_opt_main(argv: list[str] | None = None) -> None:
     print("Next                         : cd into the workspace and run the magit enum command from QUICK_OPT_COMMANDS.md.")
 
 
-def relax_seeds_main(argv: list[str] | None = None) -> None:
+def relax_seeds_main(argv: list[str] | None = None, *, prog: str = "materials-opt relax-seeds") -> None:
     parser = argparse.ArgumentParser(
-        prog="materials-opt relax-seeds",
-        description="Prepare FM/AFM seed and ISIF=2 volume-scan VASP folders.",
+        prog=prog,
+        description=(
+            "Prepare FM/AFM seed and ISIF=2 volume-scan VASP folders from one POSCAR "
+            "or a POSCAR-producing candidate tree."
+        ),
     )
     parser.add_argument("--poscar", type=Path, default=Path("POSCAR"))
+    parser.add_argument(
+        "--seed-root",
+        type=Path,
+        default=None,
+        help=(
+            "Optional root containing seed POSCARs from vacancy-cif, parent-defect, "
+            "vasp-md-snapshot-candidates, vasp-project-poscar, rand_cell, or another generator."
+        ),
+    )
+    parser.add_argument(
+        "--seed-runlist",
+        type=Path,
+        default=None,
+        help="Optional runlist of seed POSCAR paths or directories. Relative paths resolve under --seed-root when set.",
+    )
+    parser.add_argument(
+        "--seed-glob",
+        default="**/POSCAR",
+        help="Glob used under --seed-root when --seed-runlist is not supplied. Default: **/POSCAR.",
+    )
+    parser.add_argument(
+        "--source-kind",
+        default="single-poscar",
+        help=(
+            "Provenance label for seed source, e.g. vacancy-cif, md-snapshot, parent-defect, "
+            "project-poscar, rand-cell, single-poscar."
+        ),
+    )
     parser.add_argument("--template", type=Path, default=Path("VASP_TEMPLATE"))
     parser.add_argument("--outdir", type=Path, default=Path("RELAX_SEEDS_OPT"))
     parser.add_argument("--system", default="material")
@@ -4265,8 +4361,12 @@ def relax_seeds_main(argv: list[str] | None = None) -> None:
     template = args.template.expanduser().resolve()
     if not template.is_dir():
         raise FileNotFoundError(f"VASP template directory not found: {template}")
-    structure = normalize_duplicate_poscar_species(read_poscar_structure(args.poscar.expanduser().resolve()))
-    species = structure.species
+    seed_sources = collect_relax_seed_poscars(
+        poscar=args.poscar,
+        seed_root=args.seed_root,
+        seed_runlist=args.seed_runlist,
+        seed_glob=args.seed_glob,
+    )
     moment_specs = parse_moment_specs(args.moment)
     magnetic_elements = split_items(args.magnetic_element)
     nonmagnetic_elements = split_items(args.nonmagnetic_element)
@@ -4288,58 +4388,78 @@ def relax_seeds_main(argv: list[str] | None = None) -> None:
     for path in (seed_root, volume_root, shape_root, summary_root):
         path.mkdir(parents=True, exist_ok=True)
 
-    original_volume = cell_volume(structure.cell)
     rows: list[dict[str, Any]] = []
     run_dirs: list[Path] = []
     run_index = 0
-    for seed in seeds:
-        moments, pattern_text = seed_moments(species, magnetic_elements, moment_specs, seed)
-        magmom_line = format_magmom_line(
-            species,
-            moments,
-            selected_elements=magnetic_elements,
-            decimals=args.decimals,
-            compact_zero=True,
+    seed_plan: list[dict[str, Any]] = []
+    for input_seed, source_poscar in seed_sources:
+        structure = normalize_duplicate_poscar_species(read_poscar_structure(source_poscar))
+        species = structure.species
+        original_volume = cell_volume(structure.cell)
+        seed_plan.append(
+            {
+                "input_seed": input_seed,
+                "source_poscar": str(source_poscar),
+                "species": species.symbols,
+                "counts": species.counts,
+                "original_volume_A3": original_volume,
+            }
         )
-        seed_poscar = write_poscar_text(
-            f"{args.system} {seed} seed",
-            species.symbols,
-            species.counts,
-            structure.cell,
-            structure.scaled_positions,
-        )
-        seed_incar = template_incar_with_tags(template, magmom_line, args.isif_volume, species)
-        copy_relax_vasp_files(template, seed_root / seed, seed_poscar, seed_incar)
-
-        for volume_scale in args.volume_scale:
-            run_index += 1
-            new_cell, linear_scale = scaled_cell(structure.cell, volume_scale, args.scale_kind)
-            volume = cell_volume(new_cell)
-            name = f"run_{run_index:04d}_{seed}_v{safe_float_label(volume_scale)}"
-            run_dir = volume_root / name
+        for seed in seeds:
+            moments, pattern_text = seed_moments(species, magnetic_elements, moment_specs, seed)
+            magmom_line = format_magmom_line(
+                species,
+                moments,
+                selected_elements=magnetic_elements,
+                decimals=args.decimals,
+                compact_zero=True,
+            )
             poscar_text = write_poscar_text(
-                f"{args.system} {seed} volume_scale={volume_scale:g}",
+                f"{args.system} {input_seed} {seed} seed",
                 species.symbols,
                 species.counts,
-                new_cell,
+                structure.cell,
                 structure.scaled_positions,
             )
             incar_text = template_incar_with_tags(template, magmom_line, args.isif_volume, species)
-            copy_relax_vasp_files(template, run_dir, poscar_text, incar_text)
-            run_dirs.append(run_dir)
-            rows.append(
-                {
-                    "run_index": run_index,
-                    "stage": "volume_isif2",
-                    "seed": seed,
-                    "spin_pattern": pattern_text,
-                    "volume_scale": f"{volume_scale:.10g}",
-                    "linear_scale": f"{linear_scale:.10g}",
-                    "volume_A3": f"{volume:.10f}",
-                    "volume_per_atom_A3": f"{volume / species.total_atoms:.10f}",
-                    "run_dir": relative_run_path(run_dir, root),
-                }
-            )
+            seed_dir = seed_root / input_seed / seed if len(seed_sources) > 1 else seed_root / seed
+            copy_relax_vasp_files(template, seed_dir, poscar_text, incar_text)
+
+            for volume_scale in args.volume_scale:
+                run_index += 1
+                new_cell, linear_scale = scaled_cell(structure.cell, volume_scale, args.scale_kind)
+                volume = cell_volume(new_cell)
+                if len(seed_sources) > 1:
+                    name = f"run_{run_index:04d}_{input_seed}_{seed}_v{safe_float_label(volume_scale)}"
+                else:
+                    name = f"run_{run_index:04d}_{seed}_v{safe_float_label(volume_scale)}"
+                run_dir = volume_root / name
+                poscar_text = write_poscar_text(
+                    f"{args.system} {input_seed} {seed} volume_scale={volume_scale:g}",
+                    species.symbols,
+                    species.counts,
+                    new_cell,
+                    structure.scaled_positions,
+                )
+                incar_text = template_incar_with_tags(template, magmom_line, args.isif_volume, species)
+                copy_relax_vasp_files(template, run_dir, poscar_text, incar_text)
+                run_dirs.append(run_dir)
+                rows.append(
+                    {
+                        "run_index": run_index,
+                        "stage": "volume_isif2",
+                        "source_kind": args.source_kind,
+                        "input_seed": input_seed,
+                        "source_poscar": str(source_poscar),
+                        "seed": seed,
+                        "spin_pattern": pattern_text,
+                        "volume_scale": f"{volume_scale:.10g}",
+                        "linear_scale": f"{linear_scale:.10g}",
+                        "volume_A3": f"{volume:.10f}",
+                        "volume_per_atom_A3": f"{volume / species.total_atoms:.10f}",
+                        "run_dir": relative_run_path(run_dir, root),
+                    }
+                )
 
     write_csv(root / "relax_index.csv", rows, RELAX_INDEX_FIELDS)
     write_csv(root / "SUMMARY.csv", rows, RELAX_INDEX_FIELDS)
@@ -4350,9 +4470,15 @@ def relax_seeds_main(argv: list[str] | None = None) -> None:
         root / "relax_plan.json",
         {
             "schema": "atomi.materials.relax_seeds.v1",
+            "workflow_role": "generalized POSCAR-source to VASP relaxation volume scan",
             "system": args.system,
             "formula": args.formula,
-            "source_poscar": str(args.poscar.expanduser().resolve()),
+            "source_kind": args.source_kind,
+            "source_poscar": str(args.poscar.expanduser().resolve()) if not args.seed_root and not args.seed_runlist else "",
+            "seed_root": str(args.seed_root.expanduser().resolve()) if args.seed_root else "",
+            "seed_runlist": str(args.seed_runlist.expanduser().resolve()) if args.seed_runlist else "",
+            "seed_glob": args.seed_glob,
+            "seed_sources": seed_plan,
             "template": str(template),
             "magnetic_elements": magnetic_elements,
             "nonmagnetic_elements": nonmagnetic_elements,
@@ -4364,7 +4490,6 @@ def relax_seeds_main(argv: list[str] | None = None) -> None:
             "seed_spins": seeds,
             "scale_kind": args.scale_kind,
             "volume_scales": args.volume_scale,
-            "original_volume_A3": original_volume,
             "isif_volume": args.isif_volume,
             "isif_shape": args.isif_shape,
             "runlist": str(root / "runlist.txt"),
@@ -4376,6 +4501,7 @@ def relax_seeds_main(argv: list[str] | None = None) -> None:
                 "Run VASP array jobs with runlist.txt first.",
                 "After jobs finish or stop, run materials-opt relax-summary from the workspace.",
                 "Use the best physical rows to start ISIF=3 shape relaxation.",
+                "This relaxation layer accepts POSCARs from vacancy-cif, parent-defect, MD snapshots, projected POSCARs, random cells, or manual seed folders.",
             ],
         },
     )
@@ -4386,6 +4512,8 @@ def relax_seeds_main(argv: list[str] | None = None) -> None:
     )
 
     print(f"Relax-seeds workspace : {root}")
+    print(f"Source kind           : {args.source_kind}")
+    print(f"Input POSCAR seeds    : {len(seed_sources)}")
     print(f"Seed folders          : {seed_root}")
     print(f"Volume scan folders   : {len(run_dirs)}")
     print(f"Runlist               : {root / 'runlist.txt'}")
