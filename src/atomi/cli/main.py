@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 from atomi import __version__
+from atomi.cli.registry import dispatch_registered_command
 from atomi.cli.vasp import extv
 from atomi.core.doctor import main as doctor_main
 from atomi.core.project import create_project
@@ -922,6 +923,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     raw_args = sys.argv[1:] if argv is None else argv
+    if dispatch_registered_command(raw_args):
+        return
     if raw_args and raw_args[0] in ("mace-build-dataset", "mace-dataset", "build-mace-dataset"):
         mace_build_dataset_main(raw_args[1:])
         return
