@@ -622,6 +622,15 @@ def nested_value(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
+def serial_text(value: Any) -> str:
+    if value is None:
+        return ""
+    enum_value = getattr(value, "value", None)
+    if enum_value is not None:
+        return str(enum_value)
+    return str(value)
+
+
 def nested_number(obj: Any, *keys: str) -> float | None:
     current = obj
     for key in keys:
@@ -665,9 +674,11 @@ def normalize_phase_token(value: Any) -> str:
 def materials_project_symmetry(doc: Any) -> dict[str, Any]:
     symmetry = doc_value(doc, "symmetry", {}) or {}
     return {
-        "symbol": nested_value(symmetry, "symbol", "") or nested_value(symmetry, "space_group_symbol", ""),
+        "symbol": serial_text(
+            nested_value(symmetry, "symbol", "") or nested_value(symmetry, "space_group_symbol", "")
+        ),
         "number": nested_value(symmetry, "number", None) or nested_value(symmetry, "space_group_number", None),
-        "crystal_system": nested_value(symmetry, "crystal_system", ""),
+        "crystal_system": serial_text(nested_value(symmetry, "crystal_system", "")),
     }
 
 

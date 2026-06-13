@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -643,6 +644,9 @@ def test_materials_project_formula_selection_prefers_requested_phase() -> None:
 
 
 def test_materials_project_selection_accepts_nested_modulus_fields() -> None:
+    class CrystalSystemLike:
+        value = "Cubic"
+
     args = type(
         "Args",
         (),
@@ -671,7 +675,7 @@ def test_materials_project_selection_accepts_nested_modulus_fields() -> None:
             "bulk_modulus": {"vrh": 190},
             "shear_modulus": {"vrh": 70},
             "poisson_ratio": 0.32,
-            "symmetry": {"symbol": "Fm-3m", "number": 225, "crystal_system": "cubic"},
+            "symmetry": {"symbol": "Fm-3m", "number": 225, "crystal_system": CrystalSystemLike()},
             "energy_above_hull": 0.01,
             "is_stable": False,
         },
@@ -684,6 +688,8 @@ def test_materials_project_selection_accepts_nested_modulus_fields() -> None:
     assert selection["selected"]["k_vrh"] == 190
     assert selection["selected"]["g_vrh"] == 70
     assert selection["selected"]["homogeneous_poisson"] == 0.32
+    assert selection["selected"]["crystal_system"] == "Cubic"
+    json.dumps(selection)
 
 
 def test_aflow_formula_query_is_not_uo2_specific() -> None:
