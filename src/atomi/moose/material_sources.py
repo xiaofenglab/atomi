@@ -555,10 +555,23 @@ def resolve_materials_project_api_key(args: argparse.Namespace) -> tuple[str | N
         value = os.environ.get(args.api_key_env)
         if value:
             return value, f"env:{args.api_key_env}"
-    json_path = args.api_key_json or (
-        Path(os.environ["ATOMI_API_KEYS_JSON"]) if os.environ.get("ATOMI_API_KEYS_JSON") else None
+    json_candidates: list[Path] = []
+    if args.api_key_json is not None:
+        json_candidates.append(args.api_key_json)
+    if os.environ.get("ATOMI_API_KEYS_JSON"):
+        json_candidates.append(Path(os.environ["ATOMI_API_KEYS_JSON"]))
+    json_candidates.extend(
+        [
+            Path.home() / "atomi_hpc/atomi_hpc_config.kit.local.json",
+            Path.home() / "hpc_atomi/atomi_hpc_config.kit.local.json",
+        ]
     )
-    if json_path is not None:
+    seen: set[Path] = set()
+    for json_path in json_candidates:
+        json_path = json_path.expanduser()
+        if json_path in seen or not json_path.exists():
+            continue
+        seen.add(json_path)
         key, source = load_api_key_json(json_path, "materials_project", args.api_key_env)
         if key:
             return key, f"json:{source}"
@@ -609,6 +622,42 @@ def nested_value(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
+def nested_number(obj: Any, *keys: str) -> float | None:
+    current = obj
+    for key in keys:
+        current = nested_value(current, key, None)
+        if current is None:
+            return None
+    return finite_float(current)
+
+
+def materials_project_modulus_gpa(doc: Any, field: str) -> float | None:
+    """Read MP elastic moduli from old flat or newer nested summary fields."""
+
+    flat_key = {"bulk": "k_vrh", "shear": "g_vrh"}[field]
+    flat = finite_float(doc_value(doc, flat_key))
+    if flat is not None:
+        return flat
+    nested_key = {"bulk": "bulk_modulus", "shear": "shear_modulus"}[field]
+    nested = doc_value(doc, nested_key, None)
+    for key in ("vrh", "value", "mean"):
+        value = nested_number(nested, key)
+        if value is not None:
+            return value
+    return finite_float(nested)
+
+
+def materials_project_poisson(doc: Any) -> float | None:
+    value = finite_float(doc_value(doc, "homogeneous_poisson", None))
+    if value is not None:
+        return value
+    value = finite_float(doc_value(doc, "poisson_ratio", None))
+    if value is not None:
+        return value
+    elastic = doc_value(doc, "elasticity", None)
+    return nested_number(elastic, "homogeneous_poisson")
+
+
 def normalize_phase_token(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
 
@@ -627,9 +676,9 @@ def materials_project_candidate_summary(doc: Any) -> dict[str, Any]:
     return {
         "material_id": str(doc_value(doc, "material_id", "")),
         "formula_pretty": doc_value(doc, "formula_pretty", ""),
-        "k_vrh": doc_value(doc, "k_vrh", None),
-        "g_vrh": doc_value(doc, "g_vrh", None),
-        "homogeneous_poisson": doc_value(doc, "homogeneous_poisson", None),
+        "k_vrh": materials_project_modulus_gpa(doc, "bulk"),
+        "g_vrh": materials_project_modulus_gpa(doc, "shear"),
+        "homogeneous_poisson": materials_project_poisson(doc),
         "symmetry_symbol": symmetry["symbol"],
         "symmetry_number": symmetry["number"],
         "crystal_system": symmetry["crystal_system"],
@@ -686,7 +735,8 @@ def materials_project_doc_score(doc: Any, args: argparse.Namespace) -> tuple[Any
         except (TypeError, ValueError):
             number_mismatch = 1
     missing_elastic = int(
-        finite_float(doc_value(doc, "k_vrh")) is None or finite_float(doc_value(doc, "g_vrh")) is None
+        materials_project_modulus_gpa(doc, "bulk") is None
+        or materials_project_modulus_gpa(doc, "shear") is None
     )
     prefer_stable = not getattr(args, "no_prefer_stable", False)
     unstable = 0
@@ -722,8 +772,13 @@ def select_materials_project_doc(docs: list[Any], args: argparse.Namespace) -> t
             "No exact Materials Project phase/space-group match was found; "
             "selected the best scored formula match. Inspect candidate_summaries."
         )
-    if finite_float(doc_value(selected, "k_vrh")) is None or finite_float(doc_value(selected, "g_vrh")) is None:
-        warnings.append("Selected Materials Project entry does not contain both k_vrh and g_vrh.")
+    if (
+        materials_project_modulus_gpa(selected, "bulk") is None
+        or materials_project_modulus_gpa(selected, "shear") is None
+    ):
+        warnings.append(
+            "Selected Materials Project entry does not contain both bulk and shear VRH elastic summaries."
+        )
     selection = {
         "candidate_count": len(docs),
         "selected": materials_project_candidate_summary(selected),
@@ -731,7 +786,7 @@ def select_materials_project_doc(docs: list[Any], args: argparse.Namespace) -> t
         "warnings": warnings,
         "selection_rules": [
             "prefer requested phase/space-group text or number",
-            "prefer entries with k_vrh and g_vrh elastic summaries",
+            "prefer entries with bulk/shear VRH elastic summaries",
             "prefer stable / lower energy_above_hull entries unless --no-prefer-stable is set",
         ],
     }
@@ -751,9 +806,10 @@ def fetch_materials_project(args: argparse.Namespace) -> tuple[list[dict[str, An
     fields = [
         "material_id",
         "formula_pretty",
-        "k_vrh",
-        "g_vrh",
+        "bulk_modulus",
+        "shear_modulus",
         "homogeneous_poisson",
+        "poisson_ratio",
         "symmetry",
         "energy_above_hull",
         "is_stable",
@@ -770,9 +826,9 @@ def fetch_materials_project(args: argparse.Namespace) -> tuple[list[dict[str, An
         provider="materials-project",
         material=args.material,
         material_id=str(get("material_id", "")),
-        k_gpa=finite_float(get("k_vrh")),
-        g_gpa=finite_float(get("g_vrh")),
-        nu=finite_float(get("homogeneous_poisson")),
+        k_gpa=materials_project_modulus_gpa(doc, "bulk"),
+        g_gpa=materials_project_modulus_gpa(doc, "shear"),
+        nu=materials_project_poisson(doc),
         citation="Materials Project API; cite Materials Project and mp-api for retrieved data.",
         notes="0 K DFT-derived elastic summary; use as comparison/filler, not silent truth.",
     )
@@ -780,7 +836,7 @@ def fetch_materials_project(args: argparse.Namespace) -> tuple[list[dict[str, An
         "provider": "materials-project",
         "material": args.material,
         "material_id": row["material_id"],
-        "fields": ["k_vrh", "g_vrh", "homogeneous_poisson"],
+        "fields": ["bulk_modulus", "shear_modulus", "homogeneous_poisson", "poisson_ratio"],
         "requested_phase": getattr(args, "phase", None),
         "requested_spacegroup_number": getattr(args, "spacegroup_number", None),
         "requested_spacegroup_symbol": getattr(args, "spacegroup_symbol", None),

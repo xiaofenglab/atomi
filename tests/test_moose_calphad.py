@@ -576,6 +576,29 @@ def test_moose_material_source_loads_materials_project_key_json(tmp_path: Path, 
     assert resolved_source == f"json:{key_json}"
 
 
+def test_moose_material_source_loads_default_hpc_kit_json(tmp_path: Path, monkeypatch) -> None:
+    kit_dir = tmp_path / "atomi_hpc"
+    kit_dir.mkdir()
+    key_json = kit_dir / "atomi_hpc_config.kit.local.json"
+    key_json.write_text(
+        '{"materials_project": {"api_key_env": "MP_API_KEY", "api_key": "kit-secret"}}\n',
+        encoding="utf-8",
+    )
+    args = type(
+        "Args",
+        (),
+        {"api_key_env": "MP_API_KEY", "api_key_json": None},
+    )()
+    monkeypatch.delenv("MP_API_KEY", raising=False)
+    monkeypatch.delenv("ATOMI_API_KEYS_JSON", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    resolved, resolved_source = resolve_materials_project_api_key(args)
+
+    assert resolved == "kit-secret"
+    assert resolved_source == f"json:{key_json}"
+
+
 def test_materials_project_formula_selection_prefers_requested_phase() -> None:
     args = type(
         "Args",
@@ -617,6 +640,50 @@ def test_materials_project_formula_selection_prefers_requested_phase() -> None:
     assert selection["candidate_count"] == 2
     assert selection["warnings"] == []
     assert selection["selected"]["symmetry_symbol"] == "Fm-3m"
+
+
+def test_materials_project_selection_accepts_nested_modulus_fields() -> None:
+    args = type(
+        "Args",
+        (),
+        {
+            "material": "UO2",
+            "phase": None,
+            "spacegroup_number": 225,
+            "spacegroup_symbol": "Fm-3m",
+            "no_prefer_stable": False,
+        },
+    )()
+    docs = [
+        {
+            "material_id": "mp-soft",
+            "formula_pretty": "UO2",
+            "bulk_modulus": {"vrh": 120},
+            "shear_modulus": {"vrh": 45},
+            "poisson_ratio": 0.33,
+            "symmetry": {"symbol": "Ia-3", "number": 206, "crystal_system": "cubic"},
+            "energy_above_hull": 0.0,
+            "is_stable": True,
+        },
+        {
+            "material_id": "mp-fluorite",
+            "formula_pretty": "UO2",
+            "bulk_modulus": {"vrh": 190},
+            "shear_modulus": {"vrh": 70},
+            "poisson_ratio": 0.32,
+            "symmetry": {"symbol": "Fm-3m", "number": 225, "crystal_system": "cubic"},
+            "energy_above_hull": 0.01,
+            "is_stable": False,
+        },
+    ]
+
+    selected, selection = select_materials_project_doc(docs, args)
+
+    assert selected["material_id"] == "mp-fluorite"
+    assert selection["warnings"] == []
+    assert selection["selected"]["k_vrh"] == 190
+    assert selection["selected"]["g_vrh"] == 70
+    assert selection["selected"]["homogeneous_poisson"] == 0.32
 
 
 def test_aflow_formula_query_is_not_uo2_specific() -> None:
