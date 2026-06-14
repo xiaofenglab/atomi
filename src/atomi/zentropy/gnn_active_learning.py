@@ -16,6 +16,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from atomi.ml.crystal_graph_dataset import build_graph_dataset_from_ce_training_jsonl
 from atomi.zentropy.backends.base import CETrainingRecord, CETrainingSet, read_ce_training_jsonl, write_ce_training_jsonl
 
 SCHEMA = "atomi.zentropy.gnn_active_learning.v1"
@@ -350,6 +351,11 @@ def build_parser() -> argparse.ArgumentParser:
     select.add_argument("--system", default="Gd-UO2")
     select.add_argument("--parent-structure", default="fluorite_Fm-3m")
 
+    graph = sub.add_parser("export-graph-dataset", help="Export CETrainingSet records as graph JSONL for GNN labels.")
+    graph.add_argument("--training-jsonl", type=Path, required=True)
+    graph.add_argument("--out", type=Path, required=True)
+    graph.add_argument("--cutoff", type=float, default=5.0)
+
     return parser
 
 
@@ -410,6 +416,24 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         print(f"Selected rows : {len(rows)}")
         print(f"Wrote selected: {selected_csv}")
         print(f"Mode4 prior   : {training_jsonl}")
+        return meta
+    if args.command == "export-graph-dataset":
+        summary = build_graph_dataset_from_ce_training_jsonl(
+            args.training_jsonl.resolve(),
+            args.out.resolve(),
+            cutoff=args.cutoff,
+        )
+        meta = {
+            "schema": SCHEMA,
+            "stage": "export_graph_dataset",
+            "training_jsonl": str(args.training_jsonl),
+            "graph_jsonl": str(args.out),
+            "graph_summary": summary.to_dict(),
+        }
+        _write_json(args.out.resolve().with_suffix(args.out.suffix + ".gnn_active_learning.json"), meta)
+        print(f"Graph rows: {summary.n_records}")
+        print(f"Skipped   : {summary.n_skipped}")
+        print(f"Wrote graph: {args.out}")
         return meta
     raise ValueError(f"Unsupported command: {args.command}")
 

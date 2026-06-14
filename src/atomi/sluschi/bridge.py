@@ -278,7 +278,11 @@ def file_info(path: str | Path | None) -> dict[str, Any]:
 def load_hpc_profile(config_path: Path | None, profile_name: str) -> dict[str, Any]:
     if config_path is None:
         env_config = os.environ.get("ATOMI_HPC_CONFIG")
-        config_path = Path(env_config).expanduser() if env_config else None
+        if env_config:
+            config_path = Path(env_config).expanduser()
+        else:
+            default_config = Path.home() / "atomi_hpc" / "atomi_hpc_config.kit.local.json"
+            config_path = default_config if default_config.exists() else None
     if config_path is None or not config_path.exists():
         return {}
     data = json.loads(config_path.read_text(encoding="utf-8"))

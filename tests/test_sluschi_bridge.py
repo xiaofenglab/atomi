@@ -100,6 +100,41 @@ def test_sluschi_status_reads_hpc_profile(tmp_path: Path, monkeypatch):
     assert status["ready_for_bridge"] is True
 
 
+def test_sluschi_status_discovers_default_hpc_config(tmp_path: Path, monkeypatch):
+    hpc_dir = tmp_path / "atomi_hpc"
+    hpc_dir.mkdir()
+    lmp = tmp_path / "lmp"
+    lmp.write_text("#!/bin/sh\n", encoding="utf-8")
+    config = hpc_dir / "atomi_hpc_config.kit.local.json"
+    config.write_text(
+        json.dumps(
+            {
+                "profiles": {
+                    "sluschi": {
+                        "root": "/home/user/SLUSCHI",
+                        "bin": "/home/user/SLUSCHI/src",
+                        "mlip_model": "/models/supersalt.pt",
+                        "mlip_provider": "SuperSalt",
+                        "lammps_executable": str(lmp),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("ATOMI_HPC_CONFIG", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    status = bridge.inspect_environment()
+
+    assert status["config_path"] == ""
+    assert status["root"] == "/home/user/SLUSCHI"
+    assert status["bin"] == "/home/user/SLUSCHI/src"
+    assert status["executables"]["lmp"] == str(lmp)
+    assert status["ready_for_bridge"] is True
+
+
 def test_sluschi_supersalt_example_uses_profile_model(tmp_path: Path):
     model = tmp_path / "SuperSalt-swa.model"
     model.write_text("model", encoding="utf-8")

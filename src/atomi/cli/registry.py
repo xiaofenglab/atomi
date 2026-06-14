@@ -62,6 +62,18 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Generate and score GNN/MLIP active-learning candidates for defect thermodynamics.",
     ),
     CommandSpec(
+        aliases=("crystal-graph-dataset", "crystal_graph_dataset", "atomi-graph-dataset"),
+        target="atomi.ml.crystal_graph_dataset:main",
+        category="ml",
+        help="Export ASE structures or CETrainingSet records as graph JSONL for GNN/MLIP labels.",
+    ),
+    CommandSpec(
+        aliases=("thermo-prior-mp", "materials-project-prior", "mp-thermo-cache"),
+        target="atomi.thermo_prior.materials_project:main",
+        category="thermo_prior",
+        help="Normalize Materials Project entries into offline thermo-prior caches.",
+    ),
+    CommandSpec(
         aliases=("pocc-zentropy-defects", "pocc_zentropy_defects", "atomi-defects"),
         target="atomi.zentropy.pocc_defects:main",
         category="zentropy",

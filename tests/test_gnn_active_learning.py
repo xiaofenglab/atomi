@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
+
+from ase import Atoms
+from ase.io import write
 
 from atomi.zentropy.backends.base import CETrainingRecord, CETrainingSet, write_ce_training_jsonl
 from atomi.zentropy.gnn_active_learning import build_candidate_pool, main, score_candidates, select_candidates
@@ -108,3 +112,36 @@ def test_gnn_active_learning_cli_round_trip(tmp_path: Path) -> None:
     main(["select-dft", "--scored-csv", str(score_dir / "scored_candidates.csv"), "--outdir", str(select_dir), "--top-n", "1"])
     assert (select_dir / "selected_dft_candidates.csv").exists()
     assert (select_dir / "selected_candidates_mode4_prior.jsonl").exists()
+
+
+def test_gnn_active_learning_exports_graph_dataset(tmp_path: Path) -> None:
+    structure_dir = tmp_path / "structures"
+    structure_dir.mkdir()
+    structure = structure_dir / "seed.extxyz"
+    atoms = Atoms("UO2", positions=[[0.0, 0.0, 0.0], [2.2, 0.0, 0.0], [0.0, 2.2, 0.0]], cell=[5.5, 5.5, 5.5], pbc=True)
+    write(structure, atoms, format="extxyz")
+    training = CETrainingSet(
+        system_name="Gd-UO2",
+        parent_structure_path="fluorite",
+        records=[
+            CETrainingRecord(
+                record_id="uo2_seed",
+                structure_path="structures/seed.extxyz",
+                composition={"x_Gd": 0.0, "delta_VO": 0.0, "h_U5": 0.0},
+                motif_features={"u_o_nn": 2.0},
+                energy_eV=-12.0,
+                source="unit",
+            )
+        ],
+    )
+    training_jsonl = tmp_path / "training.jsonl"
+    write_ce_training_jsonl(training_jsonl, training)
+    output = tmp_path / "graphs.jsonl"
+
+    result = main(["export-graph-dataset", "--training-jsonl", str(training_jsonl), "--out", str(output), "--cutoff", "3.0"])
+    row = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
+
+    assert result["graph_summary"]["n_records"] == 1
+    assert row["record_id"] == "uo2_seed"
+    assert row["labels"]["energy_eV"] == -12.0
+    assert row["labels"]["motif_features"]["u_o_nn"] == 2.0
