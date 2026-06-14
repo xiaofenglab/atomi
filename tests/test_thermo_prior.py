@@ -228,6 +228,39 @@ def test_aeris_status_uses_environment_defaults(tmp_path: Path, monkeypatch, cap
     assert printed["ready"] is False
 
 
+def test_aeris_status_uses_private_kit_defaults(tmp_path: Path, monkeypatch, capsys):
+    aeris_root = tmp_path / "AERIS"
+    aeris_root.mkdir()
+    (aeris_root / "aeris.py").write_text("# fake AERIS checkout\n", encoding="utf-8")
+    model = aeris_root / "model" / "aeris_full_struct.pt"
+    kit = tmp_path / "atomi_hpc_config.kit.local.json"
+    kit.write_text(
+        json.dumps(
+            {
+                "aeris": {
+                    "root": str(aeris_root),
+                    "model": str(model),
+                    "device": "cpu",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("ATOMI_AERIS_ROOT", raising=False)
+    monkeypatch.delenv("ATOMI_AERIS_MODEL", raising=False)
+    monkeypatch.delenv("ATOMI_AERIS_DEVICE", raising=False)
+    monkeypatch.setenv("ATOMI_HPC_CONFIG", str(kit))
+
+    status = thermo_prior_main(["aeris-status"])
+    printed = json.loads(capsys.readouterr().out)
+
+    assert status is not None
+    assert printed["root"] == str(aeris_root)
+    assert printed["model"] == str(model)
+    assert printed["root_exists"] is True
+    assert printed["ready"] is False
+
+
 def test_thermo_prior_console_main_returns_none(tmp_path: Path, monkeypatch, capsys):
     aeris_root = tmp_path / "AERIS"
     aeris_root.mkdir()

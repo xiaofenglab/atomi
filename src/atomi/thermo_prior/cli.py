@@ -22,9 +22,69 @@ def _env_path(name: str) -> Path | None:
     return Path(value).expanduser() if value else None
 
 
+def _candidate_hpc_config_paths() -> list[Path]:
+    paths: list[Path] = []
+    for env_name in ("ATOMI_HPC_CONFIG", "ATOMI_API_KEYS_JSON"):
+        value = os.environ.get(env_name)
+        if value:
+            paths.append(Path(value).expanduser())
+    paths.extend(
+        [
+            Path.home() / "atomi_hpc" / "atomi_hpc_config.kit.local.json",
+            Path.home() / "hpc_atomi" / "atomi_hpc_config.kit.local.json",
+        ]
+    )
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in paths:
+        if path not in seen:
+            seen.add(path)
+            unique.append(path)
+    return unique
+
+
+def _kit_value(*key_paths: tuple[str, ...]) -> str | None:
+    for path in _candidate_hpc_config_paths():
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for keys in key_paths:
+            value: Any = data
+            for key in keys:
+                if not isinstance(value, dict) or key not in value:
+                    value = None
+                    break
+                value = value[key]
+            if value:
+                return str(value)
+    return None
+
+
+def _aeris_path_default(field: str, env_name: str) -> Path | None:
+    return _env_path(env_name) or (
+        Path(value).expanduser()
+        if (value := _kit_value(("environment_exports", env_name), ("aeris", field)))
+        else None
+    )
+
+
+def _aeris_device_default() -> str:
+    return (
+        os.environ.get("ATOMI_AERIS_DEVICE")
+        or _kit_value(("environment_exports", "ATOMI_AERIS_DEVICE"), ("aeris", "device"))
+        or "cpu"
+    )
+
+
 def _require_path(value: Path | None, *, flag: str, env_name: str) -> Path:
     if value is None:
-        raise ValueError(f"Provide {flag} or set {env_name}.")
+        raise ValueError(
+            f"Provide {flag}, set {env_name}, or configure aeris/environment_exports in "
+            "ATOMI_HPC_CONFIG or ~/atomi_hpc/atomi_hpc_config.kit.local.json."
+        )
     return value
 
 
@@ -44,9 +104,9 @@ def build_parser() -> argparse.ArgumentParser:
     line.add_argument("--formation-energy-ev-atom", type=float, help="Elemental-basis compound formation energy.")
     line.add_argument("--component-a-formation-energy-ev-atom", type=float)
     line.add_argument("--component-b-formation-energy-ev-atom", type=float)
-    line.add_argument("--aeris-root", type=Path, default=_env_path("ATOMI_AERIS_ROOT"))
-    line.add_argument("--aeris-model", type=Path, default=_env_path("ATOMI_AERIS_MODEL"))
-    line.add_argument("--aeris-device", default=os.environ.get("ATOMI_AERIS_DEVICE", "cpu"))
+    line.add_argument("--aeris-root", type=Path, default=_aeris_path_default("root", "ATOMI_AERIS_ROOT"))
+    line.add_argument("--aeris-model", type=Path, default=_aeris_path_default("model", "ATOMI_AERIS_MODEL"))
+    line.add_argument("--aeris-device", default=_aeris_device_default())
     line.add_argument("--dcp-form", type=float, default=0.0, help="Formation Cp correction in J/mol/K.")
     line.add_argument("--tref-k", type=float, default=298.15)
     line.add_argument("--temperature-min-k", type=float, help="Optional lower stability bound for this compound.")
@@ -72,9 +132,9 @@ def build_parser() -> argparse.ArgumentParser:
     spec.add_argument("--default-tref-k", type=float, default=298.15)
 
     aeris = sub.add_parser("aeris-status", help="Check a configured local AERIS checkout/checkpoint.")
-    aeris.add_argument("--aeris-root", type=Path, default=_env_path("ATOMI_AERIS_ROOT"))
-    aeris.add_argument("--aeris-model", type=Path, default=_env_path("ATOMI_AERIS_MODEL"))
-    aeris.add_argument("--aeris-device", default=os.environ.get("ATOMI_AERIS_DEVICE", "cpu"))
+    aeris.add_argument("--aeris-root", type=Path, default=_aeris_path_default("root", "ATOMI_AERIS_ROOT"))
+    aeris.add_argument("--aeris-model", type=Path, default=_aeris_path_default("model", "ATOMI_AERIS_MODEL"))
+    aeris.add_argument("--aeris-device", default=_aeris_device_default())
 
     return parser
 

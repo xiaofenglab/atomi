@@ -5,6 +5,7 @@ from pathlib import Path
 
 from atomi.thermo_prior.materials_project import (
     SCHEMA,
+    console_main,
     main,
     normalize_mp_doc,
     resolve_mp_api_key,
@@ -93,6 +94,21 @@ def test_materials_project_cli_from_json(tmp_path: Path) -> None:
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["schema"] == SCHEMA
     assert payload["records"][0]["formula_pretty"] == "UCl3"
+
+
+def test_materials_project_console_main_returns_none(tmp_path: Path, capsys) -> None:
+    raw = tmp_path / "raw.json"
+    raw.write_text(
+        json.dumps({"records": [{"material_id": "mp-1", "formula_pretty": "NaCl", "chemsys": "Cl-Na"}]}),
+        encoding="utf-8",
+    )
+    output = tmp_path / "cache.json"
+
+    assert console_main(["from-json", "--input", str(raw), "--out", str(output)]) is None
+    printed = json.loads(capsys.readouterr().out)
+
+    assert printed["n_records"] == 1
+    assert output.exists()
 
 
 def test_resolve_mp_api_key_uses_explicit_private_json(tmp_path: Path, monkeypatch) -> None:

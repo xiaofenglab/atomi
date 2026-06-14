@@ -334,5 +334,10 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     return payload
 
 
+def console_main(argv: list[str] | None = None) -> None:
+    main(argv)
+    return None
+
+
 if __name__ == "__main__":
-    main()
+    console_main()
