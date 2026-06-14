@@ -111,6 +111,15 @@ def _species_counts(atoms: Atoms) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _default_record_id(path: Path) -> str:
+    """Return a stable, branch-aware id for common VASP structure filenames."""
+    if path.name.upper() in {"POSCAR", "CONTCAR"}:
+        parts = path.parts
+        suffix = parts[-3:] if len(parts) >= 3 else parts
+        return "__".join(suffix)
+    return path.stem
+
+
 def _cell_payload(atoms: Atoms) -> dict[str, Any]:
     cell = atoms.cell
     lengths_angles = cell.cellpar()
@@ -266,7 +275,7 @@ def build_graph_dataset(
             summary.n_skipped += 1
             summary.skipped.append({"path": str(path), "reason": str(exc)})
             continue
-        record_id = path.stem
+        record_id = _default_record_id(path)
         row_labels = label_map.get(record_id) or label_map.get(str(path)) or label_map.get(str(path.resolve())) or {}
         rows.append(
             atoms_to_graph_record(
@@ -439,5 +448,10 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     return payload
 
 
+def console_main(argv: list[str] | None = None) -> None:
+    main(argv)
+    return None
+
+
 if __name__ == "__main__":
-    main()
+    console_main()

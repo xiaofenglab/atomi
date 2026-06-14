@@ -10,6 +10,7 @@ from atomi.ml.crystal_graph_dataset import (
     SCHEMA,
     build_graph_dataset,
     build_graph_dataset_from_ce_training_jsonl,
+    console_main,
     validate_graph_jsonl,
 )
 from atomi.zentropy.backends.base import CETrainingRecord, CETrainingSet, write_ce_training_jsonl
@@ -45,6 +46,39 @@ def test_build_graph_dataset_from_structure_file(tmp_path: Path) -> None:
     validation = validate_graph_jsonl(output)
     assert validation.n_records == 1
     assert validation.n_edges_total == summary.n_edges_total
+
+
+def test_build_graph_dataset_uses_branch_aware_vasp_record_ids(tmp_path: Path) -> None:
+    first = tmp_path / "ideal_exact_1x1x3" / "01_vacancy_separated" / "POSCAR"
+    second = tmp_path / "refined_Na_vac_1x3x5" / "01_vacancy_separated" / "POSCAR"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    atoms = Atoms("NaCl", positions=[[0.0, 0.0, 0.0], [2.8, 0.0, 0.0]], cell=[6.0, 6.0, 6.0], pbc=True)
+    write(first, atoms, format="vasp")
+    write(second, atoms, format="vasp")
+
+    output = tmp_path / "graphs.jsonl"
+    build_graph_dataset([first, second], output, cutoff=3.0)
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    record_ids = [row["record_id"] for row in rows]
+
+    assert record_ids == [
+        "ideal_exact_1x1x3__01_vacancy_separated__POSCAR",
+        "refined_Na_vac_1x3x5__01_vacancy_separated__POSCAR",
+    ]
+    assert len(set(record_ids)) == 2
+
+
+def test_crystal_graph_dataset_console_main_returns_none(tmp_path: Path, capsys) -> None:
+    structure = tmp_path / "nacl.extxyz"
+    _write_nacl(structure)
+    output = tmp_path / "graphs.jsonl"
+
+    assert console_main(["build", str(structure), "--out", str(output), "--cutoff", "3.0"]) is None
+    printed = json.loads(capsys.readouterr().out)
+
+    assert printed["n_records"] == 1
+    assert output.exists()
 
 
 def test_build_graph_dataset_from_ce_training_jsonl_resolves_relative_paths(tmp_path: Path) -> None:
