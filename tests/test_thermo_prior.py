@@ -12,6 +12,8 @@ from atomi.thermo_prior import (
     solve_pseudobinary_coefficients,
     write_line_compound_prior,
 )
+from atomi.thermo_prior.cli import console_main as thermo_prior_console_main
+from atomi.thermo_prior.cli import main as thermo_prior_main
 
 
 def test_pseudobinary_coefficients_for_na3u5cl18():
@@ -203,3 +205,36 @@ def test_cp_placeholder_cli_writes_prior(tmp_path: Path):
     data = json.loads(out.read_text(encoding="utf-8"))
     assert data["kind"] == "cp_solid"
     assert data["thermo"]["Cp_J_mol_K"] == pytest.approx(130)
+
+
+def test_aeris_status_uses_environment_defaults(tmp_path: Path, monkeypatch, capsys):
+    aeris_root = tmp_path / "AERIS"
+    aeris_root.mkdir()
+    (aeris_root / "aeris.py").write_text("# fake AERIS checkout\n", encoding="utf-8")
+    model = aeris_root / "model" / "aeris_full_struct.pt"
+    monkeypatch.setenv("ATOMI_AERIS_ROOT", str(aeris_root))
+    monkeypatch.setenv("ATOMI_AERIS_MODEL", str(model))
+    monkeypatch.setenv("ATOMI_AERIS_DEVICE", "cpu")
+
+    status = thermo_prior_main(["aeris-status"])
+    printed = json.loads(capsys.readouterr().out)
+
+    assert status is not None
+    assert printed["root"] == str(aeris_root)
+    assert printed["model"] == str(model)
+    assert printed["root_exists"] is True
+    assert printed["aeris_py_exists"] is True
+    assert printed["model_exists"] is False
+    assert printed["ready"] is False
+
+
+def test_thermo_prior_console_main_returns_none(tmp_path: Path, monkeypatch, capsys):
+    aeris_root = tmp_path / "AERIS"
+    aeris_root.mkdir()
+    (aeris_root / "aeris.py").write_text("# fake AERIS checkout\n", encoding="utf-8")
+    monkeypatch.setenv("ATOMI_AERIS_ROOT", str(aeris_root))
+    monkeypatch.setenv("ATOMI_AERIS_MODEL", str(aeris_root / "model" / "aeris_full_struct.pt"))
+
+    assert thermo_prior_console_main(["aeris-status"]) is None
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["ready"] is False

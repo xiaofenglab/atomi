@@ -13,6 +13,7 @@ def test_command_registry_exposes_core_bridge_aliases() -> None:
     assert "zentropy-mode4-surface" in aliases
     assert "gnn-active-learning" in aliases
     assert "crystal-graph-dataset" in aliases
+    assert "thermo-prior" in aliases
     assert "thermo-prior-mp" in aliases
     assert "aq-thermo-bridge" in aliases
     assert registry["mode4-surface"].target == "atomi.zentropy.mode4_surface:main"

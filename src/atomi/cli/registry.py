@@ -68,6 +68,12 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Export ASE structures or CETrainingSet records as graph JSONL for GNN/MLIP labels.",
     ),
     CommandSpec(
+        aliases=("thermo-prior", "thermo_prior"),
+        target="atomi.thermo_prior.cli:main",
+        category="thermo_prior",
+        help="Create and inspect provenance-rich thermodynamic prior JSON files.",
+    ),
+    CommandSpec(
         aliases=("thermo-prior-mp", "materials-project-prior", "mp-thermo-cache"),
         target="atomi.thermo_prior.materials_project:main",
         category="thermo_prior",

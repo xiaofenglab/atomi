@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,17 @@ from .core import (
     write_cp_prior,
     write_line_compound_prior,
 )
+
+
+def _env_path(name: str) -> Path | None:
+    value = os.environ.get(name)
+    return Path(value).expanduser() if value else None
+
+
+def _require_path(value: Path | None, *, flag: str, env_name: str) -> Path:
+    if value is None:
+        raise ValueError(f"Provide {flag} or set {env_name}.")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,9 +44,9 @@ def build_parser() -> argparse.ArgumentParser:
     line.add_argument("--formation-energy-ev-atom", type=float, help="Elemental-basis compound formation energy.")
     line.add_argument("--component-a-formation-energy-ev-atom", type=float)
     line.add_argument("--component-b-formation-energy-ev-atom", type=float)
-    line.add_argument("--aeris-root", type=Path)
-    line.add_argument("--aeris-model", type=Path)
-    line.add_argument("--aeris-device", default="cpu")
+    line.add_argument("--aeris-root", type=Path, default=_env_path("ATOMI_AERIS_ROOT"))
+    line.add_argument("--aeris-model", type=Path, default=_env_path("ATOMI_AERIS_MODEL"))
+    line.add_argument("--aeris-device", default=os.environ.get("ATOMI_AERIS_DEVICE", "cpu"))
     line.add_argument("--dcp-form", type=float, default=0.0, help="Formation Cp correction in J/mol/K.")
     line.add_argument("--tref-k", type=float, default=298.15)
     line.add_argument("--temperature-min-k", type=float, help="Optional lower stability bound for this compound.")
@@ -60,9 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
     spec.add_argument("--default-tref-k", type=float, default=298.15)
 
     aeris = sub.add_parser("aeris-status", help="Check a configured local AERIS checkout/checkpoint.")
-    aeris.add_argument("--aeris-root", type=Path, required=True)
-    aeris.add_argument("--aeris-model", type=Path, required=True)
-    aeris.add_argument("--aeris-device", default="cpu")
+    aeris.add_argument("--aeris-root", type=Path, default=_env_path("ATOMI_AERIS_ROOT"))
+    aeris.add_argument("--aeris-model", type=Path, default=_env_path("ATOMI_AERIS_MODEL"))
+    aeris.add_argument("--aeris-device", default=os.environ.get("ATOMI_AERIS_DEVICE", "cpu"))
 
     return parser
 
@@ -160,8 +172,15 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
         print(spec)
         return {"line_compound_spec": spec}
     if args.command == "aeris-status":
-        adapter = AerisAdapter(AerisConfig(root=args.aeris_root, model=args.aeris_model, device=args.aeris_device))
+        root = _require_path(args.aeris_root, flag="--aeris-root", env_name="ATOMI_AERIS_ROOT")
+        model = _require_path(args.aeris_model, flag="--aeris-model", env_name="ATOMI_AERIS_MODEL")
+        adapter = AerisAdapter(AerisConfig(root=root, model=model, device=args.aeris_device))
         status = adapter.status()
         print(json.dumps(status, indent=2, sort_keys=True))
         return status
+    return None
+
+
+def console_main(argv: list[str] | None = None) -> None:
+    main(argv)
     return None
