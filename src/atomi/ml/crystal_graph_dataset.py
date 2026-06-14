@@ -115,6 +115,11 @@ def _default_record_id(path: Path) -> str:
     """Return a stable, branch-aware id for common VASP structure filenames."""
     if path.name.upper() in {"POSCAR", "CONTCAR"}:
         parts = path.parts
+        if "candidates" in parts:
+            index = parts.index("candidates")
+            branch = parts[index - 1 : index] if index > 0 else ()
+            suffix = (*branch, *parts[index + 1 :])
+            return "__".join(suffix)
         suffix = parts[-3:] if len(parts) >= 3 else parts
         return "__".join(suffix)
     return path.stem

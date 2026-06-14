@@ -49,8 +49,8 @@ def test_build_graph_dataset_from_structure_file(tmp_path: Path) -> None:
 
 
 def test_build_graph_dataset_uses_branch_aware_vasp_record_ids(tmp_path: Path) -> None:
-    first = tmp_path / "ideal_exact_1x1x3" / "01_vacancy_separated" / "POSCAR"
-    second = tmp_path / "refined_Na_vac_1x3x5" / "01_vacancy_separated" / "POSCAR"
+    first = tmp_path / "ideal_exact_1x1x3" / "candidates" / "01_vacancy_separated" / "POSCAR"
+    second = tmp_path / "refined_Na_vac_1x3x5" / "candidates" / "01_vacancy_separated" / "POSCAR"
     first.parent.mkdir(parents=True)
     second.parent.mkdir(parents=True)
     atoms = Atoms("NaCl", positions=[[0.0, 0.0, 0.0], [2.8, 0.0, 0.0]], cell=[6.0, 6.0, 6.0], pbc=True)
