@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -275,6 +276,286 @@ def read_total_pdf(path: Path) -> tuple[np.ndarray, np.ndarray]:
             r_values.append(float(row["r_A"]))
             g_values.append(float(row["g_total_weighted"]))
     return np.asarray(r_values, dtype=float), np.asarray(g_values, dtype=float)
+
+
+def parse_type_elements(values: list[str] | None) -> dict[int, str]:
+    mapping: dict[int, str] = {}
+    for item in values or []:
+        if "=" not in item:
+            raise ValueError(f"Type-element mapping must look like 1=K, got {item!r}")
+        left, right = item.split("=", 1)
+        symbol = right.strip()
+        if not symbol:
+            raise ValueError(f"Missing element symbol in type-element mapping {item!r}")
+        mapping[int(left)] = symbol
+    return mapping
+
+
+def parse_cell_matrix(value: str | None) -> np.ndarray | None:
+    if not value:
+        return None
+    rows = [[float(x) for x in row.split(",")] for row in value.split(";")]
+    if len(rows) != 3 or any(len(row) != 3 for row in rows):
+        raise ValueError("--cell must look like 'a,b,c;d,e,f;g,h,i'")
+    return np.asarray(rows, dtype=float)
+
+
+def parse_cell_vector(value: str) -> list[float]:
+    parts = [float(item) for item in value.split(",")]
+    if len(parts) != 3:
+        raise ValueError(f"Cell vector must contain exactly three values, got {value!r}")
+    return parts
+
+
+def cell_from_cp2k_input(path: Path | None) -> np.ndarray | None:
+    if path is None:
+        return None
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    in_cell = False
+    vectors: dict[str, list[float]] = {}
+    abc: list[float] | None = None
+    for raw in lines:
+        line = raw.strip()
+        upper = line.upper()
+        if upper.startswith("&CELL"):
+            in_cell = True
+            continue
+        if in_cell and upper.startswith("&END"):
+            break
+        if not in_cell or not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        key = parts[0].upper()
+        if key in {"A", "B", "C"} and len(parts) >= 4:
+            vectors[key] = [float(parts[1]), float(parts[2]), float(parts[3])]
+        elif key == "ABC" and len(parts) >= 4:
+            abc = [float(parts[1]), float(parts[2]), float(parts[3])]
+    if all(key in vectors for key in ("A", "B", "C")):
+        return np.asarray([vectors["A"], vectors["B"], vectors["C"]], dtype=float)
+    if abc is not None:
+        return np.diag(np.asarray(abc, dtype=float))
+    return None
+
+
+def cell_from_xyz_comment(comment: str) -> np.ndarray | None:
+    if "Lattice=" not in comment:
+        return None
+    import shlex
+
+    tokens = shlex.split(comment)
+    for token in tokens:
+        if not token.startswith("Lattice="):
+            continue
+        raw = token.split("=", 1)[1]
+        values = [float(item) for item in raw.split()]
+        if len(values) == 9:
+            return np.asarray(values, dtype=float).reshape(3, 3)
+    return None
+
+
+def frame_from_cart(symbols: list[str], cart: np.ndarray, cell: np.ndarray, index: int) -> dict[str, Any]:
+    cell = np.asarray(cell, dtype=float)
+    cart = np.asarray(cart, dtype=float)
+    frac = (cart @ np.linalg.inv(cell)) % 1.0
+    return {
+        "index": index,
+        "symbols": symbols,
+        "frac": frac,
+        "cell": cell,
+        "volume_A3": float(abs(np.linalg.det(cell))),
+    }
+
+
+def read_cp2k_xyz_frames(path: Path, cell: np.ndarray | None) -> list[dict[str, Any]]:
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    frames: list[dict[str, Any]] = []
+    i = 0
+    frame_index = 0
+    inferred_cell = cell
+    while i < len(lines):
+        if not lines[i].strip():
+            i += 1
+            continue
+        natoms = int(lines[i].strip())
+        comment = lines[i + 1] if i + 1 < len(lines) else ""
+        if inferred_cell is None:
+            inferred_cell = cell_from_xyz_comment(comment)
+        if inferred_cell is None:
+            raise ValueError("CP2K XYZ guard needs --cell, three --cell-vector values, --inp, or extxyz Lattice metadata.")
+        symbols: list[str] = []
+        cart: list[list[float]] = []
+        for line in lines[i + 2 : i + 2 + natoms]:
+            parts = line.split()
+            if len(parts) < 4:
+                raise ValueError(f"Malformed XYZ row in {path}: {line!r}")
+            symbols.append(parts[0])
+            cart.append([float(parts[1]), float(parts[2]), float(parts[3])])
+        frames.append(frame_from_cart(symbols, np.asarray(cart, dtype=float), inferred_cell, frame_index))
+        frame_index += 1
+        i += natoms + 2
+    if not frames:
+        raise ValueError(f"No CP2K XYZ frames found in {path}")
+    return frames
+
+
+def read_lammps_dump_frames(path: Path, type_elements: dict[int, str]) -> list[dict[str, Any]]:
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    frames: list[dict[str, Any]] = []
+    i = 0
+    while i < len(lines):
+        if not lines[i].startswith("ITEM: TIMESTEP"):
+            i += 1
+            continue
+        timestep = int(lines[i + 1].strip())
+        natoms = int(lines[i + 3].strip())
+        bounds_header = lines[i + 4]
+        bounds = [list(map(float, lines[i + 5 + k].split()[:3])) for k in range(3)]
+        if "xy xz yz" in bounds_header:
+            xlo_bound, xhi_bound, xy = bounds[0]
+            ylo_bound, yhi_bound, xz = bounds[1]
+            zlo_bound, zhi_bound, yz = bounds[2]
+            xlo = xlo_bound - min(0.0, xy, xz, xy + xz)
+            xhi = xhi_bound - max(0.0, xy, xz, xy + xz)
+            ylo = ylo_bound - min(0.0, yz)
+            yhi = yhi_bound - max(0.0, yz)
+            zlo, zhi = zlo_bound, zhi_bound
+            cell = np.asarray([[xhi - xlo, 0.0, 0.0], [xy, yhi - ylo, 0.0], [xz, yz, zhi - zlo]], dtype=float)
+            origin = np.asarray([xlo, ylo, zlo], dtype=float)
+        else:
+            xlo, xhi = bounds[0][:2]
+            ylo, yhi = bounds[1][:2]
+            zlo, zhi = bounds[2][:2]
+            cell = np.asarray([[xhi - xlo, 0.0, 0.0], [0.0, yhi - ylo, 0.0], [0.0, 0.0, zhi - zlo]], dtype=float)
+            origin = np.asarray([xlo, ylo, zlo], dtype=float)
+        atom_header = lines[i + 8].split()[2:]
+        rows = lines[i + 9 : i + 9 + natoms]
+        id_idx = atom_header.index("id") if "id" in atom_header else None
+        type_idx = atom_header.index("type")
+        coord_keys = ("xu", "yu", "zu") if "xu" in atom_header else ("x", "y", "z") if "x" in atom_header else ("xs", "ys", "zs")
+        coord_idx = [atom_header.index(key) for key in coord_keys]
+        atoms: list[tuple[int, int, list[float]]] = []
+        for row in rows:
+            parts = row.split()
+            atom_id = int(parts[id_idx]) if id_idx is not None else len(atoms)
+            atom_type = int(parts[type_idx])
+            if atom_type not in type_elements:
+                raise ValueError(f"LAMMPS atom type {atom_type} missing from --type-elements.")
+            atoms.append((atom_id, atom_type, [float(parts[idx]) for idx in coord_idx]))
+        atoms.sort(key=lambda item: item[0])
+        symbols = [type_elements[atom_type] for _, atom_type, _ in atoms]
+        coords = np.asarray([coord for _, _, coord in atoms], dtype=float)
+        if coord_keys[0].endswith("s"):
+            cart = coords @ cell
+        else:
+            cart = coords - origin
+        frames.append(frame_from_cart(symbols, cart, cell, timestep))
+        i += 9 + natoms
+    if not frames:
+        raise ValueError(f"No LAMMPS dump frames found in {path}")
+    return frames
+
+
+def pbc_delta(frac_a: np.ndarray, frac_b: np.ndarray) -> np.ndarray:
+    delta = np.asarray(frac_b, dtype=float) - np.asarray(frac_a, dtype=float)
+    return delta - np.rint(delta)
+
+
+def compute_total_pdf_from_frames(
+    frames: list[dict[str, Any]],
+    *,
+    species_order: list[str],
+    rmax: float,
+    dr: float,
+    weights: dict[str, float] | None,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    bins = np.arange(0.0, rmax + dr, dr)
+    r = 0.5 * (bins[:-1] + bins[1:])
+    shell = 4.0 * math.pi * r * r * dr
+    hist = np.zeros(len(r), dtype=float)
+    weighted_pair_count = 0.0
+    for frame in frames:
+        symbols = list(frame["symbols"])
+        frac = np.asarray(frame["frac"], dtype=float)
+        cell = np.asarray(frame["cell"], dtype=float)
+        volume = abs(float(np.linalg.det(cell)))
+        if volume <= 0.0:
+            raise ValueError("PDF guard requires positive cell volume.")
+        atom_weights = np.asarray([float(weights.get(sym, 1.0)) if weights else 1.0 for sym in symbols], dtype=float)
+        frame_hist = np.zeros(len(r), dtype=float)
+        frame_weight_total = 0.0
+        for i in range(len(symbols)):
+            for j in range(i + 1, len(symbols)):
+                dist = float(np.linalg.norm(pbc_delta(frac[i], frac[j]) @ cell))
+                if dist >= rmax:
+                    continue
+                pair_weight = float(atom_weights[i] * atom_weights[j])
+                frame_hist[int(dist / dr)] += 2.0 * pair_weight
+                frame_weight_total += 2.0 * pair_weight
+        number_density = len(symbols) / volume
+        norm = max(frame_weight_total, 1.0) * number_density * shell
+        norm[norm == 0.0] = 1.0
+        hist += frame_hist / norm
+        weighted_pair_count += frame_weight_total
+    g = hist / max(len(frames), 1)
+    return r, g, {
+        "n_frames": len(frames),
+        "species_order": species_order,
+        "weights": weights or "unit",
+        "mean_weighted_pair_count": weighted_pair_count / max(len(frames), 1),
+    }
+
+
+def write_total_pdf_csv(path: Path, r: np.ndarray, g: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["r_A", "g_total_weighted"])
+        for radius, value in zip(r, g):
+            writer.writerow([float(radius), float(value)])
+
+
+def select_frame_window(
+    frames: list[dict[str, Any]],
+    *,
+    start: int,
+    stop: int | None,
+    stride: int,
+) -> list[dict[str, Any]]:
+    n_frames = len(frames)
+    raw_stop = n_frames if stop is None else stop
+    start_idx = start if start >= 0 else n_frames + start
+    stop_idx = raw_stop if raw_stop >= 0 else n_frames + raw_stop
+    selected = frames[max(start_idx, 0) : min(stop_idx, n_frames) : max(stride, 1)]
+    if not selected:
+        raise ValueError(f"No frames selected from {n_frames} available frames.")
+    return selected
+
+
+def frames_from_generic_trajectory(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if args.command == "cp2k-xyz":
+        cell = parse_cell_matrix(args.cell)
+        if args.cell_vector:
+            vectors = [parse_cell_vector(item) for item in args.cell_vector]
+            if len(vectors) != 3:
+                raise ValueError("--cell-vector must be supplied exactly three times for A, B, C.")
+            cell = np.asarray(vectors, dtype=float)
+        if cell is None:
+            cell = cell_from_cp2k_input(args.inp)
+        frames = read_cp2k_xyz_frames(args.xyz, cell)
+        return frames, {
+            "engine": "cp2k-xyz",
+            "trajectory": str(args.xyz.resolve()),
+            "inp": str(args.inp.resolve()) if args.inp else None,
+        }
+    if args.command == "lammps-dump":
+        type_elements = parse_type_elements(args.type_elements)
+        frames = read_lammps_dump_frames(args.dump, type_elements)
+        return frames, {
+            "engine": "lammps-dump",
+            "trajectory": str(args.dump.resolve()),
+            "type_elements": {str(key): value for key, value in type_elements.items()},
+        }
+    raise ValueError(f"Unsupported generic trajectory engine: {args.command}")
 
 
 def _window_values(r: np.ndarray, g: np.ndarray, r_min: float, r_max: float | None) -> np.ndarray:
@@ -1070,6 +1351,240 @@ def combined_phase_order_label(pdf_label: str, diffraction_label: str) -> tuple[
     return "long-range-order-retained-or-uncertain", notes
 
 
+def generic_trajectory_guard(args: argparse.Namespace) -> dict[str, Any]:
+    """Run the PDF plus finite-cell Debye-XRD guard for CP2K XYZ or LAMMPS dump."""
+    outdir = args.outdir.resolve()
+    early_dir = outdir / "early_pdf"
+    tail_dir = outdir / "tail_pdf"
+    early_xrd_dir = outdir / "early_xrd"
+    tail_xrd_dir = outdir / "tail_xrd"
+    frames, source_meta = frames_from_generic_trajectory(args)
+    explicit_order = parse_csv_list(args.species_order)
+    species_order = _species_order_for_frames(frames, explicit_order)
+    weights = parse_weights(args.weights) if args.weights else None
+    xrd_weights = parse_weights(args.xrd_weights) if args.xrd_weights else None
+    early_frames = select_frame_window(
+        frames,
+        start=args.early_start_frame,
+        stop=args.early_stop_frame,
+        stride=args.stride,
+    )
+    tail_frames = select_frame_window(
+        frames,
+        start=args.tail_start_frame,
+        stop=args.tail_stop_frame,
+        stride=args.stride,
+    )
+    r_early, g_early, early_pdf_meta = compute_total_pdf_from_frames(
+        early_frames,
+        species_order=species_order,
+        rmax=args.rmax,
+        dr=args.dr,
+        weights=weights,
+    )
+    r_tail, g_tail, tail_pdf_meta = compute_total_pdf_from_frames(
+        tail_frames,
+        species_order=species_order,
+        rmax=args.rmax,
+        dr=args.dr,
+        weights=weights,
+    )
+    early_dir.mkdir(parents=True, exist_ok=True)
+    tail_dir.mkdir(parents=True, exist_ok=True)
+    early_pdf_csv = early_dir / "early_total_pdf.csv"
+    tail_pdf_csv = tail_dir / "tail_total_pdf.csv"
+    write_total_pdf_csv(early_pdf_csv, r_early, g_early)
+    write_total_pdf_csv(tail_pdf_csv, r_tail, g_tail)
+    early_metrics = order_metrics(r_early, g_early, r_min=args.long_r_min, r_max=args.long_r_max)
+    tail_metrics = order_metrics(r_tail, g_tail, r_min=args.long_r_min, r_max=args.long_r_max)
+    label, notes, ratios = compare_order_metrics(
+        early_metrics,
+        tail_metrics,
+        max_tail_order_ratio=args.max_tail_order_ratio,
+        signal_name="PDF",
+    )
+    xrd_two_theta, xrd_q = xrd_two_theta_q(
+        wavelength_a=args.xrd_wavelength_a,
+        two_theta_min_deg=args.xrd_two_theta_min,
+        two_theta_max_deg=args.xrd_two_theta_max,
+        two_theta_step_deg=args.xrd_two_theta_step,
+    )
+    xrd_form_factors, xrd_scattering_meta = diffraction_form_factors(
+        species_order,
+        xrd_q,
+        scattering=args.xrd_scattering,
+        custom=xrd_weights,
+    )
+    early_two_theta, early_intensity = simulated_powder_xrd_from_frames(
+        early_frames,
+        species_order=species_order,
+        form_factors=xrd_form_factors,
+        wavelength_a=args.xrd_wavelength_a,
+        two_theta_min_deg=args.xrd_two_theta_min,
+        two_theta_max_deg=args.xrd_two_theta_max,
+        two_theta_step_deg=args.xrd_two_theta_step,
+        coherence_radius_a=args.xrd_coherence_radius_a,
+        smooth_sigma_deg=args.xrd_smooth_sigma_deg,
+    )
+    tail_two_theta, tail_intensity = simulated_powder_xrd_from_frames(
+        tail_frames,
+        species_order=species_order,
+        form_factors=xrd_form_factors,
+        wavelength_a=args.xrd_wavelength_a,
+        two_theta_min_deg=args.xrd_two_theta_min,
+        two_theta_max_deg=args.xrd_two_theta_max,
+        two_theta_step_deg=args.xrd_two_theta_step,
+        coherence_radius_a=args.xrd_coherence_radius_a,
+        smooth_sigma_deg=args.xrd_smooth_sigma_deg,
+    )
+    early_xrd_dir.mkdir(parents=True, exist_ok=True)
+    tail_xrd_dir.mkdir(parents=True, exist_ok=True)
+    early_xrd_csv = early_xrd_dir / "early_powder_xrd.csv"
+    tail_xrd_csv = tail_xrd_dir / "tail_powder_xrd.csv"
+    write_xrd_csv(early_xrd_csv, early_two_theta, early_intensity)
+    write_xrd_csv(tail_xrd_csv, tail_two_theta, tail_intensity)
+    xrd_overlay_png = write_xrd_overlay_plot(
+        outdir / "simulated_powder_xrd_early_tail_overlay.png",
+        xrd_two_theta,
+        early_intensity,
+        tail_intensity,
+        title="Finite-cell Debye diffraction early vs tail",
+    )
+    early_diffraction_metrics = diffraction_metrics(early_two_theta, early_intensity)
+    tail_diffraction_metrics = diffraction_metrics(tail_two_theta, tail_intensity)
+    diffraction_label, diffraction_notes, diffraction_ratios = compare_order_metrics(
+        early_diffraction_metrics,
+        tail_diffraction_metrics,
+        max_tail_order_ratio=args.max_tail_bragg_ratio,
+        signal_name="finite-cell Debye diffraction",
+    )
+    combined_label, combined_notes = combined_phase_order_label(label, diffraction_label)
+    bragg_reference_summary: dict[str, Any] | None = None
+    workflow_phase_label = combined_label
+    workflow_guard_role = "secondary_pdf_plus_finite_cell_debye_guard"
+    if args.xrd_reference:
+        reference_frames, reference_metadata = _load_reference_frames(args.xrd_reference, species_order=species_order)
+        bragg_reference_summary = bragg_reference_guard(
+            tail_frames[-1],
+            target_label="Tail final frame",
+            reference_frames=reference_frames,
+            reference_metadata=reference_metadata,
+            species_order=species_order,
+            outdir=outdir / "bragg_xrd_reference_guard",
+            xrd_scattering=args.xrd_scattering,
+            xrd_weights=xrd_weights,
+            wavelength_a=args.xrd_wavelength_a,
+            two_theta_min_deg=args.xrd_two_theta_min,
+            two_theta_max_deg=args.xrd_two_theta_max,
+            two_theta_step_deg=args.xrd_two_theta_step,
+            coherence_radius_a=args.xrd_coherence_radius_a,
+            smooth_sigma_deg=args.xrd_smooth_sigma_deg,
+            min_reference_peak_height=args.xrd_min_reference_peak_height,
+            peak_window_deg=args.xrd_peak_window_deg,
+            retained_intensity_min=args.xrd_retained_intensity_min,
+            solid_corr_min=args.xrd_solid_corr_min,
+            solid_peak_fraction_min=args.xrd_solid_peak_fraction_min,
+            solid_weighted_intensity_min=args.xrd_solid_weighted_intensity_min,
+            liquid_corr_max=args.xrd_liquid_corr_max,
+            liquid_peak_fraction_max=args.xrd_liquid_peak_fraction_max,
+            liquid_weighted_intensity_max=args.xrd_liquid_weighted_intensity_max,
+        )
+        workflow_guard_role = "primary_bragg_reference_xrd_with_secondary_pdf_debye_guard"
+        if bragg_reference_summary["phase_order_label"] == "bragg-order-lost":
+            workflow_phase_label = "long-range-order-lost"
+        elif bragg_reference_summary["phase_order_label"] == "bragg-like-solid-warning":
+            workflow_phase_label = "long-range-order-retained-or-uncertain"
+    summary = {
+        "schema": SCHEMA_PHASE_ORDER_GUARD,
+        "engine": source_meta["engine"],
+        "source": source_meta,
+        "phase_order_label": workflow_phase_label,
+        "primary_guard_role": workflow_guard_role,
+        "secondary_pdf_debye_order_label": combined_label,
+        "pdf_order_label": label,
+        "diffraction_order_label": diffraction_label,
+        "species_order": species_order,
+        "n_source_frames": len(frames),
+        "early_frames": {
+            "start": args.early_start_frame,
+            "stop": args.early_stop_frame,
+            "n_selected": len(early_frames),
+            "source_indices": [int(frame["index"]) for frame in early_frames[:10]],
+        },
+        "tail_frames": {
+            "start": args.tail_start_frame,
+            "stop": args.tail_stop_frame,
+            "n_selected": len(tail_frames),
+            "source_indices": [int(frame["index"]) for frame in tail_frames[:10]],
+        },
+        "long_range_window_A": {"min": args.long_r_min, "max": args.long_r_max},
+        "max_tail_order_ratio": args.max_tail_order_ratio,
+        "early_order_metrics": early_metrics,
+        "tail_order_metrics": tail_metrics,
+        "ratios": ratios,
+        "diffraction": {
+            "method": "finite_cell_debye_total_scattering",
+            "method_note": (
+                "Early/tail MD diffraction is computed with a finite-cell Debye scattering approximation. "
+                "Use Bragg hkl/structure-factor powder XRD for crystalline CIF/POSCAR references."
+            ),
+            "radiation": "Cu K-alpha" if abs(args.xrd_wavelength_a - 1.5406) < 1.0e-4 else "custom",
+            "wavelength_A": args.xrd_wavelength_a,
+            "two_theta_range_deg": {
+                "min": args.xrd_two_theta_min,
+                "max": args.xrd_two_theta_max,
+                "step": args.xrd_two_theta_step,
+            },
+            "coherence_radius_A": args.xrd_coherence_radius_a,
+            "smooth_sigma_deg": args.xrd_smooth_sigma_deg,
+            "max_tail_bragg_ratio": args.max_tail_bragg_ratio,
+            "scattering": xrd_scattering_meta,
+            "early_order_metrics": early_diffraction_metrics,
+            "tail_order_metrics": tail_diffraction_metrics,
+            "ratios": diffraction_ratios,
+            "outputs": {
+                "early_powder_xrd_csv": str(early_xrd_csv.resolve()),
+                "tail_powder_xrd_csv": str(tail_xrd_csv.resolve()),
+                "overlay_plot": xrd_overlay_png,
+                "overlay_png": xrd_overlay_png if xrd_overlay_png and xrd_overlay_png.endswith(".png") else None,
+                "overlay_svg": xrd_overlay_png if xrd_overlay_png and xrd_overlay_png.endswith(".svg") else None,
+            },
+        },
+        "pdf_outputs": {
+            "early_total_pdf_csv": str(early_pdf_csv.resolve()),
+            "tail_total_pdf_csv": str(tail_pdf_csv.resolve()),
+            "early_pdf_metadata": early_pdf_meta,
+            "tail_pdf_metadata": tail_pdf_meta,
+        },
+        "bragg_reference_guard": bragg_reference_summary,
+        "notes": notes
+        + diffraction_notes
+        + combined_notes
+        + (
+            ["Crystalline Bragg reference XRD was supplied and used as the primary long-range-order guard."]
+            if bragg_reference_summary
+            else [
+                "No crystalline Bragg reference XRD was supplied; the command only used PDF plus finite-cell Debye secondary guards."
+            ]
+        ),
+    }
+    outdir.mkdir(parents=True, exist_ok=True)
+    _write_json(outdir / "phase_order_guard_summary.json", summary)
+    _write_csv(
+        outdir / "phase_order_guard_metrics.csv",
+        [
+            {"window": "early", **early_metrics},
+            {"window": "tail", **tail_metrics},
+            {"window": "tail_over_early", **ratios},
+            {"window": "early_diffraction", **early_diffraction_metrics},
+            {"window": "tail_diffraction", **tail_diffraction_metrics},
+            {"window": "diffraction_tail_over_early", **diffraction_ratios},
+        ],
+    )
+    print(json.dumps(summary, indent=2))
+    return summary
+
+
 def vasp_xdatcar_guard(args: argparse.Namespace) -> dict[str, Any]:
     outdir = args.outdir.resolve()
     early_dir = outdir / "early_pdf"
@@ -1387,8 +1902,56 @@ def add_xrd_reference_guard_arguments(parser: argparse.ArgumentParser, *, refere
     parser.add_argument("--xrd-liquid-weighted-intensity-max", type=float, default=0.25)
 
 
+def add_generic_guard_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--outdir", type=Path, default=Path("phase_order_guard"))
+    parser.add_argument("--species-order", help="Comma-separated species order, e.g. K,Cl.")
+    parser.add_argument("--early-start-frame", type=int, default=0)
+    parser.add_argument("--early-stop-frame", type=int, default=50)
+    parser.add_argument("--tail-start-frame", type=int, required=True)
+    parser.add_argument("--tail-stop-frame", type=int)
+    parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument("--rmax", type=float, default=9.0)
+    parser.add_argument("--dr", type=float, default=0.04)
+    parser.add_argument("--long-r-min", type=float, default=4.5)
+    parser.add_argument("--long-r-max", type=float)
+    parser.add_argument(
+        "--max-tail-order-ratio",
+        type=float,
+        default=0.75,
+        help="Tail/early ratio threshold for long-range-order damping. Two of std, peak-to-peak, p95 must pass.",
+    )
+    parser.add_argument(
+        "--weights",
+        nargs="*",
+        default=[],
+        help="Optional total g(r) weights like U=92 Cl=17. Defaults to unit weights.",
+    )
+    parser.add_argument(
+        "--xrd-scattering",
+        choices=("xraydb", "atomic-number", "custom"),
+        default="xraydb",
+        help="Scattering factors for simulated powder XRD. Default uses xraydb f0(q) with atomic-number fallback.",
+    )
+    parser.add_argument(
+        "--xrd-weights",
+        nargs="*",
+        default=[],
+        help="Optional custom constant XRD weights like U=92 Cl=17 when --xrd-scattering custom is used.",
+    )
+    parser.add_argument("--xrd-wavelength-a", type=float, default=1.5406, help="Default is Cu K-alpha.")
+    parser.add_argument("--xrd-two-theta-min", type=float, default=10.0)
+    parser.add_argument("--xrd-two-theta-max", type=float, default=90.0)
+    parser.add_argument("--xrd-two-theta-step", type=float, default=0.05)
+    parser.add_argument("--xrd-coherence-radius-a", type=float, default=18.0)
+    parser.add_argument("--xrd-smooth-sigma-deg", type=float, default=0.12)
+    parser.add_argument("--max-tail-bragg-ratio", type=float, default=0.65)
+    add_xrd_reference_guard_arguments(parser, reference_flag="--xrd-reference")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Compare early/tail MD PDFs as a long-range-order liquid/solid guard.")
+    parser = argparse.ArgumentParser(
+        description="Compare early/tail MD PDFs and finite-cell Debye XRD as a long-range-order liquid/solid guard."
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     vasp = sub.add_parser("vasp-xdatcar", help="Run PDF order guard from a VASP POSCAR/XDATCAR pair.")
     vasp.add_argument("--poscar", type=Path, default=Path("POSCAR"))
@@ -1456,6 +2019,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Tail/early ratio threshold for simulated-diffraction Bragg peak damping.",
     )
     add_xrd_reference_guard_arguments(vasp, reference_flag="--xrd-reference")
+    cp2k = sub.add_parser("cp2k-xyz", help="Run PDF/XRD order guard from a CP2K multi-frame *-pos.xyz trajectory.")
+    cp2k.add_argument("--xyz", type=Path, required=True, help="CP2K multi-frame *-pos.xyz trajectory.")
+    cp2k.add_argument("--inp", type=Path, help="CP2K input/restart used to read &CELL.")
+    cp2k.add_argument("--cell", help="Explicit cell matrix: 'a,b,c;d,e,f;g,h,i'.")
+    cp2k.add_argument(
+        "--cell-vector",
+        action="append",
+        default=[],
+        help="Cell vector in Angstrom; repeat exactly three times for A, B, C.",
+    )
+    add_generic_guard_arguments(cp2k)
+    lammps = sub.add_parser("lammps-dump", help="Run PDF/XRD order guard from a LAMMPS dump trajectory.")
+    lammps.add_argument("--dump", type=Path, required=True, help="LAMMPS dump trajectory.")
+    lammps.add_argument(
+        "--type-elements",
+        action="append",
+        required=True,
+        help="LAMMPS type map, e.g. 1=K. Repeat for each atom type.",
+    )
+    add_generic_guard_arguments(lammps)
     bragg = sub.add_parser(
         "bragg-frame",
         help="Compare one POSCAR/CONTCAR/CIF frame against crystalline Bragg XRD references.",
@@ -1496,6 +2079,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
     args = parser.parse_args(argv)
     if args.command == "vasp-xdatcar":
         return vasp_xdatcar_guard(args)
+    if args.command in {"cp2k-xyz", "lammps-dump"}:
+        return generic_trajectory_guard(args)
     if args.command == "bragg-frame":
         return bragg_frame_guard(args)
     return None
