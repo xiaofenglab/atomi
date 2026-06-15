@@ -89,6 +89,7 @@ Atomi currently includes command families for:
 - Defect-chemistry motif indexing, staged workflow scaffolding, dense Gibbs-surface fitting/sampling, and optional runtime checks.
 - Graph-labelled dataset export for GNN/MLIP active learning from Atomi CETrainingSet records.
 - Offline Materials Project cache normalization for thermo-prior and line-compound workflows.
+- GNN/graph-prior backend status checks for AERIS, CHGNet, and MatGL screening workflows.
 - Digital-twin workflows for scattering and spectroscopy comparisons with simulated structures.
 - Thermodynamic, aqueous database bridge, elasticity, materials-property, and multiphysics handoff utilities.
 - HPC environment discovery and local configuration helpers.

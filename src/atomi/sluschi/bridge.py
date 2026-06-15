@@ -2302,14 +2302,14 @@ def _render_mds_run_script(args: argparse.Namespace, sluschi_src: Path, label: s
 
 
 def _render_mds_sbatch(args: argparse.Namespace) -> str:
+    partition_line = f"#SBATCH --partition={args.partition}\n" if args.partition else ""
     return textwrap.dedent(
         f"""\
         #!/bin/bash
         #SBATCH --job-name={args.job_name}
         #SBATCH --output={args.job_name}_%j.out
         #SBATCH --error={args.job_name}_%j.err
-        #SBATCH --partition={args.partition}
-        #SBATCH --nodes={args.nodes}
+        {partition_line}#SBATCH --nodes={args.nodes}
         #SBATCH --ntasks={args.ntasks}
         #SBATCH --cpus-per-task={args.cpus_per_task}
         #SBATCH --time={args.walltime}
@@ -3400,7 +3400,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mds.add_argument("--submit", action="store_true", help="Submit the generated sbatch immediately.")
     mds.add_argument("--job-name", default="sluschi_mds_entropy")
-    mds.add_argument("--partition", default="single")
+    mds.add_argument("--partition", default="", help="Optional SLURM partition. Omit by default so cluster policy can select the queue.")
     mds.add_argument("--nodes", type=int, default=1)
     mds.add_argument("--ntasks", type=int, default=1)
     mds.add_argument("--cpus-per-task", type=int, default=4)

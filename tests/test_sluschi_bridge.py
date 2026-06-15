@@ -795,7 +795,8 @@ def test_sluschi_mds_entropy_run_prepares_legacy_block_layout(tmp_path: Path):
     assert "E_1_c = 0;" in (work / "entropy" / "onephase_v6.m").read_text(encoding="utf-8")
     assert "if ~exist('R_cut','var')" in (work / "entropy" / "pdf_v6.m").read_text(encoding="utf-8")
     assert "UC2" in (work / "run_mds_entropy.sh").read_text(encoding="utf-8")
-    assert (work / "submit_mds_entropy.sbatch").exists()
+    sbatch_text = (work / "submit_mds_entropy.sbatch").read_text(encoding="utf-8")
+    assert "#SBATCH --partition=" not in sbatch_text
 
 
 def test_sluschi_mds_entropy_run_rejects_short_svib_window(tmp_path: Path):

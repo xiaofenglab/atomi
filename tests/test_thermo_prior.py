@@ -271,3 +271,21 @@ def test_thermo_prior_console_main_returns_none(tmp_path: Path, monkeypatch, cap
     assert thermo_prior_console_main(["aeris-status"]) is None
     printed = json.loads(capsys.readouterr().out)
     assert printed["ready"] is False
+
+
+def test_gnn_status_reports_optional_backends(tmp_path: Path, monkeypatch, capsys):
+    aeris_root = tmp_path / "AERIS"
+    aeris_root.mkdir()
+    (aeris_root / "aeris.py").write_text("# fake AERIS checkout\n", encoding="utf-8")
+    monkeypatch.setenv("ATOMI_AERIS_ROOT", str(aeris_root))
+    monkeypatch.setenv("ATOMI_AERIS_MODEL", str(aeris_root / "model" / "aeris_full_struct.pt"))
+
+    status = thermo_prior_main(["gnn-status"])
+    printed = json.loads(capsys.readouterr().out)
+
+    assert status is not None
+    assert printed["schema"] == "atomi.thermo_prior.gnn_status.v1"
+    assert printed["backends"]["aeris"]["ready"] is False
+    assert "chgnet" in printed["backends"]
+    assert "matgl" in printed["backends"]
+    assert "fine-tune" in printed["recommendation"]

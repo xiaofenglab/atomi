@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -79,6 +80,51 @@ def _aeris_device_default() -> str:
     )
 
 
+
+def _optional_module_status(module_name: str) -> dict[str, Any]:
+    spec = importlib.util.find_spec(module_name)
+    return {
+        "module": module_name,
+        "installed": spec is not None,
+        "origin": getattr(spec, "origin", None) if spec is not None else None,
+    }
+
+
+def _gnn_status(args: argparse.Namespace) -> dict[str, Any]:
+    if args.aeris_root and args.aeris_model:
+        aeris = AerisAdapter(AerisConfig(root=args.aeris_root, model=args.aeris_model, device=args.aeris_device)).status()
+    else:
+        aeris = {
+            "root": str(args.aeris_root) if args.aeris_root else None,
+            "model": str(args.aeris_model) if args.aeris_model else None,
+            "root_exists": bool(args.aeris_root and args.aeris_root.exists()),
+            "aeris_py_exists": False,
+            "model_exists": bool(args.aeris_model and args.aeris_model.exists()),
+            "ready": False,
+            "missing_configuration": "Set ATOMI_AERIS_ROOT and ATOMI_AERIS_MODEL or configure aeris in the private KIT JSON.",
+        }
+    backends = {
+        "aeris": {**aeris, "role": "local project checkpoint for formation-energy prior"},
+        "chgnet": {
+            **_optional_module_status("chgnet"),
+            "role": "public pretrained universal graph/MLIP prior; screen only unless fine-tuned/validated for target chemistry",
+        },
+        "matgl": {
+            **_optional_module_status("matgl"),
+            "role": "public pretrained M3GNet/MatGL prior; screen only unless fine-tuned/validated for target chemistry",
+        },
+    }
+    ready = [name for name, status in backends.items() if status.get("ready") or status.get("installed")]
+    return {
+        "schema": "atomi.thermo_prior.gnn_status.v1",
+        "ready_backends": ready,
+        "backends": backends,
+        "recommendation": (
+            "Use AERIS when model_exists=true. Use CHGNet/MatGL only as screening priors; "
+            "for uranium chlorides, build graph JSONL from relaxed POSCAR/CONTCAR and fine-tune/validate against local DFT before CALPHAD use."
+        ),
+    }
+
 def _require_path(value: Path | None, *, flag: str, env_name: str) -> Path:
     if value is None:
         raise ValueError(
@@ -135,6 +181,11 @@ def build_parser() -> argparse.ArgumentParser:
     aeris.add_argument("--aeris-root", type=Path, default=_aeris_path_default("root", "ATOMI_AERIS_ROOT"))
     aeris.add_argument("--aeris-model", type=Path, default=_aeris_path_default("model", "ATOMI_AERIS_MODEL"))
     aeris.add_argument("--aeris-device", default=_aeris_device_default())
+
+    gnn = sub.add_parser("gnn-status", help="Check optional GNN/graph-prior prediction backends.")
+    gnn.add_argument("--aeris-root", type=Path, default=_aeris_path_default("root", "ATOMI_AERIS_ROOT"))
+    gnn.add_argument("--aeris-model", type=Path, default=_aeris_path_default("model", "ATOMI_AERIS_MODEL"))
+    gnn.add_argument("--aeris-device", default=_aeris_device_default())
 
     return parser
 
@@ -236,6 +287,10 @@ def main(argv: list[str] | None = None) -> dict[str, Any] | None:
         model = _require_path(args.aeris_model, flag="--aeris-model", env_name="ATOMI_AERIS_MODEL")
         adapter = AerisAdapter(AerisConfig(root=root, model=model, device=args.aeris_device))
         status = adapter.status()
+        print(json.dumps(status, indent=2, sort_keys=True))
+        return status
+    if args.command == "gnn-status":
+        status = _gnn_status(args)
         print(json.dumps(status, indent=2, sort_keys=True))
         return status
     return None
