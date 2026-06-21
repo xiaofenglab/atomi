@@ -184,6 +184,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         pdfxrd_manual.add_argument("pdfxrd_manual_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("pdf-fit-bridge", "pdf_fit_bridge", "pdf-fit-doctor", "pdf_fit_doctor"):
+        pdf_fit_bridge = subparsers.add_parser(
+            command_name,
+            help="Bridge Atomi to DiffPy/PDFgui-style and RMCProfile-style PDF fitting workflows.",
+        )
+        pdf_fit_bridge.add_argument("pdf_fit_bridge_args", nargs=argparse.REMAINDER)
+
     for command_name in (
         "pdfxrd-run",
         "pdfxrd_run",
@@ -1015,6 +1022,11 @@ def main(argv: list[str] | None = None) -> None:
 
         pdfxrd_manual_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("pdf-fit-bridge", "pdf_fit_bridge", "pdf-fit-doctor", "pdf_fit_doctor"):
+        from atomi.md.pdf_fit_bridge import main as pdf_fit_bridge_main
+
+        pdf_fit_bridge_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] in (
         "pdfxrd-run",
         "pdfxrd_run",
@@ -1647,6 +1659,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.md.pdfxrd_manual import main as pdfxrd_manual_main
 
         pdfxrd_manual_main(args.pdfxrd_manual_args)
+        return
+
+    if args.subcommand in ("pdf-fit-bridge", "pdf_fit_bridge", "pdf-fit-doctor", "pdf_fit_doctor"):
+        from atomi.md.pdf_fit_bridge import main as pdf_fit_bridge_main
+
+        pdf_fit_bridge_main(args.pdf_fit_bridge_args)
         return
     if args.subcommand in (
         "pdfxrd-run",
