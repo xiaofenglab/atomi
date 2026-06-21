@@ -132,7 +132,8 @@ def main() -> None:
 
     generator = PDFGenerator("G")
     structure = None
-    vasp_like = structure_path.name.upper() in {"POSCAR", "CONTCAR"} or structure_path.suffix.upper() in {
+    structure_name = structure_path.name.upper()
+    vasp_like = "POSCAR" in structure_name or "CONTCAR" in structure_name or structure_path.suffix.upper() in {
         ".POSCAR",
         ".CONTCAR",
     }
