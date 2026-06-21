@@ -141,7 +141,11 @@ def main() -> None:
                 "DiffPy could not parse the structure directly. Install ASE or provide CIF/PDFfit/XCFG input."
             ) from exc
         converted = structure_path.with_suffix(structure_path.suffix + ".atomi_tmp.cif")
-        write(str(converted), read(str(structure_path)))
+        try:
+            atoms = read(str(structure_path), format="vasp")
+        except Exception:
+            atoms = read(str(structure_path))
+        write(str(converted), atoms, format="cif")
         structure = load_structure(str(converted))
     generator.setStructure(structure)
     generator.setQmax(args.qmax)
