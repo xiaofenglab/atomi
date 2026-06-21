@@ -131,9 +131,17 @@ def main() -> None:
     contribution.setCalculationRange(xmin=args.rmin, xmax=args.rmax, dx=None)
 
     generator = PDFGenerator("G")
-    try:
-        structure = load_structure(str(structure_path))
-    except StructureFormatError:
+    structure = None
+    vasp_like = structure_path.name.upper() in {"POSCAR", "CONTCAR"} or structure_path.suffix.upper() in {
+        ".POSCAR",
+        ".CONTCAR",
+    }
+    if not vasp_like:
+        try:
+            structure = load_structure(str(structure_path))
+        except StructureFormatError:
+            structure = None
+    if structure is None:
         try:
             from ase.io import read, write
         except Exception as exc:
