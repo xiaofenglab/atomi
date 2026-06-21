@@ -110,7 +110,7 @@ def main() -> None:
     try:
         from diffpy.structure import loadStructure
         from diffpy.srfit.fitbase import FitRecipe, FitResults
-        from diffpy.srfit.pdf import PDFContribution, PDFGenerator, PDFParser
+        from diffpy.srfit.pdf import PDFContribution, PDFGenerator
         from scipy.optimize import least_squares
     except Exception as exc:
         raise SystemExit(
@@ -125,11 +125,8 @@ def main() -> None:
     if not data_path.exists():
         raise SystemExit(f"Experimental G(r) data not found: {data_path}")
 
-    parser_obj = PDFParser()
-    parser_obj.parseFile(str(data_path))
-
     contribution = PDFContribution("pdf")
-    contribution.loadData(parser_obj)
+    contribution.loadData(str(data_path))
     contribution.setCalculationRange(xmin=args.rmin, xmax=args.rmax, dx=None)
 
     generator = PDFGenerator("G")
