@@ -159,8 +159,11 @@ def main() -> None:
     recipe.addVar(generator.qbroad, args.qbroad, name="qbroad")
     recipe.addVar(generator.delta2, args.delta2, name="delta2")
 
-    result = least_squares(recipe.residual, recipe.values, xtol=1e-8, ftol=1e-8, gtol=1e-8)
-    recipe.setValues(result.x)
+    result = least_squares(recipe.residual, recipe.getValues(), xtol=1e-8, ftol=1e-8, gtol=1e-8)
+    try:
+        recipe.setValues(result.x)
+    except AttributeError:
+        recipe._applyValues(result.x)
     FitResults(recipe).printResults()
 
     r = contribution.profile.x
