@@ -108,14 +108,15 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        from diffpy.structure import loadStructure
+        from diffpy.structure import load_structure
+        from diffpy.structure.structureerrors import StructureFormatError
         from diffpy.srfit.fitbase import FitRecipe, FitResults
         from diffpy.srfit.pdf import PDFContribution, PDFGenerator
         from scipy.optimize import least_squares
     except Exception as exc:
         raise SystemExit(
             "Missing DiffPy/scipy backend. Install in the active env with: "
-            "python -m pip install diffpy.structure diffpy.srfit diffpy.pdffit2 scipy"
+            "python -m pip install diffpy.structure diffpy.srfit diffpy.pdffit2 diffpy.srreal scipy"
         ) from exc
 
     structure_path = Path(args.structure)
@@ -130,8 +131,20 @@ def main() -> None:
     contribution.setCalculationRange(xmin=args.rmin, xmax=args.rmax, dx=None)
 
     generator = PDFGenerator("G")
-    generator.setStructure(loadStructure(str(structure_path)))
-    generator.qmax.value = args.qmax
+    try:
+        structure = load_structure(str(structure_path))
+    except StructureFormatError:
+        try:
+            from ase.io import read, write
+        except Exception as exc:
+            raise SystemExit(
+                "DiffPy could not parse the structure directly. Install ASE or provide CIF/PDFfit/XCFG input."
+            ) from exc
+        converted = structure_path.with_suffix(structure_path.suffix + ".atomi_tmp.cif")
+        write(str(converted), read(str(structure_path)))
+        structure = load_structure(str(converted))
+    generator.setStructure(structure)
+    generator.setQmax(args.qmax)
     contribution.addProfileGenerator(generator)
     contribution.setEquation("scale * G")
 
@@ -228,6 +241,7 @@ def build_status(python: str | None = None) -> dict[str, Any]:
             "diffpy.structure": _python_import_status("diffpy.structure", python),
             "diffpy.srfit": _python_import_status("diffpy.srfit", python),
             "diffpy.pdffit2": _python_import_status("diffpy.pdffit2", python),
+            "diffpy.srreal": _python_import_status("diffpy.srreal", python),
         },
         "executables": {
             "pdfgui": _executable_status(["pdfgui", "PDFgui"], "ATOMI_PDFGUI_EXE"),
@@ -373,7 +387,8 @@ def print_install_plan(args: argparse.Namespace) -> None:
     payload = {
         "diffpy_core": {
             "purpose": "Small-box PDF fitting and PDFgui-style scripted refinement.",
-            "command": f"{env_python} -m pip install diffpy.structure diffpy.srfit diffpy.pdffit2 scipy",
+            "command": f"{env_python} -m pip install diffpy.structure diffpy.srfit diffpy.pdffit2 diffpy.srreal scipy",
+            "note": "diffpy.srreal is required by PDFGenerator. If pip source builds fail, install Boost and set BOOST_PATH, or use the micromamba DiffPy PDF environment.",
         },
         "pdfgui": {
             "purpose": "GUI small-box refinement front-end.",
