@@ -44,6 +44,18 @@ class CommandSpec:
 
 COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec(
+        aliases=("turbomole-define", "turbomole_define", "tm-define"),
+        target="atomi.qchem.turbomole:main",
+        category="qchem",
+        help="Prepare blank-line-safe Turbomole define input and run scripts.",
+    ),
+    CommandSpec(
+        aliases=("molcas-cluster", "molcas_cluster", "openmolcas-cluster"),
+        target="atomi.qchem.molcas:main",
+        category="qchem",
+        help="Prepare OpenMolcas embedded-cluster inputs from POSCAR/CONTCAR.",
+    ),
+    CommandSpec(
         aliases=("aq-thermo-bridge", "aq_thermo_bridge", "thermofun-bridge", "thermohub-bridge"),
         target="atomi.aqueous.thermohub_bridge:main",
         category="aqueous",
