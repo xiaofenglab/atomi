@@ -80,6 +80,12 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Export ASE structures or CETrainingSet records as graph JSONL for GNN/MLIP labels.",
     ),
     CommandSpec(
+        aliases=("local-structure", "local_structure", "structure-cluster", "local-cluster", "atomi-local-structure"),
+        target="atomi.local_structure:main",
+        category="structure",
+        help="Extract and compare ASE/Pymatgen local clusters from VASP, CP2K, and LAMMPS structures.",
+    ),
+    CommandSpec(
         aliases=("thermo-prior", "thermo_prior"),
         target="atomi.thermo_prior.cli:main",
         category="thermo_prior",

@@ -84,7 +84,11 @@ mode4 = [
 elastic-viz = []
 
 [project.scripts]
-atomi = "atomi.cli.main:main"
+atomi = "atomi.cli.bootstrap:main"
+local-structure = "atomi.local_structure:main"
+local-cluster = "atomi.local_structure:main"
+structure-cluster = "atomi.local_structure:main"
+atomi-local-structure = "atomi.local_structure:main"
 plotvasp = "atomi.cli.compat:plotvasp"
 plotvasp4 = "atomi.cli.compat:plotvasp4"
 plotlammps = "atomi.cli.compat:plotlammps"
