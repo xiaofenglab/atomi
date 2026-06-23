@@ -1999,6 +1999,30 @@ def _format_sluschi_float(value: float) -> str:
     return f"{value:.12g}"
 
 
+def _safe_sluschi_mds_label(label: str, *, temperature_k: float) -> tuple[str, bool]:
+    """Return a legacy SLUSCHI/MATLAB-safe filename label.
+
+    Upstream MDS helpers infer temperature from underscore-delimited filename
+    labels, and labels containing tokens such as ``T300`` can make downstream
+    MATLAB parsing drift into malformed array dimensions.  Keep the generated
+    label lowercase ASCII with a numeric temperature token in position 2.
+    """
+    raw = (label or f"s_{int(round(temperature_k))}").strip()
+    normalized = re.sub(r"[^A-Za-z0-9_]+", "_", raw)
+    normalized = re.sub(r"_+", "_", normalized).strip("_").lower()
+    if not normalized:
+        normalized = f"s_{int(round(temperature_k))}"
+    temp_token = str(int(round(temperature_k)))
+    parts = [part for part in normalized.split("_") if part]
+    if len(parts) < 2:
+        parts = [parts[0] if parts else "s", temp_token]
+    elif parts[1] != temp_token:
+        parts[1] = temp_token
+    parts = parts[:2] + [part for part in parts[2:] if part != f"t{temp_token}"]
+    safe = "_".join(parts)
+    return safe, safe != raw
+
+
 def _sluschi_param_layout(param_path: Path) -> SluschiParamLayout:
     lines = _read_lines(param_path)
     if len(lines) < 6:
@@ -2327,7 +2351,8 @@ def mds_entropy_run_main(args: argparse.Namespace) -> dict[str, Any]:
     sluschi_src = Path(os.path.expandvars(sluschi_raw)).expanduser()
     if sluschi_src.name != "src" and (sluschi_src / "src" / "mds_src").is_dir():
         sluschi_src = sluschi_src / "src"
-    label = args.label or f"s_{int(round(args.temperature_k))}"
+    requested_label = args.label or f"s_{int(round(args.temperature_k))}"
+    label, label_was_sanitized = _safe_sluschi_mds_label(requested_label, temperature_k=args.temperature_k)
     layout = _write_legacy_mds_latt_step(
         prepared_root=prepared_root,
         workdir=workdir,
@@ -2361,6 +2386,12 @@ def mds_entropy_run_main(args: argparse.Namespace) -> dict[str, Any]:
         "prepared_root": str(prepared_root),
         "workdir": str(workdir),
         "label": label,
+        "requested_label": requested_label,
+        "label_was_sanitized": label_was_sanitized,
+        "label_rule": (
+            "Legacy SLUSCHI MDS labels are sanitized to lowercase ASCII tokens with numeric rounded "
+            "temperature as underscore token 2; avoid labels such as uc2_routeA_rep01_T300_tail... ."
+        ),
         "sluschi_src": str(sluschi_src),
         "environment_rule": {
             "primary_atomi_env": args.atomi_env or "$HOME/m_lammps_env",

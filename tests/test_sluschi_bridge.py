@@ -799,6 +799,53 @@ def test_sluschi_mds_entropy_run_prepares_legacy_block_layout(tmp_path: Path):
     assert "#SBATCH --partition=" not in sbatch_text
 
 
+def test_sluschi_mds_entropy_run_sanitizes_temperature_label(tmp_path: Path):
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    (prepared / "param").write_text(
+        "\n".join(["2", "1 2", "238.02891", "12.011", "0.0005", "3", "U", "C", "0", "0", "0", "0", "0", "0", "0", "0"])
+        + "\n",
+        encoding="utf-8",
+    )
+    (prepared / "pos").write_text(("0 0 0 0 0 0\n0.25 0.25 0.25 0 0 0\n0.5 0.5 0.5 0 0 0\n") * 240, encoding="utf-8")
+    (prepared / "latt").write_text(("2 0 0 0 0 0\n0 2 0 0 0 0\n0 0 2 0 0 0\n") * 240, encoding="utf-8")
+    (prepared / "step").write_text("0.0005\n" * 240, encoding="utf-8")
+    sluschi_src = tmp_path / "SLUSCHI" / "src"
+    entropy_src = sluschi_src / "mds_src" / "entropy"
+    entropy_src.mkdir(parents=True)
+    (entropy_src / "main.m").write_text("system = ['replace_here'];\n", encoding="utf-8")
+    (entropy_src / "jobsub_master").write_text("# replace_here\n", encoding="utf-8")
+
+    result = bridge.main(
+        [
+            "mds-entropy-run",
+            "--prepared-root",
+            str(prepared),
+            "--workdir",
+            str(tmp_path / "work"),
+            "--temperature-k",
+            "300",
+            "--system",
+            "UC2",
+            "--formula",
+            "UC2",
+            "--phase",
+            "solid",
+            "--sluschi-bin",
+            str(sluschi_src),
+            "--label",
+            "uc2_routeA_rep01_T300_tail1520_1999",
+        ]
+    )
+
+    assert result["requested_label"] == "uc2_routeA_rep01_T300_tail1520_1999"
+    assert result["label"] == "uc2_300_rep01_tail1520_1999"
+    assert result["label_was_sanitized"] is True
+    work = tmp_path / "work"
+    assert (work / "entropy" / "pos_uc2_300_rep01_tail1520_1999").exists()
+    assert "uc2_300_rep01_tail1520_1999" in (work / "entropy" / "main.m").read_text(encoding="utf-8")
+
+
 def test_sluschi_mds_entropy_run_rejects_short_svib_window(tmp_path: Path):
     prepared = tmp_path / "prepared"
     prepared.mkdir()
