@@ -110,6 +110,6 @@ set key off
 set label 1 sprintf("live timing excludes initialization; batch refreshes are averaged per new DAV") at graph 0.02,0.95 left textcolor rgb "green"
 
 plot \
-    "< awk 'NF>=4 && $1 !~ /^#/{n++; print $1,$3} END{if(n==0) print 1,0}' ".timefileshell using 1:2 with linespoints lc rgb "green" title "seconds/DAV"
+    "< awk -v xmin=".xmin." -v xmax=".xmax." 'NF>=4 && $1 !~ /^#/{x=$1+0; y=$3+0; if(x>=xmin && x<=xmax){n++; print x,y}} END{if(n==0){print xmin,0; print xmax,0}}' ".timefileshell using 1:2 with linespoints lc rgb "green" title "seconds/DAV"
 
 unset multiplot

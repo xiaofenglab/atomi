@@ -95,6 +95,16 @@ def test_vasp_live4_header_uses_colored_panel_captions() -> None:
     assert "set term dumb ansi 160 56" in text
 
 
+def test_vasp_live_timing_fallback_stays_inside_sliding_window() -> None:
+    script = files("atomi").joinpath("viz", "gnuplot", "vasp_live.gp")
+    text = script.read_text(encoding="utf-8")
+
+    assert "awk -v xmin=" in text
+    assert "x>=xmin && x<=xmax" in text
+    assert "print xmin,0; print xmax,0" in text
+    assert "END{if(n==0) print 1,0}" not in text
+
+
 def test_vasp_live_reads_poscar_header_for_run_label(tmp_path: Path) -> None:
     output = tmp_path / "vasp.out"
     output.write_text("running\n", encoding="utf-8")
