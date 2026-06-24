@@ -32,8 +32,11 @@ VDW_RADII = {
     "H": 1.20,
     "O": 1.52,
     "Na": 2.27,
+    "K": 2.75,
+    "Ca": 2.31,
     "Cl": 1.75,
     "Ga": 1.87,
+    "Nb": 2.07,
 }
 
 PAIR_MIN_DIST = {
@@ -45,13 +48,22 @@ PAIR_MIN_DIST = {
     frozenset(("O", "O")): 2.20,
     frozenset(("O", "Cl")): 2.35,
     frozenset(("O", "Na")): 2.10,
+    frozenset(("O", "K")): 2.40,
+    frozenset(("O", "Ca")): 2.30,
     frozenset(("O", "Ga")): 2.45,
+    frozenset(("O", "Nb")): 2.00,
     frozenset(("Cl", "Cl")): 2.80,
     frozenset(("Cl", "Na")): 2.70,
+    frozenset(("Cl", "K")): 3.00,
+    frozenset(("Cl", "Ca")): 2.90,
     frozenset(("Cl", "Ga")): 2.10,
     frozenset(("Na", "Na")): 3.20,
     frozenset(("Na", "Ga")): 4.00,
+    frozenset(("K", "K")): 3.50,
+    frozenset(("Ca", "Ca")): 3.40,
+    frozenset(("Ca", "Nb")): 5.00,
     frozenset(("Ga", "Ga")): 2.80,
+    frozenset(("Nb", "Nb")): 3.20,
 }
 
 KIND_DEFAULTS = {
@@ -59,7 +71,10 @@ KIND_DEFAULTS = {
     "O": ("DZVP-MOLOPT-SR-GTH", "GTH-PBE-q6"),
     "Cl": ("DZVP-MOLOPT-SR-GTH", "GTH-PBE-q7"),
     "Na": ("DZVP-MOLOPT-SR-GTH", "GTH-PBE-q9"),
+    "K": ("DZVP-MOLOPT-SR-GTH", "GTH-PBE-q9"),
+    "Ca": ("DZVP-MOLOPT-PBE-GTH", "GTH-PBE-q10"),
     "Ga": ("DZVP-MOLOPT-SR-GTH", "GTH-PBE-q13"),
+    "Nb": ("DZVP-MOLOPT-PBE-GTH-q13", "GTH-PBE-q13"),
 }
 
 

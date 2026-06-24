@@ -318,6 +318,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cp2k_build_acid_box.add_argument("builder_args", nargs=argparse.REMAINDER)
 
+    cp2k_build_alkaline_box = subparsers.add_parser(
+        "cp2k-build-alkaline-box",
+        help="Build alkaline explicit-water CP2K AIMD boxes and starter inputs.",
+    )
+    cp2k_build_alkaline_box.add_argument("builder_args", nargs=argparse.REMAINDER)
+
     cp2k_geoopt_input = subparsers.add_parser(
         "cp2k-geoopt-input",
         help="Write staged CP2K GEO_OPT inputs with restart-aware MAX_ITER.",
@@ -1135,6 +1141,11 @@ def main(argv: list[str] | None = None) -> None:
 
         cp2k_build_acid_box_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "cp2k-build-alkaline-box":
+        from atomi.cp2k.alkaline_box import main as cp2k_build_alkaline_box_main
+
+        cp2k_build_alkaline_box_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "cp2k-geoopt-input":
         from atomi.cp2k.geoopt_input import main as cp2k_geoopt_input_main
 
@@ -1809,6 +1820,12 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.cp2k.acid_box import main as cp2k_build_acid_box_main
 
         cp2k_build_acid_box_main(args.builder_args)
+        return
+
+    if args.subcommand == "cp2k-build-alkaline-box":
+        from atomi.cp2k.alkaline_box import main as cp2k_build_alkaline_box_main
+
+        cp2k_build_alkaline_box_main(args.builder_args)
         return
 
     if args.subcommand == "cp2k-geoopt-input":
