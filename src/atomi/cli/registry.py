@@ -98,6 +98,12 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Normalize Materials Project entries into offline thermo-prior caches.",
     ),
     CommandSpec(
+        aliases=("mindat-bridge", "mindat-api", "mindat"),
+        target="atomi.thermo_prior.mindat:main",
+        category="thermo_prior",
+        help="Query token-gated OpenMindat/Mindat API endpoints and write offline JSON caches.",
+    ),
+    CommandSpec(
         aliases=("pocc-zentropy-defects", "pocc_zentropy_defects", "atomi-defects"),
         target="atomi.zentropy.pocc_defects:main",
         category="zentropy",
