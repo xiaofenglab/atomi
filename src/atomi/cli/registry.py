@@ -104,6 +104,12 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Query token-gated OpenMindat/Mindat API endpoints and write offline JSON caches.",
     ),
     CommandSpec(
+        aliases=("vasp-bader-charge", "bader-charge", "vasp-bader", "bader-vasp"),
+        target="atomi.vasp.bader_charge:main",
+        category="vasp",
+        help="Prepare, run, and parse Bader charge analysis from VASP charge-density files.",
+    ),
+    CommandSpec(
         aliases=("pocc-zentropy-defects", "pocc_zentropy_defects", "atomi-defects"),
         target="atomi.zentropy.pocc_defects:main",
         category="zentropy",
