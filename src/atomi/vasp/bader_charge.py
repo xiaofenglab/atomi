@@ -196,6 +196,7 @@ def inspect_run(
     has_aeccar0 = _is_nonempty(aeccar0_path)
     has_aeccar2 = _is_nonempty(aeccar2_path)
     has_acf = _is_nonempty(acf_path)
+    has_pybader_atoms = any(path.is_file() and path.stat().st_size > 0 for path in run_dir.glob("*-atoms.dat"))
     has_poscar = _is_nonempty(poscar_path)
     has_potcar = _is_nonempty(potcar_path)
     bader_exe = _which(bader_cmd)
@@ -205,8 +206,11 @@ def inspect_run(
         warnings.append("CHGCAR is missing or empty; Bader cannot run.")
     if has_chgcar and not (has_aeccar0 and has_aeccar2):
         warnings.append("AECCAR0/AECCAR2 are incomplete; run will fall back to CHGCAR-only Bader.")
-    if (has_aeccar0 or has_aeccar2) and not chgsum_exe:
-        warnings.append("chgsum.pl is not on PATH; cannot build AECCAR0+2 reference automatically.")
+    if (has_aeccar0 or has_aeccar2) and not chgsum_exe and bader_exe:
+        warnings.append(
+            "chgsum.pl is not on PATH; Atomi will try direct two-file -ref AECCAR0 AECCAR2 "
+            "when running Bader. This is supported by pybader."
+        )
     if has_chgcar and not bader_exe:
         warnings.append("bader executable is not on PATH; use setup script after loading/installing Bader.")
     if has_acf and not has_poscar:
@@ -229,8 +233,8 @@ def inspect_run(
         bader_executable=bader_exe,
         chgsum_executable=chgsum_exe,
         ready_for_bader=has_chgcar and bader_exe is not None,
-        ready_for_reference_bader=has_chgcar and has_aeccar0 and has_aeccar2 and bader_exe is not None and chgsum_exe is not None,
-        ready_for_parse=has_acf,
+        ready_for_reference_bader=has_chgcar and has_aeccar0 and has_aeccar2 and bader_exe is not None,
+        ready_for_parse=has_acf or has_pybader_atoms,
         warnings=warnings,
     )
 
@@ -274,8 +278,11 @@ def write_bader_script(
                 'if [ -s "$AECCAR0_FILE" ] && [ -s "$AECCAR2_FILE" ] && command -v "$CHGSUM_CMD" >/dev/null 2>&1; then',
                 '  "$CHGSUM_CMD" "$AECCAR0_FILE" "$AECCAR2_FILE" | tee chgsum.log',
                 '  "$BADER_CMD" "$CHGCAR_FILE" -ref AECCAR0+2 | tee bader.log',
+                'elif [ -s "$AECCAR0_FILE" ] && [ -s "$AECCAR2_FILE" ]; then',
+                '  echo "INFO: chgsum.pl unavailable; trying direct -ref AECCAR0 AECCAR2 (pybader-compatible)." >&2',
+                '  "$BADER_CMD" "$CHGCAR_FILE" -ref "$AECCAR0_FILE" "$AECCAR2_FILE" -o dat | tee bader.log',
                 "else",
-                '  echo "WARNING: AECCAR reference or chgsum.pl unavailable; running CHGCAR-only Bader." >&2',
+                '  echo "WARNING: AECCAR reference unavailable; running CHGCAR-only Bader." >&2',
                 '  "$BADER_CMD" "$CHGCAR_FILE" | tee bader.log',
                 "fi",
             ]
@@ -333,10 +340,15 @@ def run_bader_command(
         raise FileNotFoundError(message)
 
     commands: list[list[str]] = []
-    reference_ready = status.has_aeccar0 and status.has_aeccar2 and status.chgsum_executable is not None and not skip_chgsum
-    if reference_ready:
+    reference_files_ready = status.has_aeccar0 and status.has_aeccar2 and not skip_chgsum
+    reference_mode = "none"
+    if reference_files_ready and status.chgsum_executable is not None:
+        reference_mode = "chgsum"
         commands.append([status.chgsum_executable or chgsum_cmd, "AECCAR0", "AECCAR2"])
         commands.append([status.bader_executable or bader_cmd, "CHGCAR", "-ref", "AECCAR0+2"])
+    elif reference_files_ready:
+        reference_mode = "direct_two_file"
+        commands.append([status.bader_executable or bader_cmd, "CHGCAR", "-ref", "AECCAR0", "AECCAR2", "-o", "dat"])
     else:
         commands.append([status.bader_executable or bader_cmd, "CHGCAR"])
 
@@ -348,7 +360,14 @@ def run_bader_command(
         logs.append({"command": command, "returncode": proc.returncode, "log": str(run_dir / log_name)})
         if proc.returncode != 0:
             raise RuntimeError(f"Command failed with code {proc.returncode}: {' '.join(command)}")
-    return {"schema": SCHEMA, "stage": "run", "status": "OK", "reference_ready": reference_ready, "logs": logs}
+    return {
+        "schema": SCHEMA,
+        "stage": "run",
+        "status": "OK",
+        "reference_ready": reference_mode != "none",
+        "reference_mode": reference_mode,
+        "logs": logs,
+    }
 
 
 def parse_acf(
@@ -359,16 +378,25 @@ def parse_acf(
 ) -> list[BaderAtomCharge]:
     zvals = zvals or {}
     rows: list[BaderAtomCharge] = []
+    seen_zero_index = False
+    column_order = "henkelman"
     for raw in acf.read_text(encoding="utf-8", errors="replace").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or line.startswith("-"):
             continue
+        lowered = line.lower()
+        if "charge" in lowered and "volume" in lowered and "distance" in lowered:
+            column_order = "pybader"
+            continue
         parts = line.split()
-        if not parts or not parts[0].isdigit():
+        if not parts or not _looks_like_int(parts[0]):
             continue
         if len(parts) < 5:
             continue
-        index = int(parts[0])
+        raw_index = int(parts[0])
+        if raw_index == 0:
+            seen_zero_index = True
+        index = raw_index + 1 if seen_zero_index else raw_index
         if index < 1 or index > len(species):
             symbol = "X"
         else:
@@ -376,6 +404,12 @@ def parse_acf(
         bader_electrons = float(parts[4])
         zval = zvals.get(symbol)
         net_charge = zval - bader_electrons if zval is not None else None
+        if column_order == "pybader":
+            atomic_volume = float(parts[5]) if len(parts) > 5 and _looks_like_number(parts[5]) else None
+            min_dist = float(parts[6]) if len(parts) > 6 and _looks_like_number(parts[6]) else None
+        else:
+            min_dist = float(parts[5]) if len(parts) > 5 and _looks_like_number(parts[5]) else None
+            atomic_volume = float(parts[6]) if len(parts) > 6 and _looks_like_number(parts[6]) else None
         rows.append(
             BaderAtomCharge(
                 index=index,
@@ -386,13 +420,21 @@ def parse_acf(
                 bader_electrons=bader_electrons,
                 zval=zval,
                 net_charge=net_charge,
-                min_dist=float(parts[5]) if len(parts) > 5 and _looks_like_number(parts[5]) else None,
-                atomic_volume=float(parts[6]) if len(parts) > 6 and _looks_like_number(parts[6]) else None,
+                min_dist=min_dist,
+                atomic_volume=atomic_volume,
             )
         )
     if not rows:
         raise ValueError(f"No atom rows parsed from {acf}")
     return rows
+
+
+def _looks_like_int(token: str) -> bool:
+    try:
+        int(token)
+    except ValueError:
+        return False
+    return True
 
 
 def summarize_rows(rows: list[BaderAtomCharge]) -> list[dict[str, Any]]:
@@ -535,6 +577,10 @@ def run_command(args: argparse.Namespace) -> dict[str, Any]:
 def parse_command(args: argparse.Namespace) -> dict[str, Any]:
     run_dir = args.run_dir.expanduser().resolve()
     acf = _resolve_run_file(run_dir, args.acf, "ACF.dat")
+    if args.acf is None and not acf.exists():
+        atoms_dat = sorted(run_dir.glob("*-atoms.dat"))
+        if atoms_dat:
+            acf = atoms_dat[0]
     poscar = _resolve_run_file(run_dir, args.poscar, "CONTCAR")
     if not poscar.exists() and args.poscar is None:
         poscar = run_dir / "POSCAR"
