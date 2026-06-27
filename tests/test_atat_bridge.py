@@ -1251,6 +1251,8 @@ def test_materials_opt_relax_seeds_prepares_volume_scan(tmp_path: Path, capsys) 
     assert {row["volume_scale"] for row in index_rows} == {"0.98", "1.02"}
     incar = (out / runlist[0] / "INCAR").read_text(encoding="utf-8")
     assert "ISIF = 2" in incar
+    assert "EDIFF = 1E-6" in incar
+    assert "EDIFFG = -0.01" in incar
     assert "MAGMOM =" in incar
 
     atomi_main(["materials-opt", "relax-summary", "--workspace", str(out), "--no-plot"])
@@ -1352,6 +1354,8 @@ def test_materials_opt_relax_seeds_handles_repeated_duplicate_species_blocks(tmp
     assert "LDAUL = 3 -1" in incar
     assert "LDAUU = 4.0 0.0" in incar
     assert "LDAUJ = 0 0" in incar
+    assert "EDIFF = 1E-6" in incar
+    assert "EDIFFG = -0.01" in incar
     assert "U  C" in poscar_text
     assert "4  8" in poscar_text
 

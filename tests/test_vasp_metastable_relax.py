@@ -43,6 +43,7 @@ def write_vasp_root(root: Path) -> None:
                 "LDAUU = 6.0 4.0 0.0",
                 "IBRION = 2",
                 "ISIF = 3",
+                "EDIFFG = -0.03",
             ]
         )
         + "\n",
@@ -75,6 +76,8 @@ def test_metastable_prepare_preserves_physics_and_uses_conservative_freeze_seque
         assert (out / stage / "POTCAR").is_file()
     static_incar = (out / "00_static_scf" / "INCAR").read_text(encoding="utf-8")
     relax_incar = (out / "01_gentle_relax" / "INCAR").read_text(encoding="utf-8")
+    continue_relax_incar = (out / "02_continue_relax" / "INCAR").read_text(encoding="utf-8")
+    final_static_incar = (out / "03_final_static" / "INCAR").read_text(encoding="utf-8")
     cation_relax_poscar = (out / "01_gentle_relax" / "POSCAR").read_text(encoding="utf-8")
     oxygen_relax_poscar = (out / "02_continue_relax" / "POSCAR").read_text(encoding="utf-8")
 
@@ -88,6 +91,12 @@ def test_metastable_prepare_preserves_physics_and_uses_conservative_freeze_seque
     assert "ICHARG = 1" in relax_incar
     assert "IBRION = 2" in relax_incar
     assert "POTIM = 0.05" in relax_incar
+    assert "EDIFF = 1E-6" in continue_relax_incar
+    assert "EDIFFG = -0.01" in continue_relax_incar
+    assert "NSW = 0" in final_static_incar
+    assert "IBRION = -1" in final_static_incar
+    assert "LREAL = .FALSE." in final_static_incar
+    assert "EDIFFG" not in final_static_incar
     assert "Selective dynamics" in cation_relax_poscar
     assert "0.0  0.0  0.0   T T T" in cation_relax_poscar
     assert "0.25  0.25  0.25   F F F" in cation_relax_poscar

@@ -68,7 +68,7 @@ class PoscarDocument:
 class StageSpec:
     name: str
     description: str
-    overrides: dict[str, str]
+    overrides: dict[str, str | None]
     relaxation: bool
 
 
@@ -128,7 +128,7 @@ STAGES = {
             "ISIF": "2",
             "NSW": "30",
             "POTIM": "0.10",
-            "EDIFFG": "-0.03",
+            "EDIFFG": "-0.01",
             "EDIFF": "1E-6",
             "ISYM": "0",
             "LREAL": "Auto",
@@ -139,7 +139,7 @@ STAGES = {
     ),
     "03_final_static": StageSpec(
         name="03_final_static",
-        description="Final static energy and charge/magnetization collection.",
+        description="Final static energy and charge/magnetization collection after the preceding ionic relaxation reaches EDIFFG=-0.01.",
         relaxation=False,
         overrides={
             "ISTART": "0",
@@ -150,6 +150,7 @@ STAGES = {
             "ISYM": "0",
             "LREAL": ".FALSE.",
             "EDIFF": "1E-7",
+            "EDIFFG": None,
             "ALGO": "Normal",
             "LCHARG": ".TRUE.",
             "LWAVE": ".FALSE.",
@@ -328,19 +329,22 @@ def incar_key(line: str) -> str | None:
     return stripped.split("=", 1)[0].strip().upper()
 
 
-def set_incar_overrides(text: str, overrides: dict[str, str]) -> str:
+def set_incar_overrides(text: str, overrides: dict[str, str | None]) -> str:
     remaining = {key.upper(): value for key, value in overrides.items()}
     output: list[str] = []
     for line in text.splitlines():
         key = incar_key(line)
         if key in remaining:
-            output.append(f"{key} = {remaining.pop(key)}")
+            value = remaining.pop(key)
+            if value is not None:
+                output.append(f"{key} = {value}")
         else:
             output.append(line)
-    if remaining:
+    appendable = {key: value for key, value in remaining.items() if value is not None}
+    if appendable:
         output.append("")
         output.append("# Atomi metastable-relax stage overrides")
-        for key, value in remaining.items():
+        for key, value in appendable.items():
             output.append(f"{key} = {value}")
     return "\n".join(output).rstrip() + "\n"
 

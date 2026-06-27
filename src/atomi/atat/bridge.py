@@ -528,6 +528,10 @@ def reorder_template_incar_species_tags(text: str, template: Path, output_specie
     return reorder_incar_species_tags(text, source.species, output_species)
 
 
+RELAX_FINAL_EDIFF = "1E-6"
+RELAX_FINAL_EDIFFG = "-0.01"
+
+
 def template_incar_with_tags(
     template: Path,
     magmom_line: str,
@@ -543,6 +547,8 @@ def template_incar_with_tags(
     text = replace_or_append_incar_tag(text, "MAGMOM", magmom_line.split("=", 1)[1].strip())
     text = replace_or_append_incar_tag(text, "ISPIN", "2")
     text = replace_or_append_incar_tag(text, "ISIF", str(isif))
+    text = replace_or_append_incar_tag(text, "EDIFF", RELAX_FINAL_EDIFF)
+    text = replace_or_append_incar_tag(text, "EDIFFG", RELAX_FINAL_EDIFFG)
     return text
 
 
@@ -4501,6 +4507,8 @@ def relax_seeds_main(argv: list[str] | None = None, *, prog: str = "materials-op
                 "Run VASP array jobs with runlist.txt first.",
                 "After jobs finish or stop, run materials-opt relax-summary from the workspace.",
                 "Use the best physical rows to start ISIF=3 shape relaxation.",
+                "Generated non-static relaxation INCARs force EDIFF=1E-6 and EDIFFG=-0.01, matching the UO2-style final ionic-relaxation guard before any final static energy step.",
+                "Final static stages remain separate NSW=0 calculations with LREAL=.FALSE.; do not use EDIFFG as a static-energy guard.",
                 "This relaxation layer accepts POSCARs from vacancy-cif, parent-defect, MD snapshots, projected POSCARs, random cells, or manual seed folders.",
             ],
         },
