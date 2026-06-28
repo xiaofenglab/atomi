@@ -2090,6 +2090,133 @@ def _convert_sluschi_step_lines_to_fs(lines: list[str], *, prepared_step_unit: s
     return converted
 
 
+def _sluschi_vector_rows(path: Path) -> list[list[float]]:
+    rows: list[list[float]] = []
+    for line in _read_lines(path):
+        parts = line.split()
+        if not parts:
+            continue
+        try:
+            rows.append([float(parts[0]), float(parts[1]), float(parts[2])])
+        except (IndexError, ValueError) as exc:
+            raise ValueError(f"Could not parse first three vector columns from {path}: {line!r}") from exc
+    return rows
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = (len(ordered) - 1) * percentile / 100.0
+    lower = math.floor(rank)
+    upper = math.ceil(rank)
+    if lower == upper:
+        return ordered[int(rank)]
+    weight = rank - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def _prepared_frame_displacement_guard(prepared_root: Path, *, block_size: int) -> dict[str, Any]:
+    """Summarize frame-to-frame motion before a legacy SLUSCHI MDS run.
+
+    SLUSCHI MDS reconstructs velocities from consecutive coordinate frames.
+    Concatenated CP2K/LAMMPS/VASP snippets can therefore create artificial
+    velocity spikes even when phase/RDF diagnostics look sensible.  This guard
+    is deliberately non-fatal because diffusive liquids may have real larger
+    jumps; the manifest lets downstream workflow code decide whether a solid
+    ``S_vib`` row is promotable.
+    """
+    param_layout = _sluschi_param_layout(prepared_root / "param")
+    natoms = param_layout.natoms
+    pos_rows = _sluschi_vector_rows(prepared_root / "pos")
+    latt_rows = _sluschi_vector_rows(prepared_root / "latt")
+    step_lines = [line for line in _read_lines(prepared_root / "step") if line.strip()]
+    if len(pos_rows) % natoms != 0:
+        raise ValueError(f"pos line count {len(pos_rows)} is not divisible by natoms={natoms}")
+    n_frames = len(pos_rows) // natoms
+    if n_frames < 2:
+        return {
+            "n_frames": n_frames,
+            "natoms": natoms,
+            "status": "too_few_frames",
+            "rule": "Need at least two frames to check frame-to-frame SLUSCHI displacement continuity.",
+        }
+    if len(latt_rows) % 3 != 0:
+        raise ValueError(f"latt line count {len(latt_rows)} is not divisible by 3")
+    cells = [latt_rows[idx : idx + 3] for idx in range(0, len(latt_rows), 3)]
+    n_latt_records = len(cells)
+    if n_latt_records == n_frames:
+        frame_cells = cells
+    elif n_latt_records and n_frames % n_latt_records == 0:
+        repeat = n_frames // n_latt_records
+        frame_cells = [cell for cell in cells for _ in range(repeat)]
+    else:
+        raise ValueError(
+            f"latt has {n_latt_records} records; expected either frame-level {n_frames} "
+            "or an integer block divisor of the frame count"
+        )
+
+    frame_max: list[float] = []
+    frame_mean: list[float] = []
+    for frame_idx in range(n_frames - 1):
+        cell = frame_cells[frame_idx]
+        offsets = []
+        start = frame_idx * natoms
+        next_start = (frame_idx + 1) * natoms
+        for atom_idx in range(natoms):
+            before = pos_rows[start + atom_idx]
+            after = pos_rows[next_start + atom_idx]
+            displacement = [after[axis] - before[axis] for axis in range(3)]
+            frac = cart_to_frac(displacement, cell)
+            wrapped = [value - round(value) for value in frac]
+            cart = _cart_from_fractional(wrapped, cell)
+            offsets.append(math.sqrt(sum(value * value for value in cart)))
+        frame_max.append(max(offsets))
+        frame_mean.append(sum(offsets) / len(offsets))
+
+    threshold = 0.35
+    large = [idx for idx, value in enumerate(frame_max) if value > threshold]
+    first_large = [
+        {
+            "transition_index": idx,
+            "from_frame": idx,
+            "to_frame": idx + 1,
+            "mod_legacy_block_size": idx % block_size if block_size else None,
+            "frame_max_displacement_angstrom": frame_max[idx],
+            "frame_mean_displacement_angstrom": frame_mean[idx],
+        }
+        for idx in large[:20]
+    ]
+    warning = len(large) > max(3, int(0.01 * len(frame_max))) or _percentile(frame_max, 99.0) > threshold
+    return {
+        "n_frames": n_frames,
+        "natoms": natoms,
+        "input_latt_records": n_latt_records,
+        "input_step_records": len(step_lines),
+        "large_displacement_threshold_angstrom": threshold,
+        "frame_max_displacement_angstrom_mean": sum(frame_max) / len(frame_max),
+        "frame_max_displacement_angstrom_p95": _percentile(frame_max, 95.0),
+        "frame_max_displacement_angstrom_p99": _percentile(frame_max, 99.0),
+        "frame_max_displacement_angstrom_max": max(frame_max),
+        "frame_mean_displacement_angstrom_mean": sum(frame_mean) / len(frame_mean),
+        "frame_mean_displacement_angstrom_p95": _percentile(frame_mean, 95.0),
+        "frame_mean_displacement_angstrom_p99": _percentile(frame_mean, 99.0),
+        "frame_mean_displacement_angstrom_max": max(frame_mean),
+        "n_large_displacement_transitions": len(large),
+        "large_displacement_transition_fraction": len(large) / len(frame_max),
+        "first_large_displacement_transitions": first_large,
+        "svib_continuity_warning": warning,
+        "rule": (
+            "For solid SLUSCHI S_vib, large frame-to-frame jumps usually indicate "
+            "a discontinuous or incorrectly timed trajectory and should block "
+            "promotion until the MD/prep path is fixed. Keep S_conf/order "
+            "diagnostics separate from S_vib promotion."
+        ),
+    }
+
+
 def _write_mds_param_with_step_fs(param: Path, target: Path, *, prepared_step_unit: str) -> tuple[float, float]:
     layout = _sluschi_param_layout(param)
     multiplier = _sluschi_step_multiplier_to_fs(prepared_step_unit)
@@ -2359,6 +2486,10 @@ def mds_entropy_run_main(args: argparse.Namespace) -> dict[str, Any]:
         block_size=args.legacy_mds_block_size,
         prepared_step_unit=args.prepared_step_unit,
     )
+    frame_displacement_guard = _prepared_frame_displacement_guard(
+        prepared_root,
+        block_size=args.legacy_mds_block_size,
+    )
     svib_preflight = sluschi_onephase_svib_preflight(int(layout["n_frames"]))
     if not svib_preflight["svib_window_valid"] and not args.allow_invalid_svib_window:
         raise ValueError(
@@ -2398,6 +2529,7 @@ def mds_entropy_run_main(args: argparse.Namespace) -> dict[str, Any]:
             "mliap_lammps_env": "$HOME/m_lammps_gk_v2 for MLIAP/LAMMPS-specific runs only",
         },
         "layout": layout,
+        "frame_displacement_guard": frame_displacement_guard,
         "svib_preflight": svib_preflight,
         "outputs": {
             "run_script": str(run_script),
@@ -2413,6 +2545,7 @@ def mds_entropy_run_main(args: argparse.Namespace) -> dict[str, Any]:
             "Run through sbatch for MATLAB/SLUSCHI workloads that may take more than a quick interactive parse.",
             "After completion, use the constrained/use-this-value Svib line and phase-health/phase-window checks before accepting entropy.",
             "Svib requires a positive onephase_v6 vibrational window; use at least 202 frames and preferably 320+ frames for screening.",
+            "For solid Svib promotion, inspect frame_displacement_guard; artificial jumps from stitched trajectory snippets can poison the vibrational DOS while leaving Sconf/order diagnostics usable.",
             "The copied legacy MATLAB template is locally patched when needed for undefined MDS correction variables and missing RDF cutoff fallbacks; the upstream SLUSCHI installation is not modified.",
         ],
     }

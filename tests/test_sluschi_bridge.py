@@ -773,6 +773,8 @@ def test_sluschi_mds_entropy_run_prepares_legacy_block_layout(tmp_path: Path):
     assert result["layout"]["input_param_timestep"] == 0.0005
     assert result["layout"]["legacy_param_timestep_fs"] == 0.5
     assert result["layout"]["legacy_step_values_fs"] == ["0.5", "0.5"]
+    assert result["frame_displacement_guard"]["svib_continuity_warning"] is False
+    assert result["frame_displacement_guard"]["frame_max_displacement_angstrom_max"] == 0.0
     assert result["svib_preflight"]["onephase_v6_nsteps"] == -20
     assert result["svib_preflight"]["svib_window_valid"] is False
     assert result["sluschi_template_compatibility_patches"] == [
@@ -797,6 +799,33 @@ def test_sluschi_mds_entropy_run_prepares_legacy_block_layout(tmp_path: Path):
     assert "UC2" in (work / "run_mds_entropy.sh").read_text(encoding="utf-8")
     sbatch_text = (work / "submit_mds_entropy.sbatch").read_text(encoding="utf-8")
     assert "#SBATCH --partition=" not in sbatch_text
+
+
+def test_sluschi_mds_entropy_run_flags_stitched_coordinate_jumps(tmp_path: Path):
+    prepared = tmp_path / "prepared_jump"
+    prepared.mkdir()
+    natoms = 2
+    n_frames = 240
+    (prepared / "param").write_text(
+        "\n".join(["1", "2", "39.0983", "0.006", str(natoms), "K", "0", "0", "0", "0", "0", "0", "0", "0"])
+        + "\n",
+        encoding="utf-8",
+    )
+    pos_lines = []
+    for frame_idx in range(n_frames):
+        jump = 1.0 if frame_idx in {81, 162} else 0.0
+        pos_lines.append(f"{jump:.6f} 0.0 0.0 0 0 0\n")
+        pos_lines.append(f"{jump:.6f} 0.5 0.5 0 0 0\n")
+    (prepared / "pos").write_text("".join(pos_lines), encoding="utf-8")
+    (prepared / "latt").write_text(("10.0 0.0 0.0 0 0 0\n0.0 10.0 0.0 0 0 0\n0.0 0.0 10.0 0 0 0\n") * n_frames, encoding="utf-8")
+    (prepared / "step").write_text("0.006\n" * n_frames, encoding="utf-8")
+
+    guard = bridge._prepared_frame_displacement_guard(prepared, block_size=80)
+
+    assert guard["svib_continuity_warning"] is True
+    assert guard["n_large_displacement_transitions"] == 4
+    assert guard["frame_max_displacement_angstrom_max"] == 1.0
+    assert guard["first_large_displacement_transitions"][0]["from_frame"] == 80
 
 
 def test_sluschi_mds_entropy_run_sanitizes_temperature_label(tmp_path: Path):
