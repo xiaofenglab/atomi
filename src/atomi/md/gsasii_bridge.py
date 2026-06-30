@@ -476,15 +476,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> Any:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    result = args.func(args)
+    # Console entry points pass argv=None and are wrapped by sys.exit(...).
+    # Do not return dictionaries/lists there, otherwise Python prints their repr
+    # and exits nonzero.  Programmatic callers that pass argv explicitly still
+    # receive the underlying payload.
+    return 0 if argv is None else result
 
 
 def status_cli() -> Any:
-    return main(["status", *sys.argv[1:]])
+    main(["status", *sys.argv[1:]])
+    return 0
 
 
 def install_plan_cli() -> Any:
-    return main(["install-plan", *sys.argv[1:]])
+    main(["install-plan", *sys.argv[1:]])
+    return 0
 
 
 if __name__ == "__main__":

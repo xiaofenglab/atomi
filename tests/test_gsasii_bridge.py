@@ -1,6 +1,7 @@
 import argparse
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 from atomi.md import gsasii_bridge
@@ -82,3 +83,21 @@ def test_install_plan_recommends_external_runtime(capsys) -> None:
     assert "GSAS-II runtime" in payload["recommendation"]
     assert any("No GPU" in item for item in payload["why"])
     assert "GSAS-II / Atomi HPC install plan" in captured.out
+
+
+def test_standalone_status_cli_returns_zero(monkeypatch, capsys) -> None:
+    def fake_probe(python=None, gsasii_root=None):
+        return {
+            "available": True,
+            "python": "/private/gsas2/bin/python",
+            "gsasii_root": "/private/gsas2",
+            "origin": "/private/gsas2/GSAS-II/GSASII/GSASIIscriptable.py",
+        }
+
+    monkeypatch.setattr(gsasii_bridge, "probe_gsasii", fake_probe)
+    monkeypatch.setattr(sys, "argv", ["gsasii-status"])
+
+    assert gsasii_bridge.status_cli() == 0
+    captured = capsys.readouterr()
+    assert "GSAS-II bridge status" in captured.out
+    assert "import      : ok" in captured.out
