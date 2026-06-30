@@ -92,6 +92,7 @@ def test_write_private_template_and_discovery_script(tmp_path: Path) -> None:
     assert config["site"] == "new_cluster"
     assert config["privacy"] == "local-only; do not commit or push"
     assert "atat" in config["profiles"]
+    assert "gsasii" in config["profiles"]
     assert "vasp_cpu" in config["profiles"]
     assert "lammps_md_engine" in config["profiles"]
     assert config["profiles"]["lammps_md_engine"]["modules"] == []
@@ -143,6 +144,11 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
                         "executable": "/private/pdfgetx3_env/bin/pdfgetx3",
                         "wheelhouse": "/private/wheels/pdfgetx3",
                     },
+                    "gsasii": {
+                        "env_path": "/private/gsas2main",
+                        "python": "/private/gsas2main/bin/python",
+                        "root": "/private/gsas2main",
+                    },
                     "moose": {
                         "env_path": "/private/moose_env",
                         "app_executable": "/private/moose/app-opt",
@@ -174,6 +180,7 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
         "atat",
         "calphad",
         "cp2k",
+        "gsasii",
         "lammps_md_engine",
         "mace_training_gpu",
         "moose",
@@ -211,6 +218,9 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
     assert "export ATOMI_PDFGETX3_EXE=/private/pdfgetx3_env/bin/pdfgetx3" in env_text
     assert "export ATOMI_PDFGETX3_ENV=/private/pdfgetx3_env" in env_text
     assert "export ATOMI_PDFGETX3_WHEELHOUSE=/private/wheels/pdfgetx3" in env_text
+    assert "export ATOMI_GSASII_PYTHON=/private/gsas2main/bin/python" in env_text
+    assert "export ATOMI_GSASII_ROOT=/private/gsas2main" in env_text
+    assert "export ATOMI_GSASII_ENV=/private/gsas2main" in env_text
     assert "export CP2K_DATA_DIR=/private/cp2k/data" in env_text
     assert "OMP_NUM_THREADS" not in env_text
 

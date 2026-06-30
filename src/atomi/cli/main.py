@@ -191,6 +191,27 @@ def build_parser() -> argparse.ArgumentParser:
         )
         pdf_fit_bridge.add_argument("pdf_fit_bridge_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("gsasii-bridge", "gsasii_bridge", "xrd-fit-bridge", "xrd_fit_bridge"):
+        gsasii_bridge = subparsers.add_parser(
+            command_name,
+            help="Bridge Atomi to GSAS-II scriptable Bragg/XRD fitting workflows.",
+        )
+        gsasii_bridge.add_argument("gsasii_bridge_args", nargs=argparse.REMAINDER)
+
+    for command_name in ("gsasii-status", "gsasii_status", "gsasii-doctor"):
+        gsasii_status = subparsers.add_parser(
+            command_name,
+            help="Check GSAS-II scriptable availability.",
+        )
+        gsasii_status.add_argument("gsasii_status_args", nargs=argparse.REMAINDER)
+
+    for command_name in ("gsasii-install-plan", "gsasii_install_plan"):
+        gsasii_install_plan = subparsers.add_parser(
+            command_name,
+            help="Print recommended GSAS-II HPC installation/configuration pattern.",
+        )
+        gsasii_install_plan.add_argument("gsasii_install_plan_args", nargs=argparse.REMAINDER)
+
     for command_name in (
         "pdfxrd-run",
         "pdfxrd_run",
@@ -1033,6 +1054,21 @@ def main(argv: list[str] | None = None) -> None:
 
         pdf_fit_bridge_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("gsasii-bridge", "gsasii_bridge", "xrd-fit-bridge", "xrd_fit_bridge"):
+        from atomi.md.gsasii_bridge import main as gsasii_bridge_main
+
+        gsasii_bridge_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in ("gsasii-status", "gsasii_status", "gsasii-doctor"):
+        from atomi.md.gsasii_bridge import main as gsasii_bridge_main
+
+        gsasii_bridge_main(["status", *raw_args[1:]])
+        return
+    if raw_args and raw_args[0] in ("gsasii-install-plan", "gsasii_install_plan"):
+        from atomi.md.gsasii_bridge import main as gsasii_bridge_main
+
+        gsasii_bridge_main(["install-plan", *raw_args[1:]])
+        return
     if raw_args and raw_args[0] in (
         "pdfxrd-run",
         "pdfxrd_run",
@@ -1676,6 +1712,21 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.md.pdf_fit_bridge import main as pdf_fit_bridge_main
 
         pdf_fit_bridge_main(args.pdf_fit_bridge_args)
+        return
+    if args.subcommand in ("gsasii-bridge", "gsasii_bridge", "xrd-fit-bridge", "xrd_fit_bridge"):
+        from atomi.md.gsasii_bridge import main as gsasii_bridge_main
+
+        gsasii_bridge_main(args.gsasii_bridge_args)
+        return
+    if args.subcommand in ("gsasii-status", "gsasii_status", "gsasii-doctor"):
+        from atomi.md.gsasii_bridge import main as gsasii_bridge_main
+
+        gsasii_bridge_main(["status", *args.gsasii_status_args])
+        return
+    if args.subcommand in ("gsasii-install-plan", "gsasii_install_plan"):
+        from atomi.md.gsasii_bridge import main as gsasii_bridge_main
+
+        gsasii_bridge_main(["install-plan", *args.gsasii_install_plan_args])
         return
     if args.subcommand in (
         "pdfxrd-run",

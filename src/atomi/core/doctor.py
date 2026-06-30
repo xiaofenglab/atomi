@@ -434,6 +434,16 @@ def build_hpc_config_template(site: str = "") -> dict[str, Any]:
                     "ATOMI_PDFGETX3_WHEELHOUSE": "",
                 },
             },
+            "gsasii": {
+                "env_path": "",
+                "python": "",
+                "root": "",
+                "environment": {
+                    "ATOMI_GSASII_PYTHON": "",
+                    "ATOMI_GSASII_ROOT": "",
+                    "ATOMI_GSASII_ENV": "",
+                },
+            },
             "moose": {
                 "modules": [],
                 "env_path": "",
@@ -926,6 +936,24 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
             if _nonempty(pdfgetx3.get(field)):
                 exports.setdefault("ATOMI_PDFGETX3_WHEELHOUSE", str(pdfgetx3[field]))
                 break
+
+    gsasii = profiles.get("gsasii", {})
+    if isinstance(gsasii, dict):
+        env = gsasii.get("environment", {})
+        if isinstance(env, dict):
+            for key, value in env.items():
+                if _nonempty(value) and str(key).startswith("ATOMI_"):
+                    exports[str(key)] = str(value)
+        for field in ("python", "python_executable", "gsasii_python"):
+            if _nonempty(gsasii.get(field)):
+                exports.setdefault("ATOMI_GSASII_PYTHON", str(gsasii[field]))
+                break
+        for field in ("root", "gsasii_root", "install_root"):
+            if _nonempty(gsasii.get(field)):
+                exports.setdefault("ATOMI_GSASII_ROOT", str(gsasii[field]))
+                break
+        if _nonempty(gsasii.get("env_path")):
+            exports.setdefault("ATOMI_GSASII_ENV", str(gsasii["env_path"]))
 
     moose = profiles.get("moose", {})
     if isinstance(moose, dict):
