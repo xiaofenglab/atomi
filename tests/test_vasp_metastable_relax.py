@@ -85,17 +85,22 @@ def test_metastable_prepare_preserves_physics_and_uses_conservative_freeze_seque
     assert "MAGMOM = 7 -7 2*0" in static_incar
     assert "IBRION = -1" in static_incar
     assert "ISIF = 2" in static_incar
+    assert "NELM = 3000" in static_incar
     assert "LCHARG = .TRUE." in static_incar
     assert "LWAVE = .FALSE." in static_incar
     assert "ISTART = 0" in relax_incar
     assert "ICHARG = 1" in relax_incar
     assert "IBRION = 2" in relax_incar
     assert "POTIM = 0.05" in relax_incar
+    assert "NELM = 3000" in relax_incar
     assert "EDIFF = 1E-6" in continue_relax_incar
     assert "EDIFFG = -0.01" in continue_relax_incar
+    assert "NSW = 600" in continue_relax_incar
+    assert "NELM = 3000" in continue_relax_incar
     assert "NSW = 0" in final_static_incar
     assert "IBRION = -1" in final_static_incar
     assert "LREAL = .FALSE." in final_static_incar
+    assert "NELM = 3000" in final_static_incar
     assert "EDIFFG" not in final_static_incar
     assert "Selective dynamics" in cation_relax_poscar
     assert "0.0  0.0  0.0   T T T" in cation_relax_poscar
