@@ -15,6 +15,11 @@ def test_ocean_install_plan_explains_external_runtime(capsys) -> None:
     assert "OCEAN / Atomi HPC install plan" in captured.out
 
 
+def test_ocean_main_returns_shell_success(capsys) -> None:
+    assert ocean.main(["install-plan"]) == 0
+    assert "OCEAN / Atomi HPC install plan" in capsys.readouterr().out
+
+
 def test_ocean_prepare_writes_workspace(tmp_path: Path) -> None:
     structure = tmp_path / "POSCAR"
     structure.write_text("test structure\n1\n1 0 0\n0 1 0\n0 0 1\nU O\n1 2\nDirect\n0 0 0\n0.25 0.25 0.25\n0.75 0.75 0.75\n", encoding="utf-8")

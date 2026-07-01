@@ -355,7 +355,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> Any:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    args.func(args)
+    return 0
 
 
 def status_cli() -> Any:
