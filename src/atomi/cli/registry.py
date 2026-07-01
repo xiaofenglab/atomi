@@ -56,6 +56,24 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Prepare OpenMolcas embedded-cluster inputs from POSCAR/CONTCAR.",
     ),
     CommandSpec(
+        aliases=("molcas-bridge", "molcas_bridge", "openmolcas-bridge", "openmolcas_bridge"),
+        target="atomi.qchem.openmolcas_bridge:main",
+        category="qchem",
+        help="Prepare, run, and summarize OpenMolcas CASSCF/CASPT2/RASSI bridge workspaces.",
+    ),
+    CommandSpec(
+        aliases=("molcas-status", "molcas_status", "openmolcas-status"),
+        target="atomi.qchem.openmolcas_bridge:status_cli",
+        category="qchem",
+        help="Check configured OpenMolcas runtime for Atomi bridge use.",
+    ),
+    CommandSpec(
+        aliases=("molcas-install-plan", "molcas_install_plan"),
+        target="atomi.qchem.openmolcas_bridge:install_plan_cli",
+        category="qchem",
+        help="Print the recommended OpenMolcas HPC/KIT setup pattern.",
+    ),
+    CommandSpec(
         aliases=("aq-thermo-bridge", "aq_thermo_bridge", "thermofun-bridge", "thermohub-bridge"),
         target="atomi.aqueous.thermohub_bridge:main",
         category="aqueous",

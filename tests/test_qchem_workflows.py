@@ -1,3 +1,4 @@
+import argparse
 from pathlib import Path
 
 from atomi.qchem.molcas import MolcasClusterOptions, read_poscar, write_cluster_workspace
@@ -69,3 +70,88 @@ def test_molcas_cluster_writes_xfield_and_templates(tmp_path: Path) -> None:
     assert "XField = u01.xfield" in ground
     medge = (outdir / "u01.Medge_template.inp").read_text(encoding="utf-8")
     assert "Do not use an ECP" in medge
+
+
+
+def test_openmolcas_bridge_prepare_and_collect(tmp_path: Path) -> None:
+    from atomi.qchem import openmolcas_bridge
+
+    xyz = tmp_path / "u_o_cluster.xyz"
+    xyz.write_text("2\nUO\nU 0 0 0\nO 2.2 0 0\n", encoding="utf-8")
+    outdir = tmp_path / "molcas_bridge"
+    metadata = openmolcas_bridge.prepare_main(
+        argparse.Namespace(
+            xyz=xyz,
+            outdir=outdir,
+            label="u4o9_u01",
+            xyz_name="",
+            copy_xyz=True,
+            charge=2,
+            spin=3,
+            basis="ANO-RCC-VDZP",
+            group="NoSym",
+            recipe="actinide-m45-xanes",
+            nactel="2 0 0",
+            inactive="40 0",
+            ras1="1 0",
+            ras2="7 0",
+            ras3="0 5",
+            ciroots="1 1 1",
+            iterations="300 100",
+            levs="5.0",
+            frozen="20 20",
+            ipea="0",
+            imag="5.0",
+            threshold="1.0E-09 1.0E-07",
+            no_caspt2=False,
+            multistate=False,
+            no_orbital_prep=False,
+            no_partner=False,
+            partner_spin=5,
+            partner_ciroots="3 3 1",
+            sonorb="1,2,3",
+            no_bssh=False,
+            no_amfi=False,
+            core_hole_note="U M4/M5 scaffold",
+            extra_rasscf_line=[],
+            executable="pymolcas",
+            module="chem/openmolcas/test",
+            job_name="u4o9-u01",
+            ntasks=4,
+            mem_per_cpu_mb=4000,
+            time="02:00:00",
+            scratch_gb="50",
+        )
+    )
+    text = (outdir / "u4o9_u01.inp").read_text(encoding="utf-8")
+    run_script = (outdir / "run_openmolcas.sh").read_text(encoding="utf-8")
+    assert metadata["schema"] == "atomi.openmolcas_bridge_project.v1"
+    assert "Actinide M4,5-edge scaffold" in text
+    assert "&RASSCF" in text
+    assert "&CASPT2" in text
+    assert "&RASSI" in text
+    assert "SpinOrbit" in text
+    assert "ATOMI_MOLCAS_MODULE=chem/openmolcas/test" in run_script
+
+    output = tmp_path / "molcas.out"
+    output.write_text(
+        "--- Start Module: caspt2 at now ---\n"
+        "::    XMS-CASPT2 Root  1     Total energy:  -4104.79129157\n"
+        "--- Stop Module: caspt2 at now /rc=_RC_ALL_IS_WELL_ ---\n"
+        "--- Start Module: rassi at now ---\n"
+        "--- Stop Module: rassi at now /rc=_RC_ALL_IS_WELL_ ---\n",
+        encoding="utf-8",
+    )
+    summary = openmolcas_bridge.collect_main(argparse.Namespace(output=output, write=None))
+    assert summary["caspt2_roots"][0]["energy_hartree"] == -4104.79129157
+    assert summary["rassi_module_count"] == 1
+    assert not summary["has_error_marker"]
+
+
+def test_openmolcas_status_cli_accepts_registry_argv(capsys) -> None:
+    from atomi.qchem import openmolcas_bridge
+
+    assert openmolcas_bridge.status_cli(["--json"]) == 0
+    assert "atomi.openmolcas_status.v1" in capsys.readouterr().out
+    assert openmolcas_bridge.install_plan_cli([]) == 0
+    assert "OpenMolcas / Atomi HPC install plan" in capsys.readouterr().out
