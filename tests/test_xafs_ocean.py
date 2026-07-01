@@ -40,7 +40,17 @@ def test_ocean_prepare_writes_workspace(tmp_path: Path) -> None:
         module="chem/ocean/test",
         pseudo_dir="/private/ocean/pseudos",
         energy_window="-10 60 eV",
-        extra=["nbands 200"],
+        edge_atom_index=0,
+        nkpt="4 4 4",
+        screen_nkpt="2 2 2",
+        xmesh="",
+        nbands=200,
+        screen_nbands=100,
+        ecut="80",
+        diemac="5.0",
+        broaden="0.3",
+        pp_list=["U.test.UPF", "O.test.UPF"],
+        extra=["# custom extra line"],
         job_name="ocean-u-m4",
         ntasks=16,
         cpus_per_task=1,
@@ -53,14 +63,19 @@ def test_ocean_prepare_writes_workspace(tmp_path: Path) -> None:
     run_script = (outdir / "run_ocean_xanes.sh").read_text(encoding="utf-8")
     project = json.loads((outdir / "ocean_xanes_project.json").read_text(encoding="utf-8"))
 
-    assert "absorber U" in ocean_input
-    assert "edge M4" in ocean_input
+    assert "acell {" in ocean_input
+    assert "znucl { 92 8 }" in ocean_input
+    assert "typat {" in ocean_input
+    assert "1 2 2" in ocean_input
+    assert "edges{ 1 3 2 }" in ocean_input
+    assert "pp_list{ U.test.UPF O.test.UPF }" in ocean_input
     assert "nbands 200" in ocean_input
     assert "module load \"${ATOMI_OCEAN_MODULE}\"" in run_script
     assert "ATOMI_OCEAN_MODULE=chem/ocean/test" in run_script
     assert "ATOMI_OCEAN_EXE=/private/ocean/bin/ocean.pl" in run_script
     assert metadata["module"] == "chem/ocean/test"
     assert metadata["absorber"] == project["absorber"] == "U"
+    assert metadata["native_ocean"]["edge_quantum"] == {"n": 3, "l": 2}
     assert metadata["dft_plus_u"].startswith("VASP LDAU")
 
 

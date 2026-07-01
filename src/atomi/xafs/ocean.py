@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shlex
 import shutil
@@ -17,6 +18,223 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+
+
+BOHR_PER_ANGSTROM = 1.8897261246257702
+
+ATOMIC_NUMBERS = {
+    "H": 1,
+    "C": 6,
+    "N": 7,
+    "O": 8,
+    "F": 9,
+    "Na": 11,
+    "Cl": 17,
+    "K": 19,
+    "Ca": 20,
+    "Ti": 22,
+    "Nb": 41,
+    "Ce": 58,
+    "Gd": 64,
+    "U": 92,
+}
+
+EDGE_QUANTUM_NUMBERS = {
+    "K": (1, 0),
+    "L1": (2, 0),
+    "L2": (2, 1),
+    "L3": (2, 1),
+    "L": (2, 1),
+    "M1": (3, 0),
+    "M2": (3, 1),
+    "M3": (3, 1),
+    "M4": (3, 2),
+    "M5": (3, 2),
+    "M": (3, 2),
+}
+
+
+def _vec_norm(vec: list[float]) -> float:
+    return math.sqrt(sum(x * x for x in vec))
+
+
+def _det3(m: list[list[float]]) -> float:
+    return (
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    )
+
+
+def _invert3(m: list[list[float]]) -> list[list[float]]:
+    det = _det3(m)
+    if abs(det) < 1e-14:
+        raise ValueError("POSCAR lattice is singular")
+    return [
+        [
+            (m[1][1] * m[2][2] - m[1][2] * m[2][1]) / det,
+            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) / det,
+            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) / det,
+        ],
+        [
+            (m[1][2] * m[2][0] - m[1][0] * m[2][2]) / det,
+            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) / det,
+            (m[0][2] * m[1][0] - m[0][0] * m[1][2]) / det,
+        ],
+        [
+            (m[1][0] * m[2][1] - m[1][1] * m[2][0]) / det,
+            (m[0][1] * m[2][0] - m[0][0] * m[2][1]) / det,
+            (m[0][0] * m[1][1] - m[0][1] * m[1][0]) / det,
+        ],
+    ]
+
+
+def _row_times_matrix(row: list[float], matrix: list[list[float]]) -> list[float]:
+    return [sum(row[i] * matrix[i][j] for i in range(3)) for j in range(3)]
+
+
+def _parse_poscar(path: Path) -> dict[str, Any]:
+    lines = [line.strip() for line in path.expanduser().read_text(encoding="utf-8").splitlines() if line.strip()]
+    if len(lines) < 8:
+        raise ValueError(f"{path} does not look like a POSCAR/CONTCAR")
+    scale = float(lines[1].split()[0])
+    lattice = [[float(x) * scale for x in lines[i].split()[:3]] for i in range(2, 5)]
+    elements = lines[5].split()
+    counts = [int(x) for x in lines[6].split()]
+    coord_line = 7
+    if lines[coord_line].lower().startswith("s"):
+        coord_line += 1
+    mode = lines[coord_line].lower()
+    start = coord_line + 1
+    total = sum(counts)
+    coords = [[float(x) for x in lines[start + i].split()[:3]] for i in range(total)]
+    if mode.startswith("c") or mode.startswith("k"):
+        inv_lattice = _invert3(lattice)
+        frac = [_row_times_matrix(coord, inv_lattice) for coord in coords]
+    else:
+        frac = coords
+    typat: list[int] = []
+    first_indices: dict[str, int] = {}
+    atom_index = 1
+    for type_index, (element, count) in enumerate(zip(elements, counts), start=1):
+        first_indices.setdefault(element, atom_index)
+        typat.extend([type_index] * count)
+        atom_index += count
+    return {
+        "lattice": lattice,
+        "elements": elements,
+        "counts": counts,
+        "frac": frac,
+        "typat": typat,
+        "first_indices": first_indices,
+        "natom": total,
+    }
+
+
+def _edge_quantum(edge: str) -> tuple[int, int]:
+    key = edge.strip().upper()
+    if key not in EDGE_QUANTUM_NUMBERS:
+        raise ValueError(f"Unsupported OCEAN edge label {edge!r}; expected one of {', '.join(sorted(EDGE_QUANTUM_NUMBERS))}")
+    return EDGE_QUANTUM_NUMBERS[key]
+
+
+def _format_block(values: list[Any], per_line: int = 12) -> str:
+    parts = [str(value) for value in values]
+    return "\n  ".join(" ".join(parts[i : i + per_line]) for i in range(0, len(parts), per_line))
+
+
+def _pseudo_list(elements: list[str], pseudo_dir: str, pp_list: list[str] | None) -> list[str]:
+    if pp_list:
+        if len(pp_list) != len(elements):
+            raise ValueError("--pp-list must provide one pseudopotential filename per POSCAR element, in POSCAR order")
+        return pp_list
+    root = Path(pseudo_dir).expanduser() if pseudo_dir else None
+    names: list[str] = []
+    for element in elements:
+        match = None
+        if root and root.exists():
+            candidates = sorted(root.glob(f"{element}*.UPF")) + sorted(root.glob(f"{element}*.upf"))
+            if candidates:
+                match = candidates[0].name
+        names.append(match or f"{element}.UPF")
+    return names
+
+
+def _write_native_ocean_input(args: argparse.Namespace, outdir: Path) -> tuple[Path, dict[str, Any]]:
+    poscar = _parse_poscar(args.structure)
+    absorber = args.absorber.strip()
+    if absorber not in poscar["first_indices"]:
+        raise ValueError(f"Absorber {absorber!r} is not present in {args.structure}")
+    edge_n, edge_l = _edge_quantum(args.edge)
+    edge_atom_index = int(getattr(args, "edge_atom_index", 0) or poscar["first_indices"][absorber])
+    lengths_bohr = [_vec_norm(vec) * BOHR_PER_ANGSTROM for vec in poscar["lattice"]]
+    rprim = [[component * BOHR_PER_ANGSTROM / length for component in vec] for vec, length in zip(poscar["lattice"], lengths_bohr)]
+    pp_names = _pseudo_list(poscar["elements"], getattr(args, "pseudo_dir", ""), getattr(args, "pp_list", []))
+    znucl = [ATOMIC_NUMBERS.get(element) for element in poscar["elements"]]
+    missing = [element for element, z in zip(poscar["elements"], znucl) if z is None]
+    if missing:
+        raise ValueError(f"Missing atomic number mapping for: {', '.join(missing)}")
+    nkpt = getattr(args, "nkpt", "") or "10 10 6"
+    screen_nkpt = getattr(args, "screen_nkpt", "") or "2 2 2"
+    xmesh = getattr(args, "xmesh", "") or nkpt
+    lines = [
+        "# OCEAN input generated by Atomi from POSCAR/CONTCAR.",
+        "# Review against your local OCEAN version/tutorial before production.",
+        "# NOTE: OCEAN edge n/l does not distinguish spin-orbit split L2/L3 or M4/M5 by itself.",
+        "para_prefix { srun }",
+        f"dft{{ {args.dft_engine} }}",
+        f"nkpt {{ {nkpt} }}",
+        f"screen.nkpt {{ {screen_nkpt} }}",
+        f"screen.nbands {getattr(args, 'screen_nbands', 180)}",
+        f"nbands {getattr(args, 'nbands', 240)}",
+        "acell { " + " ".join(f"{x:.10f}" for x in lengths_bohr) + " }",
+        "rprim {",
+        *["  " + " ".join(f"{x:.16f}" for x in row) for row in rprim],
+        "}",
+        f"ntypat {{ {len(poscar['elements'])} }}",
+        f"natom {{ {poscar['natom']} }}",
+        "znucl { " + " ".join(str(z) for z in znucl) + " }",
+        "ppdir { ../ }",
+        "pp_list{ " + " ".join(pp_names) + " }",
+        "typat {",
+        "  " + _format_block(poscar["typat"]),
+        "}",
+        "xred {",
+        *["  " + " ".join(f"{x:.16f}" for x in row) for row in poscar["frac"]],
+        "}",
+        f"ecut {getattr(args, 'ecut', '90')}",
+        f"diemac {getattr(args, 'diemac', '10.0')}",
+        f"CNBSE.xmesh {{ {xmesh} }}",
+        f"edges{{ {edge_atom_index} {edge_n} {edge_l} }}",
+        f"cnbse.broaden{{ {getattr(args, 'broaden', '0.4')} }}",
+        "screen.shells{ 4.0 }",
+        "cnbse.rad{ 4.0 }",
+        "scfac 0.80",
+    ]
+    if args.energy_window:
+        lines.append(f"# energy_window_note {args.energy_window}")
+    if args.dft_plus_u:
+        lines.append(f"# dft_plus_u_note {args.dft_plus_u}")
+    if args.vasp_dir:
+        lines.append(f"# vasp_dir {args.vasp_dir}")
+    if args.extra:
+        lines.extend(args.extra)
+    path = outdir / "ocean.in"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    native = {
+        "native_ocean_input": True,
+        "edge_atom_index": edge_atom_index,
+        "edge_quantum": {"n": edge_n, "l": edge_l},
+        "elements": poscar["elements"],
+        "counts": poscar["counts"],
+        "pseudopotentials": pp_names,
+        "ppdir_policy": "workspace-relative ../ is used because OCEAN OPF runs inside OPF/",
+        "nkpt": nkpt,
+        "screen_nkpt": screen_nkpt,
+        "xmesh": xmesh,
+    }
+    return path, native
 
 
 SPECTRUM_CANDIDATES = (
@@ -164,24 +382,8 @@ def install_plan_main(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def write_ocean_stub(args: argparse.Namespace, outdir: Path) -> Path:
-    lines = [
-        "# OCEAN input scaffold generated by Atomi.",
-        "# Review against your local OCEAN version/tutorial before production.",
-        f"absorber {args.absorber}",
-        f"edge {args.edge}",
-        f"dft_engine {args.dft_engine}",
-        f"structure {args.structure}",
-    ]
-    if args.vasp_dir:
-        lines.append(f"vasp_dir {args.vasp_dir}")
-    if args.pseudo_dir:
-        lines.append(f"pseudo_dir {args.pseudo_dir}")
-    if args.energy_window:
-        lines.append(f"energy_window {args.energy_window}")
-    if args.extra:
-        lines.extend(args.extra)
-    path = outdir / "ocean.in"
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    """Backward-compatible name for writing a native OCEAN input."""
+    path, _ = _write_native_ocean_input(args, outdir)
     return path
 
 
@@ -240,7 +442,7 @@ def write_run_scripts(args: argparse.Namespace, outdir: Path, ocean_input: Path)
 def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
     outdir = args.outdir.expanduser().resolve()
     outdir.mkdir(parents=True, exist_ok=True)
-    ocean_input = write_ocean_stub(args, outdir)
+    ocean_input, native_metadata = _write_native_ocean_input(args, outdir)
     scripts = write_run_scripts(args, outdir, ocean_input)
     metadata = {
         "schema": "atomi.ocean_xanes_project.v1",
@@ -254,6 +456,7 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
         "dft_plus_u": args.dft_plus_u,
         "module": args.module or os.environ.get("ATOMI_OCEAN_MODULE", ""),
         "ocean_input": str(ocean_input.resolve()),
+        "native_ocean": native_metadata,
         "scripts": scripts,
         "recommendations": [
             "Use VASP/DFT+U to converge the periodic ground state before OCEAN.",
@@ -263,7 +466,7 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
     }
     (outdir / "ocean_xanes_project.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"Wrote OCEAN XANES workspace: {outdir}")
-    print(f"Wrote OCEAN input scaffold: {ocean_input}")
+    print(f"Wrote native OCEAN input: {ocean_input}")
     return metadata
 
 
@@ -338,6 +541,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--module", default=os.environ.get("ATOMI_OCEAN_MODULE", ""), help="Environment module to load before running OCEAN, e.g. chem/ocean/2.9.7.")
     p.add_argument("--pseudo-dir", default=os.environ.get("ATOMI_OCEAN_PSEUDO_DIR", ""))
     p.add_argument("--energy-window", default="", help="Human-readable energy window note, e.g. '-10 60 eV'.")
+    p.add_argument("--edge-atom-index", type=int, default=0, help="1-based absorber atom index for OCEAN edges; defaults to first absorber atom.")
+    p.add_argument("--nkpt", default="10 10 6", help="OCEAN ground-state k mesh, e.g. '10 10 6'.")
+    p.add_argument("--screen-nkpt", default="2 2 2", help="OCEAN screening k mesh, e.g. '2 2 2'.")
+    p.add_argument("--xmesh", default="", help="CNBSE.xmesh; defaults to --nkpt.")
+    p.add_argument("--nbands", type=int, default=240)
+    p.add_argument("--screen-nbands", type=int, default=180)
+    p.add_argument("--ecut", default="90")
+    p.add_argument("--diemac", default="10.0")
+    p.add_argument("--broaden", default="0.4")
+    p.add_argument("--pp-list", nargs="*", default=[], help="Pseudopotential filenames in POSCAR element order.")
     p.add_argument("--extra", action="append", default=[], help="Extra line to append to ocean.in scaffold.")
     p.add_argument("--job-name", default="ocean-xanes")
     p.add_argument("--ntasks", type=int, default=8)
