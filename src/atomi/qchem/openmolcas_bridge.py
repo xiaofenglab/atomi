@@ -91,19 +91,50 @@ def _resolve_executable(executable: str) -> str | None:
     return found or None
 
 
+def _probe_executable_via_module(module_name: str, executable: str) -> dict[str, Any]:
+    if not module_name:
+        return {}
+    shell = (
+        "source /etc/profile.d/modules.sh 2>/dev/null || true; "
+        f"module load {shlex.quote(module_name)} >/dev/null 2>&1; "
+        "module_status=$?; "
+        f"resolved=$(command -v {shlex.quote(executable)} 2>/dev/null || true); "
+        'printf "module_status=%s\\nresolved_executable=%s\\nMOLCAS_VERSION=%s\\nMOLCAS=%s\\n" '
+        '"$module_status" "$resolved" "${MOLCAS_VERSION:-}" "${MOLCAS:-}"'
+    )
+    try:
+        proc = subprocess.run(["bash", "-lc", shell], capture_output=True, text=True, timeout=30)
+    except Exception as exc:  # pragma: no cover - shell/module specific
+        return {"module_probe_error": str(exc)}
+    parsed: dict[str, Any] = {"module_probe_returncode": proc.returncode}
+    if proc.stderr:
+        parsed["module_probe_stderr_head"] = "\n".join(proc.stderr.splitlines()[:8])
+    for line in proc.stdout.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            parsed[f"module_probe_{key}"] = value
+    return parsed
+
+
 def probe_molcas(executable: str | None = None, module: str | None = None) -> dict[str, Any]:
     exe = executable or default_molcas_executable()
+    module_name = module if module is not None else os.environ.get("ATOMI_MOLCAS_MODULE", "")
     resolved = _resolve_executable(exe)
+    module_probe = _probe_executable_via_module(module_name, exe) if not resolved and module_name else {}
+    module_resolved = str(module_probe.get("module_probe_resolved_executable") or "")
+    if not resolved and module_resolved:
+        resolved = module_resolved
     payload: dict[str, Any] = {
         "executable": exe,
         "resolved_executable": resolved or "",
         "available": bool(resolved),
-        "module": module if module is not None else os.environ.get("ATOMI_MOLCAS_MODULE", ""),
-        "molcas": os.environ.get("MOLCAS", ""),
-        "molcas_version": os.environ.get("MOLCAS_VERSION", ""),
+        "module": module_name,
+        "molcas": os.environ.get("MOLCAS") or str(module_probe.get("module_probe_MOLCAS") or ""),
+        "molcas_version": os.environ.get("MOLCAS_VERSION") or str(module_probe.get("module_probe_MOLCAS_VERSION") or ""),
         "molcas_workdir": os.environ.get("MOLCAS_WORKDIR", ""),
+        **module_probe,
     }
-    if resolved:
+    if resolved and not module_resolved:
         for flag in ("--version", "-h"):
             try:
                 proc = subprocess.run([resolved, flag], capture_output=True, text=True, timeout=15)
