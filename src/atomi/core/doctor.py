@@ -444,6 +444,22 @@ def build_hpc_config_template(site: str = "") -> dict[str, Any]:
                     "ATOMI_GSASII_ENV": "",
                 },
             },
+            "ocean": {
+                "root": "",
+                "bin": "",
+                "executable": "",
+                "pseudo_dir": "",
+                "dft_engine": "vasp",
+                "modules": [],
+                "module_commands": [],
+                "environment": {
+                    "ATOMI_OCEAN_ROOT": "",
+                    "ATOMI_OCEAN_BIN": "",
+                    "ATOMI_OCEAN_EXE": "",
+                    "ATOMI_OCEAN_PSEUDO_DIR": "",
+                    "ATOMI_OCEAN_DFT_ENGINE": "",
+                },
+            },
             "moose": {
                 "modules": [],
                 "env_path": "",
@@ -954,6 +970,30 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
                 break
         if _nonempty(gsasii.get("env_path")):
             exports.setdefault("ATOMI_GSASII_ENV", str(gsasii["env_path"]))
+
+    ocean = profiles.get("ocean", {})
+    if isinstance(ocean, dict):
+        env = ocean.get("environment", {})
+        if isinstance(env, dict):
+            for key, value in env.items():
+                if _nonempty(value) and str(key).startswith("ATOMI_"):
+                    exports[str(key)] = str(value)
+        if _nonempty(ocean.get("root")):
+            exports.setdefault("ATOMI_OCEAN_ROOT", str(ocean["root"]))
+        for field in ("bin", "bin_dir", "executable_dir"):
+            if _nonempty(ocean.get(field)):
+                exports.setdefault("ATOMI_OCEAN_BIN", str(ocean[field]))
+                break
+        for field in ("executable", "ocean_executable", "command", "run"):
+            if _nonempty(ocean.get(field)):
+                exports.setdefault("ATOMI_OCEAN_EXE", str(ocean[field]))
+                break
+        for field in ("pseudo_dir", "pseudopotential_dir", "pseudos"):
+            if _nonempty(ocean.get(field)):
+                exports.setdefault("ATOMI_OCEAN_PSEUDO_DIR", str(ocean[field]))
+                break
+        if _nonempty(ocean.get("dft_engine")):
+            exports.setdefault("ATOMI_OCEAN_DFT_ENGINE", str(ocean["dft_engine"]))
 
     moose = profiles.get("moose", {})
     if isinstance(moose, dict):

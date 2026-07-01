@@ -18,11 +18,14 @@ legacy_scripts/
 *_SYNC_STATUS.json
 *_SYNC_PROBE.txt
 *_PROJECT_MEMORY.local.md
+*_PROJECT_MEMORY.local.md.bak*
 ATOMI_PRIVATE_HANDBOOK.local.md
+ATOMI_PRIVATE_HANDBOOK.local.md.bak*
 
 # Private local HPC configuration
 atomi_hpc_config.json
 *.local.json
+*.local.json.bak*
 atomi_hpc_env.sh
 atomi_hpc_discover.sh
 atomi_hpc_discovery*.log

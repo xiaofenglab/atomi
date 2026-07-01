@@ -93,6 +93,7 @@ def test_write_private_template_and_discovery_script(tmp_path: Path) -> None:
     assert config["privacy"] == "local-only; do not commit or push"
     assert "atat" in config["profiles"]
     assert "gsasii" in config["profiles"]
+    assert "ocean" in config["profiles"]
     assert "vasp_cpu" in config["profiles"]
     assert "lammps_md_engine" in config["profiles"]
     assert config["profiles"]["lammps_md_engine"]["modules"] == []
@@ -149,6 +150,13 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
                         "python": "/private/gsas2main/bin/python",
                         "root": "/private/gsas2main",
                     },
+                    "ocean": {
+                        "root": "/private/ocean",
+                        "bin": "/private/ocean/bin",
+                        "executable": "/private/ocean/bin/ocean.pl",
+                        "pseudo_dir": "/private/ocean/pseudos",
+                        "dft_engine": "vasp",
+                    },
                     "moose": {
                         "env_path": "/private/moose_env",
                         "app_executable": "/private/moose/app-opt",
@@ -184,6 +192,7 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
         "lammps_md_engine",
         "mace_training_gpu",
         "moose",
+        "ocean",
         "pdfgetx3",
         "phonopy",
         "xafs_larch",
@@ -221,6 +230,11 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
     assert "export ATOMI_GSASII_PYTHON=/private/gsas2main/bin/python" in env_text
     assert "export ATOMI_GSASII_ROOT=/private/gsas2main" in env_text
     assert "export ATOMI_GSASII_ENV=/private/gsas2main" in env_text
+    assert "export ATOMI_OCEAN_ROOT=/private/ocean" in env_text
+    assert "export ATOMI_OCEAN_BIN=/private/ocean/bin" in env_text
+    assert "export ATOMI_OCEAN_EXE=/private/ocean/bin/ocean.pl" in env_text
+    assert "export ATOMI_OCEAN_PSEUDO_DIR=/private/ocean/pseudos" in env_text
+    assert "export ATOMI_OCEAN_DFT_ENGINE=vasp" in env_text
     assert "export CP2K_DATA_DIR=/private/cp2k/data" in env_text
     assert "OMP_NUM_THREADS" not in env_text
 

@@ -246,6 +246,27 @@ def build_parser() -> argparse.ArgumentParser:
         )
         xafs_command.add_argument("xafs_args", nargs=argparse.REMAINDER)
 
+    for command_name in ("ocean-xanes-bridge", "ocean_xanes_bridge", "xanes-ocean-bridge"):
+        ocean_xanes = subparsers.add_parser(
+            command_name,
+            help="Prepare, inspect, or collect periodic-solid OCEAN XANES workflows.",
+        )
+        ocean_xanes.add_argument("ocean_xanes_args", nargs=argparse.REMAINDER)
+
+    for command_name in ("ocean-xanes-status", "ocean_xanes_status"):
+        ocean_xanes_status = subparsers.add_parser(
+            command_name,
+            help="Check configured OCEAN executable/runtime.",
+        )
+        ocean_xanes_status.add_argument("ocean_xanes_status_args", nargs=argparse.REMAINDER)
+
+    for command_name in ("ocean-xanes-install-plan", "ocean_xanes_install_plan"):
+        ocean_xanes_install_plan = subparsers.add_parser(
+            command_name,
+            help="Print recommended OCEAN HPC installation/configuration pattern.",
+        )
+        ocean_xanes_install_plan.add_argument("ocean_xanes_install_plan_args", nargs=argparse.REMAINDER)
+
     for command_name in ("thermo_lammps", "lammps-thermo-series"):
         lammps_thermo_series = subparsers.add_parser(
             command_name,
@@ -1120,6 +1141,21 @@ def main(argv: list[str] | None = None) -> None:
 
         xafs_status_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] in ("ocean-xanes-bridge", "ocean_xanes_bridge", "xanes-ocean-bridge"):
+        from atomi.xafs.ocean import main as ocean_xanes_main
+
+        ocean_xanes_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in ("ocean-xanes-status", "ocean_xanes_status"):
+        from atomi.xafs.ocean import main as ocean_xanes_main
+
+        ocean_xanes_main(["status", *raw_args[1:]])
+        return
+    if raw_args and raw_args[0] in ("ocean-xanes-install-plan", "ocean_xanes_install_plan"):
+        from atomi.xafs.ocean import main as ocean_xanes_main
+
+        ocean_xanes_main(["install-plan", *raw_args[1:]])
+        return
     if raw_args and raw_args[0] in ("thermo_lammps", "lammps-thermo-series"):
         from atomi.lammps.thermo_series import main as thermo_series_main
 
@@ -1786,6 +1822,21 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.xafs.status import main as xafs_status_main
 
         xafs_status_main(args.xafs_args)
+        return
+    if args.subcommand in ("ocean-xanes-bridge", "ocean_xanes_bridge", "xanes-ocean-bridge"):
+        from atomi.xafs.ocean import main as ocean_xanes_main
+
+        ocean_xanes_main(args.ocean_xanes_args)
+        return
+    if args.subcommand in ("ocean-xanes-status", "ocean_xanes_status"):
+        from atomi.xafs.ocean import main as ocean_xanes_main
+
+        ocean_xanes_main(["status", *args.ocean_xanes_status_args])
+        return
+    if args.subcommand in ("ocean-xanes-install-plan", "ocean_xanes_install_plan"):
+        from atomi.xafs.ocean import main as ocean_xanes_main
+
+        ocean_xanes_main(["install-plan", *args.ocean_xanes_install_plan_args])
         return
 
     if args.subcommand in ("thermo_lammps", "lammps-thermo-series"):
