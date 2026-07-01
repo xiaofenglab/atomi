@@ -212,6 +212,7 @@ def test_molcas_xanes_spectrum_from_output(tmp_path: Path) -> None:
             edge="K",
             gauge="length",
             from_state=1,
+            section="last",
             energy_shift_ev=0.0,
             gaussian_fwhm=1.0,
             lorentzian_fwhm=1.0,

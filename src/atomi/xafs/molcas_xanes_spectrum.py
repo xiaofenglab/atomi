@@ -34,6 +34,7 @@ class Transition:
     gauge: str
     state_basis: str
     source: str
+    section_index: int = 0
 
 
 def _float(text: str) -> float:
@@ -44,12 +45,18 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
-def parse_so_states(text: str) -> list[SOState]:
-    """Parse the SO-state mixing table and return transition energies."""
+def parse_so_states(text: str, *, which: str = "last") -> list[SOState]:
+    """Parse an SO-state mixing table and return transition energies.
 
-    marker = re.search(r"SO State\s+Total energy\s*\(au\)\s+Spin-free states, spin, and weights", text)
-    if not marker:
+    Some historical OpenMolcas outputs contain several RASSI sections from
+    trial blocks in one file.  ``which='last'`` is the default because the last
+    completed table usually corresponds to the final recipe in those files.
+    """
+
+    markers = list(re.finditer(r"SO State\s+Total energy\s*\(au\)\s+Spin-free states, spin, and weights", text))
+    if not markers:
         return []
+    marker = markers[0] if which == "first" else markers[-1]
     section = text[marker.end() :]
     stop = re.search(r"\n\s*-{20,}\s*\n\s*\n", section)
     if stop:
@@ -69,7 +76,6 @@ def parse_so_states(text: str) -> list[SOState]:
         states.append(SOState(state=state, energy_raw_au=energy, energy_ev=rel_au * HARTREE_TO_EV))
     return states
 
-
 def parse_transition_sections(text: str) -> list[Transition]:
     """Parse OpenMolcas transition-strength tables.
 
@@ -83,10 +89,12 @@ def parse_transition_sections(text: str) -> list[Transition]:
     active_title = ""
     active_gauge = ""
     active_basis = ""
+    section_index = 0
     for line in lines:
         stripped = line.strip()
         lower = stripped.lower()
         if stripped.startswith("++") and "transition strengths" in lower:
+            section_index += 1
             active_title = stripped
             active_basis = "so" if "(so states)" in lower else "spin-free" if "(spin-free states)" in lower else "unknown"
             if "velocity" in lower:
@@ -113,15 +121,22 @@ def parse_transition_sections(text: str) -> list[Transition]:
                     gauge=active_gauge,
                     state_basis=active_basis,
                     source=active_title,
+                    section_index=section_index,
                 )
             )
     return transitions
 
 
-def transitions_from_output(path: Path, *, gauge: str = "length", state_from: int = 1) -> list[Transition]:
+def transitions_from_output(
+    path: Path,
+    *,
+    gauge: str = "length",
+    state_from: int = 1,
+    section_policy: str = "last",
+) -> list[Transition]:
     text = read_text(path)
-    states = {s.state: s.energy_ev for s in parse_so_states(text)}
-    rows = []
+    states = {s.state: s.energy_ev for s in parse_so_states(text, which="first" if section_policy == "first" else "last")}
+    matching = []
     for tr in parse_transition_sections(text):
         if tr.state_basis != "so":
             continue
@@ -131,6 +146,12 @@ def transitions_from_output(path: Path, *, gauge: str = "length", state_from: in
             continue
         if tr.state_to not in states or tr.state_from not in states:
             continue
+        matching.append(tr)
+    if section_policy in {"first", "last"} and matching:
+        target = min(tr.section_index for tr in matching) if section_policy == "first" else max(tr.section_index for tr in matching)
+        matching = [tr for tr in matching if tr.section_index == target]
+    rows = []
+    for tr in matching:
         rows.append(
             Transition(
                 state_from=tr.state_from,
@@ -140,10 +161,10 @@ def transitions_from_output(path: Path, *, gauge: str = "length", state_from: in
                 gauge=tr.gauge,
                 state_basis=tr.state_basis,
                 source=str(path),
+                section_index=tr.section_index,
             )
         )
     return rows
-
 
 def transitions_from_csv(path: Path) -> list[Transition]:
     rows: list[Transition] = []
@@ -163,6 +184,7 @@ def transitions_from_csv(path: Path) -> list[Transition]:
                     gauge=raw.get("gauge") or "csv",
                     state_basis=raw.get("state_basis") or "csv",
                     source=str(path),
+                    section_index=int(float(raw.get("section_index") or 0)),
                 )
             )
     return rows
@@ -249,6 +271,7 @@ def broaden(
             "oscillator_strength": tr.oscillator_strength,
             "gauge": tr.gauge,
             "state_basis": tr.state_basis,
+            "section_index": tr.section_index,
         }
         for tr, en in zip(usable, energies)
     ]
@@ -256,7 +279,7 @@ def broaden(
 
 
 def write_transitions_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    keys = ["state_from", "state_to", "energy_ev", "oscillator_strength", "gauge", "state_basis"]
+    keys = ["state_from", "state_to", "energy_ev", "oscillator_strength", "gauge", "state_basis", "section_index"]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=keys)
         writer.writeheader()
@@ -300,7 +323,7 @@ def maybe_plot(path: Path, energy: np.ndarray, intensity: np.ndarray, rows: list
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if getattr(args, "molcas_out", None):
-        transitions = transitions_from_output(args.molcas_out, gauge=args.gauge, state_from=args.from_state)
+        transitions = transitions_from_output(args.molcas_out, gauge=args.gauge, state_from=args.from_state, section_policy=args.section)
         source = str(args.molcas_out)
     else:
         transitions = transitions_from_csv(args.transitions_csv)
@@ -364,6 +387,7 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--edge", default="K")
     parser.add_argument("--gauge", choices=("length", "velocity", "any"), default="length")
     parser.add_argument("--from-state", type=int, default=1)
+    parser.add_argument("--section", choices=("last", "first", "all"), default="last", help="RASSI transition section to use when an output contains multiple trial blocks.")
     parser.add_argument("--energy-shift-ev", type=float, default=0.0)
     parser.add_argument("--gaussian-fwhm", type=float, default=1.0)
     parser.add_argument("--lorentzian-fwhm", type=float)
