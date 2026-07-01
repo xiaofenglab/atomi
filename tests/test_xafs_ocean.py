@@ -32,6 +32,7 @@ def test_ocean_prepare_writes_workspace(tmp_path: Path) -> None:
         executable="/private/ocean/bin/ocean.pl",
         root="/private/ocean",
         bin="/private/ocean/bin",
+        module="chem/ocean/test",
         pseudo_dir="/private/ocean/pseudos",
         energy_window="-10 60 eV",
         extra=["nbands 200"],
@@ -50,7 +51,10 @@ def test_ocean_prepare_writes_workspace(tmp_path: Path) -> None:
     assert "absorber U" in ocean_input
     assert "edge M4" in ocean_input
     assert "nbands 200" in ocean_input
+    assert "module load \"${ATOMI_OCEAN_MODULE}\"" in run_script
+    assert "ATOMI_OCEAN_MODULE=chem/ocean/test" in run_script
     assert "ATOMI_OCEAN_EXE=/private/ocean/bin/ocean.pl" in run_script
+    assert metadata["module"] == "chem/ocean/test"
     assert metadata["absorber"] == project["absorber"] == "U"
     assert metadata["dft_plus_u"].startswith("VASP LDAU")
 

@@ -153,6 +153,7 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
                     "ocean": {
                         "root": "/private/ocean",
                         "bin": "/private/ocean/bin",
+                        "module": "chem/ocean/test",
                         "executable": "/private/ocean/bin/ocean.pl",
                         "pseudo_dir": "/private/ocean/pseudos",
                         "dft_engine": "vasp",
@@ -232,6 +233,7 @@ def test_env_script_and_auto_setup_with_existing_config(tmp_path: Path) -> None:
     assert "export ATOMI_GSASII_ENV=/private/gsas2main" in env_text
     assert "export ATOMI_OCEAN_ROOT=/private/ocean" in env_text
     assert "export ATOMI_OCEAN_BIN=/private/ocean/bin" in env_text
+    assert "export ATOMI_OCEAN_MODULE=chem/ocean/test" in env_text
     assert "export ATOMI_OCEAN_EXE=/private/ocean/bin/ocean.pl" in env_text
     assert "export ATOMI_OCEAN_PSEUDO_DIR=/private/ocean/pseudos" in env_text
     assert "export ATOMI_OCEAN_DFT_ENGINE=vasp" in env_text

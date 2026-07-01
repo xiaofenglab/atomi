@@ -65,6 +65,7 @@ def probe_ocean(executable: str | None = None, root: str | None = None, bin_dir:
         "resolved_executable": str(Path(resolved).expanduser()) if resolved else "",
         "root": root or os.environ.get("ATOMI_OCEAN_ROOT", ""),
         "bin": bin_dir or os.environ.get("ATOMI_OCEAN_BIN", ""),
+        "module": os.environ.get("ATOMI_OCEAN_MODULE", ""),
         "pseudo_dir": os.environ.get("ATOMI_OCEAN_PSEUDO_DIR", ""),
         "dft_engine": os.environ.get("ATOMI_OCEAN_DFT_ENGINE", "vasp"),
     }
@@ -91,6 +92,7 @@ def status_main(args: argparse.Namespace) -> dict[str, Any]:
         "environment": {
             "ATOMI_OCEAN_ROOT": os.environ.get("ATOMI_OCEAN_ROOT", ""),
             "ATOMI_OCEAN_BIN": os.environ.get("ATOMI_OCEAN_BIN", ""),
+            "ATOMI_OCEAN_MODULE": os.environ.get("ATOMI_OCEAN_MODULE", ""),
             "ATOMI_OCEAN_EXE": os.environ.get("ATOMI_OCEAN_EXE", ""),
             "ATOMI_OCEAN_PSEUDO_DIR": os.environ.get("ATOMI_OCEAN_PSEUDO_DIR", ""),
             "ATOMI_OCEAN_DFT_ENGINE": os.environ.get("ATOMI_OCEAN_DFT_ENGINE", ""),
@@ -104,6 +106,7 @@ def status_main(args: argparse.Namespace) -> dict[str, Any]:
         print(f"  executable : {ocean.get('resolved_executable') or ocean.get('executable')}")
         print(f"  available  : {'yes' if ocean.get('available') else 'no'}")
         print(f"  root       : {ocean.get('root') or '(not set)'}")
+        print(f"  module     : {ocean.get('module') or '(not set)'}")
         print(f"  pseudo dir : {ocean.get('pseudo_dir') or '(not set)'}")
     return report
 
@@ -134,12 +137,14 @@ def install_plan_main(args: argparse.Namespace) -> dict[str, Any]:
                 "ocean": {
                     "root": "$HOME/atomi_hpc/ocean",
                     "bin": "$HOME/atomi_hpc/ocean/bin",
+                    "module": "",
                     "executable": "$HOME/atomi_hpc/ocean/bin/ocean.pl",
                     "pseudo_dir": "$HOME/atomi_hpc/ocean/pseudos",
                     "dft_engine": "vasp",
                     "environment": {
                         "ATOMI_OCEAN_ROOT": "$HOME/atomi_hpc/ocean",
                         "ATOMI_OCEAN_BIN": "$HOME/atomi_hpc/ocean/bin",
+                        "ATOMI_OCEAN_MODULE": "",
                         "ATOMI_OCEAN_EXE": "$HOME/atomi_hpc/ocean/bin/ocean.pl",
                         "ATOMI_OCEAN_PSEUDO_DIR": "$HOME/atomi_hpc/ocean/pseudos",
                         "ATOMI_OCEAN_DFT_ENGINE": "vasp",
@@ -182,12 +187,27 @@ def write_ocean_stub(args: argparse.Namespace, outdir: Path) -> Path:
 
 def write_run_scripts(args: argparse.Namespace, outdir: Path, ocean_input: Path) -> dict[str, str]:
     exe = args.executable or default_ocean_executable()
+    module_name = args.module or os.environ.get("ATOMI_OCEAN_MODULE", "")
     run_script = outdir / "run_ocean_xanes.sh"
+    module_block = ""
+    if module_name:
+        module_block = (
+            f"export ATOMI_OCEAN_MODULE={shlex.quote(str(module_name))}\n"
+            'if ! type module >/dev/null 2>&1; then\n'
+            '  source /etc/profile.d/modules.sh 2>/dev/null || true\n'
+            'fi\n'
+            'if type module >/dev/null 2>&1; then\n'
+            '  module load "${ATOMI_OCEAN_MODULE}"\n'
+            'else\n'
+            '  echo "WARNING: module command is unavailable; expecting OCEAN runtime already on PATH." >&2\n'
+            'fi\n'
+        )
     run_script.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
         'cd "${SCRIPT_DIR}"\n'
+        f"{module_block}"
         f"export ATOMI_OCEAN_EXE={shlex.quote(str(exe))}\n"
         f"export ATOMI_OCEAN_ROOT={shlex.quote(str(args.root or os.environ.get('ATOMI_OCEAN_ROOT', '')))}\n"
         f"export ATOMI_OCEAN_BIN={shlex.quote(str(args.bin or os.environ.get('ATOMI_OCEAN_BIN', '')))}\n"
@@ -232,6 +252,7 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
         "vasp_dir": str(args.vasp_dir.expanduser().resolve()) if args.vasp_dir else "",
         "dft_engine": args.dft_engine,
         "dft_plus_u": args.dft_plus_u,
+        "module": args.module or os.environ.get("ATOMI_OCEAN_MODULE", ""),
         "ocean_input": str(ocean_input.resolve()),
         "scripts": scripts,
         "recommendations": [
@@ -314,6 +335,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--executable", default="")
     p.add_argument("--root", default="")
     p.add_argument("--bin", default="")
+    p.add_argument("--module", default=os.environ.get("ATOMI_OCEAN_MODULE", ""), help="Environment module to load before running OCEAN, e.g. chem/ocean/2.9.7.")
     p.add_argument("--pseudo-dir", default=os.environ.get("ATOMI_OCEAN_PSEUDO_DIR", ""))
     p.add_argument("--energy-window", default="", help="Human-readable energy window note, e.g. '-10 60 eV'.")
     p.add_argument("--extra", action="append", default=[], help="Extra line to append to ocean.in scaffold.")

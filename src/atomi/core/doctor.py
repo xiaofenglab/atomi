@@ -447,6 +447,7 @@ def build_hpc_config_template(site: str = "") -> dict[str, Any]:
             "ocean": {
                 "root": "",
                 "bin": "",
+                "module": "",
                 "executable": "",
                 "pseudo_dir": "",
                 "dft_engine": "vasp",
@@ -455,6 +456,7 @@ def build_hpc_config_template(site: str = "") -> dict[str, Any]:
                 "environment": {
                     "ATOMI_OCEAN_ROOT": "",
                     "ATOMI_OCEAN_BIN": "",
+                    "ATOMI_OCEAN_MODULE": "",
                     "ATOMI_OCEAN_EXE": "",
                     "ATOMI_OCEAN_PSEUDO_DIR": "",
                     "ATOMI_OCEAN_DFT_ENGINE": "",
@@ -983,6 +985,10 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
         for field in ("bin", "bin_dir", "executable_dir"):
             if _nonempty(ocean.get(field)):
                 exports.setdefault("ATOMI_OCEAN_BIN", str(ocean[field]))
+                break
+        for field in ("module", "env_module", "hpc_module"):
+            if _nonempty(ocean.get(field)):
+                exports.setdefault("ATOMI_OCEAN_MODULE", str(ocean[field]))
                 break
         for field in ("executable", "ocean_executable", "command", "run"):
             if _nonempty(ocean.get(field)):
