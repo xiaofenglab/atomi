@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "atomi"
-version = "0.9.14"
+version = "0.9.15"
 description = "Reusable HPC workflow tools for computational materials science."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -38,6 +38,9 @@ scattering = [
 xafs = [
   "xraydb",
   "xraylarch; python_version >= '3.10'",
+]
+molcas-viz = [
+  "Pegamoid",
 ]
 zentropy = [
   "pyzentropy; python_version >= '3.10'",
@@ -127,6 +130,15 @@ molcas_status = "atomi.qchem.openmolcas_bridge:status_cli"
 openmolcas-status = "atomi.qchem.openmolcas_bridge:status_cli"
 molcas-install-plan = "atomi.qchem.openmolcas_bridge:install_plan_cli"
 molcas_install_plan = "atomi.qchem.openmolcas_bridge:install_plan_cli"
+pegamoid-bridge = "atomi.qchem.pegamoid_bridge:main"
+pegamoid_bridge = "atomi.qchem.pegamoid_bridge:main"
+pegamoid-status = "atomi.qchem.pegamoid_bridge:status_cli"
+pegamoid_status = "atomi.qchem.pegamoid_bridge:status_cli"
+pegamoid-install-plan = "atomi.qchem.pegamoid_bridge:install_plan_cli"
+pegamoid_install_plan = "atomi.qchem.pegamoid_bridge:install_plan_cli"
+molcas-xanes-spectrum = "atomi.xafs.molcas_xanes_spectrum:main"
+molcas_xanes_spectrum = "atomi.xafs.molcas_xanes_spectrum:main"
+xanes-molcas-spectrum = "atomi.xafs.molcas_xanes_spectrum:main"
 moose-doctor = "atomi.moose.env:main"
 moose_status = "atomi.moose.env:main"
 moose-status = "atomi.moose.env:main"

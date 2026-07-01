@@ -155,3 +155,83 @@ def test_openmolcas_status_cli_accepts_registry_argv(capsys) -> None:
     assert "atomi.openmolcas_status.v1" in capsys.readouterr().out
     assert openmolcas_bridge.install_plan_cli([]) == 0
     assert "OpenMolcas / Atomi HPC install plan" in capsys.readouterr().out
+
+
+def test_pegamoid_bridge_status_and_prepare(tmp_path: Path, capsys) -> None:
+    from atomi.qchem import pegamoid_bridge
+
+    assert pegamoid_bridge.status_cli(["--json"]) == 0
+    assert "atomi.pegamoid_status.v1" in capsys.readouterr().out
+    assert pegamoid_bridge.install_plan_cli([]) == 0
+    assert "separate GUI/runtime environment" in capsys.readouterr().out
+
+    h5 = tmp_path / "Ga_6h2o.rasscf.h5"
+    orb = tmp_path / "Ga_6h2o.RasOrb"
+    h5.write_text("placeholder", encoding="utf-8")
+    orb.write_text("placeholder", encoding="utf-8")
+    meta = pegamoid_bridge.prepare_main(
+        argparse.Namespace(file=[str(h5), str(orb)], outdir=tmp_path / "pegamoid", label="ga", module="", maxscratch="100MB")
+    )
+    run_script = Path(meta["run_script"]).read_text(encoding="utf-8")
+    assert "PEGAMOID_MAXSCRATCH" in run_script
+    assert "Ga_6h2o.rasscf.h5" in run_script
+    assert meta["schema"] == "atomi.pegamoid_bridge_project.v1"
+
+
+def test_molcas_xanes_spectrum_from_output(tmp_path: Path) -> None:
+    from atomi.xafs import molcas_xanes_spectrum
+
+    output = tmp_path / "ga.out"
+    output.write_text(
+        """
+ Weights of the five most important spin-orbit-free states for each spin-orbit state.
+
+ SO State  Total energy (au)           Spin-free states, spin, and weights
+ -------------------------------------------------------------------------------------------------------
+    1         0.000000       1 0.0  1.0000
+    2       382.000000       2 0.0  1.0000
+    3       382.100000       3 0.0  1.0000
+ -------------------------------------------------------------------------------------------------------
+
+++ Dipole transition strengths (SO states):
+   ----------------------------------------
+      From   To        Osc. strength     Einstein coefficients Ax, Ay, Az (sec-1)    Total A (sec-1)
+     -----------------------------------------------------------------------------------------------
+         1    2       2.00000000E-04  1.0  1.0  1.0  1.0
+         1    3       1.00000000E-04  1.0  1.0  1.0  1.0
+     -----------------------------------------------------------------------------------------------
+""",
+        encoding="utf-8",
+    )
+    outdir = tmp_path / "spectrum"
+    summary = molcas_xanes_spectrum.run(
+        argparse.Namespace(
+            molcas_out=output,
+            transitions_csv=None,
+            element="Ga",
+            edge="K",
+            gauge="length",
+            from_state=1,
+            energy_shift_ev=0.0,
+            gaussian_fwhm=1.0,
+            lorentzian_fwhm=1.0,
+            broadening="pseudo-voigt",
+            pseudo_voigt_eta=0.5,
+            normalize="max",
+            emin=10390.0,
+            emax=10410.0,
+            step=0.2,
+            outdir=outdir,
+            spectrum_name="spectrum.csv",
+            transitions_name="transitions.csv",
+            summary_name="summary.json",
+            plot_name="spectrum.png",
+            title="Ga test",
+            no_xraydb=True,
+            no_plot=True,
+        )
+    )
+    assert summary["schema"] == "atomi.molcas_xanes_spectrum.v1"
+    assert summary["n_transitions_used"] == 2
+    assert (outdir / "spectrum.csv").exists()
+    assert "energy_ev" in (outdir / "transitions.csv").read_text(encoding="utf-8")

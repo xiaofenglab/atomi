@@ -74,6 +74,30 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Print the recommended OpenMolcas HPC/KIT setup pattern.",
     ),
     CommandSpec(
+        aliases=("pegamoid-bridge", "pegamoid_bridge"),
+        target="atomi.qchem.pegamoid_bridge:main",
+        category="qchem",
+        help="Prepare Pegamoid launch wrappers for OpenMolcas orbital/density files.",
+    ),
+    CommandSpec(
+        aliases=("pegamoid-status", "pegamoid_status"),
+        target="atomi.qchem.pegamoid_bridge:status_cli",
+        category="qchem",
+        help="Check configured Pegamoid runtime for OpenMolcas orbital viewing.",
+    ),
+    CommandSpec(
+        aliases=("pegamoid-install-plan", "pegamoid_install_plan"),
+        target="atomi.qchem.pegamoid_bridge:install_plan_cli",
+        category="qchem",
+        help="Print the recommended external Pegamoid viewer setup pattern.",
+    ),
+    CommandSpec(
+        aliases=("molcas-xanes-spectrum", "molcas_xanes_spectrum", "xanes-molcas-spectrum"),
+        target="atomi.xafs.molcas_xanes_spectrum:main",
+        category="xafs",
+        help="Broaden OpenMolcas/RASSI dipole transitions into XANES spectra.",
+    ),
+    CommandSpec(
         aliases=("aq-thermo-bridge", "aq_thermo_bridge", "thermofun-bridge", "thermohub-bridge"),
         target="atomi.aqueous.thermohub_bridge:main",
         category="aqueous",
