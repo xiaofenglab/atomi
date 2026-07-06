@@ -54,6 +54,36 @@ EDGE_QUANTUM_NUMBERS = {
     "M": (3, 2),
 }
 
+DFT_ENGINE_ALIASES = {
+    "quantum_espresso": "qe",
+    "espresso": "qe",
+    "qe": "qe",
+    "abinit": "abi",
+    "abi": "abi",
+    "obf": "obf",
+}
+
+EXAMPLE_OPF_OPTS = [
+    "{z:03d}",
+    "2 1 0 0",
+    "scalar rel",
+    "lda",
+    "2.0 6.0 2.0 0.0",
+    "2.0 6.0 2.0 0.0",
+]
+
+EXAMPLE_OPF_FILL = [
+    "2",
+    ".3 3.00 0.0001",
+    "2.5",
+    "0.05 20",
+]
+
+
+def _ocean_dft_token(engine: str) -> str:
+    key = engine.strip().lower().replace("-", "_")
+    return DFT_ENGINE_ALIASES.get(key, engine.strip() or "qe")
+
 
 def _vec_norm(vec: list[float]) -> float:
     return math.sqrt(sum(x * x for x in vec))
@@ -148,7 +178,7 @@ def _pseudo_list(elements: list[str], pseudo_dir: str, pp_list: list[str] | None
     if pp_list:
         if len(pp_list) != len(elements):
             raise ValueError("--pp-list must provide one pseudopotential filename per POSCAR element, in POSCAR order")
-        return pp_list
+        return [Path(item).expanduser().name for item in pp_list]
     root = Path(pseudo_dir).expanduser() if pseudo_dir else None
     names: list[str] = []
     for element in elements:
@@ -159,6 +189,96 @@ def _pseudo_list(elements: list[str], pseudo_dir: str, pp_list: list[str] | None
                 match = candidates[0].name
         names.append(match or f"{element}.UPF")
     return names
+
+
+def _write_example_opf_files(outdir: Path, elements: list[str], znucl: list[int]) -> dict[str, Any]:
+    """Write diagnostic OCEAN OPF controls.
+
+    These lines are adapted from the JUSTUS2 OCEAN SrTiO3 example.  They make
+    OPF requirements explicit, but they are not element-validated production
+    controls for actinides.
+    """
+    opts_pairs: list[tuple[int, str]] = []
+    fill_pairs: list[tuple[int, str]] = []
+    for element, z in zip(elements, znucl):
+        opts_name = f"{element}.screening.opts"
+        fill_name = f"{element}.screening.fill"
+        (outdir / opts_name).write_text(
+            "\n".join(line.format(z=z) for line in EXAMPLE_OPF_OPTS) + "\n",
+            encoding="utf-8",
+        )
+        (outdir / fill_name).write_text("\n".join(EXAMPLE_OPF_FILL) + "\n", encoding="utf-8")
+        opts_pairs.append((z, opts_name))
+        fill_pairs.append((z, fill_name))
+    return {
+        "opf_template": "example",
+        "opf_warning": (
+            "Example OPF controls are diagnostic-only; replace with validated "
+            "element-specific OCEAN/Shirley controls before interpreting spectra."
+        ),
+        "opts": opts_pairs,
+        "fill": fill_pairs,
+    }
+
+
+def _format_z_file_map(prefix: str, pairs: list[tuple[int, str]]) -> list[str]:
+    if len(pairs) == 1:
+        z, name = pairs[0]
+        return [f"{prefix}{{ {z} {name} }}"]
+    lines = [f"{prefix}{{"]
+    lines.extend(f"  {z} {name}" for z, name in pairs)
+    lines.append("}")
+    return lines
+
+
+def _stage_ocean_pseudopotentials(outdir: Path, pseudo_dir: str, pp_names: list[str]) -> dict[str, Any]:
+    """Stage OCEAN pseudopotentials where OPF can resolve ``ppdir { ../ }``.
+
+    The JUSTUS2 OCEAN 2.9.7 OPF stage runs from ``workspace/OPF`` and opens
+    pseudopotentials relative to that directory.  Therefore ``ppdir { ../ }``
+    means the UPF files must live in the OCEAN workspace root itself.  Hamann/
+    ONCV-style OPF controls such as ``U_.in`` are staged alongside matching
+    ``U_.UPF`` files when present in the pseudo cache.
+    """
+    report: dict[str, Any] = {
+        "ppdir": "../",
+        "destination_dir": str(outdir),
+        "staged": [],
+        "staged_opf_inputs": [],
+        "missing": [],
+    }
+    root_text = str(pseudo_dir or "").strip()
+    if not root_text:
+        report["status"] = "skipped_no_pseudo_dir"
+        return report
+    root = Path(root_text).expanduser()
+    report["source_dir"] = str(root)
+    if not root.exists():
+        report["status"] = "skipped_missing_pseudo_dir"
+        return report
+    for name in pp_names:
+        filename = Path(name).name
+        src = root / filename
+        dest = outdir / filename
+        if not src.exists():
+            report["missing"].append(str(src))
+            continue
+        if src.resolve() != dest.resolve():
+            shutil.copy2(src, dest)
+        report["staged"].append({"name": filename, "source": str(src), "destination": str(dest)})
+        opf_src = src.with_suffix(".in")
+        if opf_src.exists():
+            opf_dest = outdir / opf_src.name
+            if opf_src.resolve() != opf_dest.resolve():
+                shutil.copy2(opf_src, opf_dest)
+            report["staged_opf_inputs"].append(
+                {"name": opf_src.name, "source": str(opf_src), "destination": str(opf_dest)}
+            )
+    if report["missing"]:
+        missing = ", ".join(report["missing"])
+        raise FileNotFoundError(f"OCEAN pseudopotential(s) not found in {root}: {missing}")
+    report["status"] = "staged" if report["staged"] else "nothing_to_stage"
+    return report
 
 
 def _write_native_ocean_input(args: argparse.Namespace, outdir: Path) -> tuple[Path, dict[str, Any]]:
@@ -175,15 +295,20 @@ def _write_native_ocean_input(args: argparse.Namespace, outdir: Path) -> tuple[P
     missing = [element for element, z in zip(poscar["elements"], znucl) if z is None]
     if missing:
         raise ValueError(f"Missing atomic number mapping for: {', '.join(missing)}")
+    zints = [int(z) for z in znucl]
+    opf_metadata: dict[str, Any] = {"opf_template": getattr(args, "opf_template", "none")}
+    if getattr(args, "opf_template", "none") == "example":
+        opf_metadata = _write_example_opf_files(outdir, poscar["elements"], zints)
     nkpt = getattr(args, "nkpt", "") or "10 10 6"
     screen_nkpt = getattr(args, "screen_nkpt", "") or "2 2 2"
     xmesh = getattr(args, "xmesh", "") or nkpt
+    dft_token = _ocean_dft_token(str(args.dft_engine))
     lines = [
         "# OCEAN input generated by Atomi from POSCAR/CONTCAR.",
         "# Review against your local OCEAN version/tutorial before production.",
         "# NOTE: OCEAN edge n/l does not distinguish spin-orbit split L2/L3 or M4/M5 by itself.",
         "para_prefix { srun }",
-        f"dft{{ {args.dft_engine} }}",
+        f"dft{{ {dft_token} }}",
         f"nkpt {{ {nkpt} }}",
         f"screen.nkpt {{ {screen_nkpt} }}",
         f"screen.nbands {getattr(args, 'screen_nbands', 180)}",
@@ -194,7 +319,8 @@ def _write_native_ocean_input(args: argparse.Namespace, outdir: Path) -> tuple[P
         "}",
         f"ntypat {{ {len(poscar['elements'])} }}",
         f"natom {{ {poscar['natom']} }}",
-        "znucl { " + " ".join(str(z) for z in znucl) + " }",
+        "znucl { " + " ".join(str(z) for z in zints) + " }",
+        "zsymb { " + " ".join(poscar["elements"]) + " }",
         "ppdir { ../ }",
         "pp_list{ " + " ".join(pp_names) + " }",
         "typat {",
@@ -212,6 +338,14 @@ def _write_native_ocean_input(args: argparse.Namespace, outdir: Path) -> tuple[P
         "cnbse.rad{ 4.0 }",
         "scfac 0.80",
     ]
+    if opf_metadata.get("opts"):
+        lines.extend(_format_z_file_map("opf.opts", opf_metadata["opts"]))
+    else:
+        lines.append("# opf.opts not written; QE/Shirley OCEAN runs require explicit OPF controls.")
+    if opf_metadata.get("fill"):
+        lines.extend(_format_z_file_map("opf.fill", opf_metadata["fill"]))
+    else:
+        lines.append("# opf.fill not written; QE/Shirley OCEAN runs require explicit OPF controls.")
     if args.energy_window:
         lines.append(f"# energy_window_note {args.energy_window}")
     if args.dft_plus_u:
@@ -230,6 +364,9 @@ def _write_native_ocean_input(args: argparse.Namespace, outdir: Path) -> tuple[P
         "counts": poscar["counts"],
         "pseudopotentials": pp_names,
         "ppdir_policy": "workspace-relative ../ is used because OCEAN OPF runs inside OPF/",
+        "dft_engine_input": args.dft_engine,
+        "dft_engine_ocean_token": dft_token,
+        "opf": opf_metadata,
         "nkpt": nkpt,
         "screen_nkpt": screen_nkpt,
         "xmesh": xmesh,
@@ -285,7 +422,7 @@ def probe_ocean(executable: str | None = None, root: str | None = None, bin_dir:
         "bin": bin_dir or os.environ.get("ATOMI_OCEAN_BIN", ""),
         "module": os.environ.get("ATOMI_OCEAN_MODULE", ""),
         "pseudo_dir": os.environ.get("ATOMI_OCEAN_PSEUDO_DIR", ""),
-        "dft_engine": os.environ.get("ATOMI_OCEAN_DFT_ENGINE", "vasp"),
+        "dft_engine": os.environ.get("ATOMI_OCEAN_DFT_ENGINE", "quantum_espresso"),
     }
     if exists:
         try:
@@ -358,14 +495,14 @@ def install_plan_main(args: argparse.Namespace) -> dict[str, Any]:
                     "module": "",
                     "executable": "$HOME/atomi_hpc/ocean/bin/ocean.pl",
                     "pseudo_dir": "$HOME/atomi_hpc/ocean/pseudos",
-                    "dft_engine": "vasp",
+                    "dft_engine": "quantum_espresso",
                     "environment": {
                         "ATOMI_OCEAN_ROOT": "$HOME/atomi_hpc/ocean",
                         "ATOMI_OCEAN_BIN": "$HOME/atomi_hpc/ocean/bin",
                         "ATOMI_OCEAN_MODULE": "",
                         "ATOMI_OCEAN_EXE": "$HOME/atomi_hpc/ocean/bin/ocean.pl",
                         "ATOMI_OCEAN_PSEUDO_DIR": "$HOME/atomi_hpc/ocean/pseudos",
-                        "ATOMI_OCEAN_DFT_ENGINE": "vasp",
+                        "ATOMI_OCEAN_DFT_ENGINE": "quantum_espresso",
                     },
                 }
             }
@@ -404,6 +541,16 @@ def write_run_scripts(args: argparse.Namespace, outdir: Path, ocean_input: Path)
             '  echo "WARNING: module command is unavailable; expecting OCEAN runtime already on PATH." >&2\n'
             'fi\n'
         )
+    opf_guard = ""
+    if not getattr(args, "allow_missing_opf", False):
+        opf_guard = (
+            f"if ! grep -q '^opf\\.opts' {shlex.quote(ocean_input.name)} "
+            f"|| ! grep -q '^opf\\.fill' {shlex.quote(ocean_input.name)}; then\n"
+            '  echo "ERROR: OCEAN QE/Shirley run needs explicit opf.opts and opf.fill controls." >&2\n'
+            '  echo "Use --opf-template example only for diagnostic smoke tests, or provide validated OPF controls before production." >&2\n'
+            "  exit 64\n"
+            "fi\n"
+        )
     run_script.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
@@ -414,6 +561,7 @@ def write_run_scripts(args: argparse.Namespace, outdir: Path, ocean_input: Path)
         f"export ATOMI_OCEAN_ROOT={shlex.quote(str(args.root or os.environ.get('ATOMI_OCEAN_ROOT', '')))}\n"
         f"export ATOMI_OCEAN_BIN={shlex.quote(str(args.bin or os.environ.get('ATOMI_OCEAN_BIN', '')))}\n"
         f"export ATOMI_OCEAN_PSEUDO_DIR={shlex.quote(str(args.pseudo_dir or os.environ.get('ATOMI_OCEAN_PSEUDO_DIR', '')))}\n"
+        f"{opf_guard}"
         'echo "Running OCEAN XANES bridge workspace"\n'
         f"{shlex.quote(str(exe))} {shlex.quote(ocean_input.name)}\n",
         encoding="utf-8",
@@ -443,6 +591,11 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
     outdir = args.outdir.expanduser().resolve()
     outdir.mkdir(parents=True, exist_ok=True)
     ocean_input, native_metadata = _write_native_ocean_input(args, outdir)
+    native_metadata["pseudopotential_staging"] = _stage_ocean_pseudopotentials(
+        outdir,
+        str(args.pseudo_dir or os.environ.get("ATOMI_OCEAN_PSEUDO_DIR", "")),
+        list(native_metadata.get("pseudopotentials", [])),
+    )
     scripts = write_run_scripts(args, outdir, ocean_input)
     metadata = {
         "schema": "atomi.ocean_xanes_project.v1",
@@ -533,7 +686,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--absorber", required=True, help="Absorber element, e.g. U, O, Gd.")
     p.add_argument("--edge", default="K", help="Absorption edge label, e.g. K, L3, M4.")
     p.add_argument("--outdir", type=Path, default=Path("ocean_xanes"))
-    p.add_argument("--dft-engine", default=os.environ.get("ATOMI_OCEAN_DFT_ENGINE", "vasp"))
+    p.add_argument("--dft-engine", default=os.environ.get("ATOMI_OCEAN_DFT_ENGINE", "quantum_espresso"))
     p.add_argument("--dft-plus-u", default="", help="Short DFT+U note, e.g. 'VASP LDAU U=4.5 eV on U 5f'.")
     p.add_argument("--executable", default="")
     p.add_argument("--root", default="")
@@ -551,6 +704,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--diemac", default="10.0")
     p.add_argument("--broaden", default="0.4")
     p.add_argument("--pp-list", nargs="*", default=[], help="Pseudopotential filenames in POSCAR element order.")
+    p.add_argument(
+        "--opf-template",
+        choices=("none", "example"),
+        default="none",
+        help="Write diagnostic example OPF opts/fill controls. Use only for smoke tests, not production actinide spectra.",
+    )
+    p.add_argument(
+        "--allow-missing-opf",
+        action="store_true",
+        help="Allow the generated run script to proceed without opf.opts/opf.fill preflight checks.",
+    )
     p.add_argument("--extra", action="append", default=[], help="Extra line to append to ocean.in scaffold.")
     p.add_argument("--job-name", default="ocean-xanes")
     p.add_argument("--ntasks", type=int, default=8)

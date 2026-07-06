@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and compare MD-ensemble XAFS calculations through Larch/FEFF."""
+"""Build and compare Route A FEFF/Larch XAFS calculations from structures or MD."""
 
 from __future__ import annotations
 
@@ -464,11 +464,13 @@ def write_feff_input(
         f"FMS {min(cluster_radius, 8.0):.6g}",
         "",
         "POTENTIALS",
-        "* ipot Z element label",
-        f"  0 {atomic_number(absorber):3d} {absorber:2s} {absorber}_absorber",
+        "* ipot Z element; labels are kept in comments/metadata for FEFF8L compatibility",
+        f"* ipot 0 label: {absorber}_absorber",
+        f"  0 {atomic_number(absorber):3d} {absorber:2s}",
     ]
     for symbol, ipot in potential_map.items():
-        lines.append(f"  {ipot:d} {atomic_number(symbol):3d} {symbol:2s} {symbol}")
+        lines.append(f"* ipot {ipot:d} label: {symbol}")
+        lines.append(f"  {ipot:d} {atomic_number(symbol):3d} {symbol:2s}")
     lines.extend(["", "ATOMS", "* x y z ipot tag distance_A"])
     for row in records:
         ipot = 0 if row["is_absorber"] else potential_map[row["symbol"]]
@@ -596,7 +598,8 @@ def run_prepare(args: argparse.Namespace) -> dict:
     ]
     write_rows_csv(args.outdir / "cluster_index.csv", rows, fieldnames)
     metadata = {
-        "mode": "xafs_lammps_prepare",
+        "mode": "xafs_vasp_feff_larch_prepare",
+        "xafs_route": "route_a_vasp_feff_larch",
         "source": source_summary,
         "selected_outputs": selected_outputs,
         "cell_metadata": cell_meta,
@@ -925,6 +928,7 @@ def run_larch(args: argparse.Namespace) -> dict:
 
     metadata = {
         "mode": "xafs_larch_run",
+        "xafs_route": "route_a_vasp_feff_larch",
         "prepared_dir": str(args.prepared_dir.resolve()),
         "feff_exe": args.feff_exe,
         "n_clusters": len(cluster_dirs),
@@ -1025,6 +1029,7 @@ def run_compare(args: argparse.Namespace) -> dict:
         plots.append(str(args.outdir / "xafs_compare_chi_k.png"))
     metadata = {
         "mode": "xafs_md_compare",
+        "xafs_route": "route_a_vasp_feff_larch",
         "xafs_dir": str(args.xafs_dir.resolve()),
         "model_chi": str(model_path.resolve()),
         "exp_chi": str(args.exp_chi.resolve()),
@@ -1051,12 +1056,12 @@ def run_compare(args: argparse.Namespace) -> dict:
 def build_prepare_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="xafs_lammps_prepare",
-        description="Generate absorber-centered FEFF inputs from LAMMPS/MD ensemble frames.",
+        description="Generate Route A absorber-centered FEFF inputs from VASP/static structures or MD frames.",
     )
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--pdf-dir", type=Path, help="Existing pdf_lammps or pdf_lammps_series output directory.")
     source.add_argument("--dump", type=Path, help="LAMMPS dump trajectory.")
-    source.add_argument("--traj", type=Path, help="ASE-readable trajectory, usually extxyz.")
+    source.add_argument("--traj", type=Path, help="ASE-readable structure/trajectory, e.g. POSCAR, CONTCAR, CIF, or extxyz.")
     source.add_argument("--config", nargs="+", help="One or more md-engine production config JSON files.")
     source.add_argument(
         "--md-root",

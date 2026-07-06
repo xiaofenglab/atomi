@@ -92,6 +92,12 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Print the recommended external Pegamoid viewer setup pattern.",
     ),
     CommandSpec(
+        aliases=("xafs-routes", "xafs_routes"),
+        target="atomi.xafs.routes:main",
+        category="xafs",
+        help="Print Atomi XAFS Route A/B policy: VASP-FEFF/Larch vs QE-OCEAN.",
+    ),
+    CommandSpec(
         aliases=("molcas-xanes-spectrum", "molcas_xanes_spectrum", "xanes-molcas-spectrum"),
         target="atomi.xafs.molcas_xanes_spectrum:main",
         category="xafs",

@@ -1,2 +1,2 @@
-"""XAFS helpers for MD-ensemble and Larch/FEFF workflows."""
+"""XAFS helpers for Route A FEFF/Larch and Route B QE/OCEAN workflows."""
 

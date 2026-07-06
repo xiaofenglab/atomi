@@ -25,6 +25,11 @@ def test_ocean_prepare_writes_workspace(tmp_path: Path) -> None:
     structure.write_text("test structure\n1\n1 0 0\n0 1 0\n0 0 1\nU O\n1 2\nDirect\n0 0 0\n0.25 0.25 0.25\n0.75 0.75 0.75\n", encoding="utf-8")
     vasp_dir = tmp_path / "vasp_scf"
     vasp_dir.mkdir()
+    pseudo_dir = tmp_path / "pseudos"
+    pseudo_dir.mkdir()
+    (pseudo_dir / "U.test.UPF").write_text("U pseudo\n", encoding="utf-8")
+    (pseudo_dir / "U.test.in").write_text("U oncv input\n", encoding="utf-8")
+    (pseudo_dir / "O.test.UPF").write_text("O pseudo\n", encoding="utf-8")
     outdir = tmp_path / "ocean_u_m4"
     args = argparse.Namespace(
         structure=structure,
@@ -32,13 +37,13 @@ def test_ocean_prepare_writes_workspace(tmp_path: Path) -> None:
         absorber="U",
         edge="M4",
         outdir=outdir,
-        dft_engine="vasp",
+        dft_engine="quantum_espresso",
         dft_plus_u="VASP LDAU U=4.5 eV on U 5f",
         executable="/private/ocean/bin/ocean.pl",
         root="/private/ocean",
         bin="/private/ocean/bin",
         module="chem/ocean/test",
-        pseudo_dir="/private/ocean/pseudos",
+        pseudo_dir=str(pseudo_dir),
         energy_window="-10 60 eV",
         edge_atom_index=0,
         nkpt="4 4 4",
@@ -50,6 +55,8 @@ def test_ocean_prepare_writes_workspace(tmp_path: Path) -> None:
         diemac="5.0",
         broaden="0.3",
         pp_list=["U.test.UPF", "O.test.UPF"],
+        opf_template="example",
+        allow_missing_opf=False,
         extra=["# custom extra line"],
         job_name="ocean-u-m4",
         ntasks=16,
@@ -69,13 +76,26 @@ def test_ocean_prepare_writes_workspace(tmp_path: Path) -> None:
     assert "1 2 2" in ocean_input
     assert "edges{ 1 3 2 }" in ocean_input
     assert "pp_list{ U.test.UPF O.test.UPF }" in ocean_input
+    assert "dft{ qe }" in ocean_input
+    assert "zsymb { U O }" in ocean_input
+    assert "opf.opts{" in ocean_input
+    assert (outdir / "U.screening.opts").exists()
+    assert (outdir / "O.screening.fill").exists()
+    assert (outdir / "U.test.UPF").read_text(encoding="utf-8") == "U pseudo\n"
+    assert (outdir / "U.test.in").read_text(encoding="utf-8") == "U oncv input\n"
+    assert (outdir / "O.test.UPF").read_text(encoding="utf-8") == "O pseudo\n"
     assert "nbands 200" in ocean_input
+    assert "grep -q '^opf\\.opts'" in run_script
     assert "module load \"${ATOMI_OCEAN_MODULE}\"" in run_script
     assert "ATOMI_OCEAN_MODULE=chem/ocean/test" in run_script
     assert "ATOMI_OCEAN_EXE=/private/ocean/bin/ocean.pl" in run_script
     assert metadata["module"] == "chem/ocean/test"
     assert metadata["absorber"] == project["absorber"] == "U"
     assert metadata["native_ocean"]["edge_quantum"] == {"n": 3, "l": 2}
+    assert metadata["native_ocean"]["dft_engine_ocean_token"] == "qe"
+    assert metadata["native_ocean"]["opf"]["opf_template"] == "example"
+    assert metadata["native_ocean"]["pseudopotential_staging"]["status"] == "staged"
+    assert metadata["native_ocean"]["pseudopotential_staging"]["staged_opf_inputs"][0]["name"] == "U.test.in"
     assert metadata["dft_plus_u"].startswith("VASP LDAU")
 
 

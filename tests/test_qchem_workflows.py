@@ -157,6 +157,131 @@ def test_openmolcas_status_cli_accepts_registry_argv(capsys) -> None:
     assert "OpenMolcas / Atomi HPC install plan" in capsys.readouterr().out
 
 
+def test_molcas_root_helper_audit_and_promote(tmp_path: Path) -> None:
+    from atomi.qchem import molcas_root_helper
+
+    inp = tmp_path / "u4o9_diag.inp"
+    inp.write_text(
+        """
+&RASSCF
+Title
+prep_triplet
+Spin
+ 3
+CIROOTS
+ 28 28 1
+End of input
+
+&RASSCF
+Title
+hexs_triplet_diag
+Spin
+ 3
+HEXS
+ 1
+ 1
+CIROOTS
+ 200 200 1
+End of input
+
+>>> COPY $Project.JobMix_1 JOB001
+>>> COPY $Project.JobMix_2 JOB002
+
+&RASSI
+Nr of JobIph files:
+2   28   200
+ 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20
+ 21 22 23 24 25 26 27 28
+ 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20
+ 21 22 23 24 25 26 27 28 29 30
+end of input
+""".lstrip(),
+        encoding="utf-8",
+    )
+    out = tmp_path / "u4o9_diag.out"
+    out.write_text(
+        """
+++    CI expansion specifications:
+      ----------------------------
+      Number of CSFs                            28
+      Number of determinants                    28
+      Number of root(s) required                28
+      CI roots used                              1     2     3
+      highest root included in the CI           28
+      max. size of the explicit Hamiltonian     28
+--
+++    CI expansion specifications:
+      ----------------------------
+      Number of CSFs                          1148
+      Number of highly excited CSFs           1120
+      Number of determinants                  1428
+      Number of root(s) required               200
+      CI roots used                              1     2     3     4     5
+      highest root included in the CI          200
+      max. size of the explicit Hamiltonian    201
+--
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    audit = molcas_root_helper.audit_output(out)
+    assert audit["schema"] == "atomi.openmolcas_root_audit.v1"
+    assert audit["blocks"][1]["highly_excited_csfs"] == 1120
+    assert audit["blocks"][1]["roots_required"] == 200
+    assert audit["blocks"][1]["recommended_full_roots"] == 1120
+
+    promoted = tmp_path / "u4o9_full.inp"
+    summary = molcas_root_helper.rewrite_input(
+        input_path=inp,
+        output_path=promoted,
+        set_roots={},
+        from_output=out,
+    )
+    text = promoted.read_text(encoding="utf-8")
+    assert summary["changes"][0]["old_root"] == 200
+    assert summary["changes"][0]["new_root"] == 1120
+    assert "CIROOTS\n 1120 1120 1" in text
+    assert "2   28   1120" in text
+    assert "1111 1112 1113 1114 1115 1116 1117 1118 1119 1120" in text
+
+
+def test_molcas_root_helper_make_diagnostic(tmp_path: Path) -> None:
+    from atomi.qchem import molcas_root_helper
+
+    inp = tmp_path / "u4o9_full.inp"
+    inp.write_text(
+        """
+&RASSCF
+Title
+hexs_full
+HEXS
+ 1
+ 1
+CIROOTS
+ 1120 1120 1
+End of input
+&RASSI
+Nr of JobIph files:
+1   1120
+ 1 2 3 4 5
+end of input
+""".lstrip(),
+        encoding="utf-8",
+    )
+    diag = tmp_path / "u4o9_diag.inp"
+    summary = molcas_root_helper.rewrite_input(
+        input_path=inp,
+        output_path=diag,
+        set_roots={},
+        diagnostic_root=200,
+    )
+    text = diag.read_text(encoding="utf-8")
+    assert summary["changes"][0]["source"] == "diagnostic_root"
+    assert "CIROOTS\n 200 200 1" in text
+    assert "1   200" in text
+    assert "181 182 183 184 185 186 187 188 189 190 191 192 193 194 195 196 197 198 199 200" in text
+
+
 def test_pegamoid_bridge_status_and_prepare(tmp_path: Path, capsys) -> None:
     from atomi.qchem import pegamoid_bridge
 

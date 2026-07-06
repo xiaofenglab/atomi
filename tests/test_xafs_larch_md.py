@@ -16,6 +16,7 @@ from atomi.xafs.larch_md import (
     run_prepare,
 )
 from atomi.xafs.status import build_xafs_status
+from atomi.xafs.routes import build_xafs_route_status
 
 
 def test_xafs_prepare_writes_metal_absorber_feff_inputs(tmp_path) -> None:
@@ -63,6 +64,7 @@ def test_xafs_prepare_writes_metal_absorber_feff_inputs(tmp_path) -> None:
     assert "POTENTIALS" in text
     assert "ATOMS" in text
     assert "U_absorber" in text
+    assert "  0  92 U  U_absorber" not in text
     metadata = json.loads((outdir / "xafs_prepare_metadata.json").read_text(encoding="utf-8"))
     assert metadata["cell_metadata"]["formula"] == "UO2"
     assert metadata["cell_metadata"]["n_formula_units"] == 32.0
@@ -161,3 +163,46 @@ def test_xafs_md_compare_fits_scale_and_writes_metrics(tmp_path) -> None:
     assert abs(summary["fit"]["scale"] - 2.0) < 1e-8
     assert summary["metrics"]["rmse"] < 1e-8
     assert (outdir / "xafs_compare_curve.csv").exists()
+
+
+
+def test_xafs_route_status_defines_route_a_and_b() -> None:
+    status = build_xafs_route_status(check_runtime=False)
+
+    assert status["route_order"] == ["route_a_vasp_feff_larch", "route_b_qe_ocean"]
+    routes = {route["id"]: route for route in status["routes"]}
+    assert "FEFF" in routes["route_a_vasp_feff_larch"]["label"]
+    assert "OCEAN" in routes["route_b_qe_ocean"]["label"]
+    assert "comparison_rule" in status["project_policy"]
+
+
+def test_xafs_prepare_metadata_records_route_a(tmp_path) -> None:
+    traj = tmp_path / "POSCAR"
+    atoms = Atoms(
+        symbols=["U", "O", "O"],
+        positions=[[0.0, 0.0, 0.0], [2.35, 0.0, 0.0], [0.0, 2.35, 0.0]],
+        cell=[6.0, 6.0, 6.0],
+        pbc=True,
+    )
+    write(traj, atoms, format="vasp")
+
+    outdir = tmp_path / "xafs_route_a"
+    args = build_prepare_parser().parse_args(
+        [
+            "--traj",
+            str(traj),
+            "--outdir",
+            str(outdir),
+            "--absorber",
+            "U",
+            "--cluster-radius",
+            "3.0",
+            "--max-absorber-sites",
+            "1",
+        ]
+    )
+    summary = run_prepare(args)
+
+    assert summary["mode"] == "xafs_vasp_feff_larch_prepare"
+    assert summary["xafs_route"] == "route_a_vasp_feff_larch"
+    assert summary["source"]["source"] == "traj"

@@ -239,7 +239,17 @@ def build_parser() -> argparse.ArgumentParser:
         )
         lammps_pdf_match.add_argument("pdf_match_args", nargs=argparse.REMAINDER)
 
-    for command_name in ("xafs_lammps_prepare", "xafs_cp2k_prepare", "xafs_larch_run", "xafs_md_compare", "xafs_status"):
+    for command_name in (
+        "xafs_lammps_prepare",
+        "xafs_vasp_feff_prepare",
+        "xafs-feff-prepare",
+        "xafs_cp2k_prepare",
+        "xafs_larch_run",
+        "xafs_md_compare",
+        "xafs_status",
+        "xafs-routes",
+        "xafs_routes",
+    ):
         xafs_command = subparsers.add_parser(
             command_name,
             help="Prepare, run, or compare MD-ensemble XAFS through Larch/FEFF.",
@@ -531,6 +541,13 @@ def build_parser() -> argparse.ArgumentParser:
             help="Prepare and inspect Atomi handoffs to external SLUSCHI/MLIP melting workflows.",
         )
         sluschi_bridge.add_argument("sluschi_args", nargs=argparse.REMAINDER)
+
+    for command_name in ("sluschi_route_c", "sluschi-route-c", "zentropy-md-entropy"):
+        sluschi_route_c = subparsers.add_parser(
+            command_name,
+            help="Run SLUSCHI Route C / zentropy-MD single-phase entropy workflows.",
+        )
+        sluschi_route_c.add_argument("sluschi_route_c_args", nargs=argparse.REMAINDER)
 
     for command_name in ("molten_salt_liquid_guidance", "molten-salt-liquid-guidance"):
         molten_salt_liquid_guidance = subparsers.add_parser(
@@ -1116,7 +1133,7 @@ def main(argv: list[str] | None = None) -> None:
 
         reweight_main(raw_args[1:])
         return
-    if raw_args and raw_args[0] == "xafs_lammps_prepare":
+    if raw_args and raw_args[0] in ("xafs_lammps_prepare", "xafs_vasp_feff_prepare", "xafs-feff-prepare"):
         from atomi.xafs.larch_md import prepare_main
 
         prepare_main(raw_args[1:])
@@ -1140,6 +1157,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.xafs.status import main as xafs_status_main
 
         xafs_status_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in ("xafs-routes", "xafs_routes"):
+        from atomi.xafs.routes import main as xafs_routes_main
+
+        xafs_routes_main(raw_args[1:])
         return
     if raw_args and raw_args[0] in ("ocean-xanes-bridge", "ocean_xanes_bridge", "xanes-ocean-bridge"):
         from atomi.xafs.ocean import main as ocean_xanes_main
@@ -1342,6 +1364,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.sluschi.bridge import main as sluschi_bridge_main
 
         sluschi_bridge_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] in ("sluschi_route_c", "sluschi-route-c", "zentropy-md-entropy"):
+        from atomi.sluschi.route_c import main as sluschi_route_c_main
+
+        sluschi_route_c_main(raw_args[1:])
         return
     if raw_args and raw_args[0] in ("molten_salt_liquid_guidance", "molten-salt-liquid-guidance"):
         from atomi.md.molten_salt_liquid import main as molten_salt_liquid_main
@@ -1794,7 +1821,7 @@ def main(argv: list[str] | None = None) -> None:
         reweight_main(args.pdf_match_args)
         return
 
-    if args.subcommand == "xafs_lammps_prepare":
+    if args.subcommand in ("xafs_lammps_prepare", "xafs_vasp_feff_prepare", "xafs-feff-prepare"):
         from atomi.xafs.larch_md import prepare_main
 
         prepare_main(args.xafs_args)
@@ -1822,6 +1849,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.xafs.status import main as xafs_status_main
 
         xafs_status_main(args.xafs_args)
+        return
+    if args.subcommand in ("xafs-routes", "xafs_routes"):
+        from atomi.xafs.routes import main as xafs_routes_main
+
+        xafs_routes_main(args.xafs_args)
         return
     if args.subcommand in ("ocean-xanes-bridge", "ocean_xanes_bridge", "xanes-ocean-bridge"):
         from atomi.xafs.ocean import main as ocean_xanes_main
@@ -2078,6 +2110,11 @@ def main(argv: list[str] | None = None) -> None:
         from atomi.sluschi.bridge import main as sluschi_bridge_main
 
         sluschi_bridge_main(args.sluschi_args)
+        return
+    if args.subcommand in ("sluschi_route_c", "sluschi-route-c", "zentropy-md-entropy"):
+        from atomi.sluschi.route_c import main as sluschi_route_c_main
+
+        sluschi_route_c_main(args.sluschi_route_c_args)
         return
 
     if args.subcommand in ("molten_salt_liquid_guidance", "molten-salt-liquid-guidance"):
