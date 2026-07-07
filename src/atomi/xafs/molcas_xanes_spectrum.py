@@ -222,6 +222,32 @@ def lorentzian_kernel(grid: np.ndarray, center: float, fwhm: float) -> np.ndarra
     return (gamma / math.pi) / ((grid - center) ** 2 + gamma**2)
 
 
+def voigt_kernel(grid: np.ndarray, center: float, gaussian_fwhm: float, lorentzian_fwhm: float) -> np.ndarray:
+    """Return an area-normalized Voigt profile.
+
+    The Gaussian part represents instrumental/numerical broadening and the
+    Lorentzian part represents the core-hole lifetime width.  SciPy is used
+    when available; otherwise a pseudo-Voigt fallback keeps the CLI usable in
+    minimal environments while preserving the same input convention.
+    """
+
+    sigma = gaussian_fwhm / (2.0 * math.sqrt(2.0 * math.log(2.0)))
+    gamma = lorentzian_fwhm / 2.0
+    if sigma <= 0:
+        raise ValueError("Gaussian FWHM must be positive")
+    if gamma <= 0:
+        raise ValueError("Lorentzian FWHM must be positive")
+    try:
+        from scipy.special import wofz  # type: ignore
+
+        z = ((grid - center) + 1j * gamma) / (sigma * math.sqrt(2.0))
+        return np.real(wofz(z)) / (sigma * math.sqrt(2.0 * math.pi))
+    except Exception:
+        return 0.5 * lorentzian_kernel(grid, center, lorentzian_fwhm) + 0.5 * gaussian_kernel(
+            grid, center, gaussian_fwhm
+        )
+
+
 def broaden(
     transitions: list[Transition],
     *,
@@ -248,7 +274,9 @@ def broaden(
     spectrum = np.zeros_like(grid)
     eta = max(0.0, min(1.0, eta))
     for energy, intensity in zip(energies, intensities):
-        if mode == "gaussian":
+        if mode == "voigt":
+            line = voigt_kernel(grid, energy, gaussian_fwhm, lorentzian_fwhm)
+        elif mode == "gaussian":
             line = gaussian_kernel(grid, energy, gaussian_fwhm)
         elif mode == "lorentzian":
             line = lorentzian_kernel(grid, energy, lorentzian_fwhm)
@@ -391,7 +419,7 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--energy-shift-ev", type=float, default=0.0)
     parser.add_argument("--gaussian-fwhm", type=float, default=1.0)
     parser.add_argument("--lorentzian-fwhm", type=float)
-    parser.add_argument("--broadening", choices=("pseudo-voigt", "gaussian", "lorentzian"), default="pseudo-voigt")
+    parser.add_argument("--broadening", choices=("voigt", "pseudo-voigt", "gaussian", "lorentzian"), default="voigt")
     parser.add_argument("--pseudo-voigt-eta", type=float, default=0.5)
     parser.add_argument("--normalize", choices=("max", "area", "none"), default="max")
     parser.add_argument("--emin", type=float)

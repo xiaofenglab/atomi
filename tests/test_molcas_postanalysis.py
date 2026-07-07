@@ -66,6 +66,8 @@ def test_m45_two_panel_writes_spectra_and_summary(tmp_path: Path) -> None:
     text = (outdir / "molcas_u_m45_xanes_2panel_summary.json").read_text(encoding="utf-8")
     assert "atomi.molcas_m45_two_panel.v1" in text
     assert "As-computed transition energies" in text
+    assert '"broadening": "voigt"' in text
+    assert '"stick_relative_threshold": 0.95' in text
 
 
 
@@ -141,6 +143,8 @@ def test_rank_transitions_and_orbital_handoff(tmp_path: Path) -> None:
     assert (outdir / "important_dipole_transitions.png").exists()
     summary = (outdir / "important_dipole_transitions_summary.json").read_text(encoding="utf-8")
     assert "atomi.molcas_important_dipole_transitions.v1" in summary
+    assert '"relative_threshold": 0.95' in summary
+    assert '"n_ranked": 1' in summary
 
     molcas_dir = tmp_path / "molcas"
     molcas_dir.mkdir()

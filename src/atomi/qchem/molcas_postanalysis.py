@@ -73,8 +73,8 @@ def workflow_record() -> dict[str, Any]:
             },
             {
                 "stage": "actinide M4/M5 edge broadening",
-                "command": "molcas-xanes-spectrum from-csv --transitions-csv M5_transitions.csv --element U --edge M5",
-                "purpose": "Broaden curated/averaged RASSI dipole transition CSVs with xraydb core-hole widths.",
+                "command": "molcas-xanes-spectrum from-csv --transitions-csv M5_transitions.csv --element U --edge M5 --broadening voigt",
+                "purpose": "Broaden curated/averaged RASSI dipole transition CSVs with Voigt broadening and xraydb core-hole widths.",
             },
             {
                 "stage": "actinide M4/M5 transition extraction",
@@ -88,8 +88,8 @@ def workflow_record() -> dict[str, Any]:
             },
             {
                 "stage": "important dipole transitions",
-                "command": "molcas-postanalysis rank-transitions --transitions-csv M5_transitions.csv --top 20 --plot",
-                "purpose": "Write the strongest transition table/JSON/plot so the student can discuss assignments, not only envelopes.",
+                "command": "molcas-postanalysis rank-transitions --transitions-csv M5_transitions.csv --relative-threshold 0.95 --plot",
+                "purpose": "Write the near-maximum transition table/JSON/plot so the student discusses only transitions with intensity >= 95% of the maximum.",
             },
             {
                 "stage": "orbital/mixing",
@@ -117,8 +117,9 @@ def workflow_record() -> dict[str, Any]:
             "For high-root actinide runs, audit output root counts; do not infer computed roots from input alone.",
             "For Kramers systems, average the ground doublet before report-level isotropic spectra unless a polarized/site-specific comparison is intended.",
             "Treat absolute XANES energies as uncalibrated cluster transition energies until aligned to standards or an internal oxidation-state series.",
-            "Keep stick transitions visible in report figures; they carry multiplet/state-density information hidden by broadening.",
-            "Always write a ranked important-dipole-transition table for the peaks used in scientific discussion.",
+            "Use Voigt broadening, not pure Lorentzian broadening, for report-level XANES envelopes.",
+            "Keep stick transitions visible in report figures; by default show the near-maximum stick band with intensity >= 95% of the maximum for that edge.",
+            "Always write a ranked important-dipole-transition table for the peaks used in scientific discussion; the default important set is the >=95% max-intensity band.",
             "Orbital plots should show the active orbital manifold and important transition/mixing orbitals, not just pretty frontier orbitals.",
             "When RASSI NTOCalc, BINAtorb, SONOrb, NTORB, or MD_NTO outputs exist, prefer transition-character/NTO plots for peak assignments.",
             "For reports, add a schematic MO diagram when orbital/transition assignments are central to the scientific argument.",
@@ -222,6 +223,7 @@ def _broaden_edge(
         "transitions_source": str(transitions_csv),
         "spectrum_csv": str(spectrum_csv),
         "transitions_csv": str(rows_csv),
+        "broadening": broadening,
         "energy": energy,
         "spectrum": spectrum,
         "rows": rows,
@@ -413,6 +415,8 @@ def _plot_m45(
     outpath: Path,
     title: str,
     stick_height: float,
+    stick_relative_threshold: float,
+    broadening: str,
 ) -> bool:
     try:
         import matplotlib
@@ -427,6 +431,8 @@ def _plot_m45(
         (axes[0], m5, m5_meta, "#1f4e79", "U M5"),
         (axes[1], m4, m4_meta, "#9b2d20", "U M4"),
     ]
+    stick_relative_threshold = max(0.0, min(1.0, stick_relative_threshold))
+    stick_percent = int(round(100.0 * stick_relative_threshold))
     for ax, data, meta, color, label in configs:
         energy = data["energy"]
         spectrum = data["spectrum"]
@@ -438,12 +444,16 @@ def _plot_m45(
         if rows:
             osc = [float(row["oscillator_strength"]) for row in rows]
             max_osc = max(osc) if osc else 1.0
+            stick_rows = [row for row in rows if float(row["oscillator_strength"]) >= stick_relative_threshold * max_osc]
             for row in rows:
+                if row not in stick_rows:
+                    continue
                 height = stick_height * float(row["oscillator_strength"]) / max_osc
-                ax.vlines(float(row["energy_ev"]), 0.0, -height, color=color, alpha=0.46, lw=0.8)
+                ax.vlines(float(row["energy_ev"]), 0.0, -height, color=color, alpha=0.62, lw=1.0)
         width = meta.get("core_hole_width_ev")
         width_label = f", xraydb width {float(width):.2f} eV" if width is not None else ""
-        ax.set_title(f"{label}: RASSI dipole sticks + pseudo-Voigt envelope{width_label}")
+        broadening_label = "Voigt" if broadening == "voigt" else broadening.replace("-", " ")
+        ax.set_title(f"{label}: >={stick_percent}% strongest sticks + {broadening_label} envelope{width_label}")
         ax.set_ylabel("norm. intensity")
         ax.set_ylim(-max(stick_height * 1.12, 0.1), 1.08)
         ax.axhline(0.0, color="#888888", lw=0.8)
@@ -513,8 +523,10 @@ def rank_transitions(args: argparse.Namespace) -> int:
     if args.emax is not None:
         rows = [row for row in rows if float(row["energy_ev"]) <= args.emax]
     rows = sorted(rows, key=lambda row: float(row["oscillator_strength"]), reverse=True)
-    top = rows[: args.top]
-    max_osc = float(top[0]["oscillator_strength"]) if top else 1.0
+    max_osc = float(rows[0]["oscillator_strength"]) if rows else 1.0
+    relative_threshold = max(0.0, min(1.0, float(args.relative_threshold)))
+    selected = [row for row in rows if float(row["oscillator_strength"]) >= relative_threshold * max_osc]
+    top = selected[: args.top] if args.top and args.top > 0 else selected
     ranked: list[dict[str, Any]] = []
     for idx, row in enumerate(top, start=1):
         item = dict(row)
@@ -553,13 +565,17 @@ def rank_transitions(args: argparse.Namespace) -> int:
         "schema": SCHEMA_TRANSITIONS,
         "source": str(args.transitions_csv),
         "n_input_rows_in_window": len(rows),
+        "relative_threshold": relative_threshold,
+        "selection_rule": "oscillator_strength >= relative_threshold * max_oscillator_strength",
+        "max_oscillator_strength": max_osc,
+        "n_selected_by_threshold": len(selected),
         "n_ranked": len(ranked),
         "emin_ev": args.emin,
         "emax_ev": args.emax,
         "csv": str(csv_path),
         "plot": str(plot_path) if plotted else "",
         "top": ranked,
-        "note": "Use these rows for peak assignment and orbital/NTO follow-up; broad spectra alone are not enough for interpretation.",
+        "note": "Use these near-maximum rows for peak assignment and orbital/NTO follow-up; broad spectra alone are not enough for interpretation.",
     }
     json_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"Wrote ranked transitions: {csv_path}")
@@ -1081,7 +1097,17 @@ def m45_two_panel(args: argparse.Namespace) -> int:
         prefix=args.prefix + "_m4",
     )
     plot_path = outdir / args.plot_name
-    plotted = _plot_m45(m5=m5, m4=m4, m5_meta=m5_meta, m4_meta=m4_meta, outpath=plot_path, title=args.title, stick_height=args.stick_height)
+    plotted = _plot_m45(
+        m5=m5,
+        m4=m4,
+        m5_meta=m5_meta,
+        m4_meta=m4_meta,
+        outpath=plot_path,
+        title=args.title,
+        stick_height=args.stick_height,
+        stick_relative_threshold=args.stick_relative_threshold,
+        broadening=args.broadening,
+    )
     summary = {
         "schema": SCHEMA_M45,
         "element": args.element,
@@ -1094,8 +1120,10 @@ def m45_two_panel(args: argparse.Namespace) -> int:
         "normalize": args.normalize,
         "energy_shift_ev": args.energy_shift_ev,
         "stick_height": args.stick_height,
+        "stick_relative_threshold": args.stick_relative_threshold,
+        "stick_selection_rule": "sticks shown only when oscillator_strength >= stick_relative_threshold * edge_max_oscillator_strength",
         "plot": str(plot_path) if plotted else "",
-        "note": "As-computed transition energies; apply standard alignment before direct experimental comparison.",
+        "note": "As-computed transition energies; apply standard alignment before direct experimental comparison. The envelope uses all positive transitions; the visible/report sticks use the configured near-maximum intensity threshold.",
     }
     summary_path = outdir / args.summary_name
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1116,7 +1144,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("rank-transitions", help="Rank and plot important dipole transitions from a transition CSV.")
     p.add_argument("--transitions-csv", type=Path, required=True)
-    p.add_argument("--top", type=int, default=20)
+    p.add_argument("--top", type=int, default=0, help="Optional cap after relative-threshold filtering; 0 keeps all selected rows.")
+    p.add_argument("--relative-threshold", type=float, default=0.95, help="Keep rows with oscillator strength >= this fraction of the maximum.")
     p.add_argument("--emin", type=float)
     p.add_argument("--emax", type=float)
     p.add_argument("--outdir", type=Path, default=Path("molcas_important_transitions"))
@@ -1190,7 +1219,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--gaussian-fwhm", type=float, default=1.0)
     p.add_argument("--m5-lorentzian-fwhm", type=float)
     p.add_argument("--m4-lorentzian-fwhm", type=float)
-    p.add_argument("--broadening", choices=("pseudo-voigt", "gaussian", "lorentzian"), default="pseudo-voigt")
+    p.add_argument("--broadening", choices=("voigt", "pseudo-voigt", "gaussian", "lorentzian"), default="voigt")
     p.add_argument("--pseudo-voigt-eta", type=float, default=0.5)
     p.add_argument("--normalize", choices=("max", "area", "none"), default="max")
     p.add_argument("--m5-emin", type=float)
@@ -1199,6 +1228,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--m4-emax", type=float)
     p.add_argument("--step", type=float, default=0.02)
     p.add_argument("--stick-height", type=float, default=0.45)
+    p.add_argument("--stick-relative-threshold", type=float, default=0.95, help="Show stick transitions with intensity >= this fraction of the edge maximum.")
     p.add_argument("--outdir", type=Path, default=Path("molcas_m45_postanalysis"))
     p.add_argument("--prefix", default="molcas_m45")
     p.add_argument("--plot-name", default="molcas_u_m45_xanes_2panel_tall_sticks.png")
