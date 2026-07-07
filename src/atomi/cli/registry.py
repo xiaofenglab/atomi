@@ -104,6 +104,12 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Broaden OpenMolcas/RASSI dipole transitions into XANES spectra.",
     ),
     CommandSpec(
+        aliases=("molcas-postanalysis", "molcas_postanalysis", "openmolcas-postanalysis"),
+        target="atomi.qchem.molcas_postanalysis:main",
+        category="qchem",
+        help="Print Molcas postanalysis workflow and build report-style M4/M5 XANES plots.",
+    ),
+    CommandSpec(
         aliases=("aq-thermo-bridge", "aq_thermo_bridge", "thermofun-bridge", "thermohub-bridge"),
         target="atomi.aqueous.thermohub_bridge:main",
         category="aqueous",
