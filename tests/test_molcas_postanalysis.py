@@ -69,6 +69,57 @@ def test_m45_two_panel_writes_spectra_and_summary(tmp_path: Path) -> None:
 
 
 
+def test_extract_m45_transitions_from_output(tmp_path: Path) -> None:
+    out = tmp_path / "molcas.out"
+    out.write_text(
+        """
+ SO State    Total energy (au)    Spin-free states, spin, and weights
+       1      0.0000000000       1 0.5 1.0
+       2      0.0010000000       2 0.5 1.0
+       3    131.4100000000       3 0.5 1.0
+       4    131.4110000000       4 0.5 1.0
+       5    137.7800000000       5 0.5 1.0
+       6    137.7810000000       6 0.5 1.0
+------------------------------
+
+++ Dipole transition strengths (SO states):
+ From To Osc. strength
+ 1 3 1.0E-03
+ 2 3 3.0E-03
+ 1 4 2.0E-03
+ 2 4 4.0E-03
+ 1 5 5.0E-03
+ 2 5 7.0E-03
+ 1 6 6.0E-03
+ 2 6 8.0E-03
+""",
+        encoding="utf-8",
+    )
+    outdir = tmp_path / "extract"
+    rc = molcas_postanalysis.main(
+        [
+            "extract-m45-transitions",
+            "--molcas-out",
+            str(out),
+            "--initial-states",
+            "1,2",
+            "--outdir",
+            str(outdir),
+            "--prefix",
+            "fake",
+        ]
+    )
+    assert rc == 0
+    assert (outdir / "fake_m45_all_transitions_for_atomi.csv").exists()
+    assert (outdir / "fake_m5_transitions_for_atomi.csv").exists()
+    assert (outdir / "fake_m4_transitions_for_atomi.csv").exists()
+    summary = (outdir / "fake_m45_extract_summary.json").read_text(encoding="utf-8")
+    assert "atomi.molcas_m45_transition_extract.v1" in summary
+    assert '"n_m5": 2' in summary
+    assert '"n_m4": 2' in summary
+
+
+
 def test_rank_transitions_and_orbital_handoff(tmp_path: Path) -> None:
     transitions = tmp_path / "transitions.csv"
     _write_transitions(transitions, [100.0, 101.0, 102.0, 103.0])

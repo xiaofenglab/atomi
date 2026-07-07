@@ -20,6 +20,9 @@ import numpy as np
 
 from atomi.xafs.molcas_xanes_spectrum import (
     broaden,
+    parse_so_states,
+    parse_transition_sections,
+    read_text,
     transitions_from_csv,
     write_spectrum_csv,
     write_transitions_csv,
@@ -33,6 +36,7 @@ SCHEMA_TRANSITIONS = "atomi.molcas_important_dipole_transitions.v1"
 SCHEMA_ORBITAL_HANDOFF = "atomi.molcas_orbital_handoff.v1"
 SCHEMA_MO_DIAGRAM = "atomi.molcas_mo_diagram.v1"
 SCHEMA_U5F_SPLITTING = "atomi.u5f_so_lf_splitting_diagram.v1"
+SCHEMA_M45_EXTRACT = "atomi.molcas_m45_transition_extract.v1"
 
 
 def workflow_record() -> dict[str, Any]:
@@ -71,6 +75,11 @@ def workflow_record() -> dict[str, Any]:
                 "stage": "actinide M4/M5 edge broadening",
                 "command": "molcas-xanes-spectrum from-csv --transitions-csv M5_transitions.csv --element U --edge M5",
                 "purpose": "Broaden curated/averaged RASSI dipole transition CSVs with xraydb core-hole widths.",
+            },
+            {
+                "stage": "actinide M4/M5 transition extraction",
+                "command": "molcas-postanalysis extract-m45-transitions --molcas-out RUN.out --initial-states 1,2 --prefix u5_cn8_ground_doublet_avg",
+                "purpose": "Extract and initial-state-average SO RASSI sticks from a completed Molcas output, then split lower/upper manifolds into M5/M4 CSVs.",
             },
             {
                 "stage": "actinide M4/M5 two-panel figure",
@@ -219,6 +228,180 @@ def _broaden_edge(
         "peak_energy_ev": float(energy[int(np.argmax(spectrum))]),
         "n_transitions_used": len(rows),
     }
+
+
+def _parse_state_list(text: str) -> list[int]:
+    states: list[int] = []
+    for token in text.replace(",", " ").split():
+        if not token.strip():
+            continue
+        states.append(int(token))
+    if not states:
+        raise ValueError("At least one initial SO state is required")
+    return states
+
+
+def _write_transition_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    fieldnames = [
+        "state_from",
+        "state_to",
+        "energy_ev",
+        "oscillator_strength",
+        "gauge",
+        "state_basis",
+        "section_index",
+        "initial_state_label",
+        "components_from_initial_states",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+
+def _split_m45_rows(
+    rows: list[dict[str, Any]],
+    *,
+    m5_min: float | None,
+    m5_max: float | None,
+    m4_min: float | None,
+    m4_max: float | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    if not rows:
+        return [], [], {"mode": "empty"}
+    if any(value is not None for value in [m5_min, m5_max, m4_min, m4_max]):
+        m5_rows = [
+            row
+            for row in rows
+            if (m5_min is None or float(row["energy_ev"]) >= m5_min)
+            and (m5_max is None or float(row["energy_ev"]) <= m5_max)
+        ]
+        m4_rows = [
+            row
+            for row in rows
+            if (m4_min is None or float(row["energy_ev"]) >= m4_min)
+            and (m4_max is None or float(row["energy_ev"]) <= m4_max)
+        ]
+        return m5_rows, m4_rows, {
+            "mode": "explicit_windows",
+            "m5_window_ev": [m5_min, m5_max],
+            "m4_window_ev": [m4_min, m4_max],
+        }
+
+    ordered = sorted(rows, key=lambda row: float(row["energy_ev"]))
+    if len(ordered) < 2:
+        return ordered, [], {"mode": "single_cluster"}
+    gaps = [
+        (float(ordered[i + 1]["energy_ev"]) - float(ordered[i]["energy_ev"]), i)
+        for i in range(len(ordered) - 1)
+    ]
+    gap, idx = max(gaps, key=lambda item: item[0])
+    split_energy = 0.5 * (float(ordered[idx]["energy_ev"]) + float(ordered[idx + 1]["energy_ev"]))
+    m5_rows = [row for row in ordered if float(row["energy_ev"]) <= split_energy]
+    m4_rows = [row for row in ordered if float(row["energy_ev"]) > split_energy]
+    return m5_rows, m4_rows, {
+        "mode": "largest_gap_auto",
+        "split_energy_ev": split_energy,
+        "largest_gap_ev": gap,
+        "lower_edge_assigned": "M5",
+        "upper_edge_assigned": "M4",
+    }
+
+
+def extract_m45_transitions(args: argparse.Namespace) -> int:
+    text = read_text(args.molcas_out)
+    section_choice = "first" if args.section == "first" else "last"
+    states = {state.state: state.energy_ev for state in parse_so_states(text, which=section_choice)}
+    if not states:
+        raise ValueError(f"No SO-state energy table found in {args.molcas_out}")
+    initial_states = _parse_state_list(args.initial_states)
+    transitions = []
+    for tr in parse_transition_sections(text):
+        if tr.state_basis != "so":
+            continue
+        if args.gauge != "any" and tr.gauge != args.gauge:
+            continue
+        if tr.state_from not in initial_states:
+            continue
+        if tr.state_from not in states or tr.state_to not in states:
+            continue
+        transitions.append(tr)
+    if args.section in {"first", "last"} and transitions:
+        target_section = min(tr.section_index for tr in transitions) if args.section == "first" else max(
+            tr.section_index for tr in transitions
+        )
+        transitions = [tr for tr in transitions if tr.section_index == target_section]
+    grouped: dict[int, list[Any]] = {}
+    for tr in transitions:
+        grouped.setdefault(tr.state_to, []).append(tr)
+
+    rows: list[dict[str, Any]] = []
+    for state_to, group in sorted(grouped.items(), key=lambda item: states.get(item[0], 0.0)):
+        energy_values = [states[tr.state_to] - states[tr.state_from] for tr in group]
+        osc_values = [float(tr.oscillator_strength) for tr in group]
+        if not osc_values:
+            continue
+        components = ";".join(f"{tr.state_from}:{tr.oscillator_strength:.8g}" for tr in sorted(group, key=lambda x: x.state_from))
+        rows.append(
+            {
+                "state_from": initial_states[0],
+                "state_to": state_to,
+                "energy_ev": float(np.mean(energy_values)) + float(args.energy_shift_ev),
+                "oscillator_strength": float(np.mean(osc_values)),
+                "gauge": args.gauge,
+                "state_basis": "so_initial_state_average" if len(initial_states) > 1 else "so_single_initial_state",
+                "section_index": group[0].section_index,
+                "initial_state_label": "avg_" + "_".join(str(x) for x in initial_states),
+                "components_from_initial_states": components,
+            }
+        )
+
+    if args.min_oscillator_strength is not None:
+        rows = [row for row in rows if float(row["oscillator_strength"]) >= args.min_oscillator_strength]
+    rows = [row for row in rows if float(row["oscillator_strength"]) > 0.0]
+    if not rows:
+        raise ValueError("No positive SO dipole transitions survived filtering")
+
+    outdir = args.outdir.resolve()
+    outdir.mkdir(parents=True, exist_ok=True)
+    all_csv = outdir / f"{args.prefix}_m45_all_transitions_for_atomi.csv"
+    m5_csv = outdir / f"{args.prefix}_m5_transitions_for_atomi.csv"
+    m4_csv = outdir / f"{args.prefix}_m4_transitions_for_atomi.csv"
+    m5_rows, m4_rows, split_info = _split_m45_rows(
+        rows,
+        m5_min=args.m5_min,
+        m5_max=args.m5_max,
+        m4_min=args.m4_min,
+        m4_max=args.m4_max,
+    )
+    _write_transition_csv(all_csv, rows)
+    _write_transition_csv(m5_csv, m5_rows)
+    _write_transition_csv(m4_csv, m4_rows)
+
+    summary = {
+        "schema": SCHEMA_M45_EXTRACT,
+        "molcas_out": str(args.molcas_out),
+        "initial_states": initial_states,
+        "gauge": args.gauge,
+        "section": args.section,
+        "energy_shift_ev": args.energy_shift_ev,
+        "split": split_info,
+        "n_all": len(rows),
+        "n_m5": len(m5_rows),
+        "n_m4": len(m4_rows),
+        "all_transitions_csv": str(all_csv),
+        "m5_transitions_csv": str(m5_csv),
+        "m4_transitions_csv": str(m4_csv),
+        "energy_range_all_ev": [float(min(row["energy_ev"] for row in rows)), float(max(row["energy_ev"] for row in rows))],
+    }
+    summary_path = outdir / f"{args.prefix}_m45_extract_summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"Wrote all transitions: {all_csv}")
+    print(f"Wrote M5 transitions: {m5_csv} ({len(m5_rows)} rows)")
+    print(f"Wrote M4 transitions: {m4_csv} ({len(m4_rows)} rows)")
+    print(f"Wrote summary: {summary_path}")
+    return 0
 
 
 def _plot_m45(
@@ -978,6 +1161,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use local low-symmetry cluster labels by default; uranyl-reference keeps the Polly/Bagus linear-molecule labels.",
     )
     p.set_defaults(func=u5f_splitting)
+
+    p = sub.add_parser(
+        "extract-m45-transitions",
+        help="Extract/average SO RASSI transitions from a Molcas output and split them into M5/M4 CSVs.",
+    )
+    p.add_argument("--molcas-out", type=Path, required=True)
+    p.add_argument("--initial-states", default="1,2", help="Comma/space separated SO initial states to average, e.g. 1,2.")
+    p.add_argument("--gauge", choices=["length", "velocity", "any"], default="length")
+    p.add_argument("--section", choices=["last", "first", "all"], default="last")
+    p.add_argument("--energy-shift-ev", type=float, default=0.0)
+    p.add_argument("--min-oscillator-strength", type=float)
+    p.add_argument("--m5-min", type=float)
+    p.add_argument("--m5-max", type=float)
+    p.add_argument("--m4-min", type=float)
+    p.add_argument("--m4-max", type=float)
+    p.add_argument("--outdir", type=Path, default=Path("molcas_m45_transitions"))
+    p.add_argument("--prefix", default="molcas_ground_initial_avg")
+    p.set_defaults(func=extract_m45_transitions)
 
     p = sub.add_parser("m45-two-panel", help="Build a two-panel U M5/M4 XANES envelope plus tall-stick figure.")
     p.add_argument("--m5-transitions-csv", type=Path, required=True)
