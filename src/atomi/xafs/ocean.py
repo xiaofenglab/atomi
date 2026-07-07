@@ -551,21 +551,97 @@ def write_run_scripts(args: argparse.Namespace, outdir: Path, ocean_input: Path)
             "  exit 64\n"
             "fi\n"
         )
-    run_script.write_text(
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
-        'cd "${SCRIPT_DIR}"\n'
-        f"{module_block}"
+    env_block = (
         f"export ATOMI_OCEAN_EXE={shlex.quote(str(exe))}\n"
         f"export ATOMI_OCEAN_ROOT={shlex.quote(str(args.root or os.environ.get('ATOMI_OCEAN_ROOT', '')))}\n"
         f"export ATOMI_OCEAN_BIN={shlex.quote(str(args.bin or os.environ.get('ATOMI_OCEAN_BIN', '')))}\n"
         f"export ATOMI_OCEAN_PSEUDO_DIR={shlex.quote(str(args.pseudo_dir or os.environ.get('ATOMI_OCEAN_PSEUDO_DIR', '')))}\n"
-        f"{opf_guard}"
-        'echo "Running OCEAN XANES bridge workspace"\n'
-        f"{shlex.quote(str(exe))} {shlex.quote(ocean_input.name)}\n",
-        encoding="utf-8",
+        'export OCEAN_BIN="${ATOMI_OCEAN_BIN}"\n'
     )
+    if getattr(args, "use_scratch", False):
+        collect_max_mb = int(getattr(args, "collect_max_mb", 50) or 50)
+        scratch_name = getattr(args, "scratch_name", "") or "ocean_xanes_${JOB_ID}"
+        run_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+            'cd "${SCRIPT_DIR}"\n'
+            f"{module_block}"
+            f"{env_block}"
+            f"{opf_guard}"
+            'JOB_ID="${SLURM_JOB_ID:-manual}"\n'
+            'SCRATCH_BASE="${ATOMI_OCEAN_SCRATCH_BASE:-${TMPDIR:-/tmp/${USER}/${JOB_ID}}}"\n'
+            f'SCRATCH="${{SCRATCH_BASE}}/{scratch_name}"\n'
+            'COLLECT="${SCRIPT_DIR}/collected_${JOB_ID}"\n'
+            'mkdir -p "${SCRATCH}" "${COLLECT}"\n'
+            'export SCRATCH COLLECT\n'
+            'cp ocean.in "${SCRATCH}/"\n'
+            'for f in *.UPF *.upf *.in *.opts *.fill; do\n'
+            '  if [[ -f "${f}" ]]; then cp "${f}" "${SCRATCH}/"; fi\n'
+            "done\n"
+            'echo "WORKDIR=${SCRIPT_DIR}"\n'
+            'echo "SCRATCH=${SCRATCH}"\n'
+            'echo "OCEAN_BIN=${OCEAN_BIN}"\n'
+            'echo "Started $(date -Is)"\n'
+            'cd "${SCRATCH}"\n'
+            "set +e\n"
+            f"{shlex.quote(str(exe))} {shlex.quote(ocean_input.name)} "
+            '>"${SCRIPT_DIR}/ocean_xanes.${JOB_ID}.stdout.log" '
+            '2>"${SCRIPT_DIR}/ocean_xanes.${JOB_ID}.stderr.log"\n'
+            "status=$?\n"
+            "set -e\n"
+            'echo "Finished $(date -Is) status=${status}" | tee "${SCRIPT_DIR}/ocean_xanes.${JOB_ID}.status.txt"\n'
+            'du -sh "${SCRATCH}" > "${SCRIPT_DIR}/scratch_size_${JOB_ID}.txt" 2>/dev/null || true\n'
+            "python3 - <<'PY_ATOMI_OCEAN_COLLECT'\n"
+            "from pathlib import Path\n"
+            "import os\n"
+            "import shutil\n"
+            "\n"
+            "scratch = Path(os.environ['SCRATCH'])\n"
+            "collect = Path(os.environ['COLLECT'])\n"
+            "exclude_parts = {'Out', 'Wfc', 'system.save'}\n"
+            "exclude_suffixes = ('.wfc', '.igk', '.dat1')\n"
+            f"max_bytes = {collect_max_mb} * 1024 * 1024\n"
+            "manifest = []\n"
+            "for p in scratch.rglob('*'):\n"
+            "    if not p.is_file():\n"
+            "        continue\n"
+            "    rel = p.relative_to(scratch)\n"
+            "    if set(rel.parts) & exclude_parts:\n"
+            "        continue\n"
+            "    if p.suffix in exclude_suffixes:\n"
+            "        continue\n"
+            "    try:\n"
+            "        size = p.stat().st_size\n"
+            "    except OSError:\n"
+            "        continue\n"
+            "    if size > max_bytes:\n"
+            "        continue\n"
+            "    dest = collect / rel\n"
+            "    dest.parent.mkdir(parents=True, exist_ok=True)\n"
+            "    shutil.copy2(p, dest)\n"
+            "    manifest.append(f'{size}\\t{rel}')\n"
+            "(collect / 'copied_small_file_manifest.tsv').write_text('\\n'.join(manifest) + ('\\n' if manifest else ''))\n"
+            "PY_ATOMI_OCEAN_COLLECT\n"
+            'if [[ "${ATOMI_OCEAN_KEEP_SCRATCH:-0}" != "1" ]]; then\n'
+            '  rm -rf "${SCRATCH}"\n'
+            "fi\n"
+            "exit ${status}\n",
+            encoding="utf-8",
+        )
+    else:
+        run_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+            'cd "${SCRIPT_DIR}"\n'
+            f"{module_block}"
+            f"{env_block}"
+            f"{opf_guard}"
+            'echo "Running OCEAN XANES bridge workspace"\n'
+            f"{shlex.quote(str(exe))} {shlex.quote(ocean_input.name)}\n",
+            encoding="utf-8",
+        )
     run_script.chmod(0o755)
     sbatch = outdir / "submit_ocean_xanes.sbatch"
     sbatch.write_text(
@@ -714,6 +790,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-missing-opf",
         action="store_true",
         help="Allow the generated run script to proceed without opf.opts/opf.fill preflight checks.",
+    )
+    p.add_argument(
+        "--use-scratch",
+        action="store_true",
+        help="Run OCEAN in node scratch, collect small non-scratch outputs, then clean scratch.",
+    )
+    p.add_argument(
+        "--scratch-name",
+        default="",
+        help="Scratch subdirectory name. Shell variables such as ${JOB_ID} are allowed. Default: ocean_xanes_${JOB_ID}.",
+    )
+    p.add_argument(
+        "--collect-max-mb",
+        type=int,
+        default=50,
+        help="Maximum individual file size copied back from scratch by --use-scratch.",
     )
     p.add_argument("--extra", action="append", default=[], help="Extra line to append to ocean.in scaffold.")
     p.add_argument("--job-name", default="ocean-xanes")

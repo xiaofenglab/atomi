@@ -99,6 +99,67 @@ def test_ocean_prepare_writes_workspace(tmp_path: Path) -> None:
     assert metadata["dft_plus_u"].startswith("VASP LDAU")
 
 
+def test_ocean_prepare_can_write_scratch_runner(tmp_path: Path) -> None:
+    structure = tmp_path / "POSCAR"
+    structure.write_text("test structure\n1\n1 0 0\n0 1 0\n0 0 1\nU O\n1 1\nDirect\n0 0 0\n0.25 0.25 0.25\n", encoding="utf-8")
+    pseudo_dir = tmp_path / "pseudos"
+    pseudo_dir.mkdir()
+    (pseudo_dir / "U.test.UPF").write_text("U pseudo\n", encoding="utf-8")
+    (pseudo_dir / "U.test.in").write_text("U oncv input\n", encoding="utf-8")
+    (pseudo_dir / "O.test.UPF").write_text("O pseudo\n", encoding="utf-8")
+    (pseudo_dir / "O.test.in").write_text("O oncv input\n", encoding="utf-8")
+    outdir = tmp_path / "ocean_scratch"
+    args = argparse.Namespace(
+        structure=structure,
+        vasp_dir=None,
+        absorber="U",
+        edge="M4",
+        outdir=outdir,
+        dft_engine="quantum_espresso",
+        dft_plus_u="",
+        executable="/private/ocean/bin/ocean.pl",
+        root="/private/ocean",
+        bin="/private/ocean/bin",
+        module="chem/ocean/test",
+        pseudo_dir=str(pseudo_dir),
+        energy_window="",
+        edge_atom_index=0,
+        nkpt="1 1 1",
+        screen_nkpt="1 1 1",
+        xmesh="",
+        nbands=20,
+        screen_nbands=10,
+        ecut="80",
+        diemac="5.0",
+        broaden="0.3",
+        pp_list=["U.test.UPF", "O.test.UPF"],
+        opf_template="example",
+        allow_missing_opf=False,
+        use_scratch=True,
+        scratch_name="u4o9_ocean_M4_${JOB_ID}",
+        collect_max_mb=25,
+        extra=[],
+        job_name="ocean-u-m4",
+        ntasks=16,
+        cpus_per_task=1,
+        mem="24G",
+        time="12:00:00",
+    )
+
+    ocean.prepare_main(args)
+    run_script = (outdir / "run_ocean_xanes.sh").read_text(encoding="utf-8")
+
+    assert "SCRATCH_BASE" in run_script
+    assert 'SCRATCH="${SCRATCH_BASE}/u4o9_ocean_M4_${JOB_ID}"' in run_script
+    assert "export SCRATCH COLLECT" in run_script
+    assert "copied_small_file_manifest.tsv" in run_script
+    assert "exclude_parts = {'Out', 'Wfc', 'system.save'}" in run_script
+    assert "max_bytes = 25 * 1024 * 1024" in run_script
+    assert 'rm -rf "${SCRATCH}"' in run_script
+    assert "ATOMI_OCEAN_KEEP_SCRATCH" in run_script
+    assert "for f in *.UPF *.upf *.in *.opts *.fill" in run_script
+
+
 def test_ocean_collect_summarizes_two_column_spectrum(tmp_path: Path) -> None:
     spectrum = tmp_path / "absspct.dat"
     spectrum.write_text("# e intensity\n0.0 0.1\n1.0 2.5\n2.0 1.0\n", encoding="utf-8")
