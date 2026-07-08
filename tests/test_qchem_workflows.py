@@ -20,7 +20,8 @@ def test_turbomole_define_preserves_blank_lines(tmp_path: Path) -> None:
     assert "x2t" in Path(outputs["run_script"]).read_text(encoding="utf-8")
     sbatch = Path(outputs["relax_sbatch"]).read_text(encoding="utf-8")
     assert "jobex -ri -c 200" in sbatch
-    assert "chem/turbomole/7.5" in sbatch
+    assert "module load turbomole" in sbatch
+    assert "--mail-user=" not in sbatch
     policy = Path(outputs["basis_policy"]).read_text(encoding="utf-8")
     assert "OpenMolcas" in policy
     assert "ANO-RCC" in policy

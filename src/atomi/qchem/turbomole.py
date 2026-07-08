@@ -105,21 +105,28 @@ define < {shlex.quote(define_stdin)} | tee define.log
 """
 
 
-def render_relax_sbatch(job_name: str = "Turbomole", tasks: int = 4, hours: int = 12, module: str = "chem/turbomole/7.5") -> str:
-    """Render the JUSTUS2-style Turbomole relaxation sbatch used in U-BPDC.
+def render_relax_sbatch(
+    job_name: str = "Turbomole",
+    tasks: int = 4,
+    hours: int = 12,
+    module: str = "turbomole",
+    mail_user: str | None = None,
+) -> str:
+    """Render a site-configurable Turbomole relaxation sbatch used in U-BPDC.
 
     The calculation sequence follows the existing U-BPDC runs:
     ``ridft`` -> ``jobex -ri -c 200`` -> ``aoforce -ri -central``.
     """
 
     safe_job = job_name[:30] or "Turbomole"
+    mail_user_line = f"#SBATCH --mail-user={mail_user}\n" if mail_user else ""
     return f"""#!/bin/bash
 #SBATCH --job-name {safe_job}
 #SBATCH --ntasks={tasks} --nodes=1
 #SBATCH --mem-per-cpu=2000
 #SBATCH --time={hours}:00:00
 #SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mail-user=ka_hq7637
+{mail_user_line.rstrip()}
 
 set -euo pipefail
 unset LANG; unset LC_CTYPE
@@ -174,9 +181,9 @@ def render_basis_policy_readme() -> str:
 This workspace is intended for Turbomole geometry preconditioning/relaxation.
 For actinide spectroscopy and covalency interpretation, especially U4O9 U M-edge
 HERFD-XANES work, keep the electronic-structure stage in OpenMolcas with U
-ANO-RCC basis sets. The JUSTUS2 Turbomole 7.5 installation used in the U-BPDC
-examples provides U ECP/def-style basis choices, not the OpenMolcas ANO-RCC U
-basis used for the final ground-state and excited-state calculations.
+ANO-RCC basis sets. A site-specific Turbomole module may provide U ECP/def-style
+basis choices, not the OpenMolcas ANO-RCC U basis used for the final ground-state
+and excited-state calculations.
 
 Consistent handoff rule:
 
