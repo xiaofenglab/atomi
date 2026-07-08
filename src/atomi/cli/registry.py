@@ -110,6 +110,18 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Print Molcas postanalysis workflow and build report-style M4/M5 XANES plots.",
     ),
     CommandSpec(
+        aliases=("molcas-spin-plan", "molcas_spin_plan", "openmolcas-spin-plan"),
+        target="atomi.qchem.molcas_spin_plan:main",
+        category="qchem",
+        help="Plan OpenMolcas spin/root blocks before RASSCF/CASPT2/RASSI production.",
+    ),
+    CommandSpec(
+        aliases=("molcas-symmetry-plan", "molcas_symmetry_plan", "openmolcas-symmetry-plan"),
+        target="atomi.qchem.molcas_symmetry:main",
+        category="qchem",
+        help="Detect and document OpenMolcas D2h-subgroup symmetry choices.",
+    ),
+    CommandSpec(
         aliases=("aq-thermo-bridge", "aq_thermo_bridge", "thermofun-bridge", "thermohub-bridge"),
         target="atomi.aqueous.thermohub_bridge:main",
         category="aqueous",
