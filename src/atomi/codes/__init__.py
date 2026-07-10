@@ -1,2 +1,1 @@
-"""Code-specific helpers for VASP, CP2K, LAMMPS, Turbomole, and OpenMolcas."""
-
+"""Code-specific helpers and external-runtime bridges."""

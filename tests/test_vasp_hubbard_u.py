@@ -167,6 +167,8 @@ def test_qe_scaffold_separates_hp_and_wannier_routes(tmp_path: Path) -> None:
     main(["qe-prepare", "--outdir", str(tmp_path / "qe"), "--prefix", "uo2"])
     assert "HUBBARD (ortho-atomic)" in (tmp_path / "qe" / "HUBBARD.atomic.template").read_text()
     assert "HUBBARD (wf)" in (tmp_path / "qe" / "HUBBARD.wf.template").read_text()
+    assert "wannier2pw.x" in (tmp_path / "qe" / "MLWF_ROUTE.md").read_text()
+    assert "pmw.x" in (tmp_path / "qe" / "HUBBARD.wf.template").read_text()
     workflow = (tmp_path / "qe" / "WORKFLOW.md").read_text()
     assert "does not" in workflow
     assert "projector-consistent" in workflow

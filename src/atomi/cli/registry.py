@@ -188,6 +188,12 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Prepare and analyze projector-labeled VASP/QE first-principles Hubbard-U routes.",
     ),
     CommandSpec(
+        aliases=("qe-wannier-bridge", "qe_wannier_bridge", "wannier90-bridge"),
+        target="atomi.codes.qe_wannier:main",
+        category="codes",
+        help="Probe and install version-aware QE/Wannier90 sidecar runtimes.",
+    ),
+    CommandSpec(
         aliases=("pocc-zentropy-defects", "pocc_zentropy_defects", "atomi-defects"),
         target="atomi.zentropy.pocc_defects:main",
         category="zentropy",

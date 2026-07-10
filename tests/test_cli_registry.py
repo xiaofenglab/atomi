@@ -18,6 +18,7 @@ def test_command_registry_exposes_core_bridge_aliases() -> None:
     assert "thermo-prior" in aliases
     assert "thermo-prior-mp" in aliases
     assert "aq-thermo-bridge" in aliases
+    assert "qe-wannier-bridge" in aliases
     assert registry["mode4-surface"].target == "atomi.zentropy.mode4_surface:main"
     assert registry["crystal-graph-dataset"].target == "atomi.ml.crystal_graph_dataset:main"
     assert registry["local-structure"].target == "atomi.local_structure:main"
