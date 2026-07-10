@@ -239,7 +239,7 @@ test -x "$QE_PREFIX/bin/pw2wannier90.x"
 test -x "$QE_PREFIX/bin/wannier2pw.x"
 test -x "$W90_PREFIX/bin/wannier90.x"
 
-printf '%s\n' \
+printf '%s\\n' \
   '# Source this file before QE/Wannier work.' \
   "export ATOMI_QE_ROOT=$QE_PREFIX" \
   "export ATOMI_QE_BIN=$QE_PREFIX/bin" \
