@@ -903,11 +903,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> dict[str, object]:
+def main(argv: list[str] | None = None) -> dict[str, object] | None:
+    console_entry = argv is None
     args = build_parser().parse_args(argv)
     result = args.func(args)
     print(json.dumps(result, indent=2))
-    return result
+    return None if console_entry else result
 
 
 if __name__ == "__main__":
