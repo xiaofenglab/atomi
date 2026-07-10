@@ -176,6 +176,18 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Prepare, run, and parse Bader charge analysis from VASP charge-density files.",
     ),
     CommandSpec(
+        aliases=(
+            "hubbard-u-workflow",
+            "hubbard_u_workflow",
+            "vasp-hubbard-u",
+            "wannier-u-workflow",
+            "qe-wannier-u",
+        ),
+        target="atomi.vasp.hubbard_u:main",
+        category="vasp",
+        help="Prepare and analyze projector-labeled VASP/QE first-principles Hubbard-U routes.",
+    ),
+    CommandSpec(
         aliases=("pocc-zentropy-defects", "pocc_zentropy_defects", "atomi-defects"),
         target="atomi.zentropy.pocc_defects:main",
         category="zentropy",
