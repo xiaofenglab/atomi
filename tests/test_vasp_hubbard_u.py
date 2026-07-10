@@ -66,6 +66,16 @@ def test_vasp_lr_prepare_splits_probe_species_and_reorders_magmom(tmp_path: Path
             "--alpha",
             "-0.1",
             "0.1",
+            "--nodes",
+            "2",
+            "--ntasks-per-node",
+            "48",
+            "--module-load",
+            "chem/vasp/6.2.1",
+            "--mem-per-cpu",
+            "3500M",
+            "--vasp-command",
+            "vasp -s std",
         ]
     )
 
@@ -85,7 +95,11 @@ def test_vasp_lr_prepare_splits_probe_species_and_reorders_magmom(tmp_path: Path
     reference_sbatch = (outdir / "submit_reference.sbatch").read_text(encoding="utf-8")
     response_sbatch = (outdir / "submit_response_array.sbatch").read_text(encoding="utf-8")
     submit_all = (outdir / "submit_all.sh").read_text(encoding="utf-8")
-    assert "#SBATCH --cpus-per-task=96" in reference_sbatch
+    assert "#SBATCH --nodes=2" in reference_sbatch
+    assert "#SBATCH --ntasks-per-node=48" in reference_sbatch
+    assert "#SBATCH --mem-per-cpu=3500M" in reference_sbatch
+    assert "module load chem/vasp/6.2.1" in reference_sbatch
+    assert 'VASP_COMMAND:-vasp -s std' in reference_sbatch
     assert "#SBATCH --array=0-1%4" in response_sbatch
     assert "alpha_dirs.txt" in response_sbatch
     assert "--dependency=\"afterok:$reference_job\"" in submit_all

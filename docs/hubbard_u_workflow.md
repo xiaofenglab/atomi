@@ -12,7 +12,11 @@ Prepare a reference and symmetric perturbation series:
 hubbard-u-workflow vasp-lr-prepare \
   --seed /path/to/healthy/static \
   --outdir uo2_vasp_lr \
-  --probe-atom 1
+  --probe-atom 1 \
+  --nodes 2 --ntasks-per-node 48 \
+  --mem-per-cpu 3500M \
+  --module-load chem/vasp/6.2.1 \
+  --vasp-command "vasp -s std"
 ```
 
 The command splits the probe atom into its own VASP species, duplicates the
@@ -30,6 +34,11 @@ reports linearity, and computes `U = 1/chi - 1/chi0`.
 For f shells use `LMAXMIX=6`. A UO2 reference must be guarded for AFM moment,
 occupation-matrix branch, insulating/metallic character, and linear response
 without hysteresis.
+
+Site-specific launch details are explicit inputs rather than source-code
+defaults: use `--nodes`, `--ntasks-per-node`, `--cpus-per-task`, repeated
+`--mem-per-cpu`, `--module-load`, and `--vasp-command`. This keeps Atomi portable while the
+installed HPC profile or local JSON supplies the scheduler policy.
 
 ## VASP Wannier-cRPA
 

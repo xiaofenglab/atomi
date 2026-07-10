@@ -316,24 +316,35 @@ def write_lr_slurm_scripts(
     *,
     job_name: str,
     time_limit: str,
-    cpus: int,
+    nodes: int,
+    ntasks_per_node: int,
+    cpus_per_task: int,
+    mem_per_cpu: str | None,
     array_limit: int,
     vasp_command: str,
+    module_loads: Sequence[str],
 ) -> None:
     (outdir / "alpha_dirs.txt").write_text(
         "\n".join(directory.name for directory in alpha_dirs) + "\n", encoding="utf-8"
     )
     command = vasp_command.replace("\\", "\\\\").replace('"', '\\"')
+    module_lines = ["module purge"] if module_loads else []
+    module_lines.extend(f"module load {module}" for module in module_loads)
+    module_block = "\n".join(module_lines)
+    memory_directive = f"#SBATCH --mem-per-cpu={mem_per_cpu}" if mem_per_cpu else ""
     reference = f"""#!/usr/bin/env bash
 #SBATCH --job-name={job_name}-ref
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task={cpus}
+#SBATCH --nodes={nodes}
+#SBATCH --ntasks-per-node={ntasks_per_node}
+#SBATCH --cpus-per-task={cpus_per_task}
+{memory_directive}
 #SBATCH --time={time_limit}
 
 set -euo pipefail
+ulimit -s 200000
+{module_block}
 ROOT=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$ROOT/logs"
 cd "$ROOT/reference_u0"
@@ -344,13 +355,16 @@ read -r -a VASP_CMD <<< "${{VASP_COMMAND:-{command}}}"
 #SBATCH --job-name={job_name}-resp
 #SBATCH --output=logs/%x_%A_%a.out
 #SBATCH --error=logs/%x_%A_%a.err
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task={cpus}
+#SBATCH --nodes={nodes}
+#SBATCH --ntasks-per-node={ntasks_per_node}
+#SBATCH --cpus-per-task={cpus_per_task}
+{memory_directive}
 #SBATCH --time={time_limit}
 #SBATCH --array=0-{len(alpha_dirs) - 1}%{array_limit}
 
 set -euo pipefail
+ulimit -s 200000
+{module_block}
 ROOT=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$ROOT/logs"
 alpha_dir=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$ROOT/alpha_dirs.txt")
@@ -498,6 +512,12 @@ def prepare_vasp_lr(args: argparse.Namespace) -> dict[str, object]:
             "reference_script": "submit_reference.sbatch",
             "response_array_script": "submit_response_array.sbatch",
             "array_limit": args.array_limit,
+            "nodes": args.nodes,
+            "ntasks_per_node": args.ntasks_per_node,
+            "cpus_per_task": args.cpus_per_task,
+            "mem_per_cpu": args.mem_per_cpu,
+            "module_loads": list(args.module_load),
+            "vasp_command": args.vasp_command,
         },
         "warnings": [
             "The reference is deliberately U=0; verify that UO2 remains on the intended AFM/occupation branch.",
@@ -512,9 +532,13 @@ def prepare_vasp_lr(args: argparse.Namespace) -> dict[str, object]:
         alpha_dirs,
         job_name=args.job_name,
         time_limit=args.time,
-        cpus=args.cpus,
+        nodes=args.nodes,
+        ntasks_per_node=args.ntasks_per_node,
+        cpus_per_task=args.cpus_per_task,
+        mem_per_cpu=args.mem_per_cpu,
         array_limit=args.array_limit,
         vasp_command=args.vasp_command,
+        module_loads=args.module_load,
     )
     return metadata
 
@@ -836,8 +860,17 @@ def build_parser() -> argparse.ArgumentParser:
     lr.add_argument("--overwrite", action="store_true")
     lr.add_argument("--job-name", default="hubbard-u-lr")
     lr.add_argument("--time", default="12:00:00")
-    lr.add_argument("--cpus", type=int, default=96)
+    lr.add_argument("--nodes", type=int, default=1)
+    lr.add_argument("--ntasks-per-node", type=int, default=1)
+    lr.add_argument("--cpus-per-task", type=int, default=1)
+    lr.add_argument("--mem-per-cpu")
     lr.add_argument("--array-limit", type=int, default=4)
+    lr.add_argument(
+        "--module-load",
+        action="append",
+        default=[],
+        help="Environment module to load in generated Slurm jobs; repeat as needed",
+    )
     lr.add_argument("--vasp-command", default="srun vasp_std")
     lr.set_defaults(func=prepare_vasp_lr)
 
