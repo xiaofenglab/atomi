@@ -62,6 +62,10 @@ hubbard-u-workflow qe-prepare --outdir uo2_qe --element U --manifold 5f
 
 The baseline route uses stock QE `hp.x` with `ortho-atomic` projectors. The
 legacy `HUBBARD (wf)` route uses `pmw.x` projectors and is not an MLWF route.
+This is the application layer used in Tesch and Kowalski (2022), but their U
+was calculated separately by linear response; the paper explicitly states that
+the `pmw.x` projectors were not used to calculate U. Treat this as a labeled
+historical reproduction route, not a matched-projector response.
 The modern research route requires QE 7.5 or newer, `pw2wannier90.x`,
 Wannier90, and `wannier2pw.x`, followed by a matched response implementation
 such as a pinned collaborator branch. Stock HP values must not be silently

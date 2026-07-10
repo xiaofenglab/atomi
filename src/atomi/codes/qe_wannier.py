@@ -15,6 +15,7 @@ from typing import Any, Sequence
 QE_EXECUTABLES = {
     "pw": ("ATOMI_QE_PW", "pw.x"),
     "hp": ("ATOMI_QE_HP", "hp.x"),
+    "pmw": ("ATOMI_QE_PMW", "pmw.x"),
     "pw2wannier90": ("ATOMI_QE_PW2WANNIER90", "pw2wannier90.x"),
     "wannier2pw": ("ATOMI_QE_WANNIER2PW", "wannier2pw.x"),
 }
@@ -82,6 +83,7 @@ def probe_runtime() -> dict[str, Any]:
         for name in ("pw", "pw2wannier90", "wannier90", "wannier2pw")
     )
     stock_hp = modern_hubbard and executables["hp"]["available"]
+    legacy_pmw = executables["pw"]["available"] and executables["pmw"]["available"]
 
     piotr_root = os.environ.get("ATOMI_PIOTR_QE_ROOT", "").strip()
     piotr_commit = os.environ.get("ATOMI_PIOTR_QE_COMMIT", "").strip()
@@ -103,6 +105,11 @@ def probe_runtime() -> dict[str, Any]:
         warnings.append(
             "Stock QE can build MLWF Hubbard projectors, but Piotr's matched response branch is not pinned."
         )
+    if legacy_pmw:
+        warnings.append(
+            "pmw.x supports the published Piotr 2022 application layer, but that paper did not "
+            "calculate U with the pmw.x projectors."
+        )
 
     return {
         "schema": "atomi.qe_wannier_status.v1",
@@ -118,6 +125,8 @@ def probe_runtime() -> dict[str, Any]:
         "capabilities": {
             "modern_hubbard_card": modern_hubbard,
             "stock_hp_atomic_response": stock_hp,
+            "legacy_pmw_hubbard_projectors": legacy_pmw,
+            "piotr_2022_pmw_application_layer": legacy_pmw,
             "mlwf_hubbard_projectors": mlwf_projectors,
             "piotr_matched_response": piotr_ready,
             "uo2_piotr_production_ready": mlwf_projectors and piotr_ready,
@@ -146,8 +155,11 @@ def install_plan() -> dict[str, Any]:
         ],
         "route_gates": [
             "Stock hp.x is an atomic/ortho-atomic projector baseline unless proven otherwise.",
+            "Piotr 2022 used linear-response U plus pmw.x projectors for single-point DFT+U; "
+            "the pmw.x projectors were not used to calculate U.",
             "MLWF projectors require pw.x -> pw2wannier90.x -> wannier90.x -> wannier2pw.x.",
-            "Piotr replication additionally requires his exact response branch, commit, and equations.",
+            "A newer matched-projector Piotr replication requires his exact response branch, commit, "
+            "and equations.",
             "A UO2 run also requires validated U/O UPFs, magnetic/occupation guards, and window QA.",
         ],
         "environment": {
@@ -235,6 +247,7 @@ cp -f wannier90.x postw90.x w90chk2chk.x w90spn2spn.x "$W90_PREFIX/bin/" 2>/dev/
 
 test -x "$QE_PREFIX/bin/pw.x"
 test -x "$QE_PREFIX/bin/hp.x"
+test -x "$QE_PREFIX/bin/pmw.x"
 test -x "$QE_PREFIX/bin/pw2wannier90.x"
 test -x "$QE_PREFIX/bin/wannier2pw.x"
 test -x "$W90_PREFIX/bin/wannier90.x"
@@ -245,6 +258,7 @@ printf '%s\\n' \
   "export ATOMI_QE_BIN=$QE_PREFIX/bin" \
   'export ATOMI_QE_PW=$ATOMI_QE_BIN/pw.x' \
   'export ATOMI_QE_HP=$ATOMI_QE_BIN/hp.x' \
+  'export ATOMI_QE_PMW=$ATOMI_QE_BIN/pmw.x' \
   'export ATOMI_QE_PW2WANNIER90=$ATOMI_QE_BIN/pw2wannier90.x' \
   'export ATOMI_QE_WANNIER2PW=$ATOMI_QE_BIN/wannier2pw.x' \
   "export ATOMI_WANNIER90_ROOT=$W90_PREFIX" \
@@ -282,7 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
     write.add_argument("--qe-version", default="7.5")
     write.add_argument("--wannier-version", default="3.1.0")
     write.add_argument("--cpus", type=int, default=24)
-    write.add_argument("--time", default="06:00:00")
+    write.add_argument("--time", default="02:00:00")
     write.add_argument(
         "--module-load",
         action="append",

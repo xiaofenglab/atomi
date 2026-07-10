@@ -8,7 +8,7 @@ def test_probe_runtime_separates_stock_and_piotr_routes(monkeypatch, tmp_path: P
     w90_bin = tmp_path / "w90" / "bin"
     qe_bin.mkdir(parents=True)
     w90_bin.mkdir(parents=True)
-    for name in ("pw.x", "hp.x", "pw2wannier90.x", "wannier2pw.x"):
+    for name in ("pw.x", "hp.x", "pmw.x", "pw2wannier90.x", "wannier2pw.x"):
         (qe_bin / name).write_text("", encoding="utf-8")
     (w90_bin / "wannier90.x").write_text("", encoding="utf-8")
     monkeypatch.setenv("ATOMI_QE_BIN", str(qe_bin))
@@ -20,6 +20,7 @@ def test_probe_runtime_separates_stock_and_piotr_routes(monkeypatch, tmp_path: P
 
     assert result["capabilities"]["modern_hubbard_card"] is True
     assert result["capabilities"]["stock_hp_atomic_response"] is True
+    assert result["capabilities"]["piotr_2022_pmw_application_layer"] is True
     assert result["capabilities"]["mlwf_hubbard_projectors"] is True
     assert result["capabilities"]["piotr_matched_response"] is False
     assert result["capabilities"]["uo2_piotr_production_ready"] is False
@@ -47,6 +48,7 @@ def test_write_install_script_uses_compute_node_and_checks_tools(tmp_path: Path)
     assert "module load compiler/gnu/test" in text
     assert "module load mpi/test" in text
     assert "make -j \"$JOBS\" pw hp pp" in text
+    assert "pmw.x" in text
     assert "wannier2pw.x" in text
     assert "activate_qe_wannier.sh" in text
 
