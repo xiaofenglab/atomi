@@ -250,10 +250,18 @@ def render_incar(
     kept: list[str] = []
     for line in source_lines:
         body = line.split("!", 1)[0].split("#", 1)[0]
-        key = body.split("=", 1)[0].strip().upper() if "=" in body else ""
-        if key in replaced:
+        if ";" not in body:
+            key = body.split("=", 1)[0].strip().upper() if "=" in body else ""
+            if key not in replaced:
+                kept.append(line)
             continue
-        kept.append(line)
+        for assignment in body.split(";"):
+            assignment = assignment.strip()
+            if not assignment:
+                continue
+            key = assignment.split("=", 1)[0].strip().upper() if "=" in assignment else ""
+            if key not in replaced:
+                kept.append(assignment)
     kept.extend(["", "# Atomi Hubbard-U workflow overrides"])
     if magmom is not None:
         kept.append(f"MAGMOM = {magmom}")
@@ -433,13 +441,22 @@ def prepare_vasp_lr(args: argparse.Namespace) -> dict[str, object]:
     reference_overrides = {
         "SYSTEM": f"Atomi Hubbard-U reference {split_data.symbols[0]}",
         "LDAU": ".FALSE.",
+        "LDAUTYPE": None,
+        "LDAUL": None,
+        "LDAUU": None,
+        "LDAUJ": None,
+        "LDAUPRINT": None,
         "LMAXMIX": str(args.lmaxmix),
         "LORBIT": "11",
         "ISYM": "0",
         "NSW": "0",
         "IBRION": "-1",
+        "ISTART": "0",
         "LWAVE": ".TRUE.",
         "LCHARG": ".TRUE.",
+        "LAECHG": ".FALSE.",
+        "EDIFF": "1E-7",
+        "NELM": "200",
         "ICHARG": "2",
     }
     (reference / "INCAR").write_text(
@@ -474,8 +491,12 @@ def prepare_vasp_lr(args: argparse.Namespace) -> dict[str, object]:
                 "ISYM": "0",
                 "NSW": "0",
                 "IBRION": "-1",
+                "ISTART": "1",
                 "LWAVE": ".TRUE.",
                 "LCHARG": ".TRUE.",
+                "LAECHG": ".FALSE.",
+                "EDIFF": "1E-7",
+                "NELM": "200",
                 "ICHARG": "11" if stage == "nscf" else None,
             }
             (run_dir / "INCAR").write_text(

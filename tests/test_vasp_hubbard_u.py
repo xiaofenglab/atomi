@@ -27,7 +27,7 @@ def write_seed(path: Path) -> None:
     (path / "CONTCAR").write_text(POSCAR, encoding="utf-8")
     (path / "KPOINTS").write_text("Gamma\n0\nGamma\n1 1 1\n0 0 0\n", encoding="utf-8")
     (path / "INCAR").write_text(
-        "ENCUT = 650\nISPIN = 2\nMAGMOM = 2.0 -2.0 2*0.0\n"
+        "ENCUT = 650\nISTART = 1; ICHARG = 11;\nISPIN = 2\nMAGMOM = 2.0 -2.0 2*0.0\n"
         "LDAU = .TRUE.\nLDAUTYPE = 1\nLDAUL = 3 -1\nLDAUU = 4 0\nLDAUJ = 0 0\n",
         encoding="utf-8",
     )
@@ -87,6 +87,9 @@ def test_vasp_lr_prepare_splits_probe_species_and_reorders_magmom(tmp_path: Path
     assert "1  1  2" in poscar
     assert "MAGMOM = -2.0 2.0 0.0 0.0" in incar
     assert "LDAU = .FALSE." in incar
+    assert "ISTART = 0" in incar
+    assert "ICHARG = 2" in incar
+    assert "LDAUTYPE" not in incar
     assert "LDAUTYPE = 3" in perturb
     assert "LDAUL = 3 -1 -1" in perturb
     assert "LDAUU = 0.10000000 0.0 0.0" in perturb
