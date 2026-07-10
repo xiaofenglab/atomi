@@ -282,6 +282,35 @@ def test_confighpc_applies_default_local_config(tmp_path: Path) -> None:
     assert f"export ATOMI_HPC_CONFIG={config_path}" in env_text
 
 
+def test_confighpc_exports_atomi_keys_from_generic_profile(tmp_path: Path) -> None:
+    config_path = tmp_path / "atomi_hpc_config.future.local.json"
+    env_path = tmp_path / "atomi_hpc_env.sh"
+    config_path.write_text(
+        json.dumps(
+            {
+                "site": "future",
+                "profiles": {
+                    "qe_wannier": {
+                        "environment": {
+                            "ATOMI_QE_ROOT": "/private/qe",
+                            "ATOMI_WANNIER90_EXE": "/private/w90/wannier90.x",
+                            "UNRELATED_KEY": "do-not-export",
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    doctor.configure_hpc_environment(directory=tmp_path, env_path=env_path)
+    env_text = env_path.read_text(encoding="utf-8")
+
+    assert "export ATOMI_QE_ROOT=/private/qe" in env_text
+    assert "export ATOMI_WANNIER90_EXE=/private/w90/wannier90.x" in env_text
+    assert "UNRELATED_KEY" not in env_text
+
+
 def test_confighpc_exports_separate_gk_lammps_profile(tmp_path: Path) -> None:
     config_path = tmp_path / "atomi_hpc_config.kit.local.json"
     env_path = tmp_path / "atomi_hpc_env.sh"

@@ -709,6 +709,17 @@ def collect_environment_exports(config: dict[str, Any], config_path: Path | None
             exports[str(key)] = str(value)
 
     profiles = config.get("profiles", {})
+    if isinstance(profiles, dict):
+        for profile in profiles.values():
+            if not isinstance(profile, dict):
+                continue
+            environment = profile.get("environment", {})
+            if not isinstance(environment, dict):
+                continue
+            for key, value in environment.items():
+                if str(key).startswith("ATOMI_") and _nonempty(value):
+                    exports.setdefault(str(key), str(value))
+
     lammps = profiles.get("lammps_md_engine", {})
     if isinstance(lammps, dict):
         env = lammps.get("environment", {})
