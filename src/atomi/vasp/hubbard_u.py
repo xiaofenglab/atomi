@@ -310,6 +310,84 @@ def write_lr_run_script(path: Path, reference: Path, alpha_dirs: Sequence[Path])
     path.chmod(0o755)
 
 
+def write_lr_slurm_scripts(
+    outdir: Path,
+    alpha_dirs: Sequence[Path],
+    *,
+    job_name: str,
+    time_limit: str,
+    cpus: int,
+    array_limit: int,
+    vasp_command: str,
+) -> None:
+    (outdir / "alpha_dirs.txt").write_text(
+        "\n".join(directory.name for directory in alpha_dirs) + "\n", encoding="utf-8"
+    )
+    command = vasp_command.replace("\\", "\\\\").replace('"', '\\"')
+    reference = f"""#!/usr/bin/env bash
+#SBATCH --job-name={job_name}-ref
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task={cpus}
+#SBATCH --time={time_limit}
+
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")" && pwd)
+mkdir -p "$ROOT/logs"
+cd "$ROOT/reference_u0"
+read -r -a VASP_CMD <<< "${{VASP_COMMAND:-{command}}}"
+"${{VASP_CMD[@]}}" > vasp.out 2>&1
+"""
+    response = f"""#!/usr/bin/env bash
+#SBATCH --job-name={job_name}-resp
+#SBATCH --output=logs/%x_%A_%a.out
+#SBATCH --error=logs/%x_%A_%a.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task={cpus}
+#SBATCH --time={time_limit}
+#SBATCH --array=0-{len(alpha_dirs) - 1}%{array_limit}
+
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")" && pwd)
+mkdir -p "$ROOT/logs"
+alpha_dir=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$ROOT/alpha_dirs.txt")
+if [[ -z "$alpha_dir" ]]; then
+  echo "No alpha directory for task $SLURM_ARRAY_TASK_ID" >&2
+  exit 2
+fi
+for stage in nscf scf; do
+  cp -f "$ROOT/reference_u0/CHGCAR" "$ROOT/$alpha_dir/$stage/CHGCAR"
+  cp -f "$ROOT/reference_u0/WAVECAR" "$ROOT/$alpha_dir/$stage/WAVECAR"
+done
+read -r -a VASP_CMD <<< "${{VASP_COMMAND:-{command}}}"
+cd "$ROOT/$alpha_dir/nscf"
+"${{VASP_CMD[@]}}" > vasp.out 2>&1
+cp -f WAVECAR ../scf/WAVECAR
+cd ../scf
+"${{VASP_CMD[@]}}" > vasp.out 2>&1
+"""
+    submit = """#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")" && pwd)
+cd "$ROOT"
+reference_job=$(sbatch --parsable submit_reference.sbatch)
+echo "reference_job=$reference_job"
+response_job=$(sbatch --parsable --dependency="afterok:$reference_job" submit_response_array.sbatch)
+echo "response_job=$response_job"
+"""
+    for name, content in (
+        ("submit_reference.sbatch", reference),
+        ("submit_response_array.sbatch", response),
+        ("submit_all.sh", submit),
+    ):
+        path = outdir / name
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o755)
+
+
 def prepare_vasp_lr(args: argparse.Namespace) -> dict[str, object]:
     seed = args.seed.resolve()
     outdir = args.outdir.resolve()
@@ -415,6 +493,12 @@ def prepare_vasp_lr(args: argparse.Namespace) -> dict[str, object]:
         "alphas_eV": list(args.alpha),
         "projector": "VASP PAW on-site l channel",
         "l": args.l,
+        "scheduler": {
+            "kind": "slurm",
+            "reference_script": "submit_reference.sbatch",
+            "response_array_script": "submit_response_array.sbatch",
+            "array_limit": args.array_limit,
+        },
         "warnings": [
             "The reference is deliberately U=0; verify that UO2 remains on the intended AFM/occupation branch.",
             "This U is projector-specific and is not a Wannier-projector U.",
@@ -423,6 +507,15 @@ def prepare_vasp_lr(args: argparse.Namespace) -> dict[str, object]:
     }
     (outdir / "workflow.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     write_lr_run_script(outdir / "run_response.sh", reference, alpha_dirs)
+    write_lr_slurm_scripts(
+        outdir,
+        alpha_dirs,
+        job_name=args.job_name,
+        time_limit=args.time,
+        cpus=args.cpus,
+        array_limit=args.array_limit,
+        vasp_command=args.vasp_command,
+    )
     return metadata
 
 
@@ -464,6 +557,39 @@ def parse_total_charge(path: Path, atom: int, channel: str) -> float:
     return row[channel]
 
 
+def parse_magnetization(path: Path, atom: int, component: str = "x") -> float | None:
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    target = f"magnetization ({component})"
+    tables: list[dict[int, float]] = []
+    index = 0
+    while index < len(lines):
+        if lines[index].strip().lower() != target:
+            index += 1
+            continue
+        cursor = index + 1
+        while cursor < len(lines) and "# of ion" not in lines[cursor]:
+            cursor += 1
+        if cursor >= len(lines):
+            break
+        headers = lines[cursor].split()[3:]
+        cursor += 1
+        while cursor < len(lines) and set(lines[cursor].strip()) <= {"-"}:
+            cursor += 1
+        table: dict[int, float] = {}
+        while cursor < len(lines):
+            parts = lines[cursor].split()
+            if not parts or not parts[0].isdigit():
+                break
+            row = dict(zip(headers, [float(value) for value in parts[1:]]))
+            if "tot" in row:
+                table[int(parts[0])] = row["tot"]
+            cursor += 1
+        if table:
+            tables.append(table)
+        index = cursor
+    return tables[-1].get(atom) if tables else None
+
+
 def _linear_fit(xs: Sequence[float], ys: Sequence[float]) -> tuple[float, float, float]:
     if len(xs) < 2 or len(xs) != len(ys):
         raise ValueError("linear fit requires at least two matched points")
@@ -487,7 +613,8 @@ def analyze_vasp_lr(args: argparse.Namespace) -> dict[str, object]:
     for row in rows:
         outcar = root / row["path"] / "OUTCAR"
         occupation = parse_total_charge(outcar, int(row["probe_atom"]), row["channel"])
-        parsed.append({**row, "occupation": occupation})
+        moment = parse_magnetization(outcar, int(row["probe_atom"]))
+        parsed.append({**row, "occupation": occupation, "moment": moment})
     by_stage: dict[str, list[dict[str, object]]] = {"nscf": [], "scf": []}
     for row in parsed:
         by_stage[str(row["stage"])].append(row)
@@ -503,7 +630,18 @@ def analyze_vasp_lr(args: argparse.Namespace) -> dict[str, object]:
     if abs(chi0) < args.min_slope or abs(chi) < args.min_slope:
         raise ValueError(f"response slope too small to invert: chi0={chi0}, chi={chi}")
     u_value = 1.0 / chi - 1.0 / chi0
-    health = "accepted" if min(fits["nscf"]["r2"], fits["scf"]["r2"]) >= args.min_r2 else "warning"
+    warnings: list[str] = []
+    if min(fits["nscf"]["r2"], fits["scf"]["r2"]) < args.min_r2:
+        warnings.append("occupation response is not sufficiently linear")
+    reference_outcar = root / "reference_u0" / "OUTCAR"
+    reference_moment = parse_magnetization(reference_outcar, 1) if reference_outcar.is_file() else None
+    moments = [float(row["moment"]) for row in parsed if row["moment"] is not None]
+    if args.guard_moment_sign and reference_moment is not None and abs(reference_moment) > 1.0e-8:
+        if any(moment * reference_moment < 0 for moment in moments):
+            warnings.append("probe magnetic moment changed sign across the response series")
+    if args.min_abs_moment > 0 and any(abs(moment) < args.min_abs_moment for moment in moments):
+        warnings.append("probe magnetic moment fell below the configured branch threshold")
+    health = "accepted" if not warnings else "warning"
     result = {
         "schema": "atomi.vasp_hubbard_lr_result.v1",
         "projector": "VASP PAW on-site channel",
@@ -512,11 +650,15 @@ def analyze_vasp_lr(args: argparse.Namespace) -> dict[str, object]:
         "U_response_eV": u_value,
         "fits": fits,
         "health": health,
+        "warnings": warnings,
+        "reference_probe_moment": reference_moment,
         "minimum_r2": args.min_r2,
     }
     (root / "hubbard_response.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     with (root / "hubbard_response.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["alpha_eV", "stage", "path", "occupation"])
+        writer = csv.DictWriter(
+            handle, fieldnames=["alpha_eV", "stage", "path", "occupation", "moment"]
+        )
         writer.writeheader()
         writer.writerows(
             {key: row[key] for key in writer.fieldnames} for row in parsed
@@ -692,12 +834,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=(-0.20, -0.15, -0.10, -0.05, 0.05, 0.10, 0.15, 0.20),
     )
     lr.add_argument("--overwrite", action="store_true")
+    lr.add_argument("--job-name", default="hubbard-u-lr")
+    lr.add_argument("--time", default="12:00:00")
+    lr.add_argument("--cpus", type=int, default=96)
+    lr.add_argument("--array-limit", type=int, default=4)
+    lr.add_argument("--vasp-command", default="srun vasp_std")
     lr.set_defaults(func=prepare_vasp_lr)
 
     analyze = sub.add_parser("vasp-lr-analyze", help="Fit chi0, chi and VASP response U")
     analyze.add_argument("--root", type=Path, required=True)
     analyze.add_argument("--min-r2", type=float, default=0.98)
     analyze.add_argument("--min-slope", type=float, default=1.0e-8)
+    analyze.add_argument("--guard-moment-sign", action=argparse.BooleanOptionalAction, default=True)
+    analyze.add_argument("--min-abs-moment", type=float, default=0.0)
     analyze.set_defaults(func=analyze_vasp_lr)
 
     crpa = sub.add_parser("vasp-crpa-prepare", help="Prepare a version-gated VASP Wannier-cRPA scaffold")

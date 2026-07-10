@@ -82,6 +82,13 @@ def test_vasp_lr_prepare_splits_probe_species_and_reorders_magmom(tmp_path: Path
     assert "LDAUU = 0.10000000 0.0 0.0" in perturb
     assert "ICHARG = 11" in perturb
     assert potcar.count("End of Dataset") == 3
+    reference_sbatch = (outdir / "submit_reference.sbatch").read_text(encoding="utf-8")
+    response_sbatch = (outdir / "submit_response_array.sbatch").read_text(encoding="utf-8")
+    submit_all = (outdir / "submit_all.sh").read_text(encoding="utf-8")
+    assert "#SBATCH --cpus-per-task=96" in reference_sbatch
+    assert "#SBATCH --array=0-1%4" in response_sbatch
+    assert "alpha_dirs.txt" in response_sbatch
+    assert "--dependency=\"afterok:$reference_job\"" in submit_all
     metadata = json.loads((outdir / "workflow.json").read_text(encoding="utf-8"))
     assert metadata["atom_order_new_to_old_1based"] == [2, 1, 3, 4]
     assert metadata["projector"] == "VASP PAW on-site l channel"
