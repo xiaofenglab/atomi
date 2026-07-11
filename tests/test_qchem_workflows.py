@@ -353,6 +353,7 @@ def test_molcas_xanes_spectrum_from_output(tmp_path: Path) -> None:
             transitions_name="transitions.csv",
             summary_name="summary.json",
             plot_name="spectrum.png",
+            stick_thresholds="0.95,0.50",
             title="Ga test",
             no_xraydb=True,
             no_plot=True,
@@ -360,5 +361,6 @@ def test_molcas_xanes_spectrum_from_output(tmp_path: Path) -> None:
     )
     assert summary["schema"] == "atomi.molcas_xanes_spectrum.v1"
     assert summary["n_transitions_used"] == 2
+    assert summary["stick_thresholds"] == [0.95, 0.5]
     assert (outdir / "spectrum.csv").exists()
     assert "energy_ev" in (outdir / "transitions.csv").read_text(encoding="utf-8")

@@ -323,7 +323,47 @@ def write_spectrum_csv(path: Path, energy: np.ndarray, intensity: np.ndarray) ->
             writer.writerow([f"{float(e):.8f}", f"{float(y):.12g}"])
 
 
-def maybe_plot(path: Path, energy: np.ndarray, intensity: np.ndarray, rows: list[dict[str, Any]], title: str) -> bool:
+def parse_stick_thresholds(text: str) -> list[float]:
+    """Parse comma-separated relative stick thresholds.
+
+    Values may be supplied either as fractions (``0.95``) or percentages
+    (``95``).  The default CLI policy writes paired strict/broad stick views
+    at 95% and 50% of the maximum oscillator strength.
+    """
+
+    thresholds: list[float] = []
+    for part in text.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        value = float(item)
+        if value > 1.0:
+            value /= 100.0
+        if value <= 0.0 or value > 1.0:
+            raise ValueError("Stick thresholds must be in (0, 1] or (0, 100].")
+        thresholds.append(value)
+    return thresholds
+
+
+def _threshold_label(threshold: float) -> str:
+    pct = int(round(threshold * 100.0))
+    return f"gt{pct:02d}"
+
+
+def _threshold_title(threshold: float) -> str:
+    pct = int(round(threshold * 100.0))
+    return f">= {pct}% max-oscillator-strength sticks"
+
+
+def maybe_plot(
+    path: Path,
+    energy: np.ndarray,
+    intensity: np.ndarray,
+    rows: list[dict[str, Any]],
+    title: str,
+    *,
+    stick_threshold: float | None = None,
+) -> bool:
     try:
         import matplotlib
 
@@ -338,10 +378,14 @@ def maybe_plot(path: Path, energy: np.ndarray, intensity: np.ndarray, rows: list
         stem_y = [row["oscillator_strength"] for row in rows]
         max_stem = max(stem_y) if stem_y else 1.0
         for row in rows:
-            ax.vlines(row["energy_ev"], 0, max_y * 0.18 * row["oscillator_strength"] / max_stem, color="#9b2d20", alpha=0.5)
+            relative = row["oscillator_strength"] / max_stem if max_stem else 0.0
+            if stick_threshold is not None and relative < stick_threshold:
+                continue
+            ax.vlines(row["energy_ev"], 0, max_y * 0.18 * relative, color="#9b2d20", alpha=0.65)
     ax.set_xlabel("Energy (eV)")
     ax.set_ylabel("Normalized intensity")
-    ax.set_title(title)
+    suffix = f"\n{_threshold_title(stick_threshold)}" if stick_threshold is not None else ""
+    ax.set_title(f"{title}{suffix}")
     ax.grid(alpha=0.2)
     fig.tight_layout()
     fig.savefig(path, dpi=220)
@@ -381,7 +425,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     write_spectrum_csv(spectrum_csv, energy, spectrum)
     write_transitions_csv(transitions_csv, rows)
     plot_path = outdir / args.plot_name
-    plotted = False if args.no_plot else maybe_plot(plot_path, energy, spectrum, rows, args.title or f"{args.element} {args.edge} Molcas XANES")
+    plot_title = args.title or f"{args.element} {args.edge} Molcas XANES"
+    plotted = False if args.no_plot else maybe_plot(plot_path, energy, spectrum, rows, plot_title)
+    threshold_plots: dict[str, str] = {}
+    if not args.no_plot:
+        for threshold in parse_stick_thresholds(args.stick_thresholds):
+            label = _threshold_label(threshold)
+            threshold_plot = outdir / f"{plot_path.stem}_sticks_{label}{plot_path.suffix}"
+            if maybe_plot(threshold_plot, energy, spectrum, rows, plot_title, stick_threshold=threshold):
+                threshold_plots[label] = str(threshold_plot)
     summary = {
         "schema": SCHEMA_SUMMARY,
         "source": source,
@@ -398,6 +450,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "spectrum_csv": str(spectrum_csv),
         "transitions_csv": str(transitions_csv),
         "plot": str(plot_path) if plotted else "",
+        "threshold_plots": threshold_plots,
+        "stick_thresholds": parse_stick_thresholds(args.stick_thresholds),
         "peak_energy_ev": float(energy[int(np.argmax(spectrum))]),
         "intensity_max": float(np.max(spectrum)),
     }
@@ -430,6 +484,11 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--transitions-name", default="molcas_xanes_transitions.csv")
     parser.add_argument("--summary-name", default="molcas_xanes_summary.json")
     parser.add_argument("--plot-name", default="molcas_xanes_spectrum.png")
+    parser.add_argument(
+        "--stick-thresholds",
+        default="0.95,0.50",
+        help="Comma-separated relative oscillator-strength thresholds for extra stick plots; use fractions or percentages.",
+    )
     parser.add_argument("--title", default="")
     parser.add_argument("--no-xraydb", action="store_true", help="Skip xraydb edge/core-width lookup; useful for minimal tests.")
     parser.add_argument("--no-plot", action="store_true", help="Skip optional matplotlib PNG generation.")

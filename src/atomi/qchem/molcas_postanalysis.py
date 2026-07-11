@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import tarfile
 import textwrap
 from pathlib import Path
@@ -35,8 +36,10 @@ SCHEMA_M45 = "atomi.molcas_m45_two_panel.v1"
 SCHEMA_TRANSITIONS = "atomi.molcas_important_dipole_transitions.v1"
 SCHEMA_ORBITAL_HANDOFF = "atomi.molcas_orbital_handoff.v1"
 SCHEMA_MO_DIAGRAM = "atomi.molcas_mo_diagram.v1"
+SCHEMA_ORBITAL_SPLITTING = "atomi.molcas_orbital_splitting_diagram.v1"
 SCHEMA_U5F_SPLITTING = "atomi.u5f_so_lf_splitting_diagram.v1"
 SCHEMA_M45_EXTRACT = "atomi.molcas_m45_transition_extract.v1"
+SCHEMA_AO_COMPOSITION = "atomi.molcas_ao_composition.v1"
 
 
 def workflow_record() -> dict[str, Any]:
@@ -92,6 +95,11 @@ def workflow_record() -> dict[str, Any]:
                 "purpose": "Write the near-maximum transition table/JSON/plot so the student discusses only transitions with intensity >= 95% of the maximum.",
             },
             {
+                "stage": "AO/MO composition from Molcas datablocks",
+                "command": "molcas-postanalysis ao-composition --molcas-out RUN.out --section-kind pseudonatural --section-index -2 --section-label doublet_HEXS --mo-range 79-91 --outdir ao_composition",
+                "purpose": "Parse the actual Molcas orbital coefficient datablocks so transition assignments can name dominant AOs such as U 3d, U 5f, U 7s, O 2p/O 2s, or ligand orbitals.",
+            },
+            {
                 "stage": "orbital/mixing",
                 "command": "molcas-postanalysis orbital-handoff --molcas-dir RUN_DIR --archive openmolcas.tgz --outdir orbital_handoff",
                 "purpose": "Find orbital/NTO artifacts and write a Pegamoid/NTO handoff; use targeted extraction from large Molcas archives.",
@@ -107,6 +115,11 @@ def workflow_record() -> dict[str, Any]:
                 "purpose": "Create a project-specific schematic MO diagram linking occupations to strong dipole transitions.",
             },
             {
+                "stage": "generic orbital splitting diagram",
+                "command": "molcas-postanalysis orbital-splitting --orbitals-csv mo_orbitals.csv --outdir orbital_splitting",
+                "purpose": "Create a single-edge or non-actinide ligand-field/acceptor-manifold splitting diagram without forcing U 5f labels.",
+            },
+            {
                 "stage": "U M-edge 5f splitting schematic",
                 "command": "molcas-postanalysis u5f-splitting --structure UO8_average.xyz --outdir u5f_splitting",
                 "purpose": "Make an SO versus local-cluster ligand-field U 5f correlation diagram for U M4,5 interpretation.",
@@ -120,9 +133,17 @@ def workflow_record() -> dict[str, Any]:
             "Use Voigt broadening, not pure Lorentzian broadening, for report-level XANES envelopes.",
             "Keep stick transitions visible in report figures; by default show the near-maximum stick band with intensity >= 95% of the maximum for that edge.",
             "Always write a ranked important-dipole-transition table for the peaks used in scientific discussion; the default important set is the >=95% max-intensity band.",
+            "Always parse the relevant Molcas AO/MO coefficient datablocks for assigned transitions; do not infer AO character from edge energy or generic active-space labels alone.",
+            "Place the AO/MO composition table or figure next to XANES figures when discussing dipole transitions; if it is too dense for the XANES panel, keep it as a separate companion figure.",
             "Orbital plots should show the active orbital manifold and important transition/mixing orbitals, not just pretty frontier orbitals.",
+            "When M4 and M5 transitions are drawn in one MO assignment figure, vertical transition ordering must follow excitation energy: M5 lower, M4 higher. Use a broken transition-energy axis if needed, and write actual eV values in a side key.",
+            "Keep transition labels, intensity percentages, and interpretation notes off the arrow/curve field; use a side key or companion table so labels do not overlap curves.",
+            "For `mo-diagram`, provide `source_label` and `target_label` columns in transition CSVs whenever an orbital assignment is available; arrows must point upward from source/core orbitals to acceptor/final-state orbitals, U4O9-style.",
+            "Near-degenerate MO levels should stay at the same vertical energy and be separated horizontally by small offsets; do not imply artificial vertical splitting just to avoid overlap.",
+            "For dense M4/M5 manifolds, always provide separate M5-only and M4-only MO-transition figures in addition to any combined figure.",
             "When RASSI NTOCalc, BINAtorb, SONOrb, NTORB, or MD_NTO outputs exist, prefer transition-character/NTO plots for peak assignments.",
             "For reports, add a schematic MO diagram when orbital/transition assignments are central to the scientific argument.",
+            "For single-edge systems such as Ga K-edge, use `orbital-splitting` for the local acceptor/ligand-field manifold; do not force U 5f SO/LF labels onto non-actinide K-edge chemistry.",
             "For actinide U M-edge clusters, use `u5f-splitting --structure CLUSTER.xyz` so the LF side is local-cluster based; use `--mode uranyl-reference` only as a paper-style reference.",
         ],
         "toolset": [
@@ -668,6 +689,446 @@ def orbital_handoff(args: argparse.Namespace) -> int:
 
 
 
+MO_SECTION_MARKERS = {
+    "pseudonatural": "Pseudonatural active orbitals and approximate occupation numbers",
+    "molecular": "Molecular orbitals",
+}
+MO_ROW_RE = re.compile(
+    r"^\s*(?P<mo>\d+)\s*"
+    r"(?P<energy>[-+]?\d+(?:\.\d*)?(?:[Ee][-+]?\d+)?)\s+"
+    r"(?P<occupation>[-+]?\d+(?:\.\d*)?(?:[Ee][-+]?\d+)?)\s*"
+    r"(?P<rest>.*)$"
+)
+AO_TERM_RE = re.compile(
+    r"(?P<ao_index>\d+)\s+"
+    r"(?P<atom>[A-Za-z][A-Za-z0-9+\-]*)\s+"
+    r"(?P<ao>[0-9][A-Za-z][A-Za-z0-9+\-]*)\s+"
+    r"\(\s*(?P<coeff>[-+]?\d+(?:\.\d*)?(?:[Ee][-+]?\d+)?)\s*\)"
+)
+AO_LABEL_RE = re.compile(r"^(?P<n>\d+)(?P<shell>[spdfghijklm])(?P<angular>.*)$", re.IGNORECASE)
+
+
+def _element_from_atom_label(atom: str) -> str:
+    letters = "".join(ch for ch in atom if ch.isalpha())
+    if not letters:
+        return atom
+    if len(letters) == 1:
+        return letters.upper()
+    return letters[0].upper() + letters[1:].lower()
+
+
+def _parse_ao_label(label: str) -> dict[str, str]:
+    match = AO_LABEL_RE.match(label.strip())
+    if not match:
+        return {"principal_n": "", "shell": "", "angular_label": label.strip()}
+    return {
+        "principal_n": match.group("n"),
+        "shell": match.group("shell").lower(),
+        "angular_label": match.group("angular"),
+    }
+
+
+def _ao_terms_from_text(text: str) -> list[dict[str, Any]]:
+    terms: list[dict[str, Any]] = []
+    for match in AO_TERM_RE.finditer(text):
+        coeff = float(match.group("coeff"))
+        atom = match.group("atom")
+        ao = match.group("ao")
+        parsed = _parse_ao_label(ao)
+        terms.append(
+            {
+                "ao_index": int(match.group("ao_index")),
+                "atom": atom,
+                "element": _element_from_atom_label(atom),
+                "ao": ao,
+                "principal_n": parsed["principal_n"],
+                "shell": parsed["shell"],
+                "angular_label": parsed["angular_label"],
+                "coefficient": coeff,
+                "abs_coefficient": abs(coeff),
+                "coeff2": coeff * coeff,
+                "label": f"{atom} {ao}",
+            }
+        )
+    return terms
+
+
+def _section_kind_from_line(line: str) -> str | None:
+    lower = line.lower()
+    if MO_SECTION_MARKERS["pseudonatural"].lower() in lower:
+        return "pseudonatural"
+    if line.strip().startswith("++") and "molecular orbitals" in lower:
+        return "molecular"
+    return None
+
+
+def parse_molcas_ao_sections(text: str, *, section_kind: str = "pseudonatural") -> list[dict[str, Any]]:
+    """Parse OpenMolcas AO/MO coefficient datablocks from output text."""
+
+    lines = text.splitlines()
+    sections: list[dict[str, Any]] = []
+    wanted = {section_kind} if section_kind != "all" else {"pseudonatural", "molecular"}
+    for idx, line in enumerate(lines):
+        kind = _section_kind_from_line(line)
+        if kind is None or kind not in wanted:
+            continue
+        section = {
+            "source_index": len(sections),
+            "kind": kind,
+            "start_line": idx + 1,
+            "marker": line.strip(),
+            "rows": [],
+        }
+        current: dict[str, Any] | None = None
+        quiet_lines_after_rows = 0
+        for j, raw in enumerate(lines[idx + 1 :], start=idx + 2):
+            next_kind = _section_kind_from_line(raw)
+            if j > idx + 2 and next_kind is not None:
+                break
+            stripped = raw.strip()
+            if section["rows"]:
+                if stripped.startswith("++") and next_kind is None:
+                    break
+                if any(
+                    marker in stripped
+                    for marker in [
+                        "Mulliken Population Analysis",
+                        "Natural Bond Order",
+                        "Final state energy",
+                        "RASSCF root number",
+                    ]
+                ):
+                    break
+            row_match = MO_ROW_RE.match(raw)
+            if row_match:
+                terms = _ao_terms_from_text(row_match.group("rest"))
+                current = {
+                    "section_source_index": section["source_index"],
+                    "section_kind": kind,
+                    "section_start_line": section["start_line"],
+                    "line": j,
+                    "mo": int(row_match.group("mo")),
+                    "energy": float(row_match.group("energy")),
+                    "occupation": float(row_match.group("occupation")),
+                    "terms": terms,
+                }
+                section["rows"].append(current)
+                quiet_lines_after_rows = 0
+                continue
+            continuation_terms = _ao_terms_from_text(raw)
+            if current is not None and continuation_terms:
+                current["terms"].extend(continuation_terms)
+                quiet_lines_after_rows = 0
+                continue
+            if section["rows"]:
+                quiet_lines_after_rows += 1
+                if quiet_lines_after_rows > 80:
+                    break
+        if section["rows"]:
+            sections.append(section)
+    return sections
+
+
+def _parse_mo_filter(values: list[str] | None) -> set[int] | None:
+    if not values:
+        return None
+    selected: set[int] = set()
+    for value in values:
+        for token in value.replace(",", " ").split():
+            if not token:
+                continue
+            if "-" in token:
+                lo, hi = token.split("-", 1)
+                start = int(lo)
+                stop = int(hi)
+                if stop < start:
+                    start, stop = stop, start
+                selected.update(range(start, stop + 1))
+            else:
+                selected.add(int(token))
+    return selected
+
+
+def _select_ao_sections(
+    sections: list[dict[str, Any]],
+    section_indices: list[int] | None,
+    section_labels: list[str] | None,
+) -> list[dict[str, Any]]:
+    if section_indices:
+        selected = []
+        for raw_idx in section_indices:
+            idx = raw_idx if raw_idx >= 0 else len(sections) + raw_idx
+            if idx < 0 or idx >= len(sections):
+                raise IndexError(f"section index {raw_idx} is outside 0..{len(sections)-1}")
+            selected.append(dict(sections[idx]))
+    else:
+        selected = [dict(section) for section in sections]
+    labels = section_labels or []
+    for i, section in enumerate(selected):
+        section["label"] = labels[i] if i < len(labels) else f"{section['kind']}_{section['source_index']}"
+    return selected
+
+
+def _flatten_ao_composition(
+    sections: list[dict[str, Any]],
+    *,
+    mo_filter: set[int] | None,
+    coeff_cutoff: float,
+    top_ao: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    flat: list[dict[str, Any]] = []
+    mo_rows: list[dict[str, Any]] = []
+    for section in sections:
+        for row in section["rows"]:
+            if mo_filter is not None and int(row["mo"]) not in mo_filter:
+                continue
+            terms = sorted(row["terms"], key=lambda item: float(item["abs_coefficient"]), reverse=True)
+            kept = [term for term in terms if float(term["abs_coefficient"]) >= coeff_cutoff]
+            if top_ao and top_ao > 0:
+                kept = kept[:top_ao]
+            if not kept and terms:
+                kept = terms[: max(1, top_ao or 1)]
+            coeff2_total = sum(float(term["coeff2"]) for term in kept) or 1.0
+            compact = "; ".join(f"{term['label']} ({float(term['coefficient']):+.3f})" for term in kept)
+            mo_item = {
+                "section_label": section["label"],
+                "section_source_index": section["source_index"],
+                "section_kind": section["kind"],
+                "line": row["line"],
+                "mo": row["mo"],
+                "energy": row["energy"],
+                "occupation": row["occupation"],
+                "n_terms_kept": len(kept),
+                "dominant_ao_label": kept[0]["label"] if kept else "",
+                "compact_ao_composition": compact,
+                "terms": [],
+            }
+            for rank, term in enumerate(kept, start=1):
+                item = {
+                    "section_label": section["label"],
+                    "section_source_index": section["source_index"],
+                    "section_kind": section["kind"],
+                    "line": row["line"],
+                    "mo": row["mo"],
+                    "energy": row["energy"],
+                    "occupation": row["occupation"],
+                    "component_rank": rank,
+                    "ao_index": term["ao_index"],
+                    "atom": term["atom"],
+                    "element": term["element"],
+                    "ao": term["ao"],
+                    "principal_n": term["principal_n"],
+                    "shell": term["shell"],
+                    "angular_label": term["angular_label"],
+                    "coefficient": term["coefficient"],
+                    "abs_coefficient": term["abs_coefficient"],
+                    "coeff2": term["coeff2"],
+                    "displayed_coeff2_fraction": float(term["coeff2"]) / coeff2_total,
+                    "component_label": term["label"],
+                }
+                flat.append(item)
+                mo_item["terms"].append(item)
+            mo_rows.append(mo_item)
+    return flat, mo_rows
+
+
+def _ao_component_color(term: dict[str, Any]) -> str:
+    element = str(term.get("element", "")).lower()
+    shell = str(term.get("shell", "")).lower()
+    n = str(term.get("principal_n", ""))
+    if element == "ga" and shell == "s":
+        return "#355c9a"
+    if element == "ga" and shell == "p":
+        return "#8c3f7d"
+    if element == "ga" and shell == "d":
+        return "#c47a2c"
+    if element == "cl" and shell == "s":
+        return "#6aa84f"
+    if element == "cl" and shell == "p":
+        return "#2f8f77"
+    if element == "cl" and shell == "d":
+        return "#8e7cc3"
+    if element == "u" and n == "3" and shell == "d":
+        return "#355c9a"
+    if element == "u" and n == "5" and shell == "f":
+        return "#8c3f7d"
+    if element == "u" and shell in {"s", "d"}:
+        return "#c47a2c"
+    if element == "o" and shell == "p":
+        return "#2f8f77"
+    if element == "o" and shell == "s":
+        return "#6aa84f"
+    return "#777777"
+
+
+def _write_ao_composition_plot(path: Path, mo_rows: list[dict[str, Any]], title: str) -> bool:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return False
+    if not mo_rows:
+        return False
+    rows = sorted(mo_rows, key=lambda item: (str(item["section_label"]), int(item["mo"])))
+    height = max(5.2, 0.43 * len(rows) + 1.8)
+    fig, ax = plt.subplots(figsize=(13.2, height))
+    y_positions = np.arange(len(rows))
+    for y, row in zip(y_positions, rows):
+        left = 0.0
+        for term in row["terms"]:
+            width = float(term["displayed_coeff2_fraction"])
+            ax.barh(
+                y,
+                width,
+                left=left,
+                height=0.62,
+                color=_ao_component_color(term),
+                edgecolor="white",
+                linewidth=0.6,
+            )
+            if width >= 0.14:
+                ax.text(left + width / 2, y, term["component_label"], ha="center", va="center", fontsize=7, color="white")
+            left += width
+        compact = str(row["compact_ao_composition"])
+        if len(compact) > 98:
+            compact = compact[:95] + "..."
+        ax.text(1.03, y, compact, ha="left", va="center", fontsize=8.0, color="#333333")
+    labels = [f"{row['section_label']} MO{int(row['mo'])}  occ={float(row['occupation']):.2f}" for row in rows]
+    ax.set_yticks(y_positions, labels)
+    ax.invert_yaxis()
+    ax.set_xlim(0.0, 1.82)
+    ax.set_xlabel("Displayed AO coefficient-squared fraction within each MO")
+    ax.set_title(title)
+    ax.grid(axis="x", alpha=0.20)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.text(
+        1.03,
+        -0.9,
+        "Dominant AO components from Molcas output datablocks",
+        ha="left",
+        va="center",
+        fontsize=8.5,
+        color="#555555",
+    )
+    fig.tight_layout()
+    fig.savefig(path, dpi=230, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def ao_composition(args: argparse.Namespace) -> int:
+    text = read_text(args.molcas_out)
+    sections = parse_molcas_ao_sections(text, section_kind=args.section_kind)
+    if not sections:
+        raise ValueError(f"No Molcas AO/MO coefficient sections found in {args.molcas_out}")
+    selected_sections = _select_ao_sections(sections, args.section_index, args.section_label)
+    mo_filter = _parse_mo_filter(args.mo_range)
+    flat, mo_rows = _flatten_ao_composition(
+        selected_sections,
+        mo_filter=mo_filter,
+        coeff_cutoff=float(args.ao_coeff_cutoff),
+        top_ao=int(args.top_ao),
+    )
+    if not mo_rows:
+        raise ValueError("No MO rows survived section/MO filters")
+    outdir = args.outdir.resolve()
+    outdir.mkdir(parents=True, exist_ok=True)
+    csv_path = outdir / args.csv_name
+    fieldnames = [
+        "section_label",
+        "section_source_index",
+        "section_kind",
+        "line",
+        "mo",
+        "energy",
+        "occupation",
+        "component_rank",
+        "ao_index",
+        "atom",
+        "element",
+        "ao",
+        "principal_n",
+        "shell",
+        "angular_label",
+        "coefficient",
+        "abs_coefficient",
+        "coeff2",
+        "displayed_coeff2_fraction",
+        "component_label",
+    ]
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in flat:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
+    mo_csv = outdir / args.mo_csv_name
+    with mo_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "section_label",
+                "section_source_index",
+                "section_kind",
+                "line",
+                "mo",
+                "energy",
+                "occupation",
+                "n_terms_kept",
+                "dominant_ao_label",
+                "compact_ao_composition",
+            ],
+            extrasaction="ignore",
+        )
+        writer.writeheader()
+        for row in mo_rows:
+            writer.writerow(row)
+    plot_path = outdir / args.plot_name
+    plotted = _write_ao_composition_plot(plot_path, mo_rows, args.title)
+    summary = {
+        "schema": SCHEMA_AO_COMPOSITION,
+        "molcas_out": str(args.molcas_out),
+        "section_kind": args.section_kind,
+        "available_sections": [
+            {
+                "source_index": section["source_index"],
+                "kind": section["kind"],
+                "start_line": section["start_line"],
+                "n_rows": len(section["rows"]),
+            }
+            for section in sections
+        ],
+        "selected_sections": [
+            {
+                "source_index": section["source_index"],
+                "label": section["label"],
+                "kind": section["kind"],
+                "start_line": section["start_line"],
+                "n_rows": len(section["rows"]),
+            }
+            for section in selected_sections
+        ],
+        "mo_range": args.mo_range or [],
+        "ao_coeff_cutoff": float(args.ao_coeff_cutoff),
+        "top_ao": int(args.top_ao),
+        "n_mo_rows": len(mo_rows),
+        "n_ao_components": len(flat),
+        "csv": str(csv_path),
+        "mo_summary_csv": str(mo_csv),
+        "plot": str(plot_path) if plotted else "",
+        "note": "AO labels and coefficients are parsed from Molcas output coefficient datablocks; use NTO/transition-density outputs when available for transition-specific orbital character.",
+    }
+    summary_path = outdir / args.summary_name
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"Wrote AO composition CSV: {csv_path}")
+    print(f"Wrote MO summary CSV: {mo_csv}")
+    if plotted:
+        print(f"Wrote AO composition plot: {plot_path}")
+    print(f"Wrote summary: {summary_path}")
+    return 0
+
+
 def _read_mo_orbitals(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with path.open(newline="", encoding="utf-8") as handle:
@@ -699,6 +1160,24 @@ def _transition_arrows_for_mo(path: Path | None, max_arrows: int) -> list[dict[s
     max_osc = max([float(row["oscillator_strength"]) for row in rows], default=1.0)
     arrows: list[dict[str, Any]] = []
     for idx, row in enumerate(rows, start=1):
+        source_label = (
+            row.get("source_label")
+            or row.get("from_label")
+            or row.get("from_orbital")
+            or row.get("source_orbital")
+            or row.get("from_mo")
+            or row.get("source_mo")
+            or ""
+        )
+        target_label = (
+            row.get("target_label")
+            or row.get("to_label")
+            or row.get("to_orbital")
+            or row.get("target_orbital")
+            or row.get("to_mo")
+            or row.get("target_mo")
+            or ""
+        )
         arrows.append(
             {
                 "rank": idx,
@@ -708,9 +1187,59 @@ def _transition_arrows_for_mo(path: Path | None, max_arrows: int) -> list[dict[s
                 "oscillator_strength": float(row["oscillator_strength"]),
                 "relative_oscillator_strength": float(row["oscillator_strength"]) / max_osc if max_osc else 0.0,
                 "label": row.get("label") or f"#{idx}",
+                "source_label": str(source_label).strip(),
+                "target_label": str(target_label).strip(),
+                "color": row.get("color") or "",
+                "linestyle": row.get("linestyle") or row.get("line_style") or "-",
             }
         )
     return arrows
+
+
+def _orbital_level_layouts(
+    orbitals: list[dict[str, Any]],
+    block_x: dict[str, int],
+    span: float,
+) -> dict[int, dict[str, Any]]:
+    """Place near-degenerate orbitals side-by-side without changing energy."""
+
+    tolerance = max(1.0e-4, 0.012 * span)
+    layouts: dict[int, dict[str, Any]] = {}
+    for block in block_x:
+        items = [
+            (idx, row, float(row["energy_ev"]))
+            for idx, row in enumerate(orbitals)
+            if str(row["block"]) == block
+        ]
+        items.sort(key=lambda item: item[2])
+        clusters: list[list[tuple[int, dict[str, Any], float]]] = []
+        current: list[tuple[int, dict[str, Any], float]] = []
+        for item in items:
+            if not current or abs(item[2] - current[-1][2]) <= tolerance:
+                current.append(item)
+            else:
+                clusters.append(current)
+                current = [item]
+        if current:
+            clusters.append(current)
+        for cluster in clusters:
+            n_cluster = len(cluster)
+            if n_cluster == 1:
+                offsets = [0.0]
+                half_width = 0.28
+            else:
+                spacing = 0.16
+                offsets = [spacing * (i - (n_cluster - 1) / 2.0) for i in range(n_cluster)]
+                half_width = min(0.11, max(0.06, spacing * 0.42))
+            for (idx, row, y), offset in zip(cluster, offsets):
+                layouts[idx] = {
+                    "x": float(block_x[block]) + float(offset),
+                    "y": y,
+                    "half_width": half_width,
+                    "is_near_degenerate": n_cluster > 1,
+                    "near_degenerate_group_size": n_cluster,
+                }
+    return layouts
 
 
 def _write_mo_diagram_plot(path: Path, orbitals: list[dict[str, Any]], arrows: list[dict[str, Any]], title: str) -> bool:
@@ -729,20 +1258,42 @@ def _write_mo_diagram_plot(path: Path, orbitals: list[dict[str, Any]], arrows: l
         "ground": "#2f5597",
         "core": "#c0504d",
         "core-excited": "#c0504d",
+        "source": "#355c9a",
+        "acceptor": "#8c3f7d",
         "ras1": "#8064a2",
         "ras2": "#666666",
         "ras3": "#9bbb59",
         "active": "#4bacc6",
     }
-    fig, ax = plt.subplots(figsize=(max(9.5, 3.1 * len(blocks) + 2.5), 5.8))
+    fig = plt.figure(figsize=(max(11.5, 3.2 * len(blocks) + 4.2), 6.4))
+    gs = fig.add_gridspec(1, 2, width_ratios=[3.35, 1.15], wspace=0.04)
+    ax = fig.add_subplot(gs[0, 0])
+    ax_key = fig.add_subplot(gs[0, 1])
+    ax_key.axis("off")
     emin = min(float(row["energy_ev"]) for row in orbitals)
     emax = max(float(row["energy_ev"]) for row in orbitals)
     span = max(emax - emin, 1.0)
-    for row in orbitals:
-        x = block_x[str(row["block"])]
-        y = float(row["energy_ev"])
+    layouts = _orbital_level_layouts(orbitals, block_x, span)
+    label_positions: dict[str, tuple[float, float, float]] = {}
+    label_y_by_block: dict[str, list[float]] = {block: [] for block in blocks}
+
+    def label_y(block: str, y: float) -> float:
+        used = label_y_by_block.setdefault(block, [])
+        y_lab = float(y)
+        min_gap = 0.070 * span
+        while any(abs(y_lab - old) < min_gap for old in used):
+            y_lab += min_gap
+        used.append(y_lab)
+        return y_lab
+
+    for idx, row in enumerate(orbitals):
+        layout = layouts[idx]
+        x = float(layout["x"])
+        y = float(layout["y"])
+        half_width = float(layout["half_width"])
         color = row["color"] or colors.get(str(row["block"]).lower(), "#444444")
-        ax.hlines(y, x - 0.28, x + 0.28, color=color, lw=2.4)
+        ax.hlines(y, x - half_width, x + half_width, color=color, lw=2.4)
+        label_positions[str(row["label"])] = (x, y, half_width)
         occ = row.get("occupation")
         if occ is not None:
             if occ >= 1.5:
@@ -751,28 +1302,71 @@ def _write_mo_diagram_plot(path: Path, orbitals: list[dict[str, Any]], arrows: l
                 ax.text(x, y + 0.02 * span, "up", ha="center", va="bottom", fontsize=8, color=color)
         label = str(row["label"])
         char = str(row.get("character") or "")
-        ax.text(x + 0.34, y, f"{label}" + (f" ({char})" if char else ""), va="center", fontsize=8)
+        y_lab = label_y(str(row["block"]), y)
+        ax.text(x + 0.34, y_lab, f"{label}" + (f" ({char})" if char else ""), va="center", fontsize=8)
+        if abs(y_lab - y) > 1e-9:
+            ax.plot([x + 0.27, x + 0.33], [y, y_lab], color="#888888", lw=0.55, alpha=0.7)
     if arrows:
-        x0 = -0.45
-        x1 = len(blocks) - 0.55
-        y0 = emin + 0.18 * span
+        key_y = 0.97
+        ax_key.text(0.0, key_y, "Transition key", fontsize=11.5, fontweight="bold", va="top")
+        key_y -= 0.07
+        fallback_sources = sorted([row for row in orbitals if str(row["block"]) == blocks[0]], key=lambda row: float(row["energy_ev"]))
+        fallback_targets = sorted([row for row in orbitals if str(row["block"]) == blocks[-1]], key=lambda row: float(row["energy_ev"]))
+        source_default = fallback_sources[0] if fallback_sources else orbitals[0]
+        target_cycle = fallback_targets or orbitals
         for idx, arrow in enumerate(arrows):
-            y = y0 + idx * 0.09 * span
+            source_label = str(arrow.get("source_label") or "")
+            target_label = str(arrow.get("target_label") or "")
+            source = label_positions.get(source_label)
+            target = label_positions.get(target_label)
+            assigned = source is not None and target is not None
+            if source is None:
+                source_idx = orbitals.index(source_default)
+                source_layout = layouts[source_idx]
+                source = (float(source_layout["x"]), float(source_layout["y"]), float(source_layout["half_width"]))
+                source_label = str(source_default["label"])
+            if target is None:
+                target_row = target_cycle[idx % len(target_cycle)]
+                target_idx = orbitals.index(target_row)
+                target_layout = layouts[target_idx]
+                target = (float(target_layout["x"]), float(target_layout["y"]), float(target_layout["half_width"]))
+                target_label = str(target_row["label"])
             lw = 0.8 + 2.2 * float(arrow["relative_oscillator_strength"])
+            color = arrow.get("color") or "#d97a00"
+            linestyle = "-" if assigned else "--"
+            direction = 1.0 if target[0] >= source[0] else -1.0
             ax.annotate(
                 "",
-                xy=(x1, y),
-                xytext=(x0, y),
-                arrowprops={"arrowstyle": "->", "lw": lw, "color": "#d97a00", "alpha": 0.72},
+                xy=(target[0] - direction * (target[2] + 0.02), target[1]),
+                xytext=(source[0] + direction * (source[2] + 0.02), source[1]),
+                arrowprops={"arrowstyle": "->", "lw": lw, "color": color, "alpha": 0.72, "linestyle": linestyle},
             )
-            ax.text((x0 + x1) / 2, y + 0.025 * span, f"{arrow['label']} {arrow['energy_ev']:.2f} eV", ha="center", fontsize=7, color="#7f3f00")
+            key_text = f"{arrow['label']}  {arrow['energy_ev']:.2f} eV"
+            if assigned:
+                key_text += f"\n{source_label} -> {target_label}"
+            else:
+                key_text += "\nno explicit MO assignment; schematic target"
+            ax_key.text(0.0, key_y, key_text, fontsize=8.0, color="#4d2d00", va="top")
+            key_y -= 0.095 if assigned else 0.115
+        ax_key.text(
+            0.0,
+            0.05,
+            "Arrows point from lower source orbitals toward higher acceptor/final-state levels. Near-degenerate levels share y and are separated horizontally. Solid arrows have explicit source/target labels; dashed arrows are schematic.",
+            fontsize=8.0,
+            color="#555555",
+            va="bottom",
+            wrap=True,
+        )
     ax.set_xticks([block_x[block] for block in blocks], blocks)
     ax.set_ylabel("relative orbital / state energy (eV)")
-    ax.set_title(title)
+    ax.set_title(textwrap.fill(title, width=78))
     ax.grid(axis="y", alpha=0.20)
     ax.spines[["top", "right"]].set_visible(False)
     ax.set_xlim(-0.75, len(blocks) + 1.35)
-    ax.set_ylim(emin - 0.18 * span, emax + 0.32 * span)
+    label_ys = [value for values in label_y_by_block.values() for value in values]
+    ymin = min([emin, *label_ys]) if label_ys else emin
+    ymax = max([emax, *label_ys]) if label_ys else emax
+    ax.set_ylim(ymin - 0.18 * span, ymax + 0.22 * span)
     fig.tight_layout()
     fig.savefig(path, dpi=220, bbox_inches="tight")
     plt.close(fig)
@@ -795,13 +1389,191 @@ def mo_diagram(args: argparse.Namespace) -> int:
         "plot": str(plot_path) if plotted else "",
         "orbitals": orbitals,
         "transition_arrows": arrows,
-        "note": "Schematic diagram for interpretation only; orbital shapes still come from Pegamoid/Molden/NTO viewers.",
+        "note": "Schematic diagram for interpretation only; orbital shapes still come from Pegamoid/Molden/NTO viewers. Near-degenerate levels are drawn at the same y value with small horizontal offsets.",
     }
     summary_path = outdir / args.summary_name
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"Wrote MO diagram summary: {summary_path}")
     if plotted:
         print(f"Wrote MO diagram: {plot_path}")
+    return 0
+
+
+def _write_orbital_splitting_plot(
+    path: Path,
+    orbitals: list[dict[str, Any]],
+    title: str,
+    *,
+    ylabel: str,
+    note: str,
+) -> bool:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return False
+    if not orbitals:
+        return False
+    blocks = list(dict.fromkeys(str(row["block"]) for row in orbitals))
+    block_x = {block: idx for idx, block in enumerate(blocks)}
+    colors = {
+        "core": "#355c9a",
+        "source": "#355c9a",
+        "occupied": "#666666",
+        "valence": "#666666",
+        "acceptor": "#8c3f7d",
+        "virtual": "#8c3f7d",
+        "ligand-field": "#2f8f77",
+        "lf": "#2f8f77",
+    }
+    energies = [float(row["energy_ev"]) for row in orbitals]
+    emin = min(energies)
+    emax = max(energies)
+    span = max(emax - emin, 1.0)
+    layouts = _orbital_level_layouts(orbitals, block_x, span)
+    label_y_by_block: dict[str, list[float]] = {block: [] for block in blocks}
+
+    def label_y(block: str, y: float) -> float:
+        used = label_y_by_block.setdefault(block, [])
+        y_lab = float(y)
+        min_gap = 0.075 * span
+        while any(abs(y_lab - old) < min_gap for old in used):
+            y_lab += min_gap
+        used.append(y_lab)
+        return y_lab
+
+    fig, ax = plt.subplots(figsize=(max(7.6, 2.7 * len(blocks) + 2.5), 5.7))
+    for idx, row in enumerate(orbitals):
+        block = str(row["block"])
+        layout = layouts[idx]
+        x = float(layout["x"])
+        y = float(layout["y"])
+        half_width = float(layout["half_width"])
+        color = row["color"] or colors.get(block.lower(), "#444444")
+        ax.hlines(y, x - half_width, x + half_width, color=color, lw=3.0)
+        label = str(row["label"])
+        character = str(row.get("character") or "")
+        y_lab = label_y(block, y)
+        ax.text(x + 0.27, y_lab, label + (f"  {character}" if character else ""), va="center", ha="left", fontsize=8.2)
+        if abs(y_lab - y) > 1e-9:
+            ax.plot([x + half_width, x + 0.25], [y, y_lab], color="#888888", lw=0.55, alpha=0.7)
+    for block, x in block_x.items():
+        block_rows = [row for row in orbitals if str(row["block"]) == block]
+        if len(block_rows) < 2:
+            continue
+        ys = [float(row["energy_ev"]) for row in block_rows]
+        ax.text(
+            x - 0.22,
+            max(ys) + 0.12 * span,
+            f"span {max(ys) - min(ys):.3f} eV",
+            ha="right",
+            va="bottom",
+            fontsize=8.4,
+            color="#555555",
+        )
+    ax.set_xticks([block_x[block] for block in blocks], blocks)
+    ax.set_ylabel(ylabel)
+    ax.set_title(textwrap.fill(title, width=78))
+    ax.grid(axis="y", alpha=0.20)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.set_xlim(-0.7, len(blocks) + 1.65)
+    label_ys = [value for values in label_y_by_block.values() for value in values]
+    ymin = min([emin, *label_ys]) if label_ys else emin
+    ymax = max([emax, *label_ys]) if label_ys else emax
+    ax.set_ylim(ymin - 0.18 * span, ymax + 0.30 * span)
+    if note:
+        ax.text(
+            0.0,
+            -0.14,
+            textwrap.fill(note, width=116),
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8.4,
+            color="#555555",
+        )
+    fig.tight_layout()
+    fig.savefig(path, dpi=230, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def orbital_splitting(args: argparse.Namespace) -> int:
+    orbitals = _read_mo_orbitals(args.orbitals_csv)
+    if not orbitals:
+        raise ValueError(f"No orbitals found in {args.orbitals_csv}")
+    raw_energies = [float(row["energy_ev"]) for row in orbitals]
+    if args.reference == "min":
+        offset = min(raw_energies)
+        ylabel = "relative energy from selected minimum (eV)"
+    elif args.reference == "first":
+        offset = raw_energies[0]
+        ylabel = "relative energy from first selected level (eV)"
+    else:
+        offset = 0.0
+        ylabel = "orbital energy / diagnostic coordinate (eV)"
+    plotted_orbitals: list[dict[str, Any]] = []
+    for row in orbitals:
+        item = dict(row)
+        item["raw_energy_ev"] = float(row["energy_ev"])
+        item["energy_ev"] = float(row["energy_ev"]) - offset
+        plotted_orbitals.append(item)
+
+    outdir = args.outdir.resolve()
+    outdir.mkdir(parents=True, exist_ok=True)
+    levels_csv = outdir / args.levels_name
+    with levels_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["block", "label", "raw_energy_ev", "relative_energy_ev", "occupation", "character", "state"],
+            extrasaction="ignore",
+        )
+        writer.writeheader()
+        for row in plotted_orbitals:
+            writer.writerow(
+                {
+                    "block": row.get("block", ""),
+                    "label": row.get("label", ""),
+                    "raw_energy_ev": row.get("raw_energy_ev", ""),
+                    "relative_energy_ev": row.get("energy_ev", ""),
+                    "occupation": row.get("occupation", ""),
+                    "character": row.get("character", ""),
+                    "state": row.get("state", ""),
+                }
+            )
+    plot_path = outdir / args.plot_name
+    plotted = _write_orbital_splitting_plot(
+        plot_path,
+        plotted_orbitals,
+        args.title,
+        ylabel=ylabel,
+        note=args.note,
+    )
+    blocks = list(dict.fromkeys(str(row["block"]) for row in plotted_orbitals))
+    block_spans: dict[str, float] = {}
+    for block in blocks:
+        ys = [float(row["energy_ev"]) for row in plotted_orbitals if str(row["block"]) == block]
+        block_spans[block] = float(max(ys) - min(ys)) if ys else 0.0
+    summary = {
+        "schema": SCHEMA_ORBITAL_SPLITTING,
+        "orbitals_csv": str(args.orbitals_csv),
+        "levels_csv": str(levels_csv),
+        "plot": str(plot_path) if plotted else "",
+        "reference": args.reference,
+        "energy_offset_ev": offset,
+        "n_orbitals": len(plotted_orbitals),
+        "blocks": blocks,
+        "block_spans_ev": block_spans,
+        "note": args.note,
+    }
+    summary_path = outdir / args.summary_name
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"Wrote orbital splitting levels: {levels_csv}")
+    if plotted:
+        print(f"Wrote orbital splitting diagram: {plot_path}")
+    print(f"Wrote summary: {summary_path}")
     return 0
 
 
@@ -1165,6 +1937,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--readme-name", default="MOLCAS_ORBITAL_HANDOFF.md")
     p.set_defaults(func=orbital_handoff)
 
+    p = sub.add_parser("ao-composition", help="Parse Molcas AO/MO coefficient datablocks and plot dominant AO composition.")
+    p.add_argument("--molcas-out", type=Path, required=True)
+    p.add_argument(
+        "--section-kind",
+        choices=["pseudonatural", "molecular", "all"],
+        default="pseudonatural",
+        help="Which Molcas AO/MO datablock family to parse.",
+    )
+    p.add_argument("--section-index", type=int, action="append", help="Section index to keep; accepts negatives such as -1 for last.")
+    p.add_argument("--section-label", action="append", help="Label for a selected section; repeat to match --section-index order.")
+    p.add_argument("--mo-range", action="append", help="MO filter, e.g. 79-91 or 26,27,28. Repeatable.")
+    p.add_argument("--ao-coeff-cutoff", type=float, default=0.25)
+    p.add_argument("--top-ao", type=int, default=8)
+    p.add_argument("--outdir", type=Path, default=Path("molcas_ao_composition"))
+    p.add_argument("--csv-name", default="molcas_ao_composition.csv")
+    p.add_argument("--mo-csv-name", default="molcas_mo_ao_summary.csv")
+    p.add_argument("--summary-name", default="molcas_ao_composition_summary.json")
+    p.add_argument("--plot-name", default="molcas_ao_composition.png")
+    p.add_argument("--title", default="Molcas AO/MO composition from output datablocks")
+    p.set_defaults(func=ao_composition)
+
     p = sub.add_parser("mo-diagram", help="Build a schematic MO diagram with optional important-transition arrows.")
     p.add_argument("--orbitals-csv", type=Path, required=True)
     p.add_argument("--transitions-csv", type=Path)
@@ -1174,6 +1967,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--summary-name", default="molcas_schematic_mo_diagram_summary.json")
     p.add_argument("--title", default="Schematic MO diagram from Molcas postanalysis")
     p.set_defaults(func=mo_diagram)
+
+    p = sub.add_parser("orbital-splitting", help="Build a generic orbital/ligand-field splitting diagram.")
+    p.add_argument("--orbitals-csv", type=Path, required=True)
+    p.add_argument("--reference", choices=["min", "first", "none"], default="min")
+    p.add_argument("--outdir", type=Path, default=Path("molcas_orbital_splitting"))
+    p.add_argument("--plot-name", default="molcas_orbital_splitting.png")
+    p.add_argument("--levels-name", default="molcas_orbital_splitting_levels.csv")
+    p.add_argument("--summary-name", default="molcas_orbital_splitting_summary.json")
+    p.add_argument("--title", default="Molcas orbital / ligand-field splitting diagram")
+    p.add_argument(
+        "--note",
+        default="Generic single-edge splitting schematic; use U-specific u5f-splitting only for actinide M-edge 5f manifolds.",
+    )
+    p.set_defaults(func=orbital_splitting)
 
     p = sub.add_parser("u5f-splitting", help="Build a U 5f spin-orbit versus local ligand-field splitting diagram.")
     p.add_argument("--outdir", type=Path, default=Path("u5f_so_lf_splitting"))

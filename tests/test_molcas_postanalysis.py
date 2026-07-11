@@ -28,6 +28,8 @@ def test_workflow_record_names_core_tools() -> None:
     assert "molcas-root-helper audit" in commands
     assert "molcas-xanes-spectrum" in commands
     assert "molcas-postanalysis m45-two-panel" in commands
+    assert "molcas-postanalysis ao-composition" in commands
+    assert "molcas-postanalysis orbital-splitting" in commands
     assert any("Sarah" in tool or "project report" in tool for tool in record["toolset"])
 
 
@@ -165,11 +167,38 @@ def test_mo_diagram(tmp_path: Path) -> None:
     with orbitals.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=["block", "label", "energy_ev", "occupation", "character"])
         writer.writeheader()
-        writer.writerow({"block": "ground", "label": "5f delta", "energy_ev": 0.0, "occupation": 1, "character": "nonbonding"})
-        writer.writerow({"block": "core-excited", "label": "5f pi*", "energy_ev": 2.0, "occupation": 1, "character": "antibonding"})
-        writer.writerow({"block": "core-excited", "label": "5f sigma*", "energy_ev": 4.0, "occupation": 0, "character": "antibonding"})
+        writer.writerow({"block": "source", "label": "Ga 1s", "energy_ev": 0.0, "occupation": 1, "character": "core"})
+        writer.writerow({"block": "acceptor", "label": "Ga 4px", "energy_ev": 2.0, "occupation": 0, "character": "Ga 4p"})
+        writer.writerow({"block": "acceptor", "label": "Ga 4py", "energy_ev": 4.0, "occupation": 0, "character": "Ga 4p"})
     transitions = tmp_path / "transitions.csv"
-    _write_transitions(transitions, [3579.1, 3580.4])
+    with transitions.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["state_from", "state_to", "energy_ev", "oscillator_strength", "label", "source_label", "target_label"],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "state_from": 1,
+                "state_to": 2,
+                "energy_ev": 10370.1,
+                "oscillator_strength": 0.01,
+                "label": "SO 1->2",
+                "source_label": "Ga 1s",
+                "target_label": "Ga 4px",
+            }
+        )
+        writer.writerow(
+            {
+                "state_from": 1,
+                "state_to": 3,
+                "energy_ev": 10371.4,
+                "oscillator_strength": 0.02,
+                "label": "SO 1->3",
+                "source_label": "Ga 1s",
+                "target_label": "Ga 4py",
+            }
+        )
     outdir = tmp_path / "mo"
     rc = molcas_postanalysis.main(
         [
@@ -185,7 +214,85 @@ def test_mo_diagram(tmp_path: Path) -> None:
     assert rc == 0
     assert (outdir / "molcas_schematic_mo_diagram_summary.json").exists()
     assert (outdir / "molcas_schematic_mo_diagram.png").exists()
-    assert "atomi.molcas_mo_diagram.v1" in (outdir / "molcas_schematic_mo_diagram_summary.json").read_text(encoding="utf-8")
+    summary = (outdir / "molcas_schematic_mo_diagram_summary.json").read_text(encoding="utf-8")
+    assert "atomi.molcas_mo_diagram.v1" in summary
+    assert '"source_label": "Ga 1s"' in summary
+    assert '"target_label": "Ga 4py"' in summary
+
+
+def test_orbital_splitting(tmp_path: Path) -> None:
+    orbitals = tmp_path / "ga_k_orbitals.csv"
+    with orbitals.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["block", "label", "energy_ev", "occupation", "character"])
+        writer.writeheader()
+        writer.writerow({"block": "core", "label": "Ga 1s", "energy_ev": -390.0, "occupation": 1, "character": "source"})
+        writer.writerow({"block": "acceptor", "label": "Ga 4px", "energy_ev": 0.0, "occupation": 0, "character": "Ga 4p/Cl 3p"})
+        writer.writerow({"block": "acceptor", "label": "Ga 4py", "energy_ev": 0.4, "occupation": 0, "character": "Ga 4p/Cl 3p"})
+        writer.writerow({"block": "acceptor", "label": "Ga 4pz", "energy_ev": 0.8, "occupation": 0, "character": "Ga 4p/Cl 3p"})
+    outdir = tmp_path / "split"
+    rc = molcas_postanalysis.main(
+        [
+            "orbital-splitting",
+            "--orbitals-csv",
+            str(orbitals),
+            "--outdir",
+            str(outdir),
+            "--title",
+            "Ga K-edge acceptor splitting",
+        ]
+    )
+    assert rc == 0
+    assert (outdir / "molcas_orbital_splitting.png").exists()
+    assert (outdir / "molcas_orbital_splitting_levels.csv").exists()
+    text = (outdir / "molcas_orbital_splitting_summary.json").read_text(encoding="utf-8")
+    assert "atomi.molcas_orbital_splitting_diagram.v1" in text
+    assert '"acceptor": 0.8' in text
+
+
+def test_ao_composition_from_pseudonatural_block(tmp_path: Path) -> None:
+    molcas_out = tmp_path / "molcas.out"
+    molcas_out.write_text(
+        """
+ Pseudonatural active orbitals and approximate occupation numbers
+
+      26    -0.0522      0.3333       7 GA1      4py   (-1.0078)       8 GA1      5py   ( 0.1300)
+                                      21 CL2      3py   ( 0.3726)      32 O3       2s   (-0.1118)
+      27    -0.0473      0.3333       3 GA1      4px   ( 1.0899)       4 GA1      5px   (-0.1282)
+                                      18 CL2      3px   (-0.3731)      32 O3       2s   (-0.7837)
+      28    -0.0085      0.3333       3 GA1      4px   ( 1.2671)      32 O3       2s   ( 0.3826)
+                                      33 O3       3s    ( 0.1638)      34 O3       2px  ( 0.7577)
+
+ Mulliken Population Analysis
+""",
+        encoding="utf-8",
+    )
+    outdir = tmp_path / "ao"
+    rc = molcas_postanalysis.main(
+        [
+            "ao-composition",
+            "--molcas-out",
+            str(molcas_out),
+            "--section-index",
+            "0",
+            "--section-label",
+            "ga_4h2o",
+            "--mo-range",
+            "26-28",
+            "--ao-coeff-cutoff",
+            "0.1",
+            "--outdir",
+            str(outdir),
+        ]
+    )
+    assert rc == 0
+    csv_text = (outdir / "molcas_ao_composition.csv").read_text(encoding="utf-8")
+    assert "GA1,Ga,4py" in csv_text
+    assert "GA1,Ga,4px" in csv_text
+    assert "CL2,Cl,3py" in csv_text
+    assert (outdir / "molcas_ao_composition.png").exists()
+    summary = (outdir / "molcas_ao_composition_summary.json").read_text(encoding="utf-8")
+    assert "atomi.molcas_ao_composition.v1" in summary
+    assert '"n_mo_rows": 3' in summary
 
 
 
