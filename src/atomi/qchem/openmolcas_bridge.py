@@ -52,6 +52,7 @@ class RasscfStateBlock:
     iterations: str = "200 100"
     levs: str = "2.0"
     cionly: bool = False
+    alter: tuple[str, ...] = ()
     extra_lines: tuple[str, ...] = ()
     include_in_rassi: bool = True
     run_caspt2: bool = True
@@ -90,6 +91,7 @@ class OpenMolcasPrepareOptions:
     include_amfi: bool = True
     core_hole_note: str = ""
     extra_rasscf_lines: tuple[str, ...] = ()
+    strict_rassi_compatibility: bool = True
     gas_spaces: tuple[GasSpace, ...] = ()
     gas_selector_dimension: int = 10
     gas_selector_root: int | None = None
@@ -276,6 +278,56 @@ def _state_line(count: int) -> str:
     return " ".join(str(i) for i in range(1, count + 1))
 
 
+def _normalized_vector(value: str) -> tuple[str, ...]:
+    return tuple(str(value or "").replace(",", " ").split())
+
+
+def _render_alter_lines(alter: Sequence[str]) -> list[str]:
+    rows = [str(line).strip() for line in alter if str(line).strip()]
+    if not rows:
+        return []
+    if rows[0].lower() == "alter":
+        return rows
+    if len(rows) > 1 and rows[0].isdigit():
+        return ["Alter", *rows]
+    return ["Alter", f" {len(rows)}", *[f" {row}" for row in rows]]
+
+
+def validate_rassi_compatible_state_blocks(state_blocks: Sequence[RasscfStateBlock]) -> dict[str, Any]:
+    """Validate common active-space/JOBIPH shape for RASSI-coupled RAS blocks.
+
+    OpenMolcas RASSI can combine different spin and symmetry blocks, but the
+    JobIph files must describe the same active-orbital space.  The validator is
+    deliberately strict for Atomi-generated production decks because the Ce4+
+    4f/ligand-hole scout showed that mixing RAS3 max-electron settings can
+    pass RASSCF/CASPT2 and then fail at RASSI with incompatible orbital spaces.
+    """
+
+    included = [block for block in state_blocks if block.include_in_rassi]
+    if not included:
+        raise ValueError("At least one state block must set include_in_rassi=true")
+    reference = included[0]
+    checked = ("nactel", "inactive", "ras1", "ras2", "ras3")
+    for block in included[1:]:
+        mismatches = [
+            field
+            for field in checked
+            if _normalized_vector(getattr(block, field)) != _normalized_vector(getattr(reference, field))
+        ]
+        if mismatches:
+            mismatch_text = ", ".join(mismatches)
+            raise ValueError(
+                "RASSI-coupled state blocks must use a common RAS/JOBIPH active-space shape; "
+                f"{block.title!r} differs from {reference.title!r} in {mismatch_text}. "
+                "Use a unified RAS continuation for CASPT2/RASSI, or mark incompatible diagnostic blocks with include_in_rassi=false."
+            )
+    return {
+        "included_state_count": len(included),
+        "reference_title": reference.title,
+        "checked_fields": list(checked),
+    }
+
+
 def render_rasscf_block(
     *,
     title: str,
@@ -289,6 +341,7 @@ def render_rasscf_block(
     iterations: str,
     levs: str,
     symmetry: int = 1,
+    alter: Sequence[str] = (),
     extra_lines: Sequence[str] = (),
 ) -> str:
     lines = [
@@ -314,6 +367,7 @@ def render_rasscf_block(
         "COMP",
         "levs",
         f" {levs}",
+        *_render_alter_lines(alter),
         *extra_lines,
         "End of input",
     ]
@@ -502,6 +556,8 @@ def render_multiblock_ras_production(options: OpenMolcasPrepareOptions) -> str:
             )
         )
 
+    if options.strict_rassi_compatibility:
+        validate_rassi_compatible_state_blocks(options.state_blocks)
     state_counts: list[int] = []
     caspt2_for_all_rassi_states = True
     rassi_index = 0
@@ -522,6 +578,7 @@ def render_multiblock_ras_production(options: OpenMolcasPrepareOptions) -> str:
                 ciroots=block.ciroots,
                 iterations=block.iterations,
                 levs=block.levs,
+                alter=block.alter,
                 extra_lines=tuple(extra_lines),
             )
         )
@@ -763,6 +820,9 @@ def _load_state_blocks(path: Path | None) -> tuple[RasscfStateBlock, ...]:
             raise ValueError(f"state block {index} extra_lines must be a list of strings")
         if any("gasscf" in line.lower() for line in extra_lines):
             raise ValueError("state-blocks-json is for the RAS continuation; true GAS belongs in the guarded selector-scout path")
+        alter = record.get("alter", [])
+        if not isinstance(alter, list) or not all(isinstance(line, str) for line in alter):
+            raise ValueError(f"state block {index} alter must be a list of strings")
         blocks.append(
             RasscfStateBlock(
                 title=str(record["title"]),
@@ -777,6 +837,7 @@ def _load_state_blocks(path: Path | None) -> tuple[RasscfStateBlock, ...]:
                 iterations=str(record.get("iterations", "200 100")),
                 levs=str(record.get("levs", "2.0")),
                 cionly=bool(record.get("cionly", False)),
+                alter=tuple(alter),
                 extra_lines=tuple(extra_lines),
                 include_in_rassi=bool(record.get("include_in_rassi", True)),
                 run_caspt2=bool(record.get("run_caspt2", True)),
@@ -809,6 +870,7 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--gas-selector-root must be within --gas-selector-dimension")
     requested_caspt2 = not args.no_caspt2
     requested_partner = not args.no_partner
+    strict_rassi_compatibility = not bool(getattr(args, "no_strict_rassi_compatibility", False))
     effective_recipe = "gasscf-selector-scout" if gas_spaces else "raspt2-rassi-blocks" if state_blocks else args.recipe
     options = OpenMolcasPrepareOptions(
         title=args.label,
@@ -842,6 +904,7 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
         include_amfi=not args.no_amfi,
         core_hole_note=args.core_hole_note,
         extra_rasscf_lines=tuple(args.extra_rasscf_line or ()),
+        strict_rassi_compatibility=strict_rassi_compatibility,
         gas_spaces=gas_spaces,
         gas_selector_dimension=gas_selector_dimension,
         gas_selector_root=gas_selector_root,
@@ -880,10 +943,16 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
             "reason": "The validated true-GAS path is a selector-root diagnostic only; create a separate common-orbital RAS continuation after root/sector audit.",
         }
     if state_blocks:
+        rassi_compatibility = (
+            validate_rassi_compatible_state_blocks(state_blocks)
+            if strict_rassi_compatibility
+            else {"included_state_count": sum(1 for block in state_blocks if block.include_in_rassi), "strict": False}
+        )
         metadata["ras_production_order"] = {
             "state_block_count": len(state_blocks),
             "jobiph_jobmix_rassi_order": [block.title for block in state_blocks if block.include_in_rassi],
             "rule": "The JSON list is the exact RASSCF, JobIph/JobMix, and RASSI ordering. Review common-orbital/CIONLY design before submission.",
+            "rassi_compatibility": rassi_compatibility,
         }
     project = outdir / "openmolcas_bridge_project.json"
     _json_dump(metadata, project)
@@ -986,6 +1055,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--gas-selector-root", type=int, default=None, help="One selected root for true-GAS scout; required with --gas-space.")
     p.add_argument("--gas-prwf", default="1.0E-03", help="PRWF threshold for true-GAS selector output.")
     p.add_argument("--state-blocks-json", type=Path, help="Explicit ordered RAS state blocks for CASPT2/RASSI continuation; see RasscfStateBlock fields.")
+    p.add_argument(
+        "--no-strict-rassi-compatibility",
+        action="store_true",
+        help="Do not require identical nActEl/Inactive/RAS vectors across RASSI-coupled state blocks. Use only for reviewed advanced cases.",
+    )
     p.add_argument("--executable", default="")
     p.add_argument("--module", default=None, help="Environment module to load; empty string disables module loading.")
     p.add_argument("--job-name", default="")

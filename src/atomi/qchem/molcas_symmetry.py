@@ -45,6 +45,7 @@ D2H_PRODUCT_TABLE = {
     "B3g": {"Ag": "B3g", "B3u": "Au", "B2u": "B1u", "B1g": "B2g", "B1u": "B2u", "B2g": "B1g", "B3g": "Ag", "Au": "B3u"},
     "Au": {"Ag": "Au", "B3u": "B3g", "B2u": "B2g", "B1g": "B1u", "B1u": "B1g", "B2g": "B2u", "B3g": "B3u", "Au": "Ag"},
 }
+D2H_DIPOLE_IRREPS = {"x": "B3u", "y": "B2u", "z": "B1u"}
 
 OPERATION_DESCRIPTIONS = {
     "E": "identity",
@@ -295,6 +296,35 @@ def d2h_product_counts(core_counts: dict[str, int], acceptor_counts: dict[str, i
                 raise ValueError(f"Unknown D2h irrep {acc_irrep!r}")
             products[D2H_PRODUCT_TABLE[core_irrep][acc_irrep]] += int(core_count) * int(acc_count)
     return {irrep: count for irrep, count in products.items() if count}
+
+
+def d2h_product(left: str, right: str) -> str:
+    """Return the D2h direct-product irrep in OpenMolcas ordering."""
+
+    if left not in D2H_ORDER:
+        raise ValueError(f"Unknown D2h irrep {left!r}")
+    if right not in D2H_ORDER:
+        raise ValueError(f"Unknown D2h irrep {right!r}")
+    return D2H_PRODUCT_TABLE[left][right]
+
+
+def d2h_dipole_allowed_final_irreps(
+    initial_irrep: str,
+    *,
+    dipole_irreps: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Return electric-dipole allowed final irreps for a D2h initial state.
+
+    The default uses the conventional OpenMolcas D2h axis assignment:
+    x -> B3u, y -> B2u, z -> B1u.  The return value preserves the polarization
+    labels because XANES inputs often need to retain x/y/z provenance even when
+    two axes collapse under a lower subgroup.
+    """
+
+    axes = dipole_irreps or D2H_DIPOLE_IRREPS
+    if initial_irrep not in D2H_ORDER:
+        raise ValueError(f"Unknown D2h irrep {initial_irrep!r}")
+    return {axis: d2h_product(initial_irrep, irrep) for axis, irrep in axes.items()}
 
 
 def _write_json(payload: dict[str, Any], path: Path | None) -> None:

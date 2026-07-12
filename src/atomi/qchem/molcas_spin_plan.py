@@ -112,6 +112,87 @@ def f3_root_counts(n_orbitals: int) -> dict[str, int]:
     return {"doublet": doublet, "quartet": quartet}
 
 
+def spin_roots_from_spatial_counts(
+    spatial_counts: dict[str, int],
+    spin_couplings: dict[int, int],
+    *,
+    order: tuple[str, ...] = D2H_ORDER,
+) -> dict[int, dict[str, int]]:
+    """Map spatial root counts to OpenMolcas roots for each spin multiplicity.
+
+    ``spatial_counts`` should come from an explicit symmetry/scout inventory:
+    for example D2h products or the ``Number of highly excited CSFs`` audit
+    from a block-increased RASSCF scout.  ``spin_couplings`` is intentionally
+    caller supplied because the multiplier is a physical model choice:
+
+    - Ce3+ L2,3 2p5 4f1 5d1 has two doublet couplings and one quartet coupling:
+      ``{2: 2, 4: 1}``.
+    - Ce4+ 2p5 5d1 has one singlet and one triplet coupling:
+      ``{1: 1, 3: 1}``.
+
+    This helper does not guess roots from an element label; it keeps the scout
+    table, spin model, and generated CIROOTS relationship auditable.
+    """
+
+    normalized = _validate_counts(spatial_counts, order=order)
+    if not normalized:
+        raise ValueError("spatial_counts must contain at least one non-zero irrep")
+    if not spin_couplings:
+        raise ValueError("spin_couplings must contain at least one spin multiplicity")
+    roots_by_spin: dict[int, dict[str, int]] = {}
+    for spin, multiplier in spin_couplings.items():
+        ispin = int(spin)
+        imult = int(multiplier)
+        if ispin < 1 or imult < 1:
+            raise ValueError("spin multiplicities and coupling multipliers must be positive")
+        roots_by_spin[ispin] = {irrep: int(normalized[irrep]) * imult for irrep in order if irrep in normalized}
+    return roots_by_spin
+
+
+def spin_blocks_from_spatial_counts(
+    *,
+    label_prefix: str,
+    manifold: str,
+    spatial_counts: dict[str, int],
+    spin_couplings: dict[int, int],
+    nactel: str,
+    ras1: str = "",
+    ras2: str = "",
+    ras3: str = "",
+    hexs: bool = True,
+    order: tuple[str, ...] = D2H_ORDER,
+    root_source: str = "spatial scout counts x spin-coupling multipliers",
+) -> list[SpinBlock]:
+    """Return generic SpinBlock records from spatial scout counts."""
+
+    roots_by_spin = spin_roots_from_spatial_counts(spatial_counts, spin_couplings, order=order)
+    blocks: list[SpinBlock] = []
+    for spin in sorted(roots_by_spin):
+        for irrep in order:
+            roots = roots_by_spin[spin].get(irrep)
+            if not roots:
+                continue
+            label = MULTIPLICITY_LABELS.get(spin, f"spin{spin}")
+            blocks.append(
+                SpinBlock(
+                    label=f"{label_prefix}_{irrep}_{label}",
+                    manifold=manifold,
+                    symmetry=order.index(irrep) + 1,
+                    symmetry_label=irrep,
+                    spin_multiplicity=spin,
+                    roots=roots,
+                    nactel=nactel,
+                    ras1=ras1,
+                    ras2=ras2,
+                    ras3=ras3,
+                    hexs=hexs,
+                    root_source=root_source,
+                    note="Roots are derived from reviewed spatial counts and explicit spin-coupling multipliers.",
+                )
+            )
+    return blocks
+
+
 def core_hole_f2_to_f3_root_counts(*, n_core_orbitals: int, n_acceptor_orbitals: int) -> dict[str, int]:
     """Estimate C1 core-excited roots for d10 f2 -> d9 f3 blocks.
 

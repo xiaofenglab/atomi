@@ -12,8 +12,11 @@ from atomi.qchem.molcas_spin_plan import (
     render_ce4_l23_d2h_probe,
     render_ce4_l23_4f_ligand_gas_selector_probe,
     render_u4_m45_c1_5f_probe,
+    spin_blocks_from_spatial_counts,
+    spin_roots_from_spatial_counts,
     u4_m45_c1_5f_plan,
 )
+from atomi.qchem.molcas_symmetry import d2h_dipole_allowed_final_irreps
 
 
 def test_f2_root_counts_for_u4_5f2() -> None:
@@ -35,6 +38,32 @@ def test_d2h_core_acceptor_products_for_ce_l3() -> None:
         {"Ag": 2, "B1g": 1, "B2g": 1, "B3g": 1},
     )
     assert products == {"B3u": 4, "B2u": 4, "B1u": 4, "Au": 3}
+
+
+def test_d2h_dipole_allowed_final_irreps_for_ce3_b3u_ground() -> None:
+    allowed = d2h_dipole_allowed_final_irreps("B3u")
+    assert allowed == {"x": "Ag", "y": "B1g", "z": "B2g"}
+
+
+def test_spin_roots_from_spatial_counts_for_ce3_l23_open_shell() -> None:
+    roots = spin_roots_from_spatial_counts({"Ag": 33, "B1g": 31, "B2g": 31}, {2: 2, 4: 1})
+    assert roots[2] == {"Ag": 66, "B1g": 62, "B2g": 62}
+    assert roots[4] == {"Ag": 33, "B1g": 31, "B2g": 31}
+
+    blocks = spin_blocks_from_spatial_counts(
+        label_prefix="Ce3_L23",
+        manifold="core_excited",
+        spatial_counts={"Ag": 33, "B1g": 31, "B2g": 31},
+        spin_couplings={2: 2, 4: 1},
+        nactel="8 1 1",
+        ras1="0 1 1 0 1 0 0 0",
+        ras2="0 2 2 0 2 0 0 1",
+        ras3="3 0 0 1 0 1 1 0",
+    )
+    by_label = {block.label: block for block in blocks}
+    assert by_label["Ce3_L23_Ag_doublet"].roots == 66
+    assert by_label["Ce3_L23_B1g_quartet"].roots == 31
+    assert by_label["Ce3_L23_B2g_doublet"].symmetry == 6
 
 
 def test_ce4_l23_d2h_spin_plan_counts() -> None:
