@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from atomi.cli.registry import command_registry, registered_aliases
 from atomi.qchem.molcas_spin_plan import (
+    ce4_l23_4f_ligand_gas_plan,
     ce4_l3_d2h_plan,
     ce4_l23_d2h_plan,
     core_hole_f2_to_f3_root_counts,
@@ -9,6 +10,7 @@ from atomi.qchem.molcas_spin_plan import (
     f2_root_counts,
     f3_root_counts,
     render_ce4_l23_d2h_probe,
+    render_ce4_l23_4f_ligand_gas_selector_probe,
     render_u4_m45_c1_5f_probe,
     u4_m45_c1_5f_plan,
 )
@@ -56,6 +58,30 @@ def test_ce4_l3_alias_keeps_scalar_2p_warning() -> None:
     plan = ce4_l3_d2h_plan()
     assert plan["edge"] == "L3"
     assert any("Scalar D2h RASSCF spans Ce 2p" in item for item in plan["warnings"])
+
+
+def test_ce4_l23_4f_ligand_plan_and_selector_renderer_are_diagnostic_only() -> None:
+    plan = ce4_l23_4f_ligand_gas_plan()
+    assert plan["inactive"] == "14 6 6 7 6 7 7 4"
+    assert plan["ground_full_root_count"] == 14
+    assert plan["core_excited_spaces"][0]["vector"] == "0 1 1 0 1 0 0 0"
+    assert plan["core_excited_spaces"][1]["min_electrons"] == 18
+    assert plan["core_excited_spaces"][1]["max_electrons"] == 19
+    assert plan["core_excited_spaces"][3]["vector"] == "3 0 0 1 0 1 1 0"
+    assert len(plan["blocks"]) == 12
+    assert plan["production_guard"]["caspt2"] is False
+    assert plan["production_guard"]["rassi"] is False
+
+    text = render_ce4_l23_4f_ligand_gas_selector_probe(spin=3, selector_root=2)
+    assert "GASSCF\n 4" in text
+    assert "CIROOTS\n 1 10\n 2" in text
+    assert "L23_B3u_triplet_selector_root2" in text
+    assert "L23_Au_triplet_selector_root2" in text
+    assert "OUTOrbitals\n AVERage" in text
+    assert "ORBL\n NOTHING" in text
+    assert ">>COPY" not in text
+    assert "&CASPT2" not in text
+    assert "&RASSI" not in text
 
 
 def test_u4_m45_c1_5f_plan_ground_and_excited_counts() -> None:

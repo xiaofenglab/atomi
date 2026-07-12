@@ -57,6 +57,17 @@ class SpinBlock:
     note: str = ""
 
 
+@dataclass(frozen=True)
+class GasSpace:
+    """One symmetry-resolved GASSCF space with cumulative occupancy limits."""
+
+    label: str
+    vector: str
+    min_electrons: int
+    max_electrons: int
+    note: str = ""
+
+
 def _comb(n: int, k: int) -> int:
     if n < 0 or k < 0 or k > n:
         return 0
@@ -223,6 +234,262 @@ def ce4_l3_d2h_plan() -> dict[str, Any]:
     """Alias plan for the Ce L3 pilot; see Ce 2p/SOC warning in the payload."""
 
     return ce4_l23_d2h_plan(edge_label="L3")
+
+
+def ce4_l23_4f_ligand_gas_plan(*, selector_dimension: int = 10) -> dict[str, Any]:
+    """Plan the Ce4+ 4f/ligand exact-sector GASSCF audit.
+
+    This is deliberately a *diagnostic* plan.  The four independent GAS
+    spaces preserve the distinction between a Ce 2p core hole and an O 2p
+    ligand hole, but the OpenMolcas build used for this workflow cannot use a
+    true-GAS JobIph safely for the subsequent CASPT2/RASSI handoff.  A reduced
+    common-orbital RAS bridge must be designed only after the selector-root
+    audit has classified the accepted screened and poorly-screened sectors.
+    """
+
+    if not 1 <= selector_dimension <= 10:
+        raise ValueError("The validated Ce4+ true-GAS selector window is 1 through 10 roots.")
+
+    spaces = (
+        GasSpace("Ce 2p core", "0 1 1 0 1 0 0 0", 5, 5, "Core-excited constraint; use 6,6 for ground."),
+        GasSpace("O 2p ligand SALCs", "0 2 2 0 2 0 0 1", 18, 19, "Allows L14/4f0 and L13/4f1 sectors."),
+        GasSpace("Ce 4f", "0 2 2 0 2 0 0 1", 19, 19, "Balances the optional ligand hole."),
+        GasSpace("Ce 6s/5d", "3 0 0 1 0 1 1 0", 20, 20, "One acceptor electron in the core-excited sector."),
+    )
+    ground_spaces = (
+        GasSpace("Ce 2p core", spaces[0].vector, 6, 6, "Full 2p6 core."),
+        GasSpace("O 2p ligand SALCs", spaces[1].vector, 19, 20, "Allows 4f0 and 4f1 ligand-hole ground sectors."),
+        GasSpace("Ce 4f", spaces[2].vector, 20, 20, "Balances the optional ligand hole."),
+        GasSpace("Ce 6s/5d", spaces[3].vector, 20, 20, "Excluded from the ground sector."),
+    )
+    full_root_counts = {
+        1: {"B3u": 447, "B2u": 447, "B1u": 447, "Au": 441},
+        3: {"B3u": 668, "B2u": 668, "B1u": 668, "Au": 660},
+        5: {"B3u": 221, "B2u": 221, "B1u": 221, "Au": 219},
+    }
+    blocks = []
+    for multiplicity, counts in full_root_counts.items():
+        for irrep in ("B3u", "B2u", "B1u", "Au"):
+            blocks.append(
+                {
+                    "label": f"L23_{irrep}_{MULTIPLICITY_LABELS[multiplicity]}_selector",
+                    "manifold": "core_excited",
+                    "symmetry": D2H_ORDER.index(irrep) + 1,
+                    "symmetry_label": irrep,
+                    "spin_multiplicity": multiplicity,
+                    "full_root_count": counts[irrep],
+                    "selector_dimension": selector_dimension,
+                    "root_source": "Validated Ce4+ CN8 four-GAS root/CSF inventory",
+                }
+            )
+    return {
+        "schema": SCHEMA,
+        "plan_kind": "true_gas_selector_audit",
+        "system": "CeO8",
+        "element": "Ce",
+        "formal_oxidation": 4,
+        "edge": "L2,3",
+        "group": "D2h Abelian subgroup of fluorite/Oh local symmetry",
+        "molcas_d2h_order": list(D2H_ORDER),
+        "inactive": "14 6 6 7 6 7 7 4",
+        "nactel": "20 0 0",
+        "ground_spaces": [asdict(space) for space in ground_spaces],
+        "core_excited_spaces": [asdict(space) for space in spaces],
+        "ground_full_root_count": 14,
+        "selector_dimension": selector_dimension,
+        "blocks": blocks,
+        "production_guard": {
+            "jobiph": False,
+            "caspt2": False,
+            "rassi": False,
+            "reason": "True GAS is not JobIph/RASSI compatible in the validated OpenMolcas build.",
+        },
+        "warnings": [
+            "Do not use the historical 14-root GAS state average; it crashes in the per-root output path.",
+            "Use one fixed-orbital selector root at a time with CIROOTS 1 <dimension>, then the selected root index.",
+            "Classify screened versus poorly-screened CI character before designing a reduced common-orbital RAS bridge.",
+            "Only the later, independently validated RAS bridge may create JobIph and proceed to CASPT2/RASSI.",
+        ],
+    }
+
+
+def _render_gasscf_selector_block(
+    *,
+    title: str,
+    symmetry: int,
+    spin: int,
+    inactive: str,
+    spaces: tuple[GasSpace, ...],
+    selector_dimension: int,
+    selector_root: int,
+    alter_lines: tuple[str, ...] = (),
+) -> str:
+    """Render one fixed-orbital true-GAS selector block without JobIph output."""
+
+    if not 1 <= selector_root <= selector_dimension:
+        raise ValueError("selector_root must be within the selector Davidson dimension")
+    lines = [
+        "&RASSCF",
+        "Title",
+        f" {title}",
+        "Symmetry",
+        f" {symmetry}",
+        "Spin",
+        f" {spin}",
+        "nActEl",
+        " 20 0 0",
+        "Inactive",
+        f" {inactive}",
+        "GASSCF",
+        f" {len(spaces)}",
+    ]
+    for space in spaces:
+        lines.extend([f" {space.vector}", f" {space.min_electrons} {space.max_electrons}"])
+    lines.extend(
+        [
+            "CIROOTS",
+            f" 1 {selector_dimension}",
+            f" {selector_root}",
+            "CIONLY",
+            *alter_lines,
+            "OUTOrbitals",
+            " AVERage",
+            "ORBL",
+            " NOTHING",
+            "ORBA",
+            " COMP",
+            "PRWF",
+            " 1.0E-03",
+            "End of input",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def render_ce4_l23_4f_ligand_gas_selector_probe(
+    *,
+    coord: str = "CeO8_fluorite_ideal.xyz",
+    basis: str = "ANO-RCC-VDZP",
+    charge: int = -12,
+    spin: int = 1,
+    selector_dimension: int = 10,
+    selector_root: int = 1,
+) -> str:
+    """Render one Ce4+ CN8 true-GAS selector audit deck.
+
+    The known Ce4+ CN8 orbital rotation table is included only for this
+    validated scaffold.  New elements/clusters must derive and review their
+    own orbital table before reusing a GAS selector workflow.
+    """
+
+    plan = ce4_l23_4f_ligand_gas_plan(selector_dimension=selector_dimension)
+    if spin not in (1, 3, 5):
+        raise ValueError("Ce4+ 4f/ligand L2,3 GAS audit requires spin 1, 3, or 5")
+    spaces = tuple(GasSpace(**space) for space in plan["core_excited_spaces"])
+    ground_spaces = tuple(GasSpace(**space) for space in plan["ground_spaces"])
+    alter = (
+        "Alter",
+        " 9",
+        " 2 1 4",
+        " 2 4 7",
+        " 2 10 12",
+        " 3 1 4",
+        " 3 4 7",
+        " 3 10 12",
+        " 5 1 4",
+        " 5 4 7",
+        " 5 10 12",
+    )
+    header = [
+        "* Atomi Ce4+ CN8 four-GAS exact-sector selector audit.",
+        "* RASSCF-only: true GAS must not emit JobIph or enter CASPT2/RASSI.",
+        "* The selector root is an audited state, not a state average.",
+        "&GATEWAY",
+        "Title = CeO2 CeO8 Ce4+ L2,3 4f ligand-hole GAS selector audit",
+        f"Coord = {coord}",
+        f"Basis = {basis}",
+        "Group = X Y Z",
+        "RX2C",
+        "AMFI",
+        "ANGM",
+        "0.0 0.0 0.0",
+        "",
+        "&SEWARD",
+        "CHOL",
+        "End of input",
+        "",
+        "&SCF",
+        "Charge",
+        f" {charge}",
+        "PROR",
+        " 2 5.0 2",
+        "THRE",
+        " 1.0d-11 1.0d-6 1.5d-6 0.2d-6",
+        "End of input",
+        "",
+        "* Stable ionic 4f0 closed-shell reference; it is not a zero-electron GASSCF optimizer.",
+        "&RASSCF",
+        "Title",
+        " closed_shell_ionic_Ce4_4f0_reference",
+        "Symmetry",
+        " 1",
+        "Spin",
+        " 1",
+        "nActEl",
+        " 0 0 0",
+        "Inactive",
+        " 14 9 9 7 9 7 7 5",
+        "Ras2",
+        " 0 0 0 0 0 0 0 0",
+        "CIROOTS",
+        " 1 1 1",
+        "Iterations",
+        " 200 100",
+        "levs",
+        " 2.5",
+        "ORBL",
+        " ALL",
+        "ORBA",
+        " COMP",
+        "End of input",
+        "",
+        "* Ground selector provides the common 4f0/4f1L reference before core-hole blocks.",
+        _render_gasscf_selector_block(
+            title="ground_Ag_singlet_4f0_4f1L_selector",
+            symmetry=1,
+            spin=1,
+            inactive=str(plan["inactive"]),
+            spaces=ground_spaces,
+            selector_dimension=1,
+            selector_root=1,
+            alter_lines=alter,
+        ).rstrip(),
+        "",
+        "* Every core-excited block retains 2p5 and the L14/4f0 plus L13/4f1 sectors.",
+    ]
+    for block in plan["blocks"]:
+        if block["spin_multiplicity"] != spin:
+            continue
+        header.append(
+            _render_gasscf_selector_block(
+                title=f"{block['label']}_root{selector_root}",
+                symmetry=int(block["symmetry"]),
+                spin=spin,
+                inactive=str(plan["inactive"]),
+                spaces=spaces,
+                selector_dimension=selector_dimension,
+                selector_root=selector_root,
+            ).rstrip()
+        )
+        header.append("")
+    header.extend(
+        [
+            "* End of true-GAS selector audit.",
+            "* No JobIph copy, CASPT2, JobMix, or RASSI is permitted in this deck.",
+            "* Extract CI sector weights first, then build a separate reduced common-orbital RAS continuation.",
+        ]
+    )
+    return "\n".join(header) + "\n"
 
 
 def u4_m45_c1_5f_plan(*, n_f_orbitals: int = 7, n_core_orbitals: int = 5, root_cap: int | None = None) -> dict[str, Any]:
