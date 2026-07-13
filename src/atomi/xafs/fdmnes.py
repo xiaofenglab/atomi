@@ -115,6 +115,22 @@ def _row_times_matrix(row: list[float], matrix: list[list[float]]) -> list[float
     return [sum(row[i] * matrix[i][j] for i in range(3)) for j in range(3)]
 
 
+def _normalize_poscar_element(label: str) -> str:
+    """Map VASP split-species labels such as U_probe or Ce4plus to elements."""
+    cleaned = label.strip()
+    if cleaned in ATOMIC_NUMBERS:
+        return cleaned
+    title = cleaned[:1].upper() + cleaned[1:]
+    if title in ATOMIC_NUMBERS:
+        return title
+    for symbol in sorted(ATOMIC_NUMBERS, key=len, reverse=True):
+        if cleaned.startswith(symbol):
+            return symbol
+        if title.startswith(symbol):
+            return symbol
+    raise ValueError(f"Missing atomic number mapping for POSCAR element {label!r}")
+
+
 def _parse_poscar(path: Path) -> dict[str, Any]:
     text = path.expanduser().read_text(encoding="utf-8", errors="replace")
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -122,7 +138,8 @@ def _parse_poscar(path: Path) -> dict[str, Any]:
         raise ValueError(f"{path} does not look like a POSCAR/CONTCAR")
     scale = float(lines[1].split()[0])
     lattice = [[float(x) * scale for x in lines[i].split()[:3]] for i in range(2, 5)]
-    elements = lines[5].split()
+    raw_elements = lines[5].split()
+    elements = [_normalize_poscar_element(element) for element in raw_elements]
     counts = [int(x) for x in lines[6].split()]
     coord_line = 7
     if lines[coord_line].lower().startswith("s"):
@@ -141,9 +158,7 @@ def _parse_poscar(path: Path) -> dict[str, Any]:
     cursor = 0
     for element, count in zip(elements, counts):
         first_indices.setdefault(element, cursor + 1)
-        z = ATOMIC_NUMBERS.get(element)
-        if z is None:
-            raise ValueError(f"Missing atomic number mapping for POSCAR element {element!r}")
+        z = ATOMIC_NUMBERS[element]
         for _ in range(count):
             atoms.append({"index": cursor + 1, "element": element, "z": z, "frac": frac[cursor]})
             cursor += 1
@@ -157,6 +172,7 @@ def _parse_poscar(path: Path) -> dict[str, Any]:
         "lattice": lattice,
         "lengths": lengths,
         "angles": angles,
+        "raw_elements": raw_elements,
         "elements": elements,
         "counts": counts,
         "atoms": atoms,
@@ -354,6 +370,7 @@ def write_fdmnes_input(args: argparse.Namespace, outdir: Path) -> tuple[Path, di
         "edge": args.edge,
         "output_prefix": output_prefix,
         "natom": poscar["natom"],
+        "raw_elements": poscar["raw_elements"],
         "elements": poscar["elements"],
         "counts": poscar["counts"],
         "cell": {"lengths_angstrom": poscar["lengths"], "angles_degrees": poscar["angles"]},

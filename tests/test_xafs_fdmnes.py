@@ -98,6 +98,63 @@ def test_fdmnes_prepare_writes_vasp_connected_workspace(tmp_path: Path) -> None:
     assert project["edge"] == "L3"
 
 
+def test_fdmnes_prepare_accepts_vasp_split_species_labels(tmp_path: Path) -> None:
+    vasp_dir = tmp_path / "vasp_uo2_lr_reference"
+    vasp_dir.mkdir()
+    (vasp_dir / "CONTCAR").write_text(
+        "UO2 split-species test\n"
+        "1\n"
+        "5.47 0 0\n"
+        "0 5.47 0\n"
+        "0 0 5.47\n"
+        "U_ Ubulk O\n"
+        "1 1 4\n"
+        "Direct\n"
+        "0 0 0\n"
+        "0.5 0.5 0.5\n"
+        "0.25 0.25 0.25\n"
+        "0.75 0.75 0.25\n"
+        "0.75 0.25 0.75\n"
+        "0.25 0.75 0.75\n",
+        encoding="utf-8",
+    )
+    outdir = tmp_path / "fdmnes_u_l3"
+    args = argparse.Namespace(
+        structure=None,
+        vasp_dir=vasp_dir,
+        absorber="U",
+        edge="L3",
+        absorber_index=0,
+        outdir=outdir,
+        output_prefix="uo2_u_l3",
+        radius=6.0,
+        energy_range="-20 80 0.5",
+        green=True,
+        scf=False,
+        quadrupole=False,
+        spinorbit=True,
+        convolution=True,
+        extra=[],
+        executable="fdmnes",
+        root="",
+        bin="",
+        module="",
+        job_name="fdmnes-u-l3",
+        ntasks=1,
+        cpus_per_task=1,
+        mem="8G",
+        time="02:00:00",
+    )
+
+    metadata = fdmnes.prepare_main(args)
+    text = (outdir / "fdmnes.inp").read_text(encoding="utf-8")
+
+    assert " 92 0.000000000000 0.000000000000 0.000000000000 ! absorber" in text
+    assert " 92 0.500000000000 0.500000000000 0.500000000000" in text
+    assert metadata["raw_elements"] == ["U_", "Ubulk", "O"]
+    assert metadata["elements"] == ["U", "U", "O"]
+
+
 def test_fdmnes_collect_summarizes_numeric_spectrum(tmp_path: Path) -> None:
     spectrum = tmp_path / "xanes.dat"
     spectrum.write_text("# e mu\n0.0 0.1\n1.0 2.0\n2.0 0.8\n", encoding="utf-8")
