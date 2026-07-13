@@ -110,6 +110,24 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Print Molcas postanalysis workflow and build report-style M4/M5 XANES plots.",
     ),
     CommandSpec(
+        aliases=("molcas-exatomic-bridge", "molcas_exatomic_bridge"),
+        target="atomi.qchem.exatomic_bridge:main",
+        category="qchem",
+        help="Optional eXatomic/NBO bridge for OpenMolcas postanalysis exports.",
+    ),
+    CommandSpec(
+        aliases=("molcas-exatomic-status",),
+        target="atomi.qchem.exatomic_bridge:status_cli",
+        category="qchem",
+        help="Check whether eXatomic is importable for Molcas/NBO postanalysis.",
+    ),
+    CommandSpec(
+        aliases=("molcas-exatomic-install-plan",),
+        target="atomi.qchem.exatomic_bridge:install_plan_cli",
+        category="qchem",
+        help="Print the recommended optional eXatomic setup for Atomi MOLCAS postanalysis.",
+    ),
+    CommandSpec(
         aliases=("molcas-spin-plan", "molcas_spin_plan", "openmolcas-spin-plan"),
         target="atomi.qchem.molcas_spin_plan:main",
         category="qchem",

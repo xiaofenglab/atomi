@@ -42,6 +42,9 @@ xafs = [
 molcas-viz = [
   "Pegamoid",
 ]
+molcas-exatomic = [
+  "exatomic==0.6.0",
+]
 zentropy = [
   "pyzentropy; python_version >= '3.10'",
 ]
@@ -146,6 +149,10 @@ xanes-molcas-spectrum = "atomi.xafs.molcas_xanes_spectrum:main"
 molcas-postanalysis = "atomi.qchem.molcas_postanalysis:main"
 molcas_postanalysis = "atomi.qchem.molcas_postanalysis:main"
 openmolcas-postanalysis = "atomi.qchem.molcas_postanalysis:main"
+molcas-exatomic-bridge = "atomi.qchem.exatomic_bridge:main"
+molcas_exatomic_bridge = "atomi.qchem.exatomic_bridge:main"
+molcas-exatomic-status = "atomi.qchem.exatomic_bridge:status_cli"
+molcas-exatomic-install-plan = "atomi.qchem.exatomic_bridge:install_plan_cli"
 molcas-spin-plan = "atomi.qchem.molcas_spin_plan:main"
 molcas_spin_plan = "atomi.qchem.molcas_spin_plan:main"
 openmolcas-spin-plan = "atomi.qchem.molcas_spin_plan:main"
