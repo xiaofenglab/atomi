@@ -430,6 +430,7 @@ def write_run_scripts(args: argparse.Namespace, outdir: Path, input_file: Path) 
     sbatch.write_text(
         "#!/bin/bash\n"
         f"#SBATCH --job-name={args.job_name}\n"
+        f"#SBATCH --chdir={outdir.resolve()}\n"
         "#SBATCH --nodes=1\n"
         f"#SBATCH --ntasks={args.ntasks}\n"
         f"#SBATCH --cpus-per-task={args.cpus_per_task}\n"

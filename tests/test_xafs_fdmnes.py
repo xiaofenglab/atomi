@@ -74,6 +74,7 @@ def test_fdmnes_prepare_writes_vasp_connected_workspace(tmp_path: Path) -> None:
     metadata = fdmnes.prepare_main(args)
     fdmnes_input = (outdir / "fdmnes.inp").read_text(encoding="utf-8")
     run_script = (outdir / "run_fdmnes_xanes.sh").read_text(encoding="utf-8")
+    sbatch_script = (outdir / "submit_fdmnes_xanes.sbatch").read_text(encoding="utf-8")
     project = json.loads((outdir / "fdmnes_xanes_project.json").read_text(encoding="utf-8"))
     fdmfile = (outdir / "fdmfile.txt").read_text(encoding="utf-8")
 
@@ -92,6 +93,8 @@ def test_fdmnes_prepare_writes_vasp_connected_workspace(tmp_path: Path) -> None:
     assert "ATOMI_FDMNES_EXE=/private/fdmnes/bin/fdmnes" in run_script
     assert "cat > fdmfile.txt" in run_script
     assert "FDMNES did not consume the generated fdmfile.txt" in run_script
+    assert f"#SBATCH --chdir={outdir.resolve()}" in sbatch_script
+    assert "bash run_fdmnes_xanes.sh" in sbatch_script
     assert fdmfile == "1\nfdmnes.inp\n"
     assert metadata["schema"] == project["schema"] == "atomi.fdmnes_xanes_project.v1"
     assert project["vasp"]["incar_tags"]["ENCUT"] == "600"
