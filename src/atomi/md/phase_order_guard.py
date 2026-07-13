@@ -1351,6 +1351,35 @@ def combined_phase_order_label(pdf_label: str, diffraction_label: str) -> tuple[
     return "long-range-order-retained-or-uncertain", notes
 
 
+def bragg_reference_workflow_label(bragg_label: str, secondary_label: str) -> tuple[str, list[str]]:
+    """Merge crystalline reference-Bragg and finite-cell MD order guards.
+
+    A crystalline Bragg reference is useful for low-temperature structure identity,
+    but high-temperature solids can shift and broaden Bragg peaks while still
+    retaining finite-cell diffraction/PDF order. In that case, keep the workflow
+    label tied to the secondary MD order guard and record the reference mismatch
+    as a warning rather than as proof of melting.
+    """
+    if bragg_label == "bragg-order-lost":
+        if secondary_label == "long-range-order-lost":
+            return "long-range-order-lost", [
+                "Reference Bragg XRD and secondary PDF/Debye guards both indicate long-range order loss."
+            ]
+        return secondary_label, [
+            "Reference Bragg peak matching is poor, but finite-cell PDF/Debye order is retained or uncertain; "
+            "treat the Bragg mismatch as a thermal/strain/finite-cell warning and require CN/MSD/phase guards "
+            "before rejecting a high-temperature solid."
+        ]
+    if bragg_label == "bragg-like-solid-warning":
+        return "long-range-order-retained-or-uncertain", [
+            "Reference Bragg XRD retains enough crystalline peak intensity for a solid-like warning label."
+        ]
+    return secondary_label, [
+        "Reference Bragg agreement is intermediate; workflow decision follows secondary PDF/Debye guards "
+        "until CN/MSD/phase checks are reviewed."
+    ]
+
+
 def generic_trajectory_guard(args: argparse.Namespace) -> dict[str, Any]:
     """Run the PDF plus finite-cell Debye-XRD guard for CP2K XYZ or LAMMPS dump."""
     outdir = args.outdir.resolve()
@@ -1460,6 +1489,7 @@ def generic_trajectory_guard(args: argparse.Namespace) -> dict[str, Any]:
     )
     combined_label, combined_notes = combined_phase_order_label(label, diffraction_label)
     bragg_reference_summary: dict[str, Any] | None = None
+    bragg_workflow_notes: list[str] = []
     workflow_phase_label = combined_label
     workflow_guard_role = "secondary_pdf_plus_finite_cell_debye_guard"
     if args.xrd_reference:
@@ -1490,10 +1520,10 @@ def generic_trajectory_guard(args: argparse.Namespace) -> dict[str, Any]:
             liquid_weighted_intensity_max=args.xrd_liquid_weighted_intensity_max,
         )
         workflow_guard_role = "primary_bragg_reference_xrd_with_secondary_pdf_debye_guard"
-        if bragg_reference_summary["phase_order_label"] == "bragg-order-lost":
-            workflow_phase_label = "long-range-order-lost"
-        elif bragg_reference_summary["phase_order_label"] == "bragg-like-solid-warning":
-            workflow_phase_label = "long-range-order-retained-or-uncertain"
+        workflow_phase_label, bragg_workflow_notes = bragg_reference_workflow_label(
+            bragg_reference_summary["phase_order_label"],
+            combined_label,
+        )
     summary = {
         "schema": SCHEMA_PHASE_ORDER_GUARD,
         "engine": source_meta["engine"],
@@ -1560,6 +1590,7 @@ def generic_trajectory_guard(args: argparse.Namespace) -> dict[str, Any]:
         "notes": notes
         + diffraction_notes
         + combined_notes
+        + bragg_workflow_notes
         + (
             ["Crystalline Bragg reference XRD was supplied and used as the primary long-range-order guard."]
             if bragg_reference_summary
@@ -1703,6 +1734,7 @@ def vasp_xdatcar_guard(args: argparse.Namespace) -> dict[str, Any]:
     )
     combined_label, combined_notes = combined_phase_order_label(label, diffraction_label)
     bragg_reference_summary: dict[str, Any] | None = None
+    bragg_workflow_notes: list[str] = []
     workflow_phase_label = combined_label
     workflow_guard_role = "secondary_pdf_plus_finite_cell_debye_guard"
     if args.xrd_reference:
@@ -1736,12 +1768,10 @@ def vasp_xdatcar_guard(args: argparse.Namespace) -> dict[str, Any]:
             liquid_weighted_intensity_max=args.xrd_liquid_weighted_intensity_max,
         )
         workflow_guard_role = "primary_bragg_reference_xrd_with_secondary_pdf_debye_guard"
-        if bragg_reference_summary["phase_order_label"] == "bragg-order-lost":
-            workflow_phase_label = "long-range-order-lost"
-        elif bragg_reference_summary["phase_order_label"] == "bragg-like-solid-warning":
-            workflow_phase_label = "long-range-order-retained-or-uncertain"
-        else:
-            workflow_phase_label = combined_label
+        workflow_phase_label, bragg_workflow_notes = bragg_reference_workflow_label(
+            bragg_reference_summary["phase_order_label"],
+            combined_label,
+        )
     summary = {
         "schema": SCHEMA_PHASE_ORDER_GUARD,
         "engine": "vasp-xdatcar",
@@ -1805,6 +1835,7 @@ def vasp_xdatcar_guard(args: argparse.Namespace) -> dict[str, Any]:
         "notes": notes
         + diffraction_notes
         + combined_notes
+        + bragg_workflow_notes
         + (
             [
                 "Crystalline Bragg reference XRD was supplied and used as the primary long-range-order guard."

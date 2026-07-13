@@ -2453,22 +2453,26 @@ def _render_mds_run_script(args: argparse.Namespace, sluschi_src: Path, label: s
 
 
 def _render_mds_sbatch(args: argparse.Namespace) -> str:
-    partition_line = f"#SBATCH --partition={args.partition}\n" if args.partition else ""
-    return textwrap.dedent(
-        f"""\
-        #!/bin/bash
-        #SBATCH --job-name={args.job_name}
-        #SBATCH --output={args.job_name}_%j.out
-        #SBATCH --error={args.job_name}_%j.err
-        {partition_line}#SBATCH --nodes={args.nodes}
-        #SBATCH --ntasks={args.ntasks}
-        #SBATCH --cpus-per-task={args.cpus_per_task}
-        #SBATCH --time={args.walltime}
-        #SBATCH --mem={args.mem}
-
-        bash run_mds_entropy.sh
-        """
+    lines = [
+        "#!/bin/bash",
+        f"#SBATCH --job-name={args.job_name}",
+        f"#SBATCH --output={args.job_name}_%j.out",
+        f"#SBATCH --error={args.job_name}_%j.err",
+    ]
+    if args.partition:
+        lines.append(f"#SBATCH --partition={args.partition}")
+    lines.extend(
+        [
+            f"#SBATCH --nodes={args.nodes}",
+            f"#SBATCH --ntasks={args.ntasks}",
+            f"#SBATCH --cpus-per-task={args.cpus_per_task}",
+            f"#SBATCH --time={args.walltime}",
+            f"#SBATCH --mem={args.mem}",
+            "",
+            "bash run_mds_entropy.sh",
+        ]
     )
+    return "\n".join(lines) + "\n"
 
 
 def mds_entropy_run_main(args: argparse.Namespace) -> dict[str, Any]:

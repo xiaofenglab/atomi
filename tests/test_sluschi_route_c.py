@@ -67,6 +67,27 @@ def test_route_c_analyze_writes_expected_summary_columns(tmp_path: Path):
     assert (out / "phase_health_route_c.json").exists()
 
 
+def test_route_c_reads_physical_guard_cn_histogram_schema(tmp_path: Path):
+    coord = tmp_path / "guard_cn_histogram.csv"
+    coord.write_text(
+        "cutoff_A,pair,CN,count,fraction\n"
+        "4.2,K_to_Cl,5,131,0.08803763440860216\n"
+        "4.2,K_to_Cl,6,1343,0.9025537634408602\n"
+        "4.2,K_to_Cl,7,9,0.006048387096774193\n"
+        "4.2,Cl_to_K,5,131,0.08803763440860216\n"
+        "4.2,Cl_to_K,6,1343,0.9025537634408602\n"
+        "4.2,Cl_to_K,7,9,0.006048387096774193\n",
+        encoding="utf-8",
+    )
+
+    dists = route_c.load_coordination_distributions(coord)
+
+    assert {dist.pair for dist in dists} == {"K-Cl", "Cl-K"}
+    for dist in dists:
+        assert dist.cutoff_A == pytest.approx(4.2)
+        assert dist.probabilities[6] == pytest.approx(0.905596)
+
+
 def test_route_c_parse_sluschi_summary_formula_basis(tmp_path: Path):
     summary = tmp_path / "sluschi_entropy_summary.csv"
     summary.write_text(

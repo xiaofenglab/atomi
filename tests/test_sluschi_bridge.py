@@ -798,6 +798,7 @@ def test_sluschi_mds_entropy_run_prepares_legacy_block_layout(tmp_path: Path):
     assert "if ~exist('R_cut','var')" in (work / "entropy" / "pdf_v6.m").read_text(encoding="utf-8")
     assert "UC2" in (work / "run_mds_entropy.sh").read_text(encoding="utf-8")
     sbatch_text = (work / "submit_mds_entropy.sbatch").read_text(encoding="utf-8")
+    assert sbatch_text.startswith("#!/bin/bash\n")
     assert "#SBATCH --partition=" not in sbatch_text
 
 

@@ -161,3 +161,15 @@ def test_phase_order_guard_lammps_dump_smoke(tmp_path: Path) -> None:
     assert (outdir / "simulated_powder_xrd_early_tail_overlay.png").exists() or (
         outdir / "simulated_powder_xrd_early_tail_overlay.svg"
     ).exists()
+
+
+def test_phase_order_guard_keeps_high_t_shifted_bragg_as_warning() -> None:
+    from atomi.md.phase_order_guard import bragg_reference_workflow_label
+
+    label, notes = bragg_reference_workflow_label(
+        "bragg-order-lost",
+        "long-range-order-retained-or-uncertain",
+    )
+
+    assert label == "long-range-order-retained-or-uncertain"
+    assert any("high-temperature solid" in note for note in notes)

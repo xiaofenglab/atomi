@@ -103,6 +103,27 @@ def normalize_probabilities(values: dict[int, float]) -> dict[int, float]:
     return {int(key): max(0.0, value) / total for key, value in sorted(values.items())}
 
 
+def row_value(row: dict[str, str], *keys: str) -> str | None:
+    """Read CSV fields while tolerating guard-output capitalization variants."""
+    lower = {str(key).lower(): value for key, value in row.items()}
+    for key in keys:
+        if key in row and row[key] not in (None, ""):
+            return row[key]
+        value = lower.get(key.lower())
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def parse_coordination_pair(pair: str) -> tuple[str, str]:
+    cleaned = pair.strip().replace("→", "_to_").replace("->", "_to_")
+    for separator in ("_to_", "-to-", " to ", "-"):
+        if separator in cleaned:
+            left, right = cleaned.split(separator, 1)
+            return left.strip(), right.strip()
+    return "", ""
+
+
 def zentropy_sconf_from_probabilities(
     probabilities: dict[int, float],
     *,
@@ -162,29 +183,29 @@ def load_coordination_distributions(path: Path) -> list[CoordinationDistribution
     rows = read_csv_rows(path)
     grouped: dict[tuple[str, str, str, float | None, float | None], dict[int, float]] = defaultdict(dict)
     for row in rows:
-        central = (row.get("central") or row.get("center") or row.get("central_species") or "").strip()
-        neighbor = (row.get("neighbor") or row.get("neighbour") or row.get("neighbor_species") or "").strip()
+        central = (row_value(row, "central", "center", "central_species") or "").strip()
+        neighbor = (row_value(row, "neighbor", "neighbour", "neighbor_species") or "").strip()
         if not central or not neighbor:
-            pair = (row.get("pair") or "").replace("_", "-")
-            if "-" in pair:
-                central, neighbor = [token.strip() for token in pair.split("-", 1)]
+            central, neighbor = parse_coordination_pair(row_value(row, "pair") or "")
         if not central or not neighbor:
             continue
-        cn_raw = row.get("cn") or row.get("coordination") or row.get("n")
+        cn_raw = row_value(row, "cn", "CN", "coordination", "n")
         try:
             cn = int(float(cn_raw))
         except (TypeError, ValueError):
             continue
-        value = finite_float(row.get("probability"))
+        value = finite_float(row_value(row, "probability"))
         if value is None:
-            value = finite_float(row.get("p_n"))
+            value = finite_float(row_value(row, "p_n"))
         if value is None:
-            value = finite_float(row.get("count"))
+            value = finite_float(row_value(row, "fraction"))
+        if value is None:
+            value = finite_float(row_value(row, "count"))
         if value is None:
             continue
-        phase = (row.get("phase") or "").strip().lower()
-        temp = finite_float(row.get("T_K") or row.get("temperature_K"))
-        cutoff = finite_float(row.get("cutoff_A") or row.get("cutoff"))
+        phase = (row_value(row, "phase") or "").strip().lower()
+        temp = finite_float(row_value(row, "T_K", "temperature_K"))
+        cutoff = finite_float(row_value(row, "cutoff_A", "cutoff"))
         grouped[(central, neighbor, phase, temp, cutoff)][cn] = grouped[(central, neighbor, phase, temp, cutoff)].get(cn, 0.0) + value
     return [
         CoordinationDistribution(central, neighbor, normalize_probabilities(values), cutoff, phase, temp)
