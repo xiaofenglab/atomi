@@ -386,6 +386,8 @@ def write_fdmnes_input(args: argparse.Namespace, outdir: Path) -> tuple[Path, di
 def write_run_scripts(args: argparse.Namespace, outdir: Path, input_file: Path) -> dict[str, str]:
     exe = args.executable or default_fdmnes_executable()
     module_name = args.module or os.environ.get("ATOMI_FDMNES_MODULE", "")
+    fdmfile = outdir / "fdmfile.txt"
+    fdmfile.write_text(f"1\n{input_file.name}\n", encoding="utf-8")
     run_script = outdir / "run_fdmnes_xanes.sh"
     module_block = ""
     if module_name:
@@ -407,15 +409,15 @@ def write_run_scripts(args: argparse.Namespace, outdir: Path, input_file: Path) 
         f"export ATOMI_FDMNES_EXE={shlex.quote(str(exe))}\n"
         f"export ATOMI_FDMNES_ROOT={shlex.quote(str(args.root or os.environ.get('ATOMI_FDMNES_ROOT', '')))}\n"
         f"export ATOMI_FDMNES_BIN={shlex.quote(str(args.bin or os.environ.get('ATOMI_FDMNES_BIN', '')))}\n"
+        f"cat > fdmfile.txt <<'FDMNES_FDMFILE'\n1\n{input_file.name}\nFDMNES_FDMFILE\n"
         'echo "Running FDMNES route-C XANES bridge workspace"\n'
         'echo "Started $(date -Is)"\n'
         "set +e\n"
-        f"{shlex.quote(str(exe))} {shlex.quote(input_file.name)} > fdmnes.stdout.log 2> fdmnes.stderr.log\n"
+        f"{shlex.quote(str(exe))} > fdmnes.stdout.log 2> fdmnes.stderr.log\n"
         "status=$?\n"
-        "if [[ ${status} -ne 0 ]]; then\n"
-        '  echo "Direct argument run failed with status ${status}; retrying stdin filename mode." >&2\n'
-        f"  printf '%s\\n' {shlex.quote(input_file.name)} | {shlex.quote(str(exe))} >> fdmnes.stdout.log 2>> fdmnes.stderr.log\n"
-        "  status=$?\n"
+        "if grep -Eqi 'Error opening the file|fdmfile.txt' fdmnes.stdout.log fdmnes.stderr.log; then\n"
+        '  echo "FDMNES did not consume the generated fdmfile.txt/input deck." >&2\n'
+        "  status=2\n"
         "fi\n"
         "set -e\n"
         'echo "Finished $(date -Is) status=${status}" | tee fdmnes.status.txt\n'

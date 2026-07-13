@@ -75,6 +75,7 @@ def test_fdmnes_prepare_writes_vasp_connected_workspace(tmp_path: Path) -> None:
     fdmnes_input = (outdir / "fdmnes.inp").read_text(encoding="utf-8")
     run_script = (outdir / "run_fdmnes_xanes.sh").read_text(encoding="utf-8")
     project = json.loads((outdir / "fdmnes_xanes_project.json").read_text(encoding="utf-8"))
+    fdmfile = (outdir / "fdmfile.txt").read_text(encoding="utf-8")
 
     assert "Filout\nce_l3_quick" in fdmnes_input
     assert "Range\n-15 70 0.5" in fdmnes_input
@@ -89,7 +90,9 @@ def test_fdmnes_prepare_writes_vasp_connected_workspace(tmp_path: Path) -> None:
     assert "  8 0.250000000000 0.250000000000 0.250000000000" in fdmnes_input
     assert "module load \"${ATOMI_FDMNES_MODULE}\"" in run_script
     assert "ATOMI_FDMNES_EXE=/private/fdmnes/bin/fdmnes" in run_script
-    assert "retrying stdin filename mode" in run_script
+    assert "cat > fdmfile.txt" in run_script
+    assert "FDMNES did not consume the generated fdmfile.txt" in run_script
+    assert fdmfile == "1\nfdmnes.inp\n"
     assert metadata["schema"] == project["schema"] == "atomi.fdmnes_xanes_project.v1"
     assert project["vasp"]["incar_tags"]["ENCUT"] == "600"
     assert project["vasp"]["incar_tags"]["LDAUU"] == "5.0 0"
