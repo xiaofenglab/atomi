@@ -412,6 +412,7 @@ def write_run_scripts(args: argparse.Namespace, outdir: Path, input_file: Path) 
         f"cat > fdmfile.txt <<'FDMNES_FDMFILE'\n1\n{input_file.name}\nFDMNES_FDMFILE\n"
         'echo "Running FDMNES route-C XANES bridge workspace"\n'
         'echo "Started $(date -Is)"\n'
+        'echo "Started $(date -Is) status=RUNNING" > fdmnes.status.txt\n'
         "set +e\n"
         f"{shlex.quote(str(exe))} > fdmnes.stdout.log 2> fdmnes.stderr.log\n"
         "status=$?\n"
