@@ -95,7 +95,27 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         aliases=("xafs-routes", "xafs_routes"),
         target="atomi.xafs.routes:main",
         category="xafs",
-        help="Print Atomi XAFS Route A/B policy: VASP-FEFF/Larch vs QE-OCEAN.",
+        help="Print Atomi XAFS Route A/B/C policy: FEFF/Larch, OCEAN, and FDMNES.",
+    ),
+    CommandSpec(
+        aliases=("fdmnes-xanes-bridge", "fdmnes_xanes_bridge", "xanes-fdmnes-bridge"),
+        target="atomi.xafs.fdmnes:main",
+        category="xafs",
+        help="Prepare, run, and collect quick route-C FDMNES XANES workspaces from VASP structures.",
+    ),
+    CommandSpec(
+        aliases=("fdmnes-xanes-status", "fdmnes_xanes_status"),
+        target="atomi.xafs.fdmnes:main",
+        category="xafs",
+        help="Check configured FDMNES runtime for Atomi route-C XANES use.",
+        prepend_args=("status",),
+    ),
+    CommandSpec(
+        aliases=("fdmnes-xanes-install-plan",),
+        target="atomi.xafs.fdmnes:main",
+        category="xafs",
+        help="Print the recommended external FDMNES HPC/KIT setup pattern.",
+        prepend_args=("install-plan",),
     ),
     CommandSpec(
         aliases=("molcas-xanes-spectrum", "molcas_xanes_spectrum", "xanes-molcas-spectrum"),

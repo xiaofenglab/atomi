@@ -20,11 +20,18 @@ def test_command_registry_exposes_core_bridge_aliases() -> None:
     assert "aq-thermo-bridge" in aliases
     assert "qe-wannier-bridge" in aliases
     assert "molcas-exatomic-bridge" in aliases
+    assert "fdmnes-xanes-bridge" in aliases
+    assert "fdmnes-xanes-status" in aliases
+    assert "fdmnes-xanes-install-plan" in aliases
     assert registry["mode4-surface"].target == "atomi.zentropy.mode4_surface:main"
     assert registry["crystal-graph-dataset"].target == "atomi.ml.crystal_graph_dataset:main"
     assert registry["local-structure"].target == "atomi.local_structure:main"
+    assert registry["fdmnes-xanes-bridge"].target == "atomi.xafs.fdmnes:main"
+    assert registry["fdmnes-xanes-status"].prepend_args == ("status",)
+    assert registry["fdmnes-xanes-install-plan"].prepend_args == ("install-plan",)
     assert "zentropy" in specs_by_category()
     assert "structure" in specs_by_category()
+    assert "xafs" in specs_by_category()
 
 
 def test_command_spec_invokes_target_with_prepended_args(monkeypatch) -> None:

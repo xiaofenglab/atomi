@@ -9,6 +9,9 @@ Route A
 Route B
     VASP/DFT+U parent context -> QE/OCEAN periodic-solid XANES/BSE workflow.
 
+Route C
+    VASP-relaxed structures -> FDMNES quick XANES scaffold and collection.
+
 The route map is intentionally method-level and material-agnostic so project
 students can apply it to UC2, U4O9, molten salts, aqueous clusters, or future
 systems without rewriting the policy.
@@ -80,29 +83,62 @@ ROUTE_B = {
 }
 
 
+ROUTE_C = {
+    "id": "route_c_vasp_fdmnes",
+    "label": "Route C: VASP structure -> FDMNES quick XANES",
+    "purpose": (
+        "Quick FDMNES XANES screen from a VASP-relaxed periodic structure or "
+        "cluster-like POSCAR, with VASP settings recorded as provenance."
+    ),
+    "commands": [
+        "atomi fdmnes-xanes-status",
+        "atomi fdmnes-xanes-bridge prepare --vasp-dir vasp_relax --absorber Ce --edge L3 --outdir fdmnes_Ce_L3",
+        "sbatch fdmnes_Ce_L3/submit_fdmnes_xanes.sbatch",
+        "atomi fdmnes-xanes-bridge collect --fdmnes-dir fdmnes_Ce_L3 --write fdmnes_Ce_L3/fdmnes_xanes_summary.json",
+    ],
+    "strengths": [
+        "Fast route-C screen for comparing absorber sites, oxidation states, and structural variants.",
+        "Works directly from VASP relaxation outputs once structural guards pass.",
+        "Useful triage companion before slower OCEAN or multireference Molcas production.",
+    ],
+    "guards": [
+        "Validate absorber index, edge, radius, SCF/Green/convolution/spin-orbit settings, and output energy alignment.",
+        "Record that VASP CHGCAR/WAVECAR are not consumed directly by the Atomi FDMNES scaffold.",
+        "For lanthanide/actinide L/M edges, compare against Molcas/OCEAN when multiplet or BSE physics controls interpretation.",
+    ],
+    "limits": [
+        "Atomi writes a reviewable FDMNES scaffold; FDMNES input physics remains project-specific.",
+        "Not a replacement for Molcas multiplet/root analysis or OCEAN periodic BSE screening.",
+    ],
+}
+
+
 def build_xafs_route_status(check_runtime: bool = False) -> dict[str, Any]:
     """Return the Atomi XAFS route map and, optionally, runtime probes."""
     status: dict[str, Any] = {
         "schema": "atomi.xafs.routes.v1",
-        "route_order": ["route_a_vasp_feff_larch", "route_b_qe_ocean"],
-        "routes": [ROUTE_A, ROUTE_B],
+        "route_order": ["route_a_vasp_feff_larch", "route_b_qe_ocean", "route_c_vasp_fdmnes"],
+        "routes": [ROUTE_A, ROUTE_B, ROUTE_C],
         "project_policy": {
             "comparison_rule": (
-                "For UC2 and U4O9, run Route A FEFF/Larch alongside Route B "
-                "QE/OCEAN when possible; record both in student reports and "
-                "promote only after route-specific guards pass."
+                "For UC2, U4O9, CeO2/CeO8, and future actinide/lanthanide spectra, "
+                "use Route C FDMNES for quick screening, Route A FEFF/Larch for "
+                "cluster/MD comparisons, and Route B OCEAN for periodic BSE checks "
+                "when possible. Record route-specific guards in student reports."
             ),
             "portfolio_owner": "Sarah",
             "atomi_owner": "Anna",
         },
     }
     if check_runtime:
-        from atomi.xafs.ocean import build_status_report as build_ocean_status_report
+        from atomi.xafs.fdmnes import probe_fdmnes
+        from atomi.xafs.ocean import probe_ocean
         from atomi.xafs.status import build_xafs_status
 
         status["runtime"] = {
             "route_a_larch_feff": build_xafs_status(),
-            "route_b_ocean": build_ocean_status_report(argparse.Namespace(executable=None, root=None, bin=None)),
+            "route_b_ocean": {"ocean": probe_ocean()},
+            "route_c_fdmnes": {"fdmnes": probe_fdmnes()},
         }
     return status
 
@@ -122,16 +158,18 @@ def print_route_status(status: dict[str, Any]) -> None:
     if "runtime" in status:
         route_a = status["runtime"]["route_a_larch_feff"]
         route_b = status["runtime"]["route_b_ocean"]["ocean"]
+        route_c = status["runtime"]["route_c_fdmnes"]["fdmnes"]
         print("  runtime summary:")
         print(f"    Route A Larch mode : {route_a.get('larch_mode')}")
         print(f"    Route A FEFF env   : {route_a.get('feff_executable') or 'not configured'}")
         print(f"    Route B OCEAN      : {'available' if route_b.get('available') else 'missing'} ({route_b.get('resolved_executable') or route_b.get('executable')})")
+        print(f"    Route C FDMNES     : {'available' if route_c.get('available') else 'missing'} ({route_c.get('resolved_executable') or route_c.get('executable')})")
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="xafs_routes",
-        description="Print Atomi XAFS Route A/B policy: VASP-FEFF/Larch vs QE-OCEAN.",
+        description="Print Atomi XAFS Route A/B/C policy: FEFF/Larch, OCEAN, and FDMNES.",
     )
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     parser.add_argument("--check-runtime", action="store_true", help="Also probe optional FEFF/Larch and OCEAN runtime status.")
