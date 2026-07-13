@@ -553,12 +553,23 @@ def prepare_main(args: argparse.Namespace) -> dict[str, Any]:
 
 def read_numeric_curve(path: Path) -> list[tuple[float, float]]:
     rows: list[tuple[float, float]] = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    header_index: int | None = None
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if "energy" in lowered and ("xanes" in lowered or "mu" in lowered):
+            header_index = idx
+            break
+    if header_index is not None:
+        lines = lines[header_index + 1 :]
+    for line in lines:
         stripped = line.strip()
         if not stripped or stripped.startswith(("#", "!", "Title", "End")):
             continue
         parts = stripped.replace(",", " ").split()
         if len(parts) < 2:
+            continue
+        if header_index is not None and len(parts) != 2:
             continue
         try:
             rows.append((float(parts[0]), float(parts[1])))

@@ -173,3 +173,22 @@ def test_fdmnes_collect_summarizes_numeric_spectrum(tmp_path: Path) -> None:
     assert summary["n_points"] == 3
     assert summary["peak_energy"] == 1.0
     assert json.loads(out.read_text(encoding="utf-8"))["intensity_max"] == 2.0
+
+
+def test_fdmnes_collect_skips_metadata_before_xanes_table(tmp_path: Path) -> None:
+    spectrum = tmp_path / "fdmnes_out.txt"
+    spectrum.write_text(
+        " 17166.300   92  2  3  5.3441817E-01 = E_edge, Z, n_edge\n"
+        "    Energy    <xanes>\n"
+        "  -20.0000  1.0483774E-05\n"
+        "   0.50000  1.6542545E-03\n",
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(fdmnes_dir=tmp_path, spectrum=spectrum, write=None)
+
+    summary = fdmnes.collect_main(args)
+
+    assert summary["n_points"] == 2
+    assert summary["energy_min"] == -20.0
+    assert summary["energy_max"] == 0.5
+    assert summary["peak_energy"] == 0.5
