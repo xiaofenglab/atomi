@@ -53,7 +53,7 @@ def test_fdmnes_prepare_writes_vasp_connected_workspace(tmp_path: Path) -> None:
         outdir=outdir,
         output_prefix="ce_l3_quick",
         radius=7.5,
-        energy_range="-15 70 0.5",
+        energy_range="-15 0.5 70",
         green=True,
         scf=True,
         quadrupole=True,
@@ -79,7 +79,7 @@ def test_fdmnes_prepare_writes_vasp_connected_workspace(tmp_path: Path) -> None:
     fdmfile = (outdir / "fdmfile.txt").read_text(encoding="utf-8")
 
     assert "Filout\nce_l3_quick" in fdmnes_input
-    assert "Range\n-15 70 0.5" in fdmnes_input
+    assert "Range\n-15 0.5 70" in fdmnes_input
     assert "Radius\n7.500000" in fdmnes_input
     assert "Edge\nL3" in fdmnes_input
     assert "Absorber\n1" in fdmnes_input
@@ -134,7 +134,7 @@ def test_fdmnes_prepare_accepts_vasp_split_species_labels(tmp_path: Path) -> Non
         outdir=outdir,
         output_prefix="uo2_u_l3",
         radius=6.0,
-        energy_range="-20 80 0.5",
+        energy_range="-20 0.5 80",
         green=True,
         scf=False,
         quadrupole=False,

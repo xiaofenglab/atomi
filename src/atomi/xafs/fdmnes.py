@@ -313,7 +313,10 @@ def write_fdmnes_input(args: argparse.Namespace, outdir: Path) -> tuple[Path, di
     output_prefix = _fdmnes_output_prefix(args)
     range_tokens = str(args.energy_range).split()
     if len(range_tokens) < 2:
-        raise ValueError("--energy-range should contain at least start and stop values, e.g. '-20 80 0.5'")
+        raise ValueError(
+            "--energy-range should follow FDMNES Range grammar, e.g. '-20 0.5 80' "
+            "for first energy, step, last energy."
+        )
     a, b, c = poscar["lengths"]
     alpha, beta, gamma = poscar["angles"]
     lines = [
@@ -640,7 +643,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--outdir", type=Path, default=Path("fdmnes_xanes"))
     p.add_argument("--output-prefix", default="", help="FDMNES Filout prefix. Defaults to fdmnes_<absorber>_<edge>.")
     p.add_argument("--radius", type=float, default=6.0, help="FDMNES cluster radius in Angstrom.")
-    p.add_argument("--energy-range", default="-20 80 0.5", help="FDMNES Range line, e.g. '-20 80 0.5'.")
+    p.add_argument(
+        "--energy-range",
+        default="-20 0.5 80",
+        help="FDMNES Range line: first energy, step, intermediate energy, step, last energy; e.g. '-20 0.5 80'.",
+    )
     p.add_argument("--green", action="store_true", default=True, help="Include Green keyword.")
     p.add_argument("--no-green", dest="green", action="store_false", help="Do not include Green keyword.")
     p.add_argument("--scf", action="store_true", default=True, help="Include SCF keyword.")
