@@ -36,7 +36,33 @@ class AlignedSpectrum:
     energy_aligned: tuple[float, ...]
 
 
+@dataclass(frozen=True)
+class Stick:
+    energy: float
+    intensity: float
+    state_label: str
+    assignment: str
+
+
+@dataclass(frozen=True)
+class StickSet:
+    label: str
+    parent_label: str
+    kind: str
+    sticks: tuple[Stick, ...]
+    source: str
+
+
+@dataclass(frozen=True)
+class AlignedStickSet:
+    stick_set: StickSet
+    energy_shift: float
+    sticks: tuple[tuple[Stick, float], ...]
+
+
 XANES_DEFAULT_ENERGY_WINDOW = (-200.0, 300.0)
+STICK_ENERGY_COLUMNS = ("energy_rel_eV", "energy_aligned", "energy_ev", "transition_energy_ev", "energy")
+STICK_INTENSITY_COLUMNS = ("oscillator_strength", "strength", "relative_intensity", "intensity", "xanes", "<xanes>", "mu")
 
 
 def _is_number(value: str) -> bool:
@@ -104,6 +130,94 @@ def read_spectrum(path: Path, *, label: str, kind: str, energy_column: str, inte
     )
 
 
+def _read_stick_table(path: Path) -> list[dict[str, str]]:
+    lines = [
+        line
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if line.strip() and not line.lstrip().startswith(("#", "!", ";"))
+    ]
+    if not lines:
+        return []
+    if "," in lines[0]:
+        return [dict(row) for row in csv.DictReader(lines) if row]
+
+    rows: list[dict[str, str]] = []
+    header: list[str] | None = None
+    for raw in lines:
+        parts = _split_data_line(raw)
+        if not parts:
+            continue
+        if header is None and any(not _is_number(part) for part in parts):
+            header = parts
+            continue
+        if header is not None and len(parts) >= len(header):
+            rows.append({name: parts[i] for i, name in enumerate(header)})
+        elif len(parts) >= 2 and _is_number(parts[0]) and _is_number(parts[1]):
+            rows.append({"energy": parts[0], "intensity": parts[1]})
+    return rows
+
+
+def _pick_column(row: dict[str, str], requested: str, candidates: tuple[str, ...], *, role: str) -> str:
+    if requested:
+        if requested not in row:
+            raise ValueError(f"Requested {role} column {requested!r} was not found.")
+        return requested
+    lookup = {key.strip().lower(): key for key in row}
+    for candidate in candidates:
+        found = lookup.get(candidate.lower())
+        if found is not None:
+            return found
+    raise ValueError(f"Could not infer {role} column. Available columns: {', '.join(row)}")
+
+
+def _optional_column(row: dict[str, str], requested: str, candidates: tuple[str, ...]) -> str | None:
+    if requested:
+        return requested if requested in row else None
+    lookup = {key.strip().lower(): key for key in row}
+    for candidate in candidates:
+        found = lookup.get(candidate.lower())
+        if found is not None:
+            return found
+    return None
+
+
+def read_sticks(
+    path: Path,
+    *,
+    label: str,
+    parent_label: str,
+    kind: str,
+    energy_column: str = "",
+    intensity_column: str = "",
+    state_column: str = "",
+    assignment_column: str = "",
+) -> StickSet:
+    rows = _read_stick_table(path.expanduser())
+    if not rows:
+        raise ValueError(f"No stick/transition rows found in {path}")
+    first = rows[0]
+    energy_key = _pick_column(first, energy_column, STICK_ENERGY_COLUMNS, role="stick energy")
+    intensity_key = _pick_column(first, intensity_column, STICK_INTENSITY_COLUMNS, role="stick intensity")
+    state_key = _optional_column(first, state_column, ("state_label", "state", "transition", "transition_label", "label"))
+    assignment_key = _optional_column(first, assignment_column, ("assignment", "character", "target_label", "final_state", "note"))
+
+    sticks: list[Stick] = []
+    for idx, row in enumerate(rows, start=1):
+        try:
+            energy = float(row[energy_key])
+            intensity = float(row[intensity_key])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isfinite(energy) or not math.isfinite(intensity) or intensity <= 0:
+            continue
+        state_label = (row.get(state_key, "") if state_key else "") or f"{label} #{idx}"
+        assignment = (row.get(assignment_key, "") if assignment_key else "") or state_label
+        sticks.append(Stick(energy=energy, intensity=intensity, state_label=state_label, assignment=assignment))
+    if not sticks:
+        raise ValueError(f"No positive numeric sticks were found in {path}")
+    return StickSet(label=label, parent_label=parent_label, kind=kind, sticks=tuple(sticks), source=str(path.expanduser()))
+
+
 def white_line_energy(spectrum: Spectrum, *, window: tuple[float, float] | None = None) -> float:
     candidates: list[tuple[float, float]] = []
     for energy, intensity in zip(spectrum.energy, spectrum.intensity):
@@ -145,6 +259,24 @@ def align_spectra(
     return aligned
 
 
+def align_stick_sets(stick_sets: list[StickSet], aligned: list[AlignedSpectrum]) -> list[AlignedStickSet]:
+    shift_by_label = {item.spectrum.label: item.energy_shift for item in aligned}
+    shift_by_kind = {item.spectrum.kind.lower(): item.energy_shift for item in aligned}
+    result: list[AlignedStickSet] = []
+    for stick_set in stick_sets:
+        shift = shift_by_label.get(stick_set.parent_label)
+        if shift is None:
+            shift = shift_by_kind.get(stick_set.parent_label.lower(), 0.0)
+        result.append(
+            AlignedStickSet(
+                stick_set=stick_set,
+                energy_shift=shift,
+                sticks=tuple((stick, stick.energy + shift) for stick in stick_set.sticks),
+            )
+        )
+    return result
+
+
 def write_overlay_csv(path: Path, aligned: list[AlignedSpectrum]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -174,6 +306,45 @@ def write_overlay_csv(path: Path, aligned: list[AlignedSpectrum]) -> None:
                         f"{intensity:.10g}",
                         f"{item.white_line_energy:.10g}",
                         f"{item.energy_shift:.10g}",
+                    ]
+                )
+
+
+def write_sticks_csv(path: Path, aligned_sticks: list[AlignedStickSet]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "label",
+                "parent_label",
+                "kind",
+                "source",
+                "energy_raw",
+                "energy_aligned",
+                "intensity",
+                "relative_intensity",
+                "energy_shift",
+                "state_label",
+                "assignment",
+            ]
+        )
+        for item in aligned_sticks:
+            max_intensity = max((stick.intensity for stick, _ in item.sticks), default=1.0)
+            for stick, aligned_energy in item.sticks:
+                writer.writerow(
+                    [
+                        item.stick_set.label,
+                        item.stick_set.parent_label,
+                        item.stick_set.kind,
+                        item.stick_set.source,
+                        f"{stick.energy:.10g}",
+                        f"{aligned_energy:.10g}",
+                        f"{stick.intensity:.10g}",
+                        f"{stick.intensity / max_intensity:.10g}" if max_intensity > 0 else "0",
+                        f"{item.energy_shift:.10g}",
+                        stick.state_label,
+                        stick.assignment,
                     ]
                 )
 
@@ -212,6 +383,30 @@ def filter_aligned_spectra(
     return clipped
 
 
+def filter_aligned_sticks(
+    aligned_sticks: list[AlignedStickSet],
+    *,
+    energy_window: tuple[float, float] | None,
+    relative_threshold: float,
+) -> list[AlignedStickSet]:
+    if not aligned_sticks:
+        return []
+    threshold = max(0.0, min(1.0, relative_threshold))
+    clipped: list[AlignedStickSet] = []
+    for item in aligned_sticks:
+        max_intensity = max((stick.intensity for stick, _ in item.sticks), default=0.0)
+        keep: list[tuple[Stick, float]] = []
+        for stick, aligned_energy in item.sticks:
+            if energy_window is not None and not (energy_window[0] <= aligned_energy <= energy_window[1]):
+                continue
+            if max_intensity > 0 and stick.intensity < threshold * max_intensity:
+                continue
+            keep.append((stick, aligned_energy))
+        if keep:
+            clipped.append(AlignedStickSet(stick_set=item.stick_set, energy_shift=item.energy_shift, sticks=tuple(keep)))
+    return clipped
+
+
 def _svg_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -224,14 +419,19 @@ def write_overlay_svg(
     path: Path,
     aligned: list[AlignedSpectrum],
     *,
+    stick_sets: list[AlignedStickSet] | None = None,
     title: str = "XANES overlay",
     x_label: str = "Aligned energy (eV)",
     y_label: str = "Normalized absorption",
     experimental_style: str = "dashed",
+    stick_label_relative_threshold: float = 0.25,
+    max_stick_labels: int = 12,
 ) -> None:
     if not aligned:
         raise ValueError("No aligned spectra to plot")
     path.parent.mkdir(parents=True, exist_ok=True)
+    stick_sets = stick_sets or []
+    has_sticks = any(item.sticks for item in stick_sets)
     x_values = [x for item in aligned for x in item.energy_aligned]
     y_values = [y for item in aligned for y in item.spectrum.intensity]
     xmin, xmax = min(x_values), max(x_values)
@@ -245,9 +445,12 @@ def write_overlay_svg(
     ypad = 0.08 * (ymax - ymin)
     ymin -= ypad
     ymax += ypad
-    width, height = 940, 580
+    width, height = 940, 740 if has_sticks else 580
     ml, mr, mt, mb = 86, 42, 64, 76
-    pw, ph = width - ml - mr, height - mt - mb
+    pw = width - ml - mr
+    curve_bottom = height - mb if not has_sticks else 452
+    ph = curve_bottom - mt
+    axis_label_y = height - mb + 24
 
     def sx(x: float) -> float:
         return ml + (x - xmin) / (xmax - xmin) * pw
@@ -269,17 +472,22 @@ def write_overlay_svg(
     for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
         xv = xmin + frac * (xmax - xmin)
         x = sx(xv)
-        lines.append(f'<line x1="{x:.2f}" x2="{x:.2f}" y1="{mt}" y2="{height - mb}" stroke="#f1f3f5" stroke-width="1"/>')
-        lines.append(f'<text x="{x:.2f}" y="{height - mb + 24}" font-family="Arial, Helvetica, sans-serif" font-size="12" text-anchor="middle" fill="#59636f">{xv:.3g}</text>')
-    lines.append(f'<line x1="{ml}" x2="{width - mr}" y1="{height - mb}" y2="{height - mb}" stroke="#303640" stroke-width="1.3"/>')
-    lines.append(f'<line x1="{ml}" x2="{ml}" y1="{mt}" y2="{height - mb}" stroke="#303640" stroke-width="1.3"/>')
+        grid_bottom = height - mb if has_sticks else curve_bottom
+        lines.append(f'<line x1="{x:.2f}" x2="{x:.2f}" y1="{mt}" y2="{grid_bottom}" stroke="#f1f3f5" stroke-width="1"/>')
+        lines.append(f'<text x="{x:.2f}" y="{axis_label_y}" font-family="Arial, Helvetica, sans-serif" font-size="12" text-anchor="middle" fill="#59636f">{xv:.3g}</text>')
+    lines.append(f'<line x1="{ml}" x2="{width - mr}" y1="{curve_bottom}" y2="{curve_bottom}" stroke="#303640" stroke-width="1.3"/>')
+    lines.append(f'<line x1="{ml}" x2="{ml}" y1="{mt}" y2="{curve_bottom}" stroke="#303640" stroke-width="1.3"/>')
     lines.append(f'<text x="{ml + pw / 2:.1f}" y="{height - 24}" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="600" text-anchor="middle" fill="#2f3640">{_svg_escape(x_label)}</text>')
     lines.append(f'<text x="24" y="{mt + ph / 2:.1f}" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="600" text-anchor="middle" fill="#2f3640" transform="rotate(-90 24 {mt + ph / 2:.1f})">{_svg_escape(y_label)}</text>')
 
     legend_y = mt + 10
+    color_by_label: dict[str, str] = {}
+    color_by_kind: dict[str, str] = {}
     for idx, item in enumerate(aligned):
         color = colors[idx % len(colors)]
         spectrum = item.spectrum
+        color_by_label[spectrum.label] = color
+        color_by_kind[spectrum.kind.lower()] = color
         points = [(sx(x), sy(y)) for x, y in zip(item.energy_aligned, spectrum.intensity)]
         is_exp = spectrum.kind.lower() in {"exp", "experiment", "experimental"}
         dash = ' stroke-dasharray="7 5"' if is_exp and experimental_style == "dashed" else ""
@@ -293,6 +501,36 @@ def write_overlay_svg(
         ly = legend_y + 24 * idx
         lines.append(f'<line x1="{lx}" x2="{lx + 34}" y1="{ly}" y2="{ly}" stroke="{color}" stroke-width="{width_attr}"{dash}/>')
         lines.append(f'<text x="{lx + 44}" y="{ly + 4}" font-family="Arial, Helvetica, sans-serif" font-size="12.5" fill="#2f3640">{_svg_escape(spectrum.label)} ({spectrum.kind}, shift {item.energy_shift:.3g} eV)</text>')
+    if has_sticks:
+        stick_top = curve_bottom + 48
+        stick_baseline = height - mb - 48
+        stick_height = max(24.0, stick_baseline - stick_top)
+        lines.append(f'<text x="{ml}" y="{curve_bottom + 30}" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="600" fill="#2f3640">Transition / feature sticks</text>')
+        lines.append(f'<line x1="{ml}" x2="{width - mr}" y1="{stick_baseline:.2f}" y2="{stick_baseline:.2f}" stroke="#303640" stroke-width="1.1"/>')
+        lines.append(f'<line x1="{ml}" x2="{ml}" y1="{stick_top:.2f}" y2="{stick_baseline:.2f}" stroke="#303640" stroke-width="1.1"/>')
+        for frac in (0.5, 1.0):
+            y = stick_baseline - frac * stick_height
+            lines.append(f'<line x1="{ml}" x2="{width - mr}" y1="{y:.2f}" y2="{y:.2f}" stroke="#eef1f4" stroke-width="1"/>')
+            lines.append(f'<text x="{ml - 10}" y="{y + 4:.2f}" font-family="Arial, Helvetica, sans-serif" font-size="11" text-anchor="end" fill="#59636f">{frac:.1g}</text>')
+        label_candidates: list[tuple[float, float, float, Stick, str]] = []
+        label_threshold = max(0.0, min(1.0, stick_label_relative_threshold))
+        for idx, item in enumerate(stick_sets):
+            color = color_by_label.get(item.stick_set.parent_label) or color_by_kind.get(item.stick_set.parent_label.lower()) or colors[(idx + len(aligned)) % len(colors)]
+            max_intensity = max((stick.intensity for stick, _ in item.sticks), default=1.0)
+            if max_intensity <= 0:
+                continue
+            for stick, aligned_energy in item.sticks:
+                if aligned_energy < xmin or aligned_energy > xmax:
+                    continue
+                relative = stick.intensity / max_intensity
+                x = sx(aligned_energy)
+                y = stick_baseline - relative * stick_height
+                lines.append(f'<line x1="{x:.2f}" x2="{x:.2f}" y1="{stick_baseline:.2f}" y2="{y:.2f}" stroke="{color}" stroke-width="1.6" opacity="0.88"/>')
+                if relative >= label_threshold:
+                    label_candidates.append((relative, x, y, stick, color))
+        for _, x, y, stick, color in sorted(label_candidates, key=lambda row: row[0], reverse=True)[:max_stick_labels]:
+            label = stick.state_label or stick.assignment
+            lines.append(f'<text x="{x + 4:.2f}" y="{stick_baseline + 18:.2f}" font-family="Arial, Helvetica, sans-serif" font-size="10.5" fill="{color}" transform="rotate(55 {x + 4:.2f} {stick_baseline + 18:.2f})">{_svg_escape(label[:44])}</text>')
     lines.append("</svg>")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -332,6 +570,38 @@ def _load_from_spec(spec: str, default_kind: str, energy_column: str, intensity_
     return read_spectrum(Path(path_text), label=label, kind=kind, energy_column=energy_column, intensity_column=intensity_column)
 
 
+def _load_sticks_from_spec(
+    spec: str,
+    *,
+    energy_column: str,
+    intensity_column: str,
+    state_column: str,
+    assignment_column: str,
+) -> StickSet:
+    parts = spec.split(":", 2)
+    if len(parts) == 1:
+        path = Path(parts[0])
+        label = path.stem
+        parent_label = label
+    elif len(parts) == 2:
+        label, path_text = parts
+        parent_label = label
+        path = Path(path_text)
+    else:
+        label, parent_label, path_text = parts
+        path = Path(path_text)
+    return read_sticks(
+        path,
+        label=label,
+        parent_label=parent_label,
+        kind="sticks",
+        energy_column=energy_column,
+        intensity_column=intensity_column,
+        state_column=state_column,
+        assignment_column=assignment_column,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -354,6 +624,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--intensity-column", default="intensity")
     parser.add_argument("--exp-energy-column", default="", help="Override energy column for --exp.")
     parser.add_argument("--exp-intensity-column", default="", help="Override intensity column for --exp.")
+    parser.add_argument(
+        "--sticks",
+        action="append",
+        default=[],
+        help=(
+            "Optional transition/feature sticks as PATH, LABEL:PATH, or LABEL:PARENT_LABEL:PATH. "
+            "PARENT_LABEL should match a spectrum label or kind so sticks receive the same energy shift."
+        ),
+    )
+    parser.add_argument("--stick-energy-column", default="", help="Override stick energy column; otherwise inferred.")
+    parser.add_argument("--stick-intensity-column", default="", help="Override stick intensity/oscillator-strength column; otherwise inferred.")
+    parser.add_argument("--stick-state-column", default="", help="Optional stick state-label column.")
+    parser.add_argument("--stick-assignment-column", default="", help="Optional stick assignment/character column.")
+    parser.add_argument("--stick-relative-threshold", type=float, default=0.05, help="Only plot sticks with intensity >= this fraction of the maximum for that stick set.")
+    parser.add_argument("--stick-label-relative-threshold", type=float, default=0.25, help="Only label sticks with intensity >= this fraction of the maximum for that stick set.")
+    parser.add_argument("--max-stick-labels", type=int, default=12)
+    parser.add_argument("--out-sticks-csv", type=Path, help="Write aligned sticks to CSV. Defaults to OUT_CSV stem plus '_sticks.csv' when --sticks is used.")
     parser.add_argument("--align", choices=["white-line", "none"], default="white-line")
     parser.add_argument("--white-line-window", default="", help="Optional raw-energy window used to find white-line maxima, e.g. '0 35'.")
     parser.add_argument(
@@ -384,9 +671,38 @@ def overlay_main(args: argparse.Namespace) -> dict[str, Any]:
     aligned = align_spectra(spectra, align=args.align, white_line_window=_parse_window(args.white_line_window))
     energy_window = _effective_energy_window(args)
     output_aligned = filter_aligned_spectra(aligned, energy_window=energy_window)
+    stick_sets = [
+        _load_sticks_from_spec(
+            spec,
+            energy_column=args.stick_energy_column,
+            intensity_column=args.stick_intensity_column,
+            state_column=args.stick_state_column,
+            assignment_column=args.stick_assignment_column,
+        )
+        for spec in args.sticks
+    ]
+    aligned_sticks = align_stick_sets(stick_sets, aligned)
+    output_sticks = filter_aligned_sticks(
+        aligned_sticks,
+        energy_window=energy_window,
+        relative_threshold=args.stick_relative_threshold,
+    )
     write_overlay_csv(args.out_csv, output_aligned)
+    sticks_csv = args.out_sticks_csv
+    if sticks_csv is None and output_sticks:
+        sticks_csv = args.out_csv.with_name(f"{args.out_csv.stem}_sticks.csv")
+    if sticks_csv is not None and output_sticks:
+        write_sticks_csv(sticks_csv, output_sticks)
     if args.out_svg:
-        write_overlay_svg(args.out_svg, output_aligned, title=args.title, experimental_style=args.exp_style)
+        write_overlay_svg(
+            args.out_svg,
+            output_aligned,
+            stick_sets=output_sticks,
+            title=args.title,
+            experimental_style=args.exp_style,
+            stick_label_relative_threshold=args.stick_label_relative_threshold,
+            max_stick_labels=args.max_stick_labels,
+        )
     summary = {
         "schema": "atomi.xafs.xanes_overlay.v1",
         "mode": args.mode,
@@ -395,6 +711,7 @@ def overlay_main(args: argparse.Namespace) -> dict[str, Any]:
         "energy_window_aligned_eV": list(energy_window) if energy_window is not None else None,
         "out_csv": str(args.out_csv),
         "out_svg": str(args.out_svg) if args.out_svg else None,
+        "out_sticks_csv": str(sticks_csv) if sticks_csv is not None else None,
         "spectra": [
             {
                 "label": item.spectrum.label,
@@ -404,6 +721,17 @@ def overlay_main(args: argparse.Namespace) -> dict[str, Any]:
                 "energy_shift": item.energy_shift,
             }
             for item in aligned
+        ],
+        "sticks": [
+            {
+                "label": item.stick_set.label,
+                "parent_label": item.stick_set.parent_label,
+                "source": item.stick_set.source,
+                "energy_shift": item.energy_shift,
+                "n_sticks_total": len(item.stick_set.sticks),
+                "n_sticks_plotted": len(next((out.sticks for out in output_sticks if out.stick_set.label == item.stick_set.label), ())),
+            }
+            for item in aligned_sticks
         ],
     }
     print(json.dumps(summary, indent=2, sort_keys=True))

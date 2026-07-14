@@ -10,6 +10,7 @@ for project-specific FDMNES convergence checks or for Molcas/OCEAN physics.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import os
@@ -581,6 +582,86 @@ def read_numeric_curve(path: Path) -> list[tuple[float, float]]:
     return rows
 
 
+def _find_raw_spectrum(root: Path, explicit: Path | None = None) -> Path:
+    if explicit is not None:
+        return explicit.expanduser()
+    skip_fragments = ("_conv", "_bav", "stdout", "stderr", "status", "project", "fdmnes.inp", "fdmfile")
+    for candidate in sorted(root.glob("*.txt")) + sorted(root.glob("*.dat")):
+        lowered = candidate.name.lower()
+        if any(fragment in lowered for fragment in skip_fragments):
+            continue
+        if read_numeric_curve(candidate):
+            return candidate
+    raise FileNotFoundError(f"No raw/unbroadened numeric FDMNES spectrum found in {root}")
+
+
+def extract_feature_sticks(
+    rows: list[tuple[float, float]],
+    *,
+    min_relative: float = 0.08,
+    min_separation_ev: float = 1.0,
+    max_peaks: int = 24,
+) -> list[dict[str, Any]]:
+    finite = [(energy, intensity) for energy, intensity in rows if math.isfinite(energy) and math.isfinite(intensity)]
+    if not finite:
+        return []
+    ymin = min(intensity for _, intensity in finite)
+    ymax = max(intensity for _, intensity in finite)
+    span = max(ymax - ymin, ymax, 1.0e-30)
+    threshold = ymin + max(0.0, min(1.0, min_relative)) * (ymax - ymin)
+    candidates: list[tuple[float, float, float]] = []
+    for idx in range(1, len(finite) - 1):
+        energy, intensity = finite[idx]
+        if intensity < threshold:
+            continue
+        if intensity >= finite[idx - 1][1] and intensity >= finite[idx + 1][1]:
+            candidates.append((energy, intensity, (intensity - ymin) / span))
+    if not candidates:
+        energy, intensity = max(finite, key=lambda row: row[1])
+        candidates.append((energy, intensity, (intensity - ymin) / span))
+
+    selected: list[tuple[float, float, float]] = []
+    for energy, intensity, relative in sorted(candidates, key=lambda row: row[1], reverse=True):
+        if any(abs(energy - kept_energy) < min_separation_ev for kept_energy, _, _ in selected):
+            continue
+        selected.append((energy, intensity, relative))
+        if len(selected) >= max_peaks:
+            break
+
+    sticks: list[dict[str, Any]] = []
+    for idx, (energy, intensity, relative) in enumerate(sorted(selected, key=lambda row: row[0]), start=1):
+        sticks.append(
+            {
+                "energy_rel_eV": energy,
+                "intensity": max(intensity - ymin, 0.0),
+                "relative_intensity": relative,
+                "state_label": f"FDMNES feature {idx}",
+                "assignment": "raw FDMNES local maximum; feature marker, not a state-resolved transition",
+            }
+        )
+    return sticks
+
+
+def write_feature_sticks_csv(path: Path, sticks: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["energy_rel_eV", "intensity", "relative_intensity", "state_label", "assignment"],
+        )
+        writer.writeheader()
+        for row in sticks:
+            writer.writerow(
+                {
+                    "energy_rel_eV": f"{float(row['energy_rel_eV']):.10g}",
+                    "intensity": f"{float(row['intensity']):.10g}",
+                    "relative_intensity": f"{float(row['relative_intensity']):.10g}",
+                    "state_label": row["state_label"],
+                    "assignment": row["assignment"],
+                }
+            )
+
+
 def _find_spectrum(root: Path, explicit: Path | None) -> Path:
     if explicit is not None:
         return explicit.expanduser()
@@ -614,6 +695,26 @@ def collect_main(args: argparse.Namespace) -> dict[str, Any]:
         "intensity_max": max(intensities),
         "peak_energy": rows[intensities.index(max(intensities))][0],
     }
+    write_feature_sticks = getattr(args, "write_feature_sticks", None)
+    if write_feature_sticks:
+        feature_source = _find_raw_spectrum(root, getattr(args, "feature_source", None))
+        feature_rows = read_numeric_curve(feature_source)
+        feature_sticks = extract_feature_sticks(
+            feature_rows,
+            min_relative=getattr(args, "feature_min_relative", 0.08),
+            min_separation_ev=getattr(args, "feature_min_separation_ev", 1.0),
+            max_peaks=getattr(args, "feature_max_peaks", 24),
+        )
+        write_feature_sticks_csv(write_feature_sticks, feature_sticks)
+        summary["feature_sticks"] = {
+            "source": str(feature_source.resolve()),
+            "csv": str(write_feature_sticks),
+            "n_features": len(feature_sticks),
+            "min_relative": getattr(args, "feature_min_relative", 0.08),
+            "min_separation_ev": getattr(args, "feature_min_separation_ev", 1.0),
+            "max_peaks": getattr(args, "feature_max_peaks", 24),
+            "note": "FDMNES feature sticks are raw-spectrum local maxima, not state-resolved oscillator-strength transitions.",
+        }
     if args.write:
         _json_dump(summary, args.write)
     else:
@@ -671,6 +772,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fdmnes-dir", type=Path, default=Path("."))
     p.add_argument("--spectrum", type=Path)
     p.add_argument("--write", type=Path)
+    p.add_argument("--write-feature-sticks", type=Path, help="Write raw FDMNES local maxima as feature-stick CSV for xanes-overlay --sticks.")
+    p.add_argument("--feature-source", type=Path, help="Raw/unbroadened FDMNES spectrum used for feature-stick extraction.")
+    p.add_argument("--feature-min-relative", type=float, default=0.08)
+    p.add_argument("--feature-min-separation-ev", type=float, default=1.0)
+    p.add_argument("--feature-max-peaks", type=int, default=24)
     p.set_defaults(func=collect_main)
     return parser
 

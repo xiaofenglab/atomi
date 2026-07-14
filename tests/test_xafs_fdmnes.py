@@ -192,3 +192,37 @@ def test_fdmnes_collect_skips_metadata_before_xanes_table(tmp_path: Path) -> Non
     assert summary["energy_min"] == -20.0
     assert summary["energy_max"] == 0.5
     assert summary["peak_energy"] == 0.5
+
+
+def test_fdmnes_collect_writes_feature_sticks_from_raw_curve(tmp_path: Path) -> None:
+    raw = tmp_path / "uo2_raw.txt"
+    conv = tmp_path / "uo2_conv.txt"
+    raw.write_text(
+        "    Energy    <xanes>\n"
+        "-2.0 0.1\n"
+        "-1.0 1.0\n"
+        "0.0 0.2\n"
+        "1.0 0.9\n"
+        "2.0 0.1\n",
+        encoding="utf-8",
+    )
+    conv.write_text("Energy <xanes>\n-2.0 0.2\n0.0 1.1\n2.0 0.3\n", encoding="utf-8")
+    out = tmp_path / "summary.json"
+    sticks = tmp_path / "feature_sticks.csv"
+    args = argparse.Namespace(
+        fdmnes_dir=tmp_path,
+        spectrum=conv,
+        write=out,
+        write_feature_sticks=sticks,
+        feature_source=raw,
+        feature_min_relative=0.05,
+        feature_min_separation_ev=1.0,
+        feature_max_peaks=8,
+    )
+
+    summary = fdmnes.collect_main(args)
+    text = sticks.read_text(encoding="utf-8")
+
+    assert summary["feature_sticks"]["n_features"] == 2
+    assert "FDMNES feature 1" in text
+    assert "not a state-resolved transition" in text

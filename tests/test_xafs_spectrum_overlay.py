@@ -144,3 +144,56 @@ def test_exafs_mode_does_not_clip_energy_without_explicit_window(tmp_path):
     assert summary["energy_window_aligned_eV"] is None
     assert len([row for row in rows if row["label"] == "Exp"]) == 3
     assert len([row for row in rows if row["label"] == "OCEAN"]) == 3
+
+
+def test_overlay_cli_aligns_transition_sticks_to_parent_spectrum(tmp_path):
+    exp_path = tmp_path / "exp.csv"
+    sim_path = tmp_path / "molcas.csv"
+    sticks_path = tmp_path / "molcas_sticks.csv"
+    out_csv = tmp_path / "overlay.csv"
+    out_svg = tmp_path / "overlay.svg"
+    out_sticks = tmp_path / "overlay_sticks.csv"
+    exp_path.write_text("energy_rel_eV,norm\n0,0.1\n8,1.4\n20,0.9\n", encoding="utf-8")
+    sim_path.write_text("energy_rel_eV,intensity\n0,0.2\n12,1.1\n24,0.7\n", encoding="utf-8")
+    sticks_path.write_text(
+        "energy_rel_eV,oscillator_strength,state_label,assignment\n"
+        "12,1.0,SO1->SO8,Ce 2p -> Ce 5d\n"
+        "18,0.3,SO1->SO9,shoulder\n",
+        encoding="utf-8",
+    )
+
+    args = spectrum_overlay.build_parser().parse_args(
+        [
+            "--exp",
+            f"Exp:{exp_path}",
+            "--sim",
+            f"Molcas:molcas:{sim_path}",
+            "--sticks",
+            f"Molcas sticks:Molcas:{sticks_path}",
+            "--exp-intensity-column",
+            "norm",
+            "--white-line-window",
+            "0 20",
+            "--stick-relative-threshold",
+            "0",
+            "--stick-label-relative-threshold",
+            "0",
+            "--out-csv",
+            str(out_csv),
+            "--out-svg",
+            str(out_svg),
+            "--out-sticks-csv",
+            str(out_sticks),
+        ]
+    )
+    summary = spectrum_overlay.overlay_main(args)
+
+    rows = list(csv.DictReader(out_sticks.open(encoding="utf-8")))
+    svg = out_svg.read_text(encoding="utf-8")
+
+    assert summary["sticks"][0]["energy_shift"] == -4.0
+    assert rows[0]["energy_raw"] == "12"
+    assert rows[0]["energy_aligned"] == "8"
+    assert rows[0]["state_label"] == "SO1->SO8"
+    assert "Transition / feature sticks" in svg
+    assert "SO1-&gt;SO8" in svg
