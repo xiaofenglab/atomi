@@ -14,6 +14,7 @@ import csv
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -37,6 +38,45 @@ ATOMIC_NUMBERS = {
     "Ce": 58,
     "Gd": 64,
     "U": 92,
+}
+ATOMIC_SYMBOLS = {z: symbol for symbol, z in ATOMIC_NUMBERS.items()}
+
+EDGE_CORE_ORBITALS = {
+    "K": "1s",
+    "L1": "2s",
+    "L2": "2p1/2",
+    "L3": "2p3/2",
+    "M1": "3s",
+    "M2": "3p1/2",
+    "M3": "3p3/2",
+    "M4": "3d3/2",
+    "M5": "3d5/2",
+    "N4": "4d3/2",
+    "N5": "4d5/2",
+}
+
+D_TARGET_ORBITALS = {
+    "Ti": "3d",
+    "Nb": "4d",
+    "Ce": "5d",
+    "Gd": "5d",
+    "U": "6d",
+}
+
+F_TARGET_ORBITALS = {
+    "Ce": "4f",
+    "Gd": "4f",
+    "U": "5f",
+}
+
+ELEMENT_NAMES = {
+    "cerium": "Ce",
+    "gadolinium": "Gd",
+    "uranium": "U",
+    "niobium": "Nb",
+    "titanium": "Ti",
+    "calcium": "Ca",
+    "oxygen": "O",
 }
 
 SPECTRUM_CANDIDATES = (
@@ -595,12 +635,198 @@ def _find_raw_spectrum(root: Path, explicit: Path | None = None) -> Path:
     raise FileNotFoundError(f"No raw/unbroadened numeric FDMNES spectrum found in {root}")
 
 
+def _next_keyword_value(lines: list[str], keyword: str) -> str:
+    lowered = keyword.lower()
+    for idx, line in enumerate(lines[:-1]):
+        if line.strip().lower() == lowered:
+            return lines[idx + 1].strip()
+    return ""
+
+
+def _parse_z_from_spectrum_header(path: Path) -> int | None:
+    try:
+        first = path.read_text(encoding="utf-8", errors="replace").splitlines()[0]
+    except IndexError:
+        return None
+    if "E_edge" not in first or "Z" not in first:
+        return None
+    parts = first.split("=", 1)[0].split()
+    if len(parts) < 2:
+        return None
+    try:
+        return int(float(parts[1]))
+    except ValueError:
+        return None
+
+
+def _parse_edge_from_spectrum_header(path: Path) -> str:
+    try:
+        first = path.read_text(encoding="utf-8", errors="replace").splitlines()[0]
+    except IndexError:
+        return ""
+    if "E_edge" not in first or "n_edge" not in first:
+        return ""
+    parts = first.split("=", 1)[0].split()
+    if len(parts) < 4:
+        return ""
+    try:
+        n_edge = int(float(parts[2]))
+        j_edge = int(float(parts[3]))
+    except ValueError:
+        return ""
+    if n_edge == 1:
+        return "K"
+    if n_edge == 2 and j_edge == 1:
+        return "L1"
+    if n_edge == 2 and j_edge == 2:
+        return "L2"
+    if n_edge == 2 and j_edge == 3:
+        return "L3"
+    if n_edge == 3 and j_edge in {4, 5}:
+        return f"M{j_edge}"
+    return ""
+
+
+def _parse_fdmnes_context(root: Path, spectrum: Path | None = None) -> dict[str, Any]:
+    """Extract conservative edge/channel labels from a FDMNES workspace.
+
+    FDMNES is a multiple-scattering continuum code.  Unless a projected
+    transition table is supplied by a separate analysis, local maxima are
+    feature markers rather than state-resolved oscillator strengths.
+    """
+
+    context: dict[str, Any] = {
+        "absorber": "",
+        "absorber_z": None,
+        "edge": "",
+        "core_orbital": "",
+        "transition_operator": "dipole",
+        "target_orbital": "unoccupied continuum",
+        "ligand_hint": "",
+        "state_resolved": False,
+        "source": "fdmnes workspace metadata",
+    }
+
+    input_path = root / "fdmnes.inp"
+    if input_path.exists():
+        lines = input_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        edge = _next_keyword_value(lines, "Edge").split()[0] if _next_keyword_value(lines, "Edge") else ""
+        if edge:
+            context["edge"] = edge.upper()
+        z_values: list[int] = []
+        in_crystal = False
+        for raw in lines:
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("!"):
+                continue
+            if stripped.lower() == "crystal":
+                in_crystal = True
+                continue
+            if not in_crystal:
+                continue
+            parts = stripped.split()
+            if len(parts) < 4:
+                continue
+            try:
+                z_values.append(int(float(parts[0])))
+            except ValueError:
+                continue
+        if z_values:
+            context["absorber_z"] = z_values[0]
+            context["absorber"] = ATOMIC_SYMBOLS.get(z_values[0], f"Z{z_values[0]}")
+            if 8 in z_values:
+                context["ligand_hint"] = "O 2p hybridization possible"
+
+    if spectrum is not None:
+        z = _parse_z_from_spectrum_header(spectrum)
+        if z is not None:
+            context["absorber_z"] = z
+            context["absorber"] = ATOMIC_SYMBOLS.get(z, f"Z{z}")
+        edge = _parse_edge_from_spectrum_header(spectrum)
+        if edge:
+            context["edge"] = edge
+
+    for candidate in sorted(root.glob("*_bav.txt")) + [root / "fdmnes.stdout.log"]:
+        if not candidate.exists():
+            continue
+        text = candidate.read_text(encoding="utf-8", errors="replace")
+        threshold = re.search(r"Threshold:\s+([A-Za-z]+)\s+([A-Za-z0-9]+)\s+edge", text)
+        if threshold:
+            absorber_text = threshold.group(1)
+            absorber_symbol = ELEMENT_NAMES.get(absorber_text.lower(), "")
+            if not absorber_symbol:
+                try:
+                    absorber_symbol = _normalize_poscar_element(absorber_text)
+                except ValueError:
+                    absorber_symbol = absorber_text
+            context["absorber"] = absorber_symbol
+            context["absorber_z"] = ATOMIC_NUMBERS.get(absorber_symbol, context["absorber_z"])
+            context["edge"] = threshold.group(2).upper()
+        if "Quadrupole component" in text:
+            context["transition_operator"] = "dipole/quadrupole"
+        elif "Dipole component" in text:
+            context["transition_operator"] = "dipole"
+        if re.search(r"\bO\b|\bZ\s*=\s*8\b|^\s*\d+\s+8\s+", text, re.MULTILINE):
+            context["ligand_hint"] = "O 2p hybridization possible"
+        break
+
+    edge = str(context.get("edge") or "").upper()
+    absorber = str(context.get("absorber") or "absorber")
+    core = EDGE_CORE_ORBITALS.get(edge, f"{edge} core" if edge else "core")
+    context["core_orbital"] = core
+    if edge in {"K", "L1", "M1"}:
+        target = "p-like unoccupied states"
+    elif edge in {"L2", "L3", "M2", "M3"}:
+        target = D_TARGET_ORBITALS.get(absorber, "d-like unoccupied states")
+    elif edge in {"M4", "M5", "N4", "N5"}:
+        target = F_TARGET_ORBITALS.get(absorber, "f-like unoccupied states")
+    else:
+        target = "unoccupied continuum states"
+    if str(context.get("transition_operator")) == "dipole/quadrupole":
+        target = f"{target}; quadrupole channel may add higher-l character"
+    context["target_orbital"] = target
+    return context
+
+
+def _feature_region(energy: float, peak_energy: float) -> str:
+    if energy < 0:
+        return "pre-edge"
+    if energy <= peak_energy - 3:
+        return "rising-edge"
+    if abs(energy - peak_energy) <= 3:
+        return "white-line"
+    if energy <= peak_energy + 25:
+        return "near-edge shoulder"
+    return "post-edge/MS"
+
+
+def _feature_assignment(context: dict[str, Any], *, energy: float, peak_energy: float, index: int) -> tuple[str, str]:
+    absorber = str(context.get("absorber") or "Abs")
+    edge = str(context.get("edge") or "edge")
+    core = str(context.get("core_orbital") or "core")
+    target = str(context.get("target_orbital") or "unoccupied continuum")
+    ligand = str(context.get("ligand_hint") or "ligand hybridization not resolved")
+    operator = str(context.get("transition_operator") or "dipole")
+    region = _feature_region(energy, peak_energy)
+    short_target = target.replace(" unoccupied states", "").replace(" unoccupied continuum states", " continuum")
+    short_target = short_target.replace("states; quadrupole channel may add higher-l character", "+higher-l")
+    if "O 2p" in ligand and "O2p" not in short_target and ("d" in short_target or "continuum" in short_target):
+        short_target = f"{short_target}/O2p"
+    state_label = f"{absorber} {edge} {core}->{short_target} #{index}"
+    assignment = (
+        f"FDMNES {region} continuum feature; {operator}-allowed {absorber} {edge} "
+        f"{core} -> {absorber} {target}; {ligand}; not a state-resolved transition."
+    )
+    return state_label, assignment
+
+
 def extract_feature_sticks(
     rows: list[tuple[float, float]],
     *,
     min_relative: float = 0.08,
     min_separation_ev: float = 1.0,
     max_peaks: int = 24,
+    context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     finite = [(energy, intensity) for energy, intensity in rows if math.isfinite(energy) and math.isfinite(intensity)]
     if not finite:
@@ -628,15 +854,25 @@ def extract_feature_sticks(
         if len(selected) >= max_peaks:
             break
 
+    peak_energy = max(finite, key=lambda row: row[1])[0]
+    context = context or {}
     sticks: list[dict[str, Any]] = []
     for idx, (energy, intensity, relative) in enumerate(sorted(selected, key=lambda row: row[0]), start=1):
+        state_label, assignment = _feature_assignment(context, energy=energy, peak_energy=peak_energy, index=idx)
         sticks.append(
             {
                 "energy_rel_eV": energy,
                 "intensity": max(intensity - ymin, 0.0),
                 "relative_intensity": relative,
-                "state_label": f"FDMNES feature {idx}",
-                "assignment": "raw FDMNES local maximum; feature marker, not a state-resolved transition",
+                "state_label": state_label,
+                "assignment": assignment,
+                "absorber": context.get("absorber", ""),
+                "edge": context.get("edge", ""),
+                "core_orbital": context.get("core_orbital", ""),
+                "transition_operator": context.get("transition_operator", ""),
+                "target_orbital": context.get("target_orbital", ""),
+                "feature_region": _feature_region(energy, peak_energy),
+                "state_resolved": "false",
             }
         )
     return sticks
@@ -644,11 +880,22 @@ def extract_feature_sticks(
 
 def write_feature_sticks_csv(path: Path, sticks: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "energy_rel_eV",
+        "intensity",
+        "relative_intensity",
+        "state_label",
+        "assignment",
+        "absorber",
+        "edge",
+        "core_orbital",
+        "transition_operator",
+        "target_orbital",
+        "feature_region",
+        "state_resolved",
+    ]
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=["energy_rel_eV", "intensity", "relative_intensity", "state_label", "assignment"],
-        )
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for row in sticks:
             writer.writerow(
@@ -658,6 +905,13 @@ def write_feature_sticks_csv(path: Path, sticks: list[dict[str, Any]]) -> None:
                     "relative_intensity": f"{float(row['relative_intensity']):.10g}",
                     "state_label": row["state_label"],
                     "assignment": row["assignment"],
+                    "absorber": row.get("absorber", ""),
+                    "edge": row.get("edge", ""),
+                    "core_orbital": row.get("core_orbital", ""),
+                    "transition_operator": row.get("transition_operator", ""),
+                    "target_orbital": row.get("target_orbital", ""),
+                    "feature_region": row.get("feature_region", ""),
+                    "state_resolved": row.get("state_resolved", "false"),
                 }
             )
 
@@ -699,21 +953,24 @@ def collect_main(args: argparse.Namespace) -> dict[str, Any]:
     if write_feature_sticks:
         feature_source = _find_raw_spectrum(root, getattr(args, "feature_source", None))
         feature_rows = read_numeric_curve(feature_source)
+        feature_context = _parse_fdmnes_context(root, spectrum=feature_source)
         feature_sticks = extract_feature_sticks(
             feature_rows,
             min_relative=getattr(args, "feature_min_relative", 0.08),
             min_separation_ev=getattr(args, "feature_min_separation_ev", 1.0),
             max_peaks=getattr(args, "feature_max_peaks", 24),
+            context=feature_context,
         )
         write_feature_sticks_csv(write_feature_sticks, feature_sticks)
         summary["feature_sticks"] = {
             "source": str(feature_source.resolve()),
             "csv": str(write_feature_sticks),
             "n_features": len(feature_sticks),
+            "context": feature_context,
             "min_relative": getattr(args, "feature_min_relative", 0.08),
             "min_separation_ev": getattr(args, "feature_min_separation_ev", 1.0),
             "max_peaks": getattr(args, "feature_max_peaks", 24),
-            "note": "FDMNES feature sticks are raw-spectrum local maxima, not state-resolved oscillator-strength transitions.",
+            "note": "FDMNES feature sticks are raw-spectrum local maxima annotated by edge/channel metadata, not state-resolved oscillator-strength transitions.",
         }
     if args.write:
         _json_dump(summary, args.write)

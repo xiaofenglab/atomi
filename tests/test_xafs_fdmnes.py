@@ -197,6 +197,12 @@ def test_fdmnes_collect_skips_metadata_before_xanes_table(tmp_path: Path) -> Non
 def test_fdmnes_collect_writes_feature_sticks_from_raw_curve(tmp_path: Path) -> None:
     raw = tmp_path / "uo2_raw.txt"
     conv = tmp_path / "uo2_conv.txt"
+    (tmp_path / "fdmnes.inp").write_text(
+        "Filout\nuo2_raw\n\nEdge\nL3\n\nCrystal\n"
+        " 92 0 0 0 ! absorber\n"
+        "  8 0.25 0.25 0.25\n",
+        encoding="utf-8",
+    )
     raw.write_text(
         "    Energy    <xanes>\n"
         "-2.0 0.1\n"
@@ -224,5 +230,8 @@ def test_fdmnes_collect_writes_feature_sticks_from_raw_curve(tmp_path: Path) -> 
     text = sticks.read_text(encoding="utf-8")
 
     assert summary["feature_sticks"]["n_features"] == 2
-    assert "FDMNES feature 1" in text
+    assert summary["feature_sticks"]["context"]["absorber"] == "U"
+    assert summary["feature_sticks"]["context"]["edge"] == "L3"
+    assert "U L3 2p3/2->6d" in text
+    assert "O 2p hybridization possible" in text
     assert "not a state-resolved transition" in text
