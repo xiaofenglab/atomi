@@ -196,4 +196,6 @@ def test_overlay_cli_aligns_transition_sticks_to_parent_spectrum(tmp_path):
     assert rows[0]["energy_aligned"] == "8"
     assert rows[0]["state_label"] == "SO1->SO8"
     assert "Transition / feature sticks" in svg
+    assert "Stick key" in svg
+    assert "<tspan font-weight=\"700\">1.</tspan>" in svg
     assert "SO1-&gt;SO8" in svg

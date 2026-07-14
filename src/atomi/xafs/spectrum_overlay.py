@@ -415,6 +415,13 @@ def _polyline(points: list[tuple[float, float]]) -> str:
     return " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
 
 
+def _short_svg_label(text: str, limit: int) -> str:
+    text = " ".join(str(text).split())
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)].rstrip() + "..."
+
+
 def write_overlay_svg(
     path: Path,
     aligned: list[AlignedSpectrum],
@@ -445,8 +452,8 @@ def write_overlay_svg(
     ypad = 0.08 * (ymax - ymin)
     ymin -= ypad
     ymax += ypad
-    width, height = 940, 740 if has_sticks else 580
-    ml, mr, mt, mb = 86, 42, 64, 76
+    width, height = (1220, 820) if has_sticks else (940, 580)
+    ml, mr, mt, mb = 86, 326 if has_sticks else 42, 64, 76
     pw = width - ml - mr
     curve_bottom = height - mb if not has_sticks else 452
     ph = curve_bottom - mt
@@ -505,9 +512,14 @@ def write_overlay_svg(
         stick_top = curve_bottom + 48
         stick_baseline = height - mb - 48
         stick_height = max(24.0, stick_baseline - stick_top)
+        key_x = width - mr + 22
+        key_right = width - 42
+        key_width = max(120, key_right - key_x)
         lines.append(f'<text x="{ml}" y="{curve_bottom + 30}" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="600" fill="#2f3640">Transition / feature sticks</text>')
         lines.append(f'<line x1="{ml}" x2="{width - mr}" y1="{stick_baseline:.2f}" y2="{stick_baseline:.2f}" stroke="#303640" stroke-width="1.1"/>')
         lines.append(f'<line x1="{ml}" x2="{ml}" y1="{stick_top:.2f}" y2="{stick_baseline:.2f}" stroke="#303640" stroke-width="1.1"/>')
+        lines.append(f'<line x1="{key_x - 16:.2f}" x2="{key_x - 16:.2f}" y1="{stick_top - 18:.2f}" y2="{stick_baseline + 22:.2f}" stroke="#d9dee5" stroke-width="1"/>')
+        lines.append(f'<text x="{key_x}" y="{curve_bottom + 30}" font-family="Arial, Helvetica, sans-serif" font-size="12.5" font-weight="600" fill="#2f3640">Stick key</text>')
         for frac in (0.5, 1.0):
             y = stick_baseline - frac * stick_height
             lines.append(f'<line x1="{ml}" x2="{width - mr}" y1="{y:.2f}" y2="{y:.2f}" stroke="#eef1f4" stroke-width="1"/>')
@@ -528,9 +540,21 @@ def write_overlay_svg(
                 lines.append(f'<line x1="{x:.2f}" x2="{x:.2f}" y1="{stick_baseline:.2f}" y2="{y:.2f}" stroke="{color}" stroke-width="1.6" opacity="0.88"/>')
                 if relative >= label_threshold:
                     label_candidates.append((relative, x, y, stick, color))
-        for _, x, y, stick, color in sorted(label_candidates, key=lambda row: row[0], reverse=True)[:max_stick_labels]:
+        selected_label_rows = sorted(label_candidates, key=lambda row: row[0], reverse=True)[:max_stick_labels]
+        selected_labels = enumerate(sorted(selected_label_rows, key=lambda row: row[1]), start=1)
+        key_line_y = stick_top + 5
+        key_line_step = 14
+        for number, (_, x, y, stick, color) in selected_labels:
+            tag_y = max(stick_top + 10, min(stick_baseline - 8, y - 6))
+            lines.append(f'<circle cx="{x:.2f}" cy="{tag_y:.2f}" r="8.5" fill="#ffffff" stroke="{color}" stroke-width="1.2"/>')
+            lines.append(f'<text x="{x:.2f}" y="{tag_y + 3.6:.2f}" font-family="Arial, Helvetica, sans-serif" font-size="9.5" font-weight="700" text-anchor="middle" fill="{color}">{number}</text>')
             label = stick.state_label or stick.assignment
-            lines.append(f'<text x="{x + 4:.2f}" y="{stick_baseline + 18:.2f}" font-family="Arial, Helvetica, sans-serif" font-size="10.5" fill="{color}" transform="rotate(55 {x + 4:.2f} {stick_baseline + 18:.2f})">{_svg_escape(label[:44])}</text>')
+            assignment = stick.assignment if stick.assignment and stick.assignment != label else ""
+            key_text = label if not assignment else f"{label}: {assignment}"
+            key_y = key_line_y + (number - 1) * key_line_step
+            if key_y > stick_baseline + 16:
+                continue
+            lines.append(f'<text x="{key_x}" y="{key_y:.2f}" font-family="Arial, Helvetica, sans-serif" font-size="10.5" fill="{color}"><tspan font-weight="700">{number}.</tspan> {_svg_escape(_short_svg_label(key_text, max(28, int(key_width / 5.7))))}</text>')
     lines.append("</svg>")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
