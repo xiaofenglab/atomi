@@ -177,7 +177,7 @@ def test_overlay_cli_aligns_transition_sticks_to_parent_spectrum(tmp_path):
             "--stick-relative-threshold",
             "0",
             "--stick-label-relative-threshold",
-            "0",
+            "0.8",
             "--out-csv",
             str(out_csv),
             "--out-svg",
@@ -198,4 +198,6 @@ def test_overlay_cli_aligns_transition_sticks_to_parent_spectrum(tmp_path):
     assert "Transition / feature sticks" in svg
     assert "Stick key" in svg
     assert "<tspan font-weight=\"700\">1.</tspan>" in svg
+    assert "<tspan font-weight=\"700\">2.</tspan>" in svg
     assert "SO1-&gt;SO8" in svg
+    assert "shoulder" in svg

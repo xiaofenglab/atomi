@@ -439,6 +439,7 @@ def write_overlay_svg(
     path.parent.mkdir(parents=True, exist_ok=True)
     stick_sets = stick_sets or []
     has_sticks = any(item.sticks for item in stick_sets)
+    n_plotted_sticks = sum(len(item.sticks) for item in stick_sets)
     x_values = [x for item in aligned for x in item.energy_aligned]
     y_values = [y for item in aligned for y in item.spectrum.intensity]
     xmin, xmax = min(x_values), max(x_values)
@@ -452,7 +453,8 @@ def write_overlay_svg(
     ypad = 0.08 * (ymax - ymin)
     ymin -= ypad
     ymax += ypad
-    width, height = (1220, 820) if has_sticks else (940, 580)
+    width = 1220 if has_sticks else 940
+    height = max(820, 640 + 14 * n_plotted_sticks) if has_sticks else 580
     ml, mr, mt, mb = 86, 326 if has_sticks else 42, 64, 76
     pw = width - ml - mr
     curve_bottom = height - mb if not has_sticks else 452
@@ -525,7 +527,6 @@ def write_overlay_svg(
             lines.append(f'<line x1="{ml}" x2="{width - mr}" y1="{y:.2f}" y2="{y:.2f}" stroke="#eef1f4" stroke-width="1"/>')
             lines.append(f'<text x="{ml - 10}" y="{y + 4:.2f}" font-family="Arial, Helvetica, sans-serif" font-size="11" text-anchor="end" fill="#59636f">{frac:.1g}</text>')
         label_candidates: list[tuple[float, float, float, Stick, str]] = []
-        label_threshold = max(0.0, min(1.0, stick_label_relative_threshold))
         for idx, item in enumerate(stick_sets):
             color = color_by_label.get(item.stick_set.parent_label) or color_by_kind.get(item.stick_set.parent_label.lower()) or colors[(idx + len(aligned)) % len(colors)]
             max_intensity = max((stick.intensity for stick, _ in item.sticks), default=1.0)
@@ -538,9 +539,10 @@ def write_overlay_svg(
                 x = sx(aligned_energy)
                 y = stick_baseline - relative * stick_height
                 lines.append(f'<line x1="{x:.2f}" x2="{x:.2f}" y1="{stick_baseline:.2f}" y2="{y:.2f}" stroke="{color}" stroke-width="1.6" opacity="0.88"/>')
-                if relative >= label_threshold:
-                    label_candidates.append((relative, x, y, stick, color))
-        selected_label_rows = sorted(label_candidates, key=lambda row: row[0], reverse=True)[:max_stick_labels]
+                label_candidates.append((relative, x, y, stick, color))
+        selected_label_rows = sorted(label_candidates, key=lambda row: row[1])
+        if max_stick_labels > 0:
+            selected_label_rows = selected_label_rows[:max_stick_labels]
         selected_labels = enumerate(sorted(selected_label_rows, key=lambda row: row[1]), start=1)
         key_line_y = stick_top + 5
         key_line_step = 14
@@ -662,8 +664,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stick-state-column", default="", help="Optional stick state-label column.")
     parser.add_argument("--stick-assignment-column", default="", help="Optional stick assignment/character column.")
     parser.add_argument("--stick-relative-threshold", type=float, default=0.05, help="Only plot sticks with intensity >= this fraction of the maximum for that stick set.")
-    parser.add_argument("--stick-label-relative-threshold", type=float, default=0.25, help="Only label sticks with intensity >= this fraction of the maximum for that stick set.")
-    parser.add_argument("--max-stick-labels", type=int, default=12)
+    parser.add_argument(
+        "--stick-label-relative-threshold",
+        type=float,
+        default=0.25,
+        help="Legacy option retained for compatibility; every plotted stick is now keyed by default.",
+    )
+    parser.add_argument("--max-stick-labels", type=int, default=0, help="Maximum keyed stick labels; 0 means key every plotted stick.")
     parser.add_argument("--out-sticks-csv", type=Path, help="Write aligned sticks to CSV. Defaults to OUT_CSV stem plus '_sticks.csv' when --sticks is used.")
     parser.add_argument("--align", choices=["white-line", "none"], default="white-line")
     parser.add_argument("--white-line-window", default="", help="Optional raw-energy window used to find white-line maxima, e.g. '0 35'.")
