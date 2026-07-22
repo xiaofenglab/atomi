@@ -172,3 +172,124 @@ def test_qe_scaffold_separates_hp_and_wannier_routes(tmp_path: Path) -> None:
     workflow = (tmp_path / "qe" / "WORKFLOW.md").read_text()
     assert "does not" in workflow
     assert "projector-consistent" in workflow
+
+
+def test_qe_wannier_plan_tracks_u_and_o_separately(tmp_path: Path) -> None:
+    root = tmp_path / "branch_b"
+    result = main(
+        [
+            "qe-wannier-plan",
+            "--outdir",
+            str(root),
+            "--system",
+            "UO2",
+            "--target",
+            "U:5f",
+            "--target",
+            "O:2p",
+        ]
+    )
+    assert result["schema"] == "atomi.qe_wannier_hubbard_plan.v1"
+    assert [row["w90_projection"] for row in result["targets"]] == ["U:f", "O:p"]
+    manifest = json.loads((root / "wannier_hubbard_manifest.json").read_text())
+    assert [row["target"] for row in manifest["targets"]] == ["U:5f", "O:2p"]
+    assert all(row["required"] for row in manifest["targets"])
+
+
+def test_qe_wannier_audit_does_not_treat_hub_files_as_u(tmp_path: Path) -> None:
+    root = tmp_path / "branch_b"
+    main(
+        [
+            "qe-wannier-plan",
+            "--outdir",
+            str(root),
+            "--system",
+            "UO2",
+            "--target",
+            "U:5f",
+            "--target",
+            "O:2p",
+        ]
+    )
+    (root / "uo2.win").write_text(
+        "begin projections\nU:f\nend projections\n", encoding="utf-8"
+    )
+    (root / "uo2.wout").write_text(
+        "Final State\nFinal Spread\nAll done: Wannier90 exiting\n", encoding="utf-8"
+    )
+    (root / "uo2.hub1").write_text("projector coefficients\n", encoding="utf-8")
+
+    result = main(["qe-wannier-audit", "--root", str(root)])
+
+    assert result["status"] == "incomplete"
+    assert result["artifacts"]["hub_count"] == 1
+    assert result["targets"][0]["projector"]["projection_present"] is True
+    assert result["targets"][0]["response"]["accepted"] is False
+    assert result["targets"][1]["projector"]["projection_present"] is False
+    assert any("no `O:p`" in item for item in result["targets"][1]["warnings"])
+
+
+def test_qe_wannier_audit_requires_matching_projector_and_response_ids(tmp_path: Path) -> None:
+    root = tmp_path / "branch_b"
+    main(
+        [
+            "qe-wannier-plan",
+            "--outdir",
+            str(root),
+            "--system",
+            "UO2",
+            "--target",
+            "U:5f",
+        ]
+    )
+    (root / "uo2.win").write_text(
+        "begin projections\nU:f\nend projections\n", encoding="utf-8"
+    )
+    (root / "uo2.wout").write_text(
+        "Final State\nFinal Spread\nAll done: Wannier90 exiting\n", encoding="utf-8"
+    )
+    (root / "uo2.hub1").write_text("projector coefficients\n", encoding="utf-8")
+    manifest_path = root / "wannier_hubbard_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["parent"]["status"] = "accepted"
+    target = manifest["targets"][0]
+    target["projector"].update(
+        {
+            "id": "uo2-u5f-wf-v1",
+            "status": "accepted",
+            "projectability_guard": "accepted",
+            "rank_guard": "accepted",
+            "centre_spread_guard": "accepted",
+            "real_space_guard": "accepted",
+            "interpolation_guard": "accepted",
+        }
+    )
+    target["response"].update(
+        {
+            "id": "uo2-u5f-lr-v1",
+            "status": "accepted",
+            "projector_id": "wrong-projector",
+            "projector_matched": True,
+            "value_eV": 4.2,
+            "code_version_or_commit": "qe-test-commit",
+        }
+    )
+    target["application"].update(
+        {
+            "status": "accepted",
+            "projector_id": "uo2-u5f-wf-v1",
+            "response_id": "uo2-u5f-lr-v1",
+            "zero_u_read_guard": "accepted",
+            "u_only_guard": "accepted",
+        }
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    mismatch = main(["qe-wannier-audit", "--root", str(root)])
+    assert mismatch["status"] == "incomplete"
+    assert mismatch["targets"][0]["response"]["accepted"] is False
+
+    manifest["targets"][0]["response"]["projector_id"] = "uo2-u5f-wf-v1"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    accepted = main(["qe-wannier-audit", "--root", str(root)])
+    assert accepted["status"] == "complete"

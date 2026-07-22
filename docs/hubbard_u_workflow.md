@@ -70,3 +70,33 @@ The modern research route requires QE 7.5 or newer, `pw2wannier90.x`,
 Wannier90, and `wannier2pw.x`, followed by a matched response implementation
 such as a pinned collaborator branch. Stock HP values must not be silently
 applied to a different Wannier projector.
+
+## General QE Wannier+U Branch B
+
+Create a per-manifold plan before preparing production calculations:
+
+```bash
+hubbard-u-workflow qe-wannier-plan \
+  --outdir uo2_branch_b \
+  --system UO2 \
+  --target U:5f \
+  --target O:2p
+```
+
+The command writes a staged workflow and `wannier_hubbard_manifest.json`.
+Each required target has independent projector, response, and application
+gates. An optional target may be rejected or declared not required only with a
+recorded scientific rationale.
+
+After adding the run evidence, audit the workspace:
+
+```bash
+hubbard-u-workflow qe-wannier-audit --root uo2_branch_b
+```
+
+The audit discovers Wannier projection blocks, completed `.wout` files, and
+exported `.hub*` files, but it does not infer a U from them. Completion requires
+an accepted parent branch, an accepted Wannier projector, a numerical response
+whose `projector_id` matches that projector, and an application test using the
+same response and projector identifiers. Stock `hp.x` values and transferred
+atomic-projector values remain labeled comparisons rather than matched-WF U.

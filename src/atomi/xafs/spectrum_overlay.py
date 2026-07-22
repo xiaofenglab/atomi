@@ -422,6 +422,22 @@ def _short_svg_label(text: str, limit: int) -> str:
     return text[: max(1, limit - 1)].rstrip() + "..."
 
 
+def _route_opacity(label: str, kind: str) -> float:
+    route = f"{label} {kind}".lower()
+    if "fdmnes" in route:
+        return 0.5
+    return 1.0
+
+
+def _stick_key_side(stick_set: StickSet) -> str:
+    route = f"{stick_set.label} {stick_set.parent_label} {stick_set.kind}".lower()
+    if "fdmnes" in route:
+        return "left"
+    if "molcas" in route:
+        return "right"
+    return "right"
+
+
 def write_overlay_svg(
     path: Path,
     aligned: list[AlignedSpectrum],
@@ -429,7 +445,7 @@ def write_overlay_svg(
     stick_sets: list[AlignedStickSet] | None = None,
     title: str = "XANES overlay",
     x_label: str = "Aligned energy (eV)",
-    y_label: str = "Normalized absorption",
+    y_label: str = "Normalized absorption (a.u.)",
     experimental_style: str = "dashed",
     stick_label_relative_threshold: float = 0.25,
     max_stick_labels: int = 12,
@@ -500,35 +516,43 @@ def write_overlay_svg(
         points = [(sx(x), sy(y)) for x, y in zip(item.energy_aligned, spectrum.intensity)]
         is_exp = spectrum.kind.lower() in {"exp", "experiment", "experimental"}
         dash = ' stroke-dasharray="7 5"' if is_exp and experimental_style == "dashed" else ""
+        opacity = _route_opacity(spectrum.label, spectrum.kind)
+        opacity_attr = f' opacity="{opacity:.2g}"' if opacity < 1.0 else ""
         width_attr = "3.0" if is_exp else "2.2"
-        lines.append(f'<polyline points="{_polyline(points)}" fill="none" stroke="{color}" stroke-width="{width_attr}" stroke-linejoin="round" stroke-linecap="round"{dash}/>')
+        lines.append(f'<polyline points="{_polyline(points)}" fill="none" stroke="{color}" stroke-width="{width_attr}" stroke-linejoin="round" stroke-linecap="round"{dash}{opacity_attr}/>')
         if is_exp and experimental_style == "hollow-points":
             step = max(1, len(points) // 24)
             for x, y in points[::step]:
                 lines.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="3.2" fill="#ffffff" stroke="{color}" stroke-width="1.4"/>')
         lx = width - 350
         ly = legend_y + 24 * idx
-        lines.append(f'<line x1="{lx}" x2="{lx + 34}" y1="{ly}" y2="{ly}" stroke="{color}" stroke-width="{width_attr}"{dash}/>')
+        lines.append(f'<line x1="{lx}" x2="{lx + 34}" y1="{ly}" y2="{ly}" stroke="{color}" stroke-width="{width_attr}"{dash}{opacity_attr}/>')
         lines.append(f'<text x="{lx + 44}" y="{ly + 4}" font-family="Arial, Helvetica, sans-serif" font-size="12.5" fill="#2f3640">{_svg_escape(spectrum.label)} ({spectrum.kind}, shift {item.energy_shift:.3g} eV)</text>')
     if has_sticks:
         stick_top = curve_bottom + 48
         stick_baseline = height - mb - 48
         stick_height = max(24.0, stick_baseline - stick_top)
-        key_x = width - mr + 22
-        key_right = width - 42
-        key_width = max(120, key_right - key_x)
+        right_key_x = width - mr + 22
+        right_key_right = width - 42
+        right_key_width = max(120, right_key_right - right_key_x)
+        left_key_x = ml + 16
+        left_key_right = min(width - mr - 18, ml + max(260, pw * 0.45))
+        left_key_width = max(120, left_key_right - left_key_x)
         lines.append(f'<text x="{ml}" y="{curve_bottom + 30}" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="600" fill="#2f3640">Transition / feature sticks</text>')
         lines.append(f'<line x1="{ml}" x2="{width - mr}" y1="{stick_baseline:.2f}" y2="{stick_baseline:.2f}" stroke="#303640" stroke-width="1.1"/>')
         lines.append(f'<line x1="{ml}" x2="{ml}" y1="{stick_top:.2f}" y2="{stick_baseline:.2f}" stroke="#303640" stroke-width="1.1"/>')
-        lines.append(f'<line x1="{key_x - 16:.2f}" x2="{key_x - 16:.2f}" y1="{stick_top - 18:.2f}" y2="{stick_baseline + 22:.2f}" stroke="#d9dee5" stroke-width="1"/>')
-        lines.append(f'<text x="{key_x}" y="{curve_bottom + 30}" font-family="Arial, Helvetica, sans-serif" font-size="12.5" font-weight="600" fill="#2f3640">Stick key</text>')
+        lines.append(f'<rect x="{left_key_x - 8:.2f}" y="{stick_top - 14:.2f}" width="{left_key_width + 16:.2f}" height="{stick_baseline - stick_top + 26:.2f}" rx="8" fill="#ffffff" fill-opacity="0.88" stroke="#d9dee5" stroke-width="0.8"/>')
+        lines.append(f'<line x1="{right_key_x - 16:.2f}" x2="{right_key_x - 16:.2f}" y1="{stick_top - 18:.2f}" y2="{stick_baseline + 22:.2f}" stroke="#d9dee5" stroke-width="1"/>')
+        lines.append(f'<text x="{left_key_x}" y="{curve_bottom + 30}" font-family="Arial, Helvetica, sans-serif" font-size="12.5" font-weight="600" fill="#2f3640">FDMNES stick key</text>')
+        lines.append(f'<text x="{right_key_x}" y="{curve_bottom + 30}" font-family="Arial, Helvetica, sans-serif" font-size="12.5" font-weight="600" fill="#2f3640">MOLCAS stick key</text>')
         for frac in (0.5, 1.0):
             y = stick_baseline - frac * stick_height
             lines.append(f'<line x1="{ml}" x2="{width - mr}" y1="{y:.2f}" y2="{y:.2f}" stroke="#eef1f4" stroke-width="1"/>')
             lines.append(f'<text x="{ml - 10}" y="{y + 4:.2f}" font-family="Arial, Helvetica, sans-serif" font-size="11" text-anchor="end" fill="#59636f">{frac:.1g}</text>')
-        label_candidates: list[tuple[float, float, float, Stick, str]] = []
+        label_candidates: list[tuple[float, float, float, Stick, str, str]] = []
         for idx, item in enumerate(stick_sets):
             color = color_by_label.get(item.stick_set.parent_label) or color_by_kind.get(item.stick_set.parent_label.lower()) or colors[(idx + len(aligned)) % len(colors)]
+            side = _stick_key_side(item.stick_set)
             max_intensity = max((stick.intensity for stick, _ in item.sticks), default=1.0)
             if max_intensity <= 0:
                 continue
@@ -539,21 +563,25 @@ def write_overlay_svg(
                 x = sx(aligned_energy)
                 y = stick_baseline - relative * stick_height
                 lines.append(f'<line x1="{x:.2f}" x2="{x:.2f}" y1="{stick_baseline:.2f}" y2="{y:.2f}" stroke="{color}" stroke-width="1.6" opacity="0.88"/>')
-                label_candidates.append((relative, x, y, stick, color))
+                label_candidates.append((relative, x, y, stick, color, side))
         selected_label_rows = sorted(label_candidates, key=lambda row: row[1])
         if max_stick_labels > 0:
             selected_label_rows = selected_label_rows[:max_stick_labels]
-        selected_labels = enumerate(sorted(selected_label_rows, key=lambda row: row[1]), start=1)
-        key_line_y = stick_top + 5
+        selected_labels = list(enumerate(sorted(selected_label_rows, key=lambda row: row[1]), start=1))
+        key_line_y_by_side = {"left": stick_top + 5, "right": stick_top + 5}
         key_line_step = 14
-        for number, (_, x, y, stick, color) in selected_labels:
+        key_line_counts = {"left": 0, "right": 0}
+        for number, (_, x, y, stick, color, side) in selected_labels:
             tag_y = max(stick_top + 10, min(stick_baseline - 8, y - 6))
             lines.append(f'<circle cx="{x:.2f}" cy="{tag_y:.2f}" r="8.5" fill="#ffffff" stroke="{color}" stroke-width="1.2"/>')
             lines.append(f'<text x="{x:.2f}" y="{tag_y + 3.6:.2f}" font-family="Arial, Helvetica, sans-serif" font-size="9.5" font-weight="700" text-anchor="middle" fill="{color}">{number}</text>')
             label = stick.state_label or stick.assignment
             assignment = stick.assignment if stick.assignment and stick.assignment != label else ""
             key_text = label if not assignment else f"{label}: {assignment}"
-            key_y = key_line_y + (number - 1) * key_line_step
+            key_x = left_key_x if side == "left" else right_key_x
+            key_width = left_key_width if side == "left" else right_key_width
+            key_y = key_line_y_by_side[side] + key_line_counts[side] * key_line_step
+            key_line_counts[side] += 1
             if key_y > stick_baseline + 16:
                 continue
             lines.append(f'<text x="{key_x}" y="{key_y:.2f}" font-family="Arial, Helvetica, sans-serif" font-size="10.5" fill="{color}"><tspan font-weight="700">{number}.</tspan> {_svg_escape(_short_svg_label(key_text, max(28, int(key_width / 5.7))))}</text>')

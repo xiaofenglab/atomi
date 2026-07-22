@@ -196,8 +196,66 @@ def test_overlay_cli_aligns_transition_sticks_to_parent_spectrum(tmp_path):
     assert rows[0]["energy_aligned"] == "8"
     assert rows[0]["state_label"] == "SO1->SO8"
     assert "Transition / feature sticks" in svg
-    assert "Stick key" in svg
+    assert "MOLCAS stick key" in svg
     assert "<tspan font-weight=\"700\">1.</tspan>" in svg
     assert "<tspan font-weight=\"700\">2.</tspan>" in svg
     assert "SO1-&gt;SO8" in svg
     assert "shoulder" in svg
+
+
+def test_overlay_svg_uses_xanes_axis_and_split_route_stick_keys(tmp_path):
+    exp_path = tmp_path / "exp.csv"
+    fdmnes_path = tmp_path / "fdmnes.csv"
+    molcas_path = tmp_path / "molcas.csv"
+    fdmnes_sticks_path = tmp_path / "fdmnes_sticks.csv"
+    molcas_sticks_path = tmp_path / "molcas_sticks.csv"
+    out_csv = tmp_path / "overlay.csv"
+    out_svg = tmp_path / "overlay.svg"
+    exp_path.write_text("energy_rel_eV,norm\n0,0.1\n8,1.4\n20,0.9\n", encoding="utf-8")
+    fdmnes_path.write_text("energy_rel_eV,intensity\n0,0.2\n10,1.1\n24,0.7\n", encoding="utf-8")
+    molcas_path.write_text("energy_rel_eV,intensity\n0,0.2\n12,1.1\n24,0.7\n", encoding="utf-8")
+    fdmnes_sticks_path.write_text(
+        "energy_rel_eV,relative_intensity,state_label,assignment\n"
+        "10,1.0,FDMNES feature,Ce L3 continuum/5d-O2p feature\n",
+        encoding="utf-8",
+    )
+    molcas_sticks_path.write_text(
+        "energy_rel_eV,oscillator_strength,state_label,assignment\n"
+        "12,1.0,SO1->SO8,Ce 2p -> Ce 5d\n",
+        encoding="utf-8",
+    )
+
+    args = spectrum_overlay.build_parser().parse_args(
+        [
+            "--exp",
+            f"Exp:{exp_path}",
+            "--sim",
+            f"FDMNES:fdmnes:{fdmnes_path}",
+            "--sim",
+            f"Molcas:molcas:{molcas_path}",
+            "--sticks",
+            f"FDMNES features:FDMNES:{fdmnes_sticks_path}",
+            "--sticks",
+            f"Molcas sticks:Molcas:{molcas_sticks_path}",
+            "--exp-intensity-column",
+            "norm",
+            "--white-line-window",
+            "0 20",
+            "--stick-relative-threshold",
+            "0",
+            "--out-csv",
+            str(out_csv),
+            "--out-svg",
+            str(out_svg),
+        ]
+    )
+    spectrum_overlay.overlay_main(args)
+
+    svg = out_svg.read_text(encoding="utf-8")
+    assert "Normalized absorption (a.u.)" in svg
+    assert "rotate(-90" in svg
+    assert "FDMNES stick key" in svg
+    assert "MOLCAS stick key" in svg
+    assert "opacity=\"0.5\"" in svg
+    assert "Ce L3 continuum/5d-O2p feature" in svg
+    assert "Ce 2p -&gt; Ce 5d" in svg

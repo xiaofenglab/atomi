@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from atomi.codes.wannier_hubbard import audit_workflow, prepare_plan
+
 
 LR_TAGS = {
     "IBRION",
@@ -890,6 +892,20 @@ separate labeled comparison.
     return metadata
 
 
+def prepare_qe_wannier_plan(args: argparse.Namespace) -> dict[str, object]:
+    return prepare_plan(
+        args.outdir.resolve(),
+        system=args.system,
+        required_targets=args.target,
+        optional_targets=args.optional_target,
+        overwrite=args.overwrite,
+    )
+
+
+def audit_qe_wannier(args: argparse.Namespace) -> dict[str, object]:
+    return audit_workflow(args.root, args.manifest)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hubbard-u-workflow")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -951,6 +967,35 @@ def build_parser() -> argparse.ArgumentParser:
     qe.add_argument("--manifold", default="5f")
     qe.add_argument("--nq", type=int, nargs=3, default=(2, 2, 2))
     qe.set_defaults(func=prepare_qe)
+
+    qe_plan = sub.add_parser(
+        "qe-wannier-plan",
+        help="Write a projector-consistent, per-manifold QE Wannier+U plan",
+    )
+    qe_plan.add_argument("--outdir", type=Path, required=True)
+    qe_plan.add_argument("--system", required=True)
+    qe_plan.add_argument(
+        "--target",
+        action="append",
+        default=[],
+        help="Required ELEMENT:MANIFOLD target, for example U:5f; repeat as needed",
+    )
+    qe_plan.add_argument(
+        "--optional-target",
+        action="append",
+        default=[],
+        help="Optional ELEMENT:MANIFOLD target that still requires an explicit decision",
+    )
+    qe_plan.add_argument("--overwrite", action="store_true")
+    qe_plan.set_defaults(func=prepare_qe_wannier_plan)
+
+    qe_audit = sub.add_parser(
+        "qe-wannier-audit",
+        help="Audit projector, response-U, and application provenance for QE Wannier+U",
+    )
+    qe_audit.add_argument("--root", type=Path, required=True)
+    qe_audit.add_argument("--manifest", type=Path)
+    qe_audit.set_defaults(func=audit_qe_wannier)
     return parser
 
 

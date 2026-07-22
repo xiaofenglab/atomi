@@ -124,6 +124,18 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Broaden OpenMolcas/RASSI dipole transitions into XANES spectra.",
     ),
     CommandSpec(
+        aliases=(
+            "molcas-mo-diagram",
+            "molcas_mo_diagram",
+            "molcas-orbital-diagram",
+            "molcas_orbital_diagram",
+            "xanes-molcas-mo-diagram",
+        ),
+        target="atomi.xafs.molcas_orbital_diagram:main",
+        category="xafs",
+        help="Plot Molcas MO/orbital transition diagrams with optional rendered orbital images.",
+    ),
+    CommandSpec(
         aliases=("molcas-postanalysis", "molcas_postanalysis", "openmolcas-postanalysis"),
         target="atomi.qchem.molcas_postanalysis:main",
         category="qchem",
