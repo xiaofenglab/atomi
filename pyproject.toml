@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "atomi"
-version = "0.9.34"
+version = "0.9.35"
 description = "Reusable HPC workflow tools for computational materials science."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -41,6 +41,8 @@ xafs = [
 ]
 molcas-viz = [
   "Pegamoid",
+  "matplotlib",
+  "PyQt5",
 ]
 molcas-exatomic = [
   "exatomic==0.6.0",

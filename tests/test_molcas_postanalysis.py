@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
+
+import numpy as np
 
 from atomi.qchem import molcas_postanalysis
 
@@ -21,6 +24,45 @@ def _write_transitions(path: Path, energies: list[float]) -> None:
             )
 
 
+def _write_ascii_orbital_grid(path: Path) -> None:
+    indices = np.indices((3, 3, 3), dtype=float)
+    volumes = [
+        indices[0] - indices[1] + 0.25 * (indices[2] - 1.0),
+        indices[0] + indices[1] - 2.0 * indices[2],
+    ]
+    lines = [
+        "0",
+        "Synthetic two-orbital GRID_IT test",
+        "Natom= 2",
+        "U1 0.0 0.0 0.0",
+        "O2 1.0 1.0 1.0",
+        "VERSION= 1.01",
+        "N_of_MO= 2",
+        "N_of_Grids= 2",
+        "N_of_Points= 27",
+        "Block_Size= 10",
+        "N_Blocks= 3",
+        "Is_cutoff= 0",
+        "CutOff= 2.5",
+        "N_P= 27",
+        "N_INDEX= 0 0 0 0 0 0 0",
+        "Net= 2 2 2",
+        "Origin= -1.0 -1.0 -1.0",
+        "Axis_1= 2.0 0.0 0.0",
+        "Axis_2= 0.0 2.0 0.0",
+        "Axis_3= 0.0 0.0 2.0",
+        "GridName= 3 19 0.0000 (0.00)",
+        "GridName= 4 25 0.0000 (0.57)",
+    ]
+    flat = [volume.ravel() for volume in volumes]
+    for offset in range(0, 27, 10):
+        block_length = min(10, 27 - offset)
+        for index, values in enumerate(flat, start=1):
+            lines.append(f"Title= {index}")
+            lines.extend(f"{value:.10E}" for value in values[offset : offset + block_length])
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def test_workflow_record_names_core_tools() -> None:
     record = molcas_postanalysis.workflow_record()
     assert record["schema"] == "atomi.molcas_postanalysis_workflow.v1"
@@ -30,6 +72,7 @@ def test_workflow_record_names_core_tools() -> None:
     assert "molcas-postanalysis m45-two-panel" in commands
     assert "molcas-postanalysis ao-composition" in commands
     assert "molcas-postanalysis orbital-splitting" in commands
+    assert "molcas-postanalysis orbital-grid-render" in commands
     assert any("Sarah" in tool or "project report" in tool for tool in record["toolset"])
 
 
@@ -326,3 +369,39 @@ def test_u5f_splitting(tmp_path: Path) -> None:
     assert "Polly and Bagus" in text
     assert "local-cluster" in text
     assert '"coordination_number": 8' in text
+
+
+def test_orbital_grid_render_reads_grid_it_and_writes_guarded_montage(tmp_path: Path) -> None:
+    grid = tmp_path / "synthetic.grid"
+    _write_ascii_orbital_grid(grid)
+    outdir = tmp_path / "orbital_grid"
+    rc = molcas_postanalysis.main(
+        [
+            "orbital-grid-render",
+            "--grid",
+            str(grid),
+            "--orbital",
+            "3:19",
+            "--orbital",
+            "4:25",
+            "--outdir",
+            str(outdir),
+            "--max-surface-points",
+            "500",
+            "--dpi",
+            "80",
+        ]
+    )
+    assert rc == 0
+    assert (outdir / "orbital_sym3_19.png").exists()
+    assert (outdir / "orbital_sym4_25.png").exists()
+    assert (outdir / "molcas_orbital_grid_montage.png").exists()
+    summary = json.loads((outdir / "molcas_orbital_grid_summary.json").read_text(encoding="utf-8"))
+    assert summary["schema"] == "atomi.molcas_orbital_grid.v1"
+    assert summary["dimensions"] == [3, 3, 3]
+    assert summary["n_selected"] == 2
+    assert summary["all_selected_guards_pass"] is True
+    assert summary["all_numerical_guards_pass"] is True
+    assert all("center_weight_fraction" in row for row in summary["selected_orbitals"])
+    assert all(row["positive_voxels"] > 0 for row in summary["selected_orbitals"])
+    assert all(row["negative_voxels"] > 0 for row in summary["selected_orbitals"])

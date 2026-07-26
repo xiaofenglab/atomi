@@ -14,7 +14,6 @@ import os
 import shlex
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +50,18 @@ def probe_pegamoid(
     env_exe = executable or os.environ.get("ATOMI_PEGAMOID_EXE") or "pegamoid.py"
     resolved_exe = shutil.which(env_exe) if env_exe else None
     resolved_python = shutil.which(env_python) if env_python else None
+    if not resolved_python and resolved_exe:
+        try:
+            first_line = Path(resolved_exe).read_text(
+                encoding="utf-8",
+                errors="replace",
+            ).splitlines()[0]
+            if first_line.startswith("#!"):
+                candidate = first_line[2:].strip().split()[0]
+                if Path(candidate).is_file():
+                    resolved_python = candidate
+        except (OSError, IndexError):
+            pass
 
     python_probe: dict[str, Any] | None = None
     if resolved_python:
@@ -59,13 +70,17 @@ def probe_pegamoid(
                 resolved_python,
                 "-c",
                 "import importlib.metadata as m; "
-                "print(m.version('Pegamoid'))",
+                "import h5py, vtk, qtpy; "
+                "from qtpy import QtCore; "
+                "assert qtpy.API_NAME; "
+                "print(m.version('Pegamoid'), qtpy.API_NAME, vtk.vtkVersion.GetVTKVersion())",
             ]
         )
 
     script_path = Path(env_script).expanduser() if env_script else None
     script_exists = bool(script_path and script_path.exists())
-    available = bool(resolved_exe or (resolved_python and script_exists) or (python_probe and python_probe.get("ok")))
+    entrypoint_found = bool(resolved_exe or (resolved_python and script_exists))
+    available = bool(entrypoint_found and python_probe and python_probe.get("ok"))
     return {
         "schema": SCHEMA_STATUS,
         "pegamoid": {
@@ -77,8 +92,10 @@ def probe_pegamoid(
             "script": str(script_path) if script_path else "",
             "script_exists": script_exists,
             "pip_probe": python_probe or {},
+            "entrypoint_found": entrypoint_found,
             "notes": [
-                "Pegamoid is a GUI viewer; Atomi only probes/writes launch wrappers.",
+                "Availability requires a Pegamoid entry point plus importable Qt, VTK, and HDF5 dependencies.",
+                "Pegamoid is an optional GUI viewer; Atomi also provides headless GRID_IT rendering.",
                 "Use ThinLinc, VNC, or trusted X forwarding for interactive viewing on HPC.",
             ],
         },
@@ -128,12 +145,13 @@ def install_plan_main(args: argparse.Namespace) -> dict[str, Any]:
         "commands": [
             "python3 -m venv $HOME/atomi_hpc/pegamoid_env",
             "$HOME/atomi_hpc/pegamoid_env/bin/python -m pip install --upgrade pip",
-            "$HOME/atomi_hpc/pegamoid_env/bin/python -m pip install Pegamoid",
+            "$HOME/atomi_hpc/pegamoid_env/bin/python -m pip install Pegamoid PyQt5",
             "eval \"$(confighpc --config $HOME/atomi_hpc/atomi_hpc_config.kit.local.json --shell)\"",
             "pegamoid-status",
         ],
         "viewer_notes": [
             "Prefer ThinLinc/VNC for the GUI; plain ssh -X may fail for VTK/OpenGL.",
+            "A Pegamoid package without a Qt binding is not a working viewer; verify with pegamoid-status.",
             "Open HDF5/InpOrb together when using InpOrb orbital selections.",
             "OpenMolcas RASSCF/RASSI should write HDF5/TDM/TRD1 when transition densities are needed.",
         ],

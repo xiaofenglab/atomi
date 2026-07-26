@@ -19,6 +19,7 @@ from typing import Any
 
 import numpy as np
 
+from atomi.qchem.molcas_orbital_grid import add_parser as add_orbital_grid_parser
 from atomi.xafs.molcas_xanes_spectrum import (
     broaden,
     parse_so_states,
@@ -110,6 +111,11 @@ def workflow_record() -> dict[str, Any]:
                 "purpose": "Prepare orbital/NTO visualization wrappers after relevant files have been identified or extracted.",
             },
             {
+                "stage": "headless orbital-grid rendering",
+                "command": "molcas-postanalysis orbital-grid-render --grid RUN.grid --orbital 3:19-21 --orbital 4:25-28 --isovalue 0.05 --min-center-fraction 0.50 --outdir orbital_grids",
+                "purpose": "Render authoritative OpenMolcas GRID_IT values without Qt/VTK and enforce finite-data, positive/negative phase, and optional center-localization guards.",
+            },
+            {
                 "stage": "schematic MO diagram",
                 "command": "molcas-postanalysis mo-diagram --orbitals-csv mo_orbitals.csv --transitions-csv important_dipole_transitions.csv --outdir mo_diagram",
                 "purpose": "Create a project-specific schematic MO diagram linking occupations to strong dipole transitions.",
@@ -142,6 +148,9 @@ def workflow_record() -> dict[str, Any]:
             "Near-degenerate MO levels should stay at the same vertical energy and be separated horizontally by small offsets; do not imply artificial vertical splitting just to avoid overlap.",
             "For dense M4/M5 manifolds, always provide separate M5-only and M4-only MO-transition figures in addition to any combined figure.",
             "When RASSI NTOCalc, BINAtorb, SONOrb, NTORB, or MD_NTO outputs exist, prefer transition-character/NTO plots for peak assignments.",
+            "For reproducible orbital figures, generate values with OpenMolcas GRID_IT and use orbital-grid-render; keep Pegamoid optional for interactive inspection.",
+            "Use one common absolute --isovalue when comparing an orbital manifold; per-orbital relative isovalues are suitable for shape inspection but can obscure relative localization.",
+            "Do not label the final generic RasOrb/Molden set as a state-specific SO orbital. Use SONORB for SO states and SONT for SO transition orbitals before GRID_IT rendering.",
             "For reports, add a schematic MO diagram when orbital/transition assignments are central to the scientific argument.",
             "For single-edge systems such as Ga K-edge, use `orbital-splitting` for the local acceptor/ligand-field manifold; do not force U 5f SO/LF labels onto non-actinide K-edge chemistry.",
             "For actinide U M-edge clusters, use `u5f-splitting --structure CLUSTER.xyz` so the LF side is local-cluster based; use `--mode uranyl-reference` only as a paper-style reference.",
@@ -1936,6 +1945,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--summary-name", default="molcas_orbital_handoff.json")
     p.add_argument("--readme-name", default="MOLCAS_ORBITAL_HANDOFF.md")
     p.set_defaults(func=orbital_handoff)
+
+    add_orbital_grid_parser(sub)
 
     p = sub.add_parser("ao-composition", help="Parse Molcas AO/MO coefficient datablocks and plot dominant AO composition.")
     p.add_argument("--molcas-out", type=Path, required=True)
