@@ -280,6 +280,12 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Prepare and inspect Atomi handoffs to external SLUSCHI workflows.",
     ),
     CommandSpec(
+        aliases=("md-entropy", "md_entropy", "md-route-c", "md_route_c"),
+        target="atomi.md.entropy:main",
+        category="md",
+        help="Plan, guard, and analyze CP2K/LAMMPS fixed-cell NVT tails for Route-C entropy.",
+    ),
+    CommandSpec(
         aliases=("lammps_sconfig", "lammps-sconfig"),
         target="atomi.sluschi.bridge:main",
         category="sluschi",

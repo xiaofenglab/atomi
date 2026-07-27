@@ -85,6 +85,7 @@ Atomi currently includes command families for:
 
 - Electronic-structure preparation, monitoring, convergence checks, and run summaries.
 - Molecular and atomistic trajectory setup, live visualization, production-array support, and post-processing.
+- Guarded CP2K/LAMMPS MD-to-entropy planning with fixed-cell NVT tails, CN/MSD-first phase checks, and separate Route-C `S_vib`/`S_conf` outputs.
 - Training-dataset preparation, model-validation diagnostics, and model handoff helpers.
 - Defect-chemistry motif indexing, staged workflow scaffolding, dense Gibbs-surface fitting/sampling, and optional runtime checks.
 - Graph-labelled dataset export for GNN/MLIP active learning from Atomi CETrainingSet records.
