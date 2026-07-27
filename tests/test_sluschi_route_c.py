@@ -100,6 +100,29 @@ def test_route_c_parse_sluschi_summary_formula_basis(tmp_path: Path):
     assert parsed["Sconf_J_mol_atom_K"] == pytest.approx(7.0)
 
 
+def test_route_c_parse_sluschi_json_summary_formula_basis(tmp_path: Path):
+    summary = tmp_path / "sluschi_entropy_summary.json"
+    summary.write_text(
+        json.dumps(
+            {
+                "schema": "atomi.sluschi.lammps_entropy_summary.v1",
+                "summary": {
+                    "atoms_per_formula": 2,
+                    "Svib_J_mol_formula_K": 140.8735,
+                    "Sconf_J_mol_formula_K": -8.314e-05,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    parsed = route_c.parse_sluschi_mds_outputs(summary, formula="KCl")
+
+    assert parsed["Svib_J_mol_atom_K"] == pytest.approx(70.43675)
+    assert parsed["Sconf_J_mol_atom_K"] == pytest.approx(-4.157e-05)
+    assert parsed["atoms_per_formula"] == pytest.approx(2.0)
+
+
 def test_route_c_kcl_demo_cli(tmp_path: Path):
     out = tmp_path / "demo"
     atomi_main(["sluschi-route-c", "kcl-demo", "--outdir", str(out)])

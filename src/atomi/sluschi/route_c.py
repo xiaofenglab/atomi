@@ -382,6 +382,31 @@ def parse_sluschi_mds_outputs(path: Path, *, formula: str = "") -> dict[str, Any
     for candidate in candidates:
         if not candidate.is_file():
             continue
+        if candidate.suffix.lower() == ".json":
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+            row = payload.get("summary", payload)
+            if not isinstance(row, dict):
+                continue
+            apf = finite_float(row.get("atoms_per_formula"), atoms_per_formula) or atoms_per_formula or 1.0
+            svib = finite_float(row.get("Svib_J_mol_atom_K"))
+            if svib is None:
+                svib_formula = finite_float(row.get("Svib_J_mol_formula_K"))
+                svib = svib_formula / apf if svib_formula is not None and apf else None
+            sconf = finite_float(row.get("Sconf_J_mol_atom_K"))
+            if sconf is None:
+                sconf_formula = finite_float(row.get("Sconf_J_mol_formula_K"))
+                sconf = sconf_formula / apf if sconf_formula is not None and apf else None
+            if svib is None and sconf is None:
+                continue
+            result.update(
+                {
+                    "Svib_J_mol_atom_K": svib,
+                    "Sconf_J_mol_atom_K": sconf,
+                    "source": str(candidate),
+                    "atoms_per_formula": apf,
+                }
+            )
+            return result
         if candidate.suffix.lower() == ".csv":
             rows = read_csv_rows(candidate)
             if not rows:
