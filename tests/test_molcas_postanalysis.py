@@ -113,6 +113,40 @@ def test_m45_two_panel_writes_spectra_and_summary(tmp_path: Path) -> None:
     assert "As-computed transition energies" in text
     assert '"broadening": "voigt"' in text
     assert '"stick_relative_threshold": 0.95' in text
+    assert '"stick_top": 0' in text
+    assert '"preset": "custom"' in text
+
+
+def test_m45_polly_profile_and_top_sticks_are_recorded(tmp_path: Path) -> None:
+    m5 = tmp_path / "m5.csv"
+    m4 = tmp_path / "m4.csv"
+    _write_transitions(m5, [3579.1, 3579.6, 3580.0])
+    _write_transitions(m4, [3749.2, 3750.0, 3751.1])
+    outdir = tmp_path / "polly"
+    rc = molcas_postanalysis.main(
+        [
+            "m45-two-panel",
+            "--m5-transitions-csv",
+            str(m5),
+            "--m4-transitions-csv",
+            str(m4),
+            "--profile-preset",
+            "u-m45-polly-high-resolution",
+            "--stick-relative-threshold",
+            "0",
+            "--stick-top",
+            "2",
+            "--outdir",
+            str(outdir),
+        ]
+    )
+    assert rc == 0
+    summary = json.loads((outdir / "molcas_u_m45_xanes_2panel_summary.json").read_text(encoding="utf-8"))
+    assert summary["profile"]["preset"] == "u-m45-polly-high-resolution"
+    assert summary["profile"]["label"] == "high-resolution/theoretical comparison"
+    assert summary["gaussian_fwhm_ev"] == 1.2894947
+    assert summary["m5_xraydb"]["core_hole_width_ev"] == 0.3621724
+    assert summary["visible_stick_counts"] == {"M5": 2, "M4": 2}
 
 
 

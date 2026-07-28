@@ -446,6 +446,7 @@ def _plot_m45(
     title: str,
     stick_height: float,
     stick_relative_threshold: float,
+    stick_top: int,
     broadening: str,
 ) -> bool:
     try:
@@ -469,21 +470,27 @@ def _plot_m45(
         rows = data["rows"]
         ax.plot(energy, spectrum, color=color, lw=2.4, label="broadened envelope")
         edge_energy = meta.get("edge_energy_ev")
-        if edge_energy is not None:
+        if edge_energy is not None and float(np.min(energy)) <= float(edge_energy) <= float(np.max(energy)):
             ax.axvline(float(edge_energy), color="#888888", ls="--", lw=1.2, label=f"xraydb {label.split()[-1]} {float(edge_energy):.0f} eV")
         if rows:
-            osc = [float(row["oscillator_strength"]) for row in rows]
-            max_osc = max(osc) if osc else 1.0
-            stick_rows = [row for row in rows if float(row["oscillator_strength"]) >= stick_relative_threshold * max_osc]
+            max_osc = max(float(row["oscillator_strength"]) for row in rows)
+            stick_rows = _select_visible_stick_rows(rows, stick_relative_threshold, stick_top)
             for row in rows:
                 if row not in stick_rows:
                     continue
                 height = stick_height * float(row["oscillator_strength"]) / max_osc
                 ax.vlines(float(row["energy_ev"]), 0.0, -height, color=color, alpha=0.62, lw=1.0)
         width = meta.get("core_hole_width_ev")
-        width_label = f", xraydb width {float(width):.2f} eV" if width is not None else ""
+        width_source = str(meta.get("source", "configured"))
+        width_label = f", {width_source} L-FWHM {float(width):.2f} eV" if width is not None else ""
         broadening_label = "Voigt" if broadening == "voigt" else broadening.replace("-", " ")
-        ax.set_title(f"{label}: >={stick_percent}% strongest sticks + {broadening_label} envelope{width_label}")
+        if stick_top > 0 and stick_relative_threshold <= 0.0:
+            stick_label = f"top {stick_top} strongest sticks"
+        elif stick_top > 0:
+            stick_label = f">={stick_percent}% strongest sticks, capped at top {stick_top}"
+        else:
+            stick_label = f">={stick_percent}% strongest sticks"
+        ax.set_title(f"{label}: {stick_label} + {broadening_label} envelope{width_label}")
         ax.set_ylabel("norm. intensity")
         ax.set_ylim(-max(stick_height * 1.12, 0.1), 1.08)
         ax.axhline(0.0, color="#888888", lw=0.8)
@@ -495,6 +502,56 @@ def _plot_m45(
     fig.savefig(outpath, dpi=240)
     plt.close(fig)
     return True
+
+
+def _select_visible_stick_rows(
+    rows: list[dict[str, Any]],
+    relative_threshold: float,
+    top: int,
+) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    threshold = max(0.0, min(1.0, relative_threshold))
+    max_osc = max(float(row["oscillator_strength"]) for row in rows)
+    selected = [row for row in rows if float(row["oscillator_strength"]) >= threshold * max_osc]
+    if top > 0 and len(selected) > top:
+        selected = sorted(selected, key=lambda row: float(row["oscillator_strength"]), reverse=True)[:top]
+    return sorted(selected, key=lambda row: float(row["energy_ev"]))
+
+
+def _resolve_m45_profile(args: argparse.Namespace) -> dict[str, Any]:
+    if args.profile_preset == "u-m45-polly-high-resolution":
+        return {
+            "preset": args.profile_preset,
+            "label": "high-resolution/theoretical comparison",
+            "measurement_channel": "theoretical multiplet comparison",
+            "width_provenance": "digitized Polly UO8 C2h M4 envelope regression",
+            "gaussian_fwhm_ev": 1.2894947,
+            "m5_lorentzian_fwhm_ev": 0.3621724,
+            "m4_lorentzian_fwhm_ev": 0.3621724,
+            "no_xraydb": True,
+        }
+    if args.profile_preset == "u-m45-physical-xas":
+        return {
+            "preset": args.profile_preset,
+            "label": "ordinary XAS lifetime profile",
+            "measurement_channel": "ordinary XAS",
+            "width_provenance": "edge-specific xraydb core-hole widths plus 1.0 eV Gaussian display resolution",
+            "gaussian_fwhm_ev": 1.0,
+            "m5_lorentzian_fwhm_ev": None,
+            "m4_lorentzian_fwhm_ev": None,
+            "no_xraydb": False,
+        }
+    return {
+        "preset": "custom",
+        "label": args.profile_label or "custom",
+        "measurement_channel": args.measurement_channel or "unspecified",
+        "width_provenance": args.width_provenance or "CLI arguments and xraydb metadata",
+        "gaussian_fwhm_ev": args.gaussian_fwhm,
+        "m5_lorentzian_fwhm_ev": args.m5_lorentzian_fwhm,
+        "m4_lorentzian_fwhm_ev": args.m4_lorentzian_fwhm,
+        "no_xraydb": args.no_xraydb,
+    }
 
 
 
@@ -1843,8 +1900,19 @@ def u5f_splitting(args: argparse.Namespace) -> int:
 def m45_two_panel(args: argparse.Namespace) -> int:
     outdir = args.outdir.resolve()
     outdir.mkdir(parents=True, exist_ok=True)
-    m5_width, m5_meta = _edge_width(args.element, args.m5_edge, args.no_xraydb, args.m5_lorentzian_fwhm)
-    m4_width, m4_meta = _edge_width(args.element, args.m4_edge, args.no_xraydb, args.m4_lorentzian_fwhm)
+    profile = _resolve_m45_profile(args)
+    m5_width, m5_meta = _edge_width(
+        args.element,
+        args.m5_edge,
+        bool(profile["no_xraydb"]),
+        profile["m5_lorentzian_fwhm_ev"],
+    )
+    m4_width, m4_meta = _edge_width(
+        args.element,
+        args.m4_edge,
+        bool(profile["no_xraydb"]),
+        profile["m4_lorentzian_fwhm_ev"],
+    )
     m5 = _broaden_edge(
         args.m5_transitions_csv,
         element=args.element,
@@ -1852,7 +1920,7 @@ def m45_two_panel(args: argparse.Namespace) -> int:
         emin=args.m5_emin,
         emax=args.m5_emax,
         step=args.step,
-        gaussian_fwhm=args.gaussian_fwhm,
+        gaussian_fwhm=float(profile["gaussian_fwhm_ev"]),
         lorentzian_fwhm=m5_width,
         broadening=args.broadening,
         eta=args.pseudo_voigt_eta,
@@ -1868,7 +1936,7 @@ def m45_two_panel(args: argparse.Namespace) -> int:
         emin=args.m4_emin,
         emax=args.m4_emax,
         step=args.step,
-        gaussian_fwhm=args.gaussian_fwhm,
+        gaussian_fwhm=float(profile["gaussian_fwhm_ev"]),
         lorentzian_fwhm=m4_width,
         broadening=args.broadening,
         eta=args.pseudo_voigt_eta,
@@ -1887,8 +1955,11 @@ def m45_two_panel(args: argparse.Namespace) -> int:
         title=args.title,
         stick_height=args.stick_height,
         stick_relative_threshold=args.stick_relative_threshold,
+        stick_top=args.stick_top,
         broadening=args.broadening,
     )
+    m5_visible = _select_visible_stick_rows(m5["rows"], args.stick_relative_threshold, args.stick_top)
+    m4_visible = _select_visible_stick_rows(m4["rows"], args.stick_relative_threshold, args.stick_top)
     summary = {
         "schema": SCHEMA_M45,
         "element": args.element,
@@ -1896,15 +1967,21 @@ def m45_two_panel(args: argparse.Namespace) -> int:
         "m4": {k: v for k, v in m4.items() if k not in {"energy", "spectrum", "rows"}},
         "m5_xraydb": m5_meta,
         "m4_xraydb": m4_meta,
-        "gaussian_fwhm_ev": args.gaussian_fwhm,
+        "profile": profile,
+        "gaussian_fwhm_ev": profile["gaussian_fwhm_ev"],
         "broadening": args.broadening,
         "normalize": args.normalize,
         "energy_shift_ev": args.energy_shift_ev,
         "stick_height": args.stick_height,
         "stick_relative_threshold": args.stick_relative_threshold,
-        "stick_selection_rule": "sticks shown only when oscillator_strength >= stick_relative_threshold * edge_max_oscillator_strength",
+        "stick_top": args.stick_top,
+        "visible_stick_counts": {"M5": len(m5_visible), "M4": len(m4_visible)},
+        "stick_selection_rule": (
+            "retain oscillator_strength >= stick_relative_threshold * edge maximum, "
+            "then optionally cap each edge at the strongest stick_top transitions"
+        ),
         "plot": str(plot_path) if plotted else "",
-        "note": "As-computed transition energies; apply standard alignment before direct experimental comparison. The envelope uses all positive transitions; the visible/report sticks use the configured near-maximum intensity threshold.",
+        "note": "As-computed transition energies; apply standard alignment before direct experimental comparison. The envelope uses all positive transitions; visible sticks use the recorded threshold and optional top-N cap.",
     }
     summary_path = outdir / args.summary_name
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -2047,6 +2124,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--step", type=float, default=0.02)
     p.add_argument("--stick-height", type=float, default=0.45)
     p.add_argument("--stick-relative-threshold", type=float, default=0.95, help="Show stick transitions with intensity >= this fraction of the edge maximum.")
+    p.add_argument("--stick-top", type=int, default=0, help="After thresholding, show at most this many strongest sticks per edge; 0 keeps all qualifying sticks.")
+    p.add_argument(
+        "--profile-preset",
+        choices=("custom", "u-m45-polly-high-resolution", "u-m45-physical-xas"),
+        default="custom",
+        help="Use a recorded U M4,5 broadening policy; preset widths override custom width flags.",
+    )
+    p.add_argument("--profile-label", default="", help="Label recorded for a custom broadening profile.")
+    p.add_argument("--measurement-channel", default="", help="Measurement or comparison channel recorded in the summary.")
+    p.add_argument("--width-provenance", default="", help="Source/provenance of custom Gaussian and Lorentzian widths.")
     p.add_argument("--outdir", type=Path, default=Path("molcas_m45_postanalysis"))
     p.add_argument("--prefix", default="molcas_m45")
     p.add_argument("--plot-name", default="molcas_u_m45_xanes_2panel_tall_sticks.png")
