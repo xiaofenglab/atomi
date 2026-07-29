@@ -23,6 +23,15 @@ molcas-postanalysis m45-two-panel \
   --stick-relative-threshold 0 \
   --stick-top 40 \
   --outdir m45_physical_xas
+
+molcas-postanalysis m45-two-panel \
+  --m5-transitions-csv run_m5_transitions_for_atomi.csv \
+  --m4-transitions-csv run_m4_transitions_for_atomi.csv \
+  --profile-preset u-m45-herfd-xraydb \
+  --herfd-target-fwhm 0.70 \
+  --stick-relative-threshold 0 \
+  --stick-top 40 \
+  --outdir m45_herfd_xraydb
 ```
 
 The high-resolution preset reproduces the narrow UO8/C2h Polly comparison
@@ -33,6 +42,17 @@ model.
 The physical-XAS preset uses edge-specific XrayDB core-hole widths and a
 recorded `1.0 eV` Gaussian display resolution. The XrayDB widths are queried
 separately for M5 and M4.
+
+The HERFD/XrayDB preset uses the detected-emission final-state U 4f-hole
+widths: N7 for M5 detected at M-alpha1 and N6 for M4 detected at M-beta.
+It derives the Gaussian contribution from `--herfd-target-fwhm` with the
+Olivero-Longbothum Voigt-width approximation. The default `0.70 eV`
+effective FWHM follows published total U M4 HERFD resolutions; use a
+different value only when the matched experiment documents it.
+
+This preset is a one-dimensional HERFD stick-envelope approximation. It
+does not replace a Kramers-Heisenberg/RIXS calculation, and absolute energy
+alignment remains a separate operation.
 
 In both figures, every positive transition contributes to the envelope.
 `--stick-top` limits only the visible sticks and makes detailed plots

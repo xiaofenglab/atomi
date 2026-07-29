@@ -149,6 +149,60 @@ def test_m45_polly_profile_and_top_sticks_are_recorded(tmp_path: Path) -> None:
     assert summary["visible_stick_counts"] == {"M5": 2, "M4": 2}
 
 
+def test_herfd_target_voigt_inverse() -> None:
+    gaussian = molcas_postanalysis._gaussian_fwhm_for_target_voigt(0.70, 0.2524)
+    np.testing.assert_allclose(gaussian, 0.5527223549555794, rtol=0, atol=1e-12)
+
+
+def test_m45_herfd_profile_uses_final_state_widths(tmp_path: Path, monkeypatch) -> None:
+    m5 = tmp_path / "m5.csv"
+    m4 = tmp_path / "m4.csv"
+    _write_transitions(m5, [3579.1, 3579.6, 3580.0])
+    _write_transitions(m4, [3749.2, 3750.0, 3751.1])
+
+    widths = {"M5": 3.8736, "M4": 4.2242, "N7": 0.2524, "N6": 0.2524}
+
+    def fake_xraydb_metadata(element: str, edge: str) -> dict[str, object]:
+        return {
+            "element": element,
+            "edge": edge,
+            "source": "xraydb-test-double",
+            "edge_energy_ev": {"M5": 3552.0, "M4": 3728.0, "N7": 377.4, "N6": 388.2}[edge],
+            "core_hole_width_ev": widths[edge],
+        }
+
+    monkeypatch.setattr(molcas_postanalysis, "xraydb_metadata", fake_xraydb_metadata)
+    outdir = tmp_path / "herfd"
+    rc = molcas_postanalysis.main(
+        [
+            "m45-two-panel",
+            "--m5-transitions-csv",
+            str(m5),
+            "--m4-transitions-csv",
+            str(m4),
+            "--profile-preset",
+            "u-m45-herfd-xraydb",
+            "--outdir",
+            str(outdir),
+        ]
+    )
+    assert rc == 0
+    summary = json.loads((outdir / "molcas_u_m45_xanes_2panel_summary.json").read_text(encoding="utf-8"))
+    assert summary["profile"]["preset"] == "u-m45-herfd-xraydb"
+    assert summary["profile"]["target_effective_voigt_fwhm_ev"] == 0.70
+    assert summary["m5_xraydb"]["edge"] == "M5"
+    assert summary["m4_xraydb"]["edge"] == "M4"
+    assert summary["m5_lifetime_xraydb"]["edge"] == "N7"
+    assert summary["m4_lifetime_xraydb"]["edge"] == "N6"
+    np.testing.assert_allclose(
+        summary["profile"]["m5_gaussian_fwhm_ev"],
+        0.5527223549555794,
+        rtol=0,
+        atol=1e-12,
+    )
+    assert "not a Kramers-Heisenberg/RIXS calculation" in summary["note"]
+
+
 
 def test_extract_m45_transitions_from_output(tmp_path: Path) -> None:
     out = tmp_path / "molcas.out"

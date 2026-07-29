@@ -254,6 +254,8 @@ def _broaden_edge(
         "spectrum_csv": str(spectrum_csv),
         "transitions_csv": str(rows_csv),
         "broadening": broadening,
+        "gaussian_fwhm_ev": gaussian_fwhm,
+        "lorentzian_fwhm_ev": lorentzian_fwhm,
         "energy": energy,
         "spectrum": spectrum,
         "rows": rows,
@@ -442,6 +444,8 @@ def _plot_m45(
     m4: dict[str, Any],
     m5_meta: dict[str, Any],
     m4_meta: dict[str, Any],
+    m5_lifetime_meta: dict[str, Any],
+    m4_lifetime_meta: dict[str, Any],
     outpath: Path,
     title: str,
     stick_height: float,
@@ -459,12 +463,12 @@ def _plot_m45(
 
     fig, axes = plt.subplots(2, 1, figsize=(9.2, 6.7), sharex=False)
     configs = [
-        (axes[0], m5, m5_meta, "#1f4e79", "U M5"),
-        (axes[1], m4, m4_meta, "#9b2d20", "U M4"),
+        (axes[0], m5, m5_meta, m5_lifetime_meta, "#1f4e79", "U M5"),
+        (axes[1], m4, m4_meta, m4_lifetime_meta, "#9b2d20", "U M4"),
     ]
     stick_relative_threshold = max(0.0, min(1.0, stick_relative_threshold))
     stick_percent = int(round(100.0 * stick_relative_threshold))
-    for ax, data, meta, color, label in configs:
+    for ax, data, meta, lifetime_meta, color, label in configs:
         energy = data["energy"]
         spectrum = data["spectrum"]
         rows = data["rows"]
@@ -480,9 +484,14 @@ def _plot_m45(
                     continue
                 height = stick_height * float(row["oscillator_strength"]) / max_osc
                 ax.vlines(float(row["energy_ev"]), 0.0, -height, color=color, alpha=0.62, lw=1.0)
-        width = meta.get("core_hole_width_ev")
-        width_source = str(meta.get("source", "configured"))
-        width_label = f", {width_source} L-FWHM {float(width):.2f} eV" if width is not None else ""
+        width = lifetime_meta.get("core_hole_width_ev")
+        width_source = str(lifetime_meta.get("source", "configured"))
+        lifetime_edge = str(lifetime_meta.get("edge", label.split()[-1]))
+        width_label = (
+            f", {width_source} {lifetime_edge} L-FWHM {float(width):.2f} eV"
+            if width is not None
+            else ""
+        )
         broadening_label = "Voigt" if broadening == "voigt" else broadening.replace("-", " ")
         if stick_top > 0 and stick_relative_threshold <= 0.0:
             stick_label = f"top {stick_top} strongest sticks"
@@ -542,6 +551,28 @@ def _resolve_m45_profile(args: argparse.Namespace) -> dict[str, Any]:
             "m4_lorentzian_fwhm_ev": None,
             "no_xraydb": False,
         }
+    if args.profile_preset == "u-m45-herfd-xraydb":
+        return {
+            "preset": args.profile_preset,
+            "label": "HERFD/XrayDB final-state lifetime profile",
+            "measurement_channel": "HERFD-XANES one-dimensional envelope",
+            "width_provenance": (
+                "xraydb U N7/N6 final-state 4f-hole widths plus Gaussian resolution "
+                "derived from the target effective Voigt FWHM"
+            ),
+            "gaussian_fwhm_ev": None,
+            "m5_lorentzian_fwhm_ev": None,
+            "m4_lorentzian_fwhm_ev": None,
+            "m5_lifetime_edge": "N7",
+            "m4_lifetime_edge": "N6",
+            "target_effective_voigt_fwhm_ev": args.herfd_target_fwhm,
+            "no_xraydb": False,
+            "envelope_caveat": (
+                "One-dimensional HERFD stick-envelope approximation; not a "
+                "Kramers-Heisenberg/RIXS calculation. Use experiment-specific "
+                "resolution when documented."
+            ),
+        }
     return {
         "preset": "custom",
         "label": args.profile_label or "custom",
@@ -552,6 +583,22 @@ def _resolve_m45_profile(args: argparse.Namespace) -> dict[str, Any]:
         "m4_lorentzian_fwhm_ev": args.m4_lorentzian_fwhm,
         "no_xraydb": args.no_xraydb,
     }
+
+
+def _gaussian_fwhm_for_target_voigt(target_fwhm: float, lorentzian_fwhm: float) -> float:
+    """Invert the Olivero-Longbothum Voigt FWHM approximation."""
+
+    if target_fwhm <= 0.0:
+        raise ValueError("Target effective Voigt FWHM must be positive")
+    if lorentzian_fwhm <= 0.0:
+        raise ValueError("Lorentzian FWHM must be positive")
+    radicand = (target_fwhm - 0.5346 * lorentzian_fwhm) ** 2 - 0.2166 * lorentzian_fwhm**2
+    if radicand < 0.0:
+        raise ValueError(
+            "Target effective Voigt FWHM is narrower than the configured "
+            f"Lorentzian lifetime width ({lorentzian_fwhm:.6g} eV)"
+        )
+    return float(np.sqrt(radicand))
 
 
 
@@ -1913,6 +1960,33 @@ def m45_two_panel(args: argparse.Namespace) -> int:
         bool(profile["no_xraydb"]),
         profile["m4_lorentzian_fwhm_ev"],
     )
+    m5_lifetime_meta = m5_meta
+    m4_lifetime_meta = m4_meta
+    m5_gaussian_fwhm = profile["gaussian_fwhm_ev"]
+    m4_gaussian_fwhm = profile["gaussian_fwhm_ev"]
+    if profile["preset"] == "u-m45-herfd-xraydb":
+        m5_width, m5_lifetime_meta = _edge_width(
+            args.element,
+            str(profile["m5_lifetime_edge"]),
+            False,
+            None,
+        )
+        m4_width, m4_lifetime_meta = _edge_width(
+            args.element,
+            str(profile["m4_lifetime_edge"]),
+            False,
+            None,
+        )
+        target_fwhm = float(profile["target_effective_voigt_fwhm_ev"])
+        m5_gaussian_fwhm = _gaussian_fwhm_for_target_voigt(target_fwhm, m5_width)
+        m4_gaussian_fwhm = _gaussian_fwhm_for_target_voigt(target_fwhm, m4_width)
+        profile["m5_gaussian_fwhm_ev"] = m5_gaussian_fwhm
+        profile["m4_gaussian_fwhm_ev"] = m4_gaussian_fwhm
+        profile["gaussian_fwhm_ev"] = (
+            m5_gaussian_fwhm
+            if np.isclose(m5_gaussian_fwhm, m4_gaussian_fwhm)
+            else None
+        )
     m5 = _broaden_edge(
         args.m5_transitions_csv,
         element=args.element,
@@ -1920,7 +1994,7 @@ def m45_two_panel(args: argparse.Namespace) -> int:
         emin=args.m5_emin,
         emax=args.m5_emax,
         step=args.step,
-        gaussian_fwhm=float(profile["gaussian_fwhm_ev"]),
+        gaussian_fwhm=float(m5_gaussian_fwhm),
         lorentzian_fwhm=m5_width,
         broadening=args.broadening,
         eta=args.pseudo_voigt_eta,
@@ -1936,7 +2010,7 @@ def m45_two_panel(args: argparse.Namespace) -> int:
         emin=args.m4_emin,
         emax=args.m4_emax,
         step=args.step,
-        gaussian_fwhm=float(profile["gaussian_fwhm_ev"]),
+        gaussian_fwhm=float(m4_gaussian_fwhm),
         lorentzian_fwhm=m4_width,
         broadening=args.broadening,
         eta=args.pseudo_voigt_eta,
@@ -1951,6 +2025,8 @@ def m45_two_panel(args: argparse.Namespace) -> int:
         m4=m4,
         m5_meta=m5_meta,
         m4_meta=m4_meta,
+        m5_lifetime_meta=m5_lifetime_meta,
+        m4_lifetime_meta=m4_lifetime_meta,
         outpath=plot_path,
         title=args.title,
         stick_height=args.stick_height,
@@ -1967,6 +2043,8 @@ def m45_two_panel(args: argparse.Namespace) -> int:
         "m4": {k: v for k, v in m4.items() if k not in {"energy", "spectrum", "rows"}},
         "m5_xraydb": m5_meta,
         "m4_xraydb": m4_meta,
+        "m5_lifetime_xraydb": m5_lifetime_meta,
+        "m4_lifetime_xraydb": m4_lifetime_meta,
         "profile": profile,
         "gaussian_fwhm_ev": profile["gaussian_fwhm_ev"],
         "broadening": args.broadening,
@@ -1981,7 +2059,12 @@ def m45_two_panel(args: argparse.Namespace) -> int:
             "then optionally cap each edge at the strongest stick_top transitions"
         ),
         "plot": str(plot_path) if plotted else "",
-        "note": "As-computed transition energies; apply standard alignment before direct experimental comparison. The envelope uses all positive transitions; visible sticks use the recorded threshold and optional top-N cap.",
+        "note": (
+            "As-computed transition energies; apply standard alignment before direct "
+            "experimental comparison. The envelope uses all positive transitions; "
+            "visible sticks use the recorded threshold and optional top-N cap. "
+            + str(profile.get("envelope_caveat", ""))
+        ).strip(),
     }
     summary_path = outdir / args.summary_name
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -2127,13 +2210,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stick-top", type=int, default=0, help="After thresholding, show at most this many strongest sticks per edge; 0 keeps all qualifying sticks.")
     p.add_argument(
         "--profile-preset",
-        choices=("custom", "u-m45-polly-high-resolution", "u-m45-physical-xas"),
+        choices=(
+            "custom",
+            "u-m45-polly-high-resolution",
+            "u-m45-physical-xas",
+            "u-m45-herfd-xraydb",
+        ),
         default="custom",
         help="Use a recorded U M4,5 broadening policy; preset widths override custom width flags.",
     )
     p.add_argument("--profile-label", default="", help="Label recorded for a custom broadening profile.")
     p.add_argument("--measurement-channel", default="", help="Measurement or comparison channel recorded in the summary.")
     p.add_argument("--width-provenance", default="", help="Source/provenance of custom Gaussian and Lorentzian widths.")
+    p.add_argument(
+        "--herfd-target-fwhm",
+        type=float,
+        default=0.70,
+        help=(
+            "Target effective Voigt FWHM in eV for u-m45-herfd-xraydb; "
+            "the Gaussian component is derived from XrayDB final-state widths."
+        ),
+    )
     p.add_argument("--outdir", type=Path, default=Path("molcas_m45_postanalysis"))
     p.add_argument("--prefix", default="molcas_m45")
     p.add_argument("--plot-name", default="molcas_u_m45_xanes_2panel_tall_sticks.png")
