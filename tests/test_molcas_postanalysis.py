@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import csv
 import json
+import sqlite3
 from pathlib import Path
 
 import numpy as np
 
 from atomi.qchem import molcas_postanalysis
+from atomi.xafs import molcas_xanes_spectrum
 
 
 def _write_transitions(path: Path, energies: list[float]) -> None:
@@ -152,6 +154,48 @@ def test_m45_polly_profile_and_top_sticks_are_recorded(tmp_path: Path) -> None:
 def test_herfd_target_voigt_inverse() -> None:
     gaussian = molcas_postanalysis._gaussian_fwhm_for_target_voigt(0.70, 0.2524)
     np.testing.assert_allclose(gaussian, 0.5527223549555794, rtol=0, atol=1e-12)
+
+
+def test_xraydb_sqlite_metadata_fallback(tmp_path: Path) -> None:
+    database = tmp_path / "xraydb.sqlite"
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE xray_levels (
+                element TEXT,
+                iupac_symbol TEXT,
+                absorption_edge REAL,
+                fluorescence_yield REAL,
+                jump_ratio REAL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE corelevel_widths (
+                element TEXT,
+                edge TEXT,
+                width REAL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO xray_levels VALUES (?, ?, ?, ?, ?)",
+            ("U", "N7", 377.4, 0.00031, 1.096),
+        )
+        connection.execute(
+            "INSERT INTO corelevel_widths VALUES (?, ?, ?)",
+            ("U", "N7", 0.2524),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    meta = molcas_xanes_spectrum._xraydb_sqlite_metadata(database, "U", "N7")
+    assert meta["source"] == "xraydb-sqlite-fallback"
+    assert meta["edge_energy_ev"] == 377.4
+    assert meta["core_hole_width_ev"] == 0.2524
 
 
 def test_m45_herfd_profile_uses_final_state_widths(tmp_path: Path, monkeypatch) -> None:

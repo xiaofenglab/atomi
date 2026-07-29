@@ -7,6 +7,7 @@ import csv
 import json
 import math
 import re
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -190,21 +191,69 @@ def transitions_from_csv(path: Path) -> list[Transition]:
     return rows
 
 
+def _xraydb_sqlite_metadata(database: Path, element: str, edge: str) -> dict[str, Any]:
+    """Read the small edge record directly when the XrayDB ORM cannot start."""
+
+    meta: dict[str, Any] = {
+        "element": element,
+        "edge": edge,
+        "source": "xraydb-sqlite-fallback",
+        "database": str(database),
+    }
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    try:
+        level = connection.execute(
+            """
+            SELECT absorption_edge, fluorescence_yield, jump_ratio
+            FROM xray_levels
+            WHERE element = ? AND iupac_symbol = ?
+            """,
+            (element, edge),
+        ).fetchone()
+        width = connection.execute(
+            """
+            SELECT width
+            FROM corelevel_widths
+            WHERE element = ? AND edge = ?
+            """,
+            (element, edge),
+        ).fetchone()
+    finally:
+        connection.close()
+    if level is None and width is None:
+        raise LookupError(f"No XrayDB record for {element} {edge}")
+    if level is not None:
+        meta["edge_energy_ev"] = float(level[0])
+        meta["fluorescence_yield"] = float(level[1])
+        meta["jump_ratio"] = float(level[2])
+    if width is not None:
+        meta["core_hole_width_ev"] = float(width[0])
+    return meta
+
+
 def xraydb_metadata(element: str, edge: str) -> dict[str, Any]:
     meta: dict[str, Any] = {"element": element, "edge": edge, "source": "xraydb"}
+    xraydb_module: Any | None = None
     try:
-        import xraydb  # type: ignore
+        import xraydb as xraydb_module  # type: ignore
 
-        edge_obj = xraydb.xray_edge(element, edge)
+        edge_obj = xraydb_module.xray_edge(element, edge)
         meta["edge_energy_ev"] = float(edge_obj.energy)
         meta["fluorescence_yield"] = float(edge_obj.fyield)
         meta["jump_ratio"] = float(edge_obj.jump_ratio)
-        width = xraydb.core_width(element, edge)
+        width = xraydb_module.core_width(element, edge)
         if width is not None:
             meta["core_hole_width_ev"] = float(width)
     except Exception as exc:
-        meta["source"] = "unavailable"
-        meta["warning"] = str(exc)
+        try:
+            if xraydb_module is None or not getattr(xraydb_module, "__file__", None):
+                raise RuntimeError("XrayDB package path is unavailable")
+            database = Path(xraydb_module.__file__).with_name("xraydb.sqlite")
+            meta = _xraydb_sqlite_metadata(database, element, edge)
+            meta["warning"] = f"XrayDB API unavailable; used read-only SQLite fallback: {exc}"
+        except Exception as fallback_exc:
+            meta["source"] = "unavailable"
+            meta["warning"] = f"{exc}; SQLite fallback failed: {fallback_exc}"
     return meta
 
 
