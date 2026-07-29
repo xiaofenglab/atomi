@@ -19,6 +19,9 @@ from typing import Any
 
 import numpy as np
 
+from atomi.qchem.molcas_natural_orbitals import (
+    add_parser as add_natural_orbital_parser,
+)
 from atomi.qchem.molcas_orbital_grid import add_parser as add_orbital_grid_parser
 from atomi.xafs.molcas_xanes_spectrum import (
     broaden,
@@ -111,6 +114,11 @@ def workflow_record() -> dict[str, Any]:
                 "purpose": "Prepare orbital/NTO visualization wrappers after relevant files have been identified or extracted.",
             },
             {
+                "stage": "ground/excited spin-free natural-orbital replay",
+                "command": "molcas-postanalysis natural-orbital-plan --jobiph RUN.JobIph_9 --root 166 --coord cluster.xyz --state-role so-parent --spin-free-state 1125 --so-state 1395 --orbital 3:19-21 --orbital 4:25-28 --label m5_so1395_sf1125 --outdir natural_orbitals",
+                "purpose": "Write matched EJOB+NATORB+TRD1 and GRID_IT inputs from a preserved RASSCF JobIph, with explicit X2C/AMFI or DKH2/R02O02/AMFI provenance.",
+            },
+            {
                 "stage": "headless orbital-grid rendering",
                 "command": "molcas-postanalysis orbital-grid-render --grid RUN.grid --orbital 3:19-21 --orbital 4:25-28 --isovalue 0.05 --min-center-fraction 0.50 --outdir orbital_grids",
                 "purpose": "Render authoritative OpenMolcas GRID_IT values without Qt/VTK and enforce finite-data, positive/negative phase, and optional center-localization guards.",
@@ -151,13 +159,15 @@ def workflow_record() -> dict[str, Any]:
             "For reproducible orbital figures, generate values with OpenMolcas GRID_IT and use orbital-grid-render; keep Pegamoid optional for interactive inspection.",
             "Use one common absolute --isovalue when comparing an orbital manifold; per-orbital relative isovalues are suitable for shape inspection but can obscure relative localization.",
             "Do not label the final generic RasOrb/Molden set as a state-specific SO orbital. Use SONORB for SO states and SONT for SO transition orbitals before GRID_IT rendering.",
+            "For ground or spin-free excited natural orbitals, replay one preserved RASSCF JobIph root with EJOB+NATORB+TRD1, then run GRID_IT on the resulting SiOrb. Never use ONEL-only zero-density output as a natural-orbital source.",
+            "Keep the interpretation hierarchy explicit: AO basis -> active MOs -> spin-free many-electron CI states -> RASSI SO mixtures. RASSI parent percentages are squared SO-mixing coefficients, not AO percentages.",
             "For reports, add a schematic MO diagram when orbital/transition assignments are central to the scientific argument.",
             "For single-edge systems such as Ga K-edge, use `orbital-splitting` for the local acceptor/ligand-field manifold; do not force U 5f SO/LF labels onto non-actinide K-edge chemistry.",
             "For actinide U M-edge clusters, use `u5f-splitting --structure CLUSTER.xyz` so the LF side is local-cluster based; use `--mode uranyl-reference` only as a paper-style reference.",
         ],
         "toolset": [
             "OpenMolcas output, JobIph/JobMix, .rasscf.h5/.rassi.h5, .RasOrb, .molden, NTORB, MD_NTO, SIORB/BIORB",
-            "molcas-bridge, molcas-root-helper, molcas-xanes-spectrum, molcas-postanalysis",
+            "molcas-bridge, molcas-root-helper, molcas-xanes-spectrum, molcas-postanalysis natural-orbital-plan/orbital-grid-render",
             "xraydb for edge references and core-hole widths",
             "Pegamoid for OpenMolcas orbital/density viewing",
             "project report + Sarah portfolio memory for accepted figures and decisions",
@@ -2106,6 +2116,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--readme-name", default="MOLCAS_ORBITAL_HANDOFF.md")
     p.set_defaults(func=orbital_handoff)
 
+    add_natural_orbital_parser(sub)
     add_orbital_grid_parser(sub)
 
     p = sub.add_parser("ao-composition", help="Parse Molcas AO/MO coefficient datablocks and plot dominant AO composition.")
