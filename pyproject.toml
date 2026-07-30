@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "atomi"
-version = "0.9.41"
+version = "0.9.42"
 description = "Reusable HPC workflow tools for computational materials science."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -93,6 +93,9 @@ elastic-viz = []
 
 [project.scripts]
 atomi = "atomi.cli.bootstrap:main"
+plot-data = "atomi.analysis.plot_dataset:main"
+plot_data = "atomi.analysis.plot_dataset:main"
+analysis-plot-data = "atomi.analysis.plot_dataset:main"
 local-structure = "atomi.local_structure:main"
 local-cluster = "atomi.local_structure:main"
 structure-cluster = "atomi.local_structure:main"

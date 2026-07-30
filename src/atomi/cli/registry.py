@@ -44,6 +44,12 @@ class CommandSpec:
 
 COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec(
+        aliases=("plot-data", "plot_data", "analysis-plot-data"),
+        target="atomi.analysis.plot_dataset:main",
+        category="analysis",
+        help="Freeze and validate reusable scientific plotting datasets.",
+    ),
+    CommandSpec(
         aliases=("turbomole-define", "turbomole_define", "tm-define"),
         target="atomi.qchem.turbomole:main",
         category="qchem",
