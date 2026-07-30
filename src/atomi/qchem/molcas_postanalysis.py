@@ -26,6 +26,7 @@ from atomi.qchem.molcas_natural_orbitals import (
     add_parser as add_natural_orbital_parser,
 )
 from atomi.qchem.molcas_orbital_grid import add_parser as add_orbital_grid_parser
+from atomi.qchem.molcas_orbital_story import add_parsers as add_orbital_story_parsers
 from atomi.xafs.molcas_xanes_spectrum import (
     broaden,
     parse_so_states,
@@ -127,6 +128,26 @@ def workflow_record() -> dict[str, Any]:
                 "purpose": "Render authoritative OpenMolcas GRID_IT values without Qt/VTK and enforce finite-data, positive/negative phase, and optional center-localization guards.",
             },
             {
+                "stage": "paper-style orbital atlas",
+                "command": "molcas-postanalysis orbital-atlas --manifest-csv orbital_atlas.csv --columns 4 --outdir orbital_atlas",
+                "purpose": "Arrange frozen orbital images into symmetry/family groups with a reusable plot-data packet and common-camera/isovalue provenance.",
+            },
+            {
+                "stage": "transition-orbital pair",
+                "command": "molcas-postanalysis orbital-pair --manifest-csv nto_pairs.csv --plot-kind nto --outdir nto_pairs",
+                "purpose": "Render particle/hole NTO pairs only when transition-density SVD contributions exist; otherwise label the view as a state-orbital comparison.",
+            },
+            {
+                "stage": "orbital network",
+                "command": "molcas-postanalysis orbital-network --nodes-csv nodes.csv --edges-csv edges.csv --metric mutual_information --method 'QCMaquis DMRG-CI m=1024' --outdir orbital_network",
+                "purpose": "Render segmented orbital networks while reserving the word entanglement for DMRG/QCMaquis mutual-information data.",
+            },
+            {
+                "stage": "natural-occupation state metrics",
+                "command": "molcas-postanalysis orbital-state-metrics --occupations-csv occupations.csv --pair ground:excited --outdir orbital_metrics",
+                "purpose": "Compute correlation entropy and guarded occupation redistribution without claiming orbital identity from index matching.",
+            },
+            {
                 "stage": "schematic MO diagram",
                 "command": "molcas-postanalysis mo-diagram --orbitals-csv mo_orbitals.csv --transitions-csv important_dipole_transitions.csv --outdir mo_diagram",
                 "purpose": "Create a project-specific schematic MO diagram linking occupations to strong dipole transitions.",
@@ -167,6 +188,10 @@ def workflow_record() -> dict[str, Any]:
             "For reproducible orbital figures, generate values with OpenMolcas GRID_IT and use orbital-grid-render; keep Pegamoid optional for interactive inspection.",
             "Use one common absolute --isovalue when comparing an orbital manifold; per-orbital relative isovalues are suitable for shape inspection but can obscure relative localization.",
             "Do not label the final generic RasOrb/Molden set as a state-specific SO orbital. Use SONORB for SO states and SONT for SO transition orbitals before GRID_IT rendering.",
+            "Do not call an AO-composition, SO-parentage, overlap, or visual-similarity network orbital entanglement. That label requires DMRG/QCMaquis orbital mutual information.",
+            "A Figure-8-style particle/hole NTO panel requires transition-density SVD data and reported singular/eigenvalue contribution; paired state natural orbitals are a different diagnostic.",
+            "For Figure-2-style orbital atlases, freeze image paths, hashes, common camera, common absolute isovalue, orbital labels, state/root provenance, and acceptance status before style iteration.",
+            "Natural-occupation entropy requires a complete consistently defined orbital set. Cross-state occupation redistribution is rejected when selected-space dimension or electron count differs.",
             "For ground or spin-free excited natural orbitals, replay one preserved RASSCF JobIph root with EJOB+NATORB+TRD1, then run GRID_IT on the resulting SiOrb. Never use ONEL-only zero-density output as a natural-orbital source.",
             "Keep the interpretation hierarchy explicit: AO basis -> active MOs -> spin-free many-electron CI states -> RASSI SO mixtures. RASSI parent percentages are squared SO-mixing coefficients, not AO percentages.",
             "For reports, add a schematic MO diagram when orbital/transition assignments are central to the scientific argument.",
@@ -2131,6 +2156,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_natural_orbital_parser(sub)
     add_orbital_grid_parser(sub)
+    add_orbital_story_parsers(sub)
     add_bagus_covalency_parser(sub)
 
     p = sub.add_parser("ao-composition", help="Parse Molcas AO/MO coefficient datablocks and plot dominant AO composition.")
