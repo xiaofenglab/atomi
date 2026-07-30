@@ -19,6 +19,9 @@ from typing import Any
 
 import numpy as np
 
+from atomi.qchem.molcas_bagus_covalency import (
+    add_parser as add_bagus_covalency_parser,
+)
 from atomi.qchem.molcas_natural_orbitals import (
     add_parser as add_natural_orbital_parser,
 )
@@ -138,6 +141,11 @@ def workflow_record() -> dict[str, Any]:
                 "command": "molcas-postanalysis u5f-splitting --structure UO8_average.xyz --outdir u5f_splitting",
                 "purpose": "Make an SO versus local-cluster ligand-field U 5f correlation diagram for U M4,5 interpretation.",
             },
+            {
+                "stage": "multi-measure covalency investigation",
+                "command": "molcas-postanalysis bagus-covalency --spec bagus_covalency_spec.json --outdir bagus_covalency_r1",
+                "purpose": "Map postanalysis orbital, configuration, and transition tables into a provenance-preserving Bagus-style audit for arbitrary elements and matched ground/excited states.",
+            },
         ],
         "decision_rules": [
             "Never promote a spectrum if the Molcas output has nonzero return codes or incomplete RASSI blocks.",
@@ -164,10 +172,15 @@ def workflow_record() -> dict[str, Any]:
             "For reports, add a schematic MO diagram when orbital/transition assignments are central to the scientific argument.",
             "For single-edge systems such as Ga K-edge, use `orbital-splitting` for the local acceptor/ligand-field manifold; do not force U 5f SO/LF labels onto non-actinide K-edge chemistry.",
             "For actinide U M-edge clusters, use `u5f-splitting --structure CLUSTER.xyz` so the LF side is local-cluster based; use `--mode uranyl-reference` only as a paper-style reference.",
+            "Run `bagus-covalency` only after state/root, orbital-identity, basis, relativity, and projection definitions are explicit; a failed identity or radial guard rejects that state comparison even when its spectrum is numerically complete.",
+            "Never collapse orbital extent, isolated-reference projection, ligand-hole weight, secondary-shell participation, and satellite intensity into one universal percent-covalent score.",
+            "A high-energy sideband is a descriptor, not a charge-transfer satellite, unless an accepted state-resolved configuration assignment names the satellite class.",
+            "Scalar-relativistic natural orbitals do not provide orbital-specific spinor <Lz>, <Sz>, or <Jz>; leave those measures unavailable unless a compatible state-resolved spinor analysis supplies them.",
         ],
         "toolset": [
             "OpenMolcas output, JobIph/JobMix, .rasscf.h5/.rassi.h5, .RasOrb, .molden, NTORB, MD_NTO, SIORB/BIORB",
             "molcas-bridge, molcas-root-helper, molcas-xanes-spectrum, molcas-postanalysis natural-orbital-plan/orbital-grid-render",
+            "molcas-postanalysis bagus-covalency for canonicalized postanalysis tables, multi-measure state comparisons, physical guards, and provenance",
             "xraydb for edge references and core-hole widths",
             "Pegamoid for OpenMolcas orbital/density viewing",
             "project report + Sarah portfolio memory for accepted figures and decisions",
@@ -2118,6 +2131,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_natural_orbital_parser(sub)
     add_orbital_grid_parser(sub)
+    add_bagus_covalency_parser(sub)
 
     p = sub.add_parser("ao-composition", help="Parse Molcas AO/MO coefficient datablocks and plot dominant AO composition.")
     p.add_argument("--molcas-out", type=Path, required=True)

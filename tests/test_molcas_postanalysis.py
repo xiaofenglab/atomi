@@ -75,6 +75,8 @@ def test_workflow_record_names_core_tools() -> None:
     assert "molcas-postanalysis ao-composition" in commands
     assert "molcas-postanalysis orbital-splitting" in commands
     assert "molcas-postanalysis orbital-grid-render" in commands
+    assert "molcas-postanalysis bagus-covalency" in commands
+    assert any("universal percent-covalent" in rule for rule in record["decision_rules"])
     assert any("Sarah" in tool or "project report" in tool for tool in record["toolset"])
 
 

@@ -84,6 +84,8 @@ Public documentation intentionally avoids detailed project recipes, molecule nam
 Atomi currently includes command families for:
 
 - Electronic-structure preparation, monitoring, convergence checks, and run summaries.
+- OpenMolcas postanalysis, orbital-grid replay, M-edge XANES, and guarded
+  [Bagus-style multi-measure covalency investigation](docs/molcas_bagus_covalency.md).
 - Molecular and atomistic trajectory setup, live visualization, production-array support, and post-processing.
 - Guarded CP2K/LAMMPS MD-to-entropy planning with fixed-cell NVT tails, CN/MSD-first phase checks, and separate Route-C `S_vib`/`S_conf` outputs.
 - Training-dataset preparation, model-validation diagnostics, and model handoff helpers.

@@ -148,6 +148,16 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Print Molcas postanalysis workflow and build report-style M4/M5 XANES plots.",
     ),
     CommandSpec(
+        aliases=(
+            "molcas-bagus-covalency",
+            "molcas_bagus_covalency",
+            "bagus-covalency",
+        ),
+        target="atomi.qchem.molcas_bagus_covalency:main",
+        category="qchem",
+        help="Run a provenance-preserving, multi-measure Bagus-style covalency investigation.",
+    ),
+    CommandSpec(
         aliases=("molcas-exatomic-bridge", "molcas_exatomic_bridge"),
         target="atomi.qchem.exatomic_bridge:main",
         category="qchem",
