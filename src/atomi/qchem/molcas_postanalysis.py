@@ -139,8 +139,8 @@ def workflow_record() -> dict[str, Any]:
             },
             {
                 "stage": "orbital network",
-                "command": "molcas-postanalysis orbital-network --nodes-csv nodes.csv --edges-csv edges.csv --metric mutual_information --method 'QCMaquis DMRG-CI m=1024' --outdir orbital_network",
-                "purpose": "Render segmented orbital networks while reserving the word entanglement for DMRG/QCMaquis mutual-information data.",
+                "command": "molcas-postanalysis orbital-network --nodes-csv orbitals.csv --edges-csv pairs.csv --metric mutual_information --method 'QCMaquis DMRG-CI m=1024' --entanglement-metadata entanglement.json --layout circular --outdir orbital_network",
+                "purpose": "Render circular orbital-entanglement networks only after validating QCMaquis/DMRG one- and two-orbital entropies, mutual-information convention, convergence, state/root, active-space, and source hashes.",
             },
             {
                 "stage": "natural-occupation state metrics",
@@ -189,6 +189,7 @@ def workflow_record() -> dict[str, Any]:
             "Use one common absolute --isovalue when comparing an orbital manifold; per-orbital relative isovalues are suitable for shape inspection but can obscure relative localization.",
             "Do not label the final generic RasOrb/Molden set as a state-specific SO orbital. Use SONORB for SO states and SONT for SO transition orbitals before GRID_IT rendering.",
             "Do not call an AO-composition, SO-parentage, overlap, or visual-similarity network orbital entanglement. That label requires DMRG/QCMaquis orbital mutual information.",
+            "A DMRG/QCMaquis method label alone is insufficient for an entanglement figure. Require one-orbital entropy, two-orbital entropy, a declared mutual-information convention, one state/root and orbital order, DMRG convergence metadata, and hashed source files.",
             "A Figure-8-style particle/hole NTO panel requires transition-density SVD data and reported singular/eigenvalue contribution; paired state natural orbitals are a different diagnostic.",
             "For Figure-2-style orbital atlases, freeze image paths, hashes, common camera, common absolute isovalue, orbital labels, state/root provenance, and acceptance status before style iteration.",
             "Natural-occupation entropy requires a complete consistently defined orbital set. Cross-state occupation redistribution is rejected when selected-space dimension or electron count differs.",

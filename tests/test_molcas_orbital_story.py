@@ -177,6 +177,20 @@ def test_orbital_network_reserves_entanglement_for_dmrg(tmp_path: Path) -> None:
                 "RASSCF AO coefficients",
             ]
         )
+    with pytest.raises(ValueError, match="requires --entanglement-metadata"):
+        molcas_postanalysis.main(
+            [
+                "orbital-network",
+                "--nodes-csv",
+                str(nodes),
+                "--edges-csv",
+                str(edges),
+                "--metric",
+                "mutual_information",
+                "--method",
+                "QCMaquis DMRG-CI m=1024",
+            ]
+        )
     outdir = tmp_path / "network"
     rc = molcas_postanalysis.main(
         [

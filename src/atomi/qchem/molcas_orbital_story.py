@@ -20,6 +20,8 @@ from typing import Any
 
 import numpy as np
 
+from atomi.qchem.molcas_orbital_entanglement import load_entanglement_dataset
+
 
 SCHEMA_ATLAS = "atomi.molcas_orbital_atlas.v1"
 SCHEMA_PAIR = "atomi.molcas_orbital_pair.v1"
@@ -453,6 +455,30 @@ def _network_positions(
     return positions, list(groups)
 
 
+def _circular_network_positions(
+    nodes: list[dict[str, str]],
+) -> tuple[dict[str, tuple[float, float]], list[str]]:
+    ordered = sorted(
+        nodes,
+        key=lambda row: (
+            _int(row, "family_order", 999),
+            row["family"],
+            _int(row, "orbital_order", _int(row, "order", 999)),
+            row["label"],
+        ),
+    )
+    angles = np.linspace(math.pi / 2.0, math.pi / 2.0 + 2.0 * math.pi, len(ordered), endpoint=False)
+    positions = {
+        row["node_id"]: (
+            float(0.5 + 0.38 * math.cos(angle)),
+            float(0.5 + 0.38 * math.sin(angle)),
+        )
+        for row, angle in zip(ordered, angles)
+    }
+    families = list(OrderedDict.fromkeys(row["family"] for row in ordered))
+    return positions, families
+
+
 def render_orbital_network(args: argparse.Namespace) -> int:
     nodes_path = args.nodes_csv.expanduser().resolve()
     edges_path = args.edges_csv.expanduser().resolve()
@@ -471,19 +497,35 @@ def render_orbital_network(args: argparse.Namespace) -> int:
     )
     if missing:
         raise ValueError(f"Edges reference unknown nodes: {', '.join(missing)}")
+    entanglement_metadata: dict[str, Any] | None = None
     if args.metric == "mutual_information":
         if not re.search(r"\b(DMRG|QCMaquis)\b", args.method, re.IGNORECASE):
             raise ValueError(
                 "A true entanglement diagram requires a DMRG/QCMaquis method label "
                 "and orbital mutual-information values."
             )
+        if args.entanglement_metadata is None:
+            raise ValueError(
+                "A true entanglement diagram requires --entanglement-metadata "
+                "with state, active-space, entropy-convention, convergence, and source hashes."
+            )
+        dataset = load_entanglement_dataset(
+            args.entanglement_metadata,
+            nodes_path,
+            edges_path,
+        )
+        entanglement_metadata = dataset.metadata
     elif re.search(r"\bentanglement\b", args.title, re.IGNORECASE):
         raise ValueError("Only --metric mutual_information may be titled an entanglement diagram")
 
     kept_edges = [row for row in edges if _float(row, "value") >= args.min_edge_value]
     if not kept_edges:
         raise ValueError("No edges remain after --min-edge-value filtering")
-    positions, families = _network_positions(nodes)
+    positions, families = (
+        _circular_network_positions(nodes)
+        if args.layout == "circular"
+        else _network_positions(nodes)
+    )
     _, plt = _matplotlib()
     from matplotlib.offsetbox import AnnotationBbox, OffsetImage
     from matplotlib.patches import FancyArrowPatch, Rectangle
@@ -492,34 +534,35 @@ def render_orbital_network(args: argparse.Namespace) -> int:
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.set_axis_off()
-    family_x = {
-        family: positions[next(row["node_id"] for row in nodes if row["family"] == family)][0]
-        for family in families
-    }
-    band_width = 0.82 / max(1, len(families))
-    for family in families:
-        x = family_x[family]
-        ax.add_patch(
-            Rectangle(
-                (x - band_width / 2.0, 0.055),
-                band_width,
-                0.88,
-                facecolor="#F7F8FA",
-                edgecolor="#D7DADF",
-                linewidth=0.7,
-                zorder=0,
+    if args.layout == "segmented":
+        family_x = {
+            family: positions[next(row["node_id"] for row in nodes if row["family"] == family)][0]
+            for family in families
+        }
+        band_width = 0.82 / max(1, len(families))
+        for family in families:
+            x = family_x[family]
+            ax.add_patch(
+                Rectangle(
+                    (x - band_width / 2.0, 0.055),
+                    band_width,
+                    0.88,
+                    facecolor="#F7F8FA",
+                    edgecolor="#D7DADF",
+                    linewidth=0.7,
+                    zorder=0,
+                )
             )
-        )
-        ax.text(
-            x,
-            0.955,
-            family,
-            ha="center",
-            va="bottom",
-            fontsize=9,
-            fontweight="bold",
-            color="#252B33",
-        )
+            ax.text(
+                x,
+                0.955,
+                family,
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                fontweight="bold",
+                color="#252B33",
+            )
 
     values = np.asarray([_float(row, "value") for row in kept_edges], dtype=float)
     maximum = float(values.max())
@@ -634,7 +677,9 @@ def render_orbital_network(args: argparse.Namespace) -> int:
             "schema": SCHEMA_NETWORK,
             "metric": args.metric,
             "method": args.method,
+            "layout": args.layout,
             "is_true_entanglement": is_entanglement,
+            "entanglement_metadata": entanglement_metadata,
             "scientific_guard": guard,
             "title": args.title,
             "source_nodes": _image_record(nodes_path),
@@ -872,6 +917,19 @@ def add_parsers(subparsers: Any) -> None:
         required=True,
     )
     parser.add_argument("--method", default="")
+    parser.add_argument(
+        "--entanglement-metadata",
+        type=Path,
+        help=(
+            "Required for mutual_information: validated QCMaquis/DMRG state, "
+            "active-space, entropy-convention, convergence, and source provenance."
+        ),
+    )
+    parser.add_argument(
+        "--layout",
+        choices=("segmented", "circular"),
+        default="segmented",
+    )
     parser.add_argument("--outdir", type=Path, default=Path("molcas_orbital_network"))
     parser.add_argument("--title", default="OpenMolcas orbital network")
     parser.add_argument("--min-edge-value", type=float, default=0.0)
