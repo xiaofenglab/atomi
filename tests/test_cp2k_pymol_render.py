@@ -116,3 +116,61 @@ def test_pymol_render_writes_workspace_and_archive(tmp_path: Path) -> None:
     assert "ga_water_entry.mp4" in names
     assert "frames.tar.gz" in names
     assert "snapshots.tar.gz" in names
+
+
+def test_pymol_render_accepts_generic_centers_and_pair_cutoffs(tmp_path: Path) -> None:
+    xyz = tmp_path / "nb_ca.xyz"
+    xyz.write_text(
+        "6\n"
+        "Nb-Ca test\n"
+        "Nb 0.0 0.0 0.0\n"
+        "Ca 3.8 0.0 0.0\n"
+        "O 2.0 0.0 0.0\n"
+        "H 2.9 0.0 0.0\n"
+        "Cl 8.0 0.0 0.0\n"
+        "N 0.0 2.0 0.0\n",
+        encoding="utf-8",
+    )
+    outdir = tmp_path / "render"
+
+    main(
+        [
+            str(xyz),
+            "--outdir",
+            str(outdir),
+            "--center-elements",
+            "Nb,Ca",
+            "--bond-cutoff",
+            "Nb-O=2.40",
+            "--bond-cutoff",
+            "Ca-O=3.00",
+            "--bond-cutoff",
+            "Ca-Nb=4.20",
+            "--attachment-cutoff",
+            "O-H=1.20",
+            "--spectator-elements",
+            "Cl",
+            "--center-color",
+            "teal",
+            "--element-color",
+            "Nb=marine",
+            "--element-color",
+            "Ca=cyan",
+            "--no-ray",
+        ]
+    )
+
+    helper = (outdir / "aimd_render_dynamic.py").read_text(encoding="utf-8")
+    assert "CENTER_ELEMENTS = set(['Nb', 'Ca'])" in helper
+    assert "('Nb', 'O'): 2.4" in helper
+    assert "('Ca', 'O'): 3.0" in helper
+    assert "('Ca', 'Nb'): 4.2" in helper
+    assert "ATTACHMENT_CUTOFFS = {('O', 'H'): 1.2}" in helper
+    assert "SPECTATOR_ELEMENTS = set(['Cl'])" in helper
+    assert 'CENTER_COLOR = "teal"' in helper
+    assert "ELEMENT_COLORS = {'Nb': 'marine', 'Ca': 'cyan'}" in helper
+    assert "for left_idx, right_idx in sorted(bond_pairs):" in helper
+
+    summary = (outdir / "render_summary.txt").read_text(encoding="utf-8")
+    assert "center_elements = Nb,Ca" in summary
+    assert "bond_cutoffs = Nb-O=2.40,Ca-O=3.00,Ca-Nb=4.20" in summary

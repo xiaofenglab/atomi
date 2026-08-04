@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import shlex
 import subprocess
 import tarfile
@@ -63,6 +64,16 @@ import os
 
 TRAJ_OBJECT = "@@TRAJ_OBJECT@@"
 
+# Generic chemistry configuration. Pair keys are (central element, neighbor
+# element); attachment keys connect first-shell atoms to solvent/ligand atoms.
+CENTER_ELEMENTS = set(@@CENTER_ELEMENTS@@)
+BOND_CUTOFFS = @@BOND_CUTOFFS@@
+ATTACHMENT_CUTOFFS = @@ATTACHMENT_CUTOFFS@@
+SPECTATOR_ELEMENTS = set(@@SPECTATOR_ELEMENTS@@)
+CENTER_COLOR = "@@CENTER_COLOR@@"
+ELEMENT_COLORS = @@ELEMENT_COLORS@@
+
+# Retained in generated helpers for compatibility with older Ga workspaces.
 GA_O_CUTOFF = @@GA_O_CUTOFF@@
 GA_CL_CUTOFF = @@GA_CL_CUTOFF@@
 O_H_CUTOFF = @@O_H_CUTOFF@@
@@ -74,13 +85,13 @@ CL_SCALE = @@CL_SCALE@@
 CL_TRANS = @@CL_TRANS@@
 
 CORE_SCALE = @@CORE_SCALE@@
-GA_SCALE = @@GA_SCALE@@
+CENTER_SCALE = @@CENTER_SCALE@@
 
 SHOW_CLOUD = @@SHOW_CLOUD@@
 CLOUD_SCALE = @@CLOUD_SCALE@@
 CLOUD_O_BOOST = @@CLOUD_O_BOOST@@
 CLOUD_CL_BOOST = @@CLOUD_CL_BOOST@@
-CLOUD_GA_BOOST = @@CLOUD_GA_BOOST@@
+CLOUD_CENTER_BOOST = @@CLOUD_CENTER_BOOST@@
 CLOUD_TRANS = @@CLOUD_TRANS@@
 
 STICK_RADIUS = @@STICK_RADIUS@@
@@ -115,11 +126,10 @@ def _clear_temp():
     for name in [
         "frameobj",
         "cloud",
-        "ga_center",
-        "firstO",
-        "shellH",
-        "nearCl",
-        "allCl",
+        "center",
+        "first_shell",
+        "attached",
+        "spectators",
         "core",
         "embed",
         "bonded_atoms",
@@ -167,40 +177,42 @@ def build_frame(state=1):
         return
 
     model_all = cmd.get_model("frameobj")
-    ga_atoms = [a for a in model_all.atom if a.symbol == "Ga"]
-    o_atoms = [a for a in model_all.atom if a.symbol == "O"]
-    h_atoms = [a for a in model_all.atom if a.symbol == "H"]
-    cl_atoms = [a for a in model_all.atom if a.symbol == "Cl"]
+    centers = [a for a in model_all.atom if a.symbol in CENTER_ELEMENTS]
+    center_idx = {a.index for a in centers}
+    spectator_idx = {a.index for a in model_all.atom if a.symbol in SPECTATOR_ELEMENTS}
+    first_shell_idx = set()
+    bond_pairs = set()
 
-    ga_idx = [a.index for a in ga_atoms]
-    all_cl_idx = [a.index for a in cl_atoms]
-    first_o_idx = set()
-    near_cl_idx = set()
+    for center in centers:
+        for atom in model_all.atom:
+            if atom.index == center.index:
+                continue
+            cutoff = BOND_CUTOFFS.get((center.symbol, atom.symbol))
+            if cutoff is None or _dist(center, atom) > cutoff:
+                continue
+            first_shell_idx.add(atom.index)
+            bond_pairs.add(tuple(sorted((center.index, atom.index))))
 
-    for ga in ga_atoms:
-        for o in o_atoms:
-            if _dist(ga, o) <= GA_O_CUTOFF:
-                first_o_idx.add(o.index)
-        for cl in cl_atoms:
-            if _dist(ga, cl) <= GA_CL_CUTOFF:
-                near_cl_idx.add(cl.index)
+    attached_idx = set()
+    first_shell_atoms = [a for a in model_all.atom if a.index in first_shell_idx]
+    for shell_atom in first_shell_atoms:
+        for atom in model_all.atom:
+            if atom.index in center_idx or atom.index == shell_atom.index:
+                continue
+            cutoff = ATTACHMENT_CUTOFFS.get((shell_atom.symbol, atom.symbol))
+            if cutoff is None or _dist(shell_atom, atom) > cutoff:
+                continue
+            attached_idx.add(atom.index)
+            bond_pairs.add(tuple(sorted((shell_atom.index, atom.index))))
 
-    shell_h_idx = set()
-    for h in h_atoms:
-        for o in o_atoms:
-            if o.index in first_o_idx and _dist(h, o) <= O_H_CUTOFF:
-                shell_h_idx.add(h.index)
-                break
-
-    core_idx = set(ga_idx) | set(first_o_idx) | set(shell_h_idx) | set(all_cl_idx)
+    core_idx = center_idx | first_shell_idx | attached_idx | spectator_idx
     all_idx = {a.index for a in model_all.atom}
     embed_idx = all_idx - core_idx
 
-    _make_selection("ga_center", "frameobj", ga_idx)
-    _make_selection("firstO", "frameobj", first_o_idx)
-    _make_selection("shellH", "frameobj", shell_h_idx)
-    _make_selection("nearCl", "frameobj", near_cl_idx)
-    _make_selection("allCl", "frameobj", all_cl_idx)
+    _make_selection("center", "frameobj", center_idx)
+    _make_selection("first_shell", "frameobj", first_shell_idx)
+    _make_selection("attached", "frameobj", attached_idx)
+    _make_selection("spectators", "frameobj", spectator_idx)
     _make_selection("core", "frameobj", core_idx)
     _make_selection("embed", "frameobj", embed_idx)
 
@@ -212,16 +224,16 @@ def build_frame(state=1):
         cmd.set("sphere_transparency", EMBED_TRANS, "embed")
         cmd.color("gray", "embed and elem H")
         cmd.color("pink", "embed and elem O")
-        cmd.color("gray", "embed and not elem O+H+Cl+Ga")
+        cmd.color("gray", "embed and not elem O+H")
 
-    if all_cl_idx:
-        cmd.show("spheres", "allCl")
-        cmd.set("sphere_scale", CL_SCALE, "allCl")
-        cmd.set("sphere_transparency", CL_TRANS, "allCl")
-        cmd.color("green", "allCl")
+    if spectator_idx:
+        cmd.show("spheres", "spectators")
+        cmd.set("sphere_scale", CL_SCALE, "spectators")
+        cmd.set("sphere_transparency", CL_TRANS, "spectators")
+        cmd.color("green", "spectators and elem Cl")
 
     if SHOW_CLOUD:
-        cloud_idx = set(ga_idx) | set(first_o_idx) | set(near_cl_idx)
+        cloud_idx = center_idx | first_shell_idx
         if cloud_idx:
             expr = " or ".join(_idx_sel("frameobj", i) for i in sorted(cloud_idx))
             cmd.create("cloud", expr, 1, 1)
@@ -230,45 +242,39 @@ def build_frame(state=1):
             cmd.alter("cloud", f"vdw=vdw*{CLOUD_SCALE}")
             cmd.alter("cloud and elem O", f"vdw=vdw*{CLOUD_O_BOOST}")
             cmd.alter("cloud and elem Cl", f"vdw=vdw*{CLOUD_CL_BOOST}")
-            cmd.alter("cloud and elem Ga", f"vdw=vdw*{CLOUD_GA_BOOST}")
+            center_expr = " or ".join(f"elem {element}" for element in sorted(CENTER_ELEMENTS))
+            if center_expr:
+                cmd.alter(f"cloud and ({center_expr})", f"vdw=vdw*{CLOUD_CENTER_BOOST}")
             cmd.rebuild("cloud")
             cmd.set("sphere_scale", 1.0, "cloud")
             cmd.set("sphere_transparency", CLOUD_TRANS, "cloud")
-            cmd.color("yellow", "cloud and elem Ga")
+            if center_expr:
+                cmd.color(CENTER_COLOR, f"cloud and ({center_expr})")
             cmd.color("gray", "cloud and elem Cl")
             cmd.color("pink", "cloud and elem O")
+            for element, color in ELEMENT_COLORS.items():
+                cmd.color(color, f"cloud and elem {element}")
 
     if core_idx:
         cmd.show("spheres", "core")
         cmd.set("sphere_scale", CORE_SCALE, "core")
         cmd.set("sphere_transparency", 0.0, "core")
-        cmd.color("yellow", "ga_center")
+        cmd.color(CENTER_COLOR, "center")
         cmd.color("green", "core and elem Cl")
         cmd.color("red", "core and elem O")
         cmd.color("white", "core and elem H")
-        cmd.set("sphere_scale", GA_SCALE, "ga_center")
+        for element, color in ELEMENT_COLORS.items():
+            cmd.color(color, f"core and elem {element}")
+        cmd.set("sphere_scale", CENTER_SCALE, "center")
 
     bonded_idx = set()
-    for ga in ga_atoms:
-        ga_sel = _idx_sel("frameobj", ga.index)
-        for o in o_atoms:
-            if _dist(ga, o) <= GA_O_CUTOFF:
-                o_sel = _idx_sel("frameobj", o.index)
-                try:
-                    cmd.bond(ga_sel, o_sel)
-                except Exception:
-                    pass
-                bonded_idx.add(ga.index)
-                bonded_idx.add(o.index)
-        for cl in cl_atoms:
-            if _dist(ga, cl) <= GA_CL_CUTOFF:
-                cl_sel = _idx_sel("frameobj", cl.index)
-                try:
-                    cmd.bond(ga_sel, cl_sel)
-                except Exception:
-                    pass
-                bonded_idx.add(ga.index)
-                bonded_idx.add(cl.index)
+    for left_idx, right_idx in sorted(bond_pairs):
+        try:
+            cmd.bond(_idx_sel("frameobj", left_idx), _idx_sel("frameobj", right_idx))
+        except Exception:
+            pass
+        bonded_idx.add(left_idx)
+        bonded_idx.add(right_idx)
 
     if bonded_idx:
         _make_selection("bonded_atoms", "frameobj", bonded_idx)
@@ -287,11 +293,10 @@ def build_frame(state=1):
             cmd.zoom("frameobj", buffer=2.0)
 
     for selection in [
-        "ga_center",
-        "firstO",
-        "shellH",
-        "nearCl",
-        "allCl",
+        "center",
+        "first_shell",
+        "attached",
+        "spectators",
         "core",
         "embed",
         "bonded_atoms",
@@ -362,9 +367,67 @@ print("  render_movie(start, stop, prefix, step, do_ray)")
 '''
 
 
+def parse_elements(value: str) -> list[str]:
+    elements = [item.strip() for item in value.split(",") if item.strip()]
+    if not elements:
+        raise ValueError("Element lists must contain at least one symbol")
+    return elements
+
+
+def parse_pair_cutoffs(values: list[str], defaults: dict[tuple[str, str], float]) -> dict[tuple[str, str], float]:
+    cutoffs = dict(defaults)
+    for value in values:
+        try:
+            pair, cutoff_text = value.rsplit("=", 1)
+            left, right = re.split(r"[-:/]", pair, maxsplit=1)
+            cutoff = float(cutoff_text)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid pair cutoff {value!r}; expected CENTER-ELEMENT=ANGSTROM"
+            ) from exc
+        if cutoff <= 0:
+            raise ValueError(f"Pair cutoff must be positive: {value!r}")
+        cutoffs[(left.strip(), right.strip())] = cutoff
+    return cutoffs
+
+
+def parse_element_colors(values: list[str]) -> dict[str, str]:
+    colors = {}
+    for value in values:
+        try:
+            element, color = value.split("=", 1)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid element color {value!r}; expected ELEMENT=PYMOL_COLOR"
+            ) from exc
+        element = element.strip()
+        color = color.strip()
+        if not element or not color:
+            raise ValueError(f"Invalid element color {value!r}")
+        colors[element] = color
+    return colors
+
+
 def render_helper_text(args: argparse.Namespace) -> str:
+    centers = parse_elements(args.center_elements)
+    spectators = parse_elements(args.spectator_elements) if args.spectator_elements.strip() else []
+    bond_cutoffs = parse_pair_cutoffs(
+        args.bond_cutoff,
+        {("Ga", "O"): args.ga_o_cutoff, ("Ga", "Cl"): args.ga_cl_cutoff},
+    )
+    attachment_cutoffs = parse_pair_cutoffs(
+        args.attachment_cutoff,
+        {("O", "H"): args.o_h_cutoff},
+    )
+    element_colors = parse_element_colors(args.element_color)
     replacements = {
         "@@TRAJ_OBJECT@@": args.object_name,
+        "@@CENTER_ELEMENTS@@": repr(centers),
+        "@@BOND_CUTOFFS@@": repr(bond_cutoffs),
+        "@@ATTACHMENT_CUTOFFS@@": repr(attachment_cutoffs),
+        "@@SPECTATOR_ELEMENTS@@": repr(spectators),
+        "@@CENTER_COLOR@@": args.center_color,
+        "@@ELEMENT_COLORS@@": repr(element_colors),
         "@@GA_O_CUTOFF@@": f"{args.ga_o_cutoff:.6g}",
         "@@GA_CL_CUTOFF@@": f"{args.ga_cl_cutoff:.6g}",
         "@@O_H_CUTOFF@@": f"{args.o_h_cutoff:.6g}",
@@ -373,12 +436,12 @@ def render_helper_text(args: argparse.Namespace) -> str:
         "@@CL_SCALE@@": f"{args.cl_scale:.6g}",
         "@@CL_TRANS@@": f"{args.cl_transparency:.6g}",
         "@@CORE_SCALE@@": f"{args.core_scale:.6g}",
-        "@@GA_SCALE@@": f"{args.ga_scale:.6g}",
+        "@@CENTER_SCALE@@": f"{args.center_scale:.6g}",
         "@@SHOW_CLOUD@@": "1" if args.show_cloud else "0",
         "@@CLOUD_SCALE@@": f"{args.cloud_scale:.6g}",
         "@@CLOUD_O_BOOST@@": f"{args.cloud_o_boost:.6g}",
         "@@CLOUD_CL_BOOST@@": f"{args.cloud_cl_boost:.6g}",
-        "@@CLOUD_GA_BOOST@@": f"{args.cloud_ga_boost:.6g}",
+        "@@CLOUD_CENTER_BOOST@@": f"{args.cloud_center_boost:.6g}",
         "@@CLOUD_TRANS@@": f"{args.cloud_transparency:.6g}",
         "@@STICK_RADIUS@@": f"{args.stick_radius:.6g}",
         "@@RAY_W@@": str(args.width),
@@ -568,6 +631,38 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument("--ray", dest="ray", action="store_true", default=True)
     parser.add_argument("--no-ray", dest="ray", action="store_false")
+    parser.add_argument(
+        "--center-elements",
+        default="Ga",
+        help="Comma-separated central elements, e.g. Nb,Ca. Default: Ga.",
+    )
+    parser.add_argument(
+        "--bond-cutoff",
+        action="append",
+        default=[],
+        metavar="CENTER-ELEMENT=ANGSTROM",
+        help="Pair-specific central-neighbor bond cutoff; repeat as needed.",
+    )
+    parser.add_argument(
+        "--attachment-cutoff",
+        action="append",
+        default=[],
+        metavar="SHELL-ELEMENT=ANGSTROM",
+        help="First-shell attachment cutoff, e.g. O-H=1.25; repeat as needed.",
+    )
+    parser.add_argument(
+        "--spectator-elements",
+        default="Cl",
+        help="Comma-separated elements shown explicitly even when unbound; empty disables.",
+    )
+    parser.add_argument("--center-color", default="yellow")
+    parser.add_argument(
+        "--element-color",
+        action="append",
+        default=[],
+        metavar="ELEMENT=PYMOL_COLOR",
+        help="Override an element color; repeat for multiple elements.",
+    )
     parser.add_argument("--ga-o-cutoff", type=float, default=2.55)
     parser.add_argument("--ga-cl-cutoff", type=float, default=2.95)
     parser.add_argument("--o-h-cutoff", type=float, default=1.25)
@@ -576,13 +671,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cl-scale", type=float, default=0.30)
     parser.add_argument("--cl-transparency", type=float, default=0.00)
     parser.add_argument("--core-scale", type=float, default=0.38)
-    parser.add_argument("--ga-scale", type=float, default=0.50)
+    parser.add_argument("--center-scale", "--ga-scale", dest="center_scale", type=float, default=0.50)
     parser.add_argument("--stick-radius", type=float, default=0.12)
     parser.add_argument("--show-cloud", action="store_true")
     parser.add_argument("--cloud-scale", type=float, default=1.30)
     parser.add_argument("--cloud-o-boost", type=float, default=1.15)
     parser.add_argument("--cloud-cl-boost", type=float, default=1.35)
-    parser.add_argument("--cloud-ga-boost", type=float, default=1.05)
+    parser.add_argument(
+        "--cloud-center-boost",
+        "--cloud-ga-boost",
+        dest="cloud_center_boost",
+        type=float,
+        default=1.05,
+    )
     parser.add_argument("--cloud-transparency", type=float, default=0.78)
     parser.add_argument("--pymol-exe", default="pymol")
     parser.add_argument("--ffmpeg-exe", default="ffmpeg")
@@ -645,6 +746,11 @@ def main(argv: list[str] | None = None) -> None:
         f"step = {args.step}",
         f"frames_to_render = {n_render}",
         f"movie_name = {args.movie_name}",
+        f"center_elements = {args.center_elements}",
+        f"bond_cutoffs = {','.join(args.bond_cutoff) or 'legacy Ga-O/Ga-Cl defaults'}",
+        f"attachment_cutoffs = {','.join(args.attachment_cutoff) or 'O-H legacy default'}",
+        f"spectator_elements = {args.spectator_elements or 'none'}",
+        f"element_colors = {','.join(args.element_color) or 'default atomic/legacy colors'}",
         f"snapshots_requested = {','.join(str(item) for item in args.snapshot) or 'none'}",
     ]
     (outdir / "render_summary.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
