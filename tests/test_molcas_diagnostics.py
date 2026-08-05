@@ -95,6 +95,49 @@ MATRIX = """
 """
 
 
+COMPACT_MATRIX = """
+      Pseudonatural active orbitals and approximate occupation numbers
+
+      MOLECULAR ORBITALS FOR SYMMETRY SPECIES 1: a1
+
+      INDEX  ENERGY  OCCUPATION COEFFICIENTS ...
+          1-4276.6386    2.0000
+                 1 U1     1s     ( 1.0000)
+          2   -2.0000    2.0000
+                 2 U1     5f0    (-0.8000)   3 O2     2px    ( 0.2000)
+          3   -1.8000    2.0000
+                 2 U1     5f0    (-0.7000)
+          4   -1.6000    2.0000
+                 2 U1     5f0    (-0.6000)
+          5   -1.4000    2.0000
+                 2 U1     5f0    (-0.5000)
+          6   -1.2000    2.0000
+                 2 U1     5f0    (-0.4000)
+          7   -1.0000    2.0000
+                 2 U1     5f0    (-0.3000)
+          8   -0.8000    2.0000
+                 2 U1     5f0    (-0.2000)
+          9   -0.6000    1.0000
+                 2 U1     5f0    (-0.9000)
+         10   -0.4000    0.5000
+                 2 U1     5f0    (-0.8500)
+         11    0.1000    0.0000
+                 4 U1     7s     ( 0.9000)
+         12    0.3000    0.0000
+                 4 U1     7s     ( 0.8000)
+         13    0.5000    0.0000
+                 4 U1     7s     ( 0.7000)
+         14    0.7000    0.0000
+                 4 U1     7s     ( 0.6000)
+         15    0.9000    0.0000
+                 4 U1     7s     ( 0.5000)
+         16    1.1000    0.0000
+                 4 U1     7s     ( 0.4000)
+
+      MOLECULAR ORBITALS FOR SYMMETRY SPECIES 2: b1
+"""
+
+
 LOG_TEXT = "".join(
     [
         _module(0, 0.0, 1),
@@ -135,6 +178,28 @@ def test_build_diagnostic_reports_six_frontier_orbitals_each(tmp_path: Path) -> 
     assert result["frontier"]["virtual"][0]["frontier_label"] == "LUMO"
     assert result["frontier"]["virtual"][0]["dominant_aos"][0]["ao"] == "7s"
     assert any("title says triplet" in warning for warning in result["warnings"])
+
+
+def test_build_diagnostic_accepts_compact_orbital_listing(tmp_path: Path) -> None:
+    inp = tmp_path / "run.inp"
+    log = tmp_path / "run.log"
+    inp.write_text(INPUT_TEXT, encoding="utf-8")
+    log.write_text(
+        "".join([_module(0, 0.0, 1), _module(1, 0.5, 1, COMPACT_MATRIX)]),
+        encoding="utf-8",
+    )
+
+    result = molcas_diagnostics.build_diagnostic(inp, log)
+
+    assert result["ao_listing"] == {
+        "format": "compact",
+        "complete_coefficient_matrix": False,
+    }
+    assert result["frontier"]["homo"] == 10
+    assert result["frontier"]["lumo"] == 11
+    assert result["frontier"]["occupied"][-1]["dominant_aos"][0]["ao"] == "5f0"
+    assert result["frontier"]["virtual"][0]["dominant_aos"][0]["ao"] == "7s"
+    assert any("compact AO printing" in warning for warning in result["warnings"])
 
 
 def test_moccheck_cli_prints_and_writes_json(tmp_path: Path, capsys) -> None:

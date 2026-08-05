@@ -28,6 +28,14 @@ MO_SYMMETRY_RE = re.compile(
     re.IGNORECASE,
 )
 AO_MATRIX_RE = re.compile(r"^\s*(?P<ao_index>\d+)\s+(?P<atom>\S+)\s+(?P<ao>\S+)\s+(?P<values>.*)$")
+COMPACT_MO_ROW_RE = re.compile(
+    rf"^\s*(?P<mo>\d+)\s*(?P<energy>{FLOAT_PATTERN})\s+"
+    rf"(?P<occupation>{FLOAT_PATTERN})(?:\s+.*)?$"
+)
+COMPACT_AO_TERM_RE = re.compile(
+    rf"(?P<ao_index>\d+)\s+(?P<atom>\S+)\s+(?P<ao>\S+)\s+"
+    rf"\(\s*(?P<coefficient>{FLOAT_PATTERN})\s*\)"
+)
 TITLE_MULTIPLICITIES = {
     "singlet": 1,
     "doublet": 2,
@@ -348,6 +356,77 @@ def parse_full_mo_matrix(module_text: str, *, symmetry: int = 1) -> list[dict[st
     return [rows[orbital] for orbital in sorted(rows)]
 
 
+def parse_compact_mo_listing(module_text: str, *, symmetry: int = 1) -> list[dict[str, Any]]:
+    """Parse OpenMolcas ``ORBA COMP`` pseudonatural-orbital listings.
+
+    Compact listings contain one orbital header followed by only the AO
+    coefficients that pass OpenMolcas' print threshold. They are sufficient
+    for frontier identity diagnostics, but they are not a complete coefficient
+    matrix.
+    """
+
+    lines = module_text.splitlines()
+    pseudonatural = [
+        idx
+        for idx, line in enumerate(lines)
+        if "pseudonatural active orbitals and approximate occupation numbers" in line.lower()
+    ]
+    anchor = pseudonatural[-1] if pseudonatural else 0
+    section_start: int | None = None
+    section_end = len(lines)
+    symmetry_label = ""
+    for idx in range(anchor, len(lines)):
+        match = MO_SYMMETRY_RE.search(lines[idx])
+        if not match:
+            continue
+        found_symmetry = int(match.group("symmetry"))
+        if section_start is None and found_symmetry == symmetry:
+            section_start = idx + 1
+            symmetry_label = match.group("label")
+            continue
+        if section_start is not None:
+            section_end = idx
+            break
+    if section_start is None:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    idx = section_start
+    while idx < section_end:
+        match = COMPACT_MO_ROW_RE.match(lines[idx])
+        if not match:
+            idx += 1
+            continue
+        row: dict[str, Any] = {
+            "mo": int(match.group("mo")),
+            "energy": float(match.group("energy").replace("D", "E").replace("d", "e")),
+            "occupation": float(
+                match.group("occupation").replace("D", "E").replace("d", "e")
+            ),
+            "symmetry": symmetry,
+            "symmetry_label": symmetry_label,
+            "terms": [],
+        }
+        idx += 1
+        while idx < section_end and not COMPACT_MO_ROW_RE.match(lines[idx]):
+            for term_match in COMPACT_AO_TERM_RE.finditer(lines[idx]):
+                coefficient = float(
+                    term_match.group("coefficient").replace("D", "E").replace("d", "e")
+                )
+                row["terms"].append(
+                    {
+                        "ao_index": int(term_match.group("ao_index")),
+                        "atom": term_match.group("atom"),
+                        "ao": term_match.group("ao"),
+                        "coefficient": coefficient,
+                        "coeff2": coefficient * coefficient,
+                    }
+                )
+            idx += 1
+        rows.append(row)
+    return rows
+
+
 def _title_spin_warning(block: RasscfInputBlock, role: str) -> str | None:
     title_lower = block.title.lower()
     for name, multiplicity in TITLE_MULTIPLICITIES.items():
@@ -420,10 +499,14 @@ def build_diagnostic(
     log_modules = parse_rasscf_log_modules(_read_text(output_path))
     module, mapping_method = match_log_module(reference, log_modules)
     mo_rows = parse_full_mo_matrix(module.text, symmetry=symmetry)
+    ao_listing_format = "full"
+    if not mo_rows:
+        mo_rows = parse_compact_mo_listing(module.text, symmetry=symmetry)
+        ao_listing_format = "compact"
     if not mo_rows:
         raise ValueError(
-            "No full pseudonatural MO coefficient matrix was found for the selected symmetry. "
-            "Ensure the reference RASSCF uses ORBL ALL and ORBA FULL."
+            "No pseudonatural MO coefficient table was found for the selected symmetry. "
+            "Ensure the reference RASSCF prints orbitals with ORBL ALL and ORBA FULL or COMP."
         )
     occupied, virtual, homo, lumo = _frontier_rows(
         mo_rows, count=orbitals_each, occupancy_threshold=occupancy_threshold
@@ -453,6 +536,11 @@ def build_diagnostic(
         )
 
     warnings: list[str] = []
+    if ao_listing_format == "compact":
+        warnings.append(
+            "The selected block used OpenMolcas compact AO printing; coefficients below the "
+            "print threshold are absent, and relative shares are normalized over printed terms only"
+        )
     for block, role in [(reference, "reference"), (setup, "setup")]:
         if block is None:
             continue
@@ -493,6 +581,10 @@ def build_diagnostic(
             "state_symmetry": module.state_symmetry,
         },
         "mapping_method": mapping_method,
+        "ao_listing": {
+            "format": ao_listing_format,
+            "complete_coefficient_matrix": ao_listing_format == "full",
+        },
         "frontier": {
             "symmetry": symmetry,
             "symmetry_label": mo_rows[0].get("symmetry_label", ""),
@@ -504,7 +596,8 @@ def build_diagnostic(
             "virtual": virtual_items,
         },
         "weight_definition": (
-            "100*c_i^2/sum_j(c_j^2) over printed AO coefficients for each MO; "
+            "100*c_i^2/sum_j(c_j^2) over the AO coefficients present in the selected "
+            f"{ao_listing_format} listing for each MO; "
             "diagnostic display share, not Mulliken or Loewdin population"
         ),
         "warnings": warnings,
@@ -552,6 +645,11 @@ def print_diagnostic(result: dict[str, Any]) -> None:
         f"(lines {module['start_line']}-{module['end_line']})"
     )
     print(f"Mapping: {result['mapping_method']}")
+    print(
+        "AO listing: "
+        f"{result['ao_listing']['format']} "
+        f"(complete matrix={result['ao_listing']['complete_coefficient_matrix']})"
+    )
     print(
         f"Signature: symmetry {module['state_symmetry']} ({frontier['symmetry_label']}), "
         f"S={module['spin_quantum_number']}, active electrons={module['active_electrons']}"

@@ -33,5 +33,9 @@ share, `100*c_i^2/sum_j(c_j^2)`, over the AO coefficients printed for that MO.
 This share is useful for rapid identity checks but is not a Mulliken, Loewdin,
 or other population analysis because the AO basis is nonorthogonal.
 
-The reference RASSCF should use `ORBL ALL` and `ORBA FULL`; otherwise the full
-AO coefficient matrix needed by this diagnostic may not be present.
+The reference RASSCF may use either `ORBL ALL` with `ORBA FULL` or `ORBA COMP`.
+`FULL` is preferred because it provides the complete printed coefficient
+matrix. With `COMP`, `moccheck` parses the thresholded per-orbital AO listing
+and emits a warning that omitted small coefficients are not included in the
+normalized display shares. The compact result is suitable for orbital-identity
+QA, but not for quantitative population analysis.
