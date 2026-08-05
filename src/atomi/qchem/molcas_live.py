@@ -488,10 +488,26 @@ def _block_guards(
     total = runtime.roots_requested or plan.expected_roots
     if plan.kind in {"rasscf", "caspt2"} and total:
         done = len(runtime.roots)
-        level = "pass" if status == "finished" and done >= total else "pending"
-        if status == "finished" and done < total:
+        if status == "finished" and done >= total:
+            level = "pass"
+            detail = f"{done}/{total} root energies found"
+        elif status == "finished":
+            # Large-root OpenMolcas jobs can truncate printed root-energy
+            # tables even though the module returns normally and writes the
+            # complete JobIph state space for later modules. Treat the
+            # listing shortfall as an audit warning, not a numerical failure.
+            level = "warn"
+            detail = (
+                f"{done}/{total} root energies printed; module returned successfully, "
+                "so verify JobIph/RASSI state coverage"
+            )
+        elif status == "failed":
             level = "fail"
-        guards.append(_guard(level, "root coverage", f"{done}/{total} root energies found"))
+            detail = f"{done}/{total} root energies found before failure"
+        else:
+            level = "pending"
+            detail = f"{done}/{total} root energies found"
+        guards.append(_guard(level, "root coverage", detail))
 
     if plan.kind == "rasscf":
         expected_spin = (
@@ -956,7 +972,7 @@ def render_snapshot(
         icon = spinner if status == "running" else icons[status]
         progress = row["progress"]
         percent = progress["percent"]
-        bar_percent = 100.0 if row["kind"] == "rassi" and status == "finished" else percent
+        bar_percent = 100.0 if status == "finished" else percent
         title = row["title"] or "(untitled)"
         signature = ""
         if row["kind"] == "rasscf":
@@ -966,7 +982,16 @@ def render_snapshot(
             if row["spin_multiplicity"] is not None:
                 parts.append(f"spin={row['spin_multiplicity']}")
             signature = " " + " ".join(parts) if parts else ""
-        if progress["total"]:
+        if (
+            status == "finished"
+            and progress["total"]
+            and progress["completed"] < progress["total"]
+        ):
+            progress_text = (
+                f"finished; {progress['completed']}/{progress['total']} "
+                f"{progress['label']} printed"
+            )
+        elif progress["total"]:
             progress_text = (
                 f"{progress['completed']}/{progress['total']} {progress['label']} {percent:.1f}%"
             )

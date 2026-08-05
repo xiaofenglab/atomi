@@ -47,6 +47,13 @@ For CASPT2, it counts unique `CASPT2 Root N Total energy` records against the
 `MULTISTATE` or `XMULTISTATE` state count. If a CASPT2 block omits an explicit
 count, the preceding RASSCF root count is the documented fallback.
 
+Some large-root OpenMolcas modules return `_RC_ALL_IS_WELL_` but truncate the
+printed root-energy or orbital-file listings near 99-100 entries. In that
+case, `moclive` marks the module finished, fills its completion bar, and shows
+the partial listing as a warning such as `finished; 99/156 roots printed`.
+The warning requires a later JobIph/RASSI state-count audit; it is not a
+RASSCF/CASPT2 convergence failure.
+
 For RASSI, `NROFJOBIPHS` or `Nr of JobIph files` defines the selected spin-free
 state counts. Their sum is not the final SO-state dimension. `moclive` reports
 human-readable stages such as constructing the spin-orbit Hamiltonian, writing
@@ -103,12 +110,15 @@ atomically updates a reusable machine-readable snapshot at every refresh.
 
 `moclive` separates numerical completion from physical acceptance.
 
-- A completed RASSCF block must have a successful module return code and the
-  requested root count.
+- A completed RASSCF block must have a successful module return code. Printed
+  root coverage is checked separately because large-root listings may be
+  truncated even when the complete JobIph state space is written.
 - A final pseudonatural-orbital table is checked for printed, finite
   occupations within a tolerant zero-to-two range.
-- Supersymmetry warnings, root shortfalls, missing final orbital tables, and
-  nonconvergence are surfaced with their source evidence.
+- Supersymmetry warnings, printed-root shortfalls, missing final orbital
+  tables, and nonconvergence are surfaced with their source evidence. A
+  printed-root shortfall after `_RC_ALL_IS_WELL_` is a warning; a non-success
+  return code or explicit fatal marker is a failure.
 - While RASSCF is active, MO identity is `pending`; the monitor must not call
   unfinished orbitals physically accepted.
 - AO dominance is descriptive. It is not a Mulliken, Loewdin, or other

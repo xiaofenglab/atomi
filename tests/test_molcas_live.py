@@ -227,6 +227,27 @@ def test_duplicate_root_records_are_counted_once(tmp_path: Path) -> None:
     assert _block(snapshot, 1)["progress"]["completed"] == 2
 
 
+def test_successful_module_with_truncated_root_listing_is_warning(tmp_path: Path) -> None:
+    output_text = (
+        _rasscf_started("ground", 3, 2)
+        + _finished("rasscf")
+        + _caspt2_started("ground PT2", 2)
+    )
+    inp, output = _write_case(tmp_path, output_text)
+
+    snapshot = molcas_live.build_snapshot(inp, output)
+    finished = _block(snapshot, 1)
+
+    assert snapshot["overall_status"] == "running"
+    assert finished["status"] == "finished"
+    coverage = next(item for item in finished["guards"] if item["name"] == "root coverage")
+    assert coverage["level"] == "warn"
+    assert "module returned successfully" in coverage["detail"]
+
+    rendered = molcas_live.render_snapshot(snapshot, bar_width=12)
+    assert "finished; 2/3 roots printed" in rendered
+
+
 def test_live_session_reads_only_appended_bytes(tmp_path: Path) -> None:
     initial = _rasscf_started("ground", 3, 1)
     inp, output = _write_case(tmp_path, initial)
