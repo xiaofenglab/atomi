@@ -154,6 +154,12 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Audit pre-ALTER/SUPSYM frontier orbitals and dominant AO character.",
     ),
     CommandSpec(
+        aliases=("moclive", "molcas-live", "molcas_live"),
+        target="atomi.qchem.molcas_live:main",
+        category="qchem",
+        help="Live-monitor input-scoped RASSCF/CASPT2/RASSI progress and physical guards.",
+    ),
+    CommandSpec(
         aliases=(
             "molcas-bagus-covalency",
             "molcas_bagus_covalency",

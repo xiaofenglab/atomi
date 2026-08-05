@@ -4,7 +4,13 @@ import sys
 import types
 
 from atomi.cli import bootstrap
-from atomi.cli.registry import CommandSpec, command_registry, dispatch_registered_command, registered_aliases, specs_by_category
+from atomi.cli.registry import (
+    CommandSpec,
+    command_registry,
+    dispatch_registered_command,
+    registered_aliases,
+    specs_by_category,
+)
 
 
 def test_command_registry_exposes_core_bridge_aliases() -> None:
@@ -22,6 +28,7 @@ def test_command_registry_exposes_core_bridge_aliases() -> None:
     assert "molcas-exatomic-bridge" in aliases
     assert "molcas-bagus-covalency" in aliases
     assert "moccheck" in aliases
+    assert "moclive" in aliases
     assert "fdmnes-xanes-bridge" in aliases
     assert "fdmnes-xanes-status" in aliases
     assert "fdmnes-xanes-install-plan" in aliases
@@ -36,11 +43,9 @@ def test_command_registry_exposes_core_bridge_aliases() -> None:
     assert registry["md-entropy"].target == "atomi.md.entropy:main"
     assert registry["md-route-c"].target == "atomi.md.entropy:main"
     assert registry["plot-data"].target == "atomi.analysis.plot_dataset:main"
-    assert (
-        registry["molcas-bagus-covalency"].target
-        == "atomi.qchem.molcas_bagus_covalency:main"
-    )
+    assert registry["molcas-bagus-covalency"].target == "atomi.qchem.molcas_bagus_covalency:main"
     assert registry["moccheck"].target == "atomi.qchem.molcas_diagnostics:main"
+    assert registry["moclive"].target == "atomi.qchem.molcas_live:main"
     assert "zentropy" in specs_by_category()
     assert "structure" in specs_by_category()
     assert "xafs" in specs_by_category()
@@ -89,7 +94,9 @@ def test_bootstrap_dispatches_registered_command_without_legacy_cli(monkeypatch)
         category="test",
         help="fake bootstrap command",
     )
-    monkeypatch.setattr("atomi.cli.registry.command_registry", lambda: {"fake-bootstrap": fake_spec})
+    monkeypatch.setattr(
+        "atomi.cli.registry.command_registry", lambda: {"fake-bootstrap": fake_spec}
+    )
 
     bootstrap.main(["fake-bootstrap", "doctor"])
 

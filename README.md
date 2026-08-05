@@ -85,6 +85,7 @@ Atomi currently includes command families for:
 
 - Electronic-structure preparation, monitoring, convergence checks, and run summaries.
 - OpenMolcas pre-`ALTER`/`SUPSYM` frontier diagnostics with `moccheck`,
+  plus input-scoped live RASSCF/CASPT2/RASSI monitoring with `moclive`,
   postanalysis, orbital-grid replay, M-edge XANES, and guarded
   [Bagus-style multi-measure covalency investigation](docs/molcas_bagus_covalency.md).
 - Molecular and atomistic trajectory setup, live visualization, production-array support, and post-processing.
