@@ -31,6 +31,15 @@ MODULE_STOP_RE = re.compile(
     r"--- Stop Module:\s*(rasscf|caspt2|rassi)\b.*?/rc=([^\s]+)", re.IGNORECASE
 )
 MODULE_SPENT_RE = re.compile(r"--- Module\s+(rasscf|caspt2|rassi)\s+spent\b", re.IGNORECASE)
+MODULE_START_TIME_RE = re.compile(
+    r"--- Start Module:\s*(rasscf|caspt2|rassi)\b\s+at\s+(.+?)\s+---", re.IGNORECASE
+)
+MODULE_STOP_TIME_RE = re.compile(
+    r"--- Stop Module:\s*(rasscf|caspt2|rassi)\b\s+at\s+(.+?)\s+/rc=", re.IGNORECASE
+)
+MODULE_SPENT_DURATION_RE = re.compile(
+    r"--- Module\s+(rasscf|caspt2|rassi)\s+spent\s+(.+?)\s+---", re.IGNORECASE
+)
 RASSCF_ROOT_RE = re.compile(r"RASSCF root number\s+(\d+)\b", re.IGNORECASE)
 RASSCF_ROOT_REQUEST_RE = re.compile(r"Number of root\(s\) required\s+(\d+)\b", re.IGNORECASE)
 CASPT2_ROOT_RE = re.compile(
@@ -96,6 +105,9 @@ class RuntimeBlock:
     kind_index: int
     start_line: int
     end_line: int | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    elapsed_seconds: float | None = None
     return_code: str | None = None
     saw_spent: bool = False
     roots: set[int] = field(default_factory=set)
@@ -301,6 +313,34 @@ def _float(value: str) -> float:
     return float(value.replace("D", "E").replace("d", "e"))
 
 
+def _molcas_datetime(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(" ".join(value.split()), "%a %b %d %H:%M:%S %Y")
+    except ValueError:
+        return None
+
+
+def _duration_seconds(value: str) -> float | None:
+    if "less than one second" in value.lower():
+        return 0.0
+    scales = {
+        "day": 86400.0,
+        "hour": 3600.0,
+        "minute": 60.0,
+        "second": 1.0,
+    }
+    total = 0.0
+    matched = False
+    for amount, unit in re.findall(
+        r"([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*(days?|hours?|minutes?|seconds?)",
+        value,
+        re.IGNORECASE,
+    ):
+        matched = True
+        total += float(amount) * scales[unit.lower().rstrip("s")]
+    return total if matched else None
+
+
 def _record_error(block: RuntimeBlock, line: str) -> None:
     if any(pattern.search(line) for pattern in ERROR_PATTERNS):
         value = _clean_line(line)
@@ -361,6 +401,10 @@ def _ingest_output_lines(lines: Iterable[str], state: OutputParserState) -> None
                 kind_index=state.kind_counts[kind],
                 start_line=line_count,
             )
+            start_time = MODULE_START_TIME_RE.search(line)
+            if start_time:
+                parsed = _molcas_datetime(start_time.group(2))
+                current.started_at = parsed.isoformat() if parsed else start_time.group(2).strip()
             state.blocks.append(current)
             state.current_index = len(state.blocks) - 1
             state.in_mo_section = False
@@ -429,6 +473,21 @@ def _ingest_output_lines(lines: Iterable[str], state: OutputParserState) -> None
         if stop and stop.group(1).lower() == current.kind:
             current.return_code = stop.group(2)
             current.end_line = line_count
+            stop_time = MODULE_STOP_TIME_RE.search(line)
+            if stop_time:
+                parsed = _molcas_datetime(stop_time.group(2))
+                current.finished_at = parsed.isoformat() if parsed else stop_time.group(2).strip()
+            if current.elapsed_seconds is None and current.started_at and current.finished_at:
+                try:
+                    current.elapsed_seconds = max(
+                        0.0,
+                        (
+                            datetime.fromisoformat(current.finished_at)
+                            - datetime.fromisoformat(current.started_at)
+                        ).total_seconds(),
+                    )
+                except ValueError:
+                    pass
             if current.return_code != "_RC_ALL_IS_WELL_":
                 current.stage = "failed"
             elif current.stage == "initializing":
@@ -438,6 +497,9 @@ def _ingest_output_lines(lines: Iterable[str], state: OutputParserState) -> None
         spent = MODULE_SPENT_RE.search(line)
         if spent and spent.group(1).lower() == current.kind:
             current.saw_spent = True
+            duration = MODULE_SPENT_DURATION_RE.search(line)
+            if duration:
+                current.elapsed_seconds = _duration_seconds(duration.group(2))
             if current.end_line is None:
                 current.end_line = line_count
             if current.return_code is None and not current.error_lines:
@@ -696,6 +758,63 @@ def _progress(plan: PlanBlock, runtime: RuntimeBlock | None, status: str) -> dic
     return {"completed": completed, "total": total, "percent": percent, "label": label}
 
 
+def _human_duration(seconds: float | None) -> str | None:
+    if seconds is None or not math.isfinite(seconds) or seconds < 0:
+        return None
+    rounded = int(round(seconds))
+    days, remainder = divmod(rounded, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _timing(
+    plan: PlanBlock,
+    runtime: RuntimeBlock | None,
+    status: str,
+    progress: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    elapsed = runtime.elapsed_seconds if runtime is not None else None
+    if runtime is not None and elapsed is None and runtime.started_at:
+        try:
+            started = datetime.fromisoformat(runtime.started_at)
+            endpoint = now or datetime.now()
+            elapsed = max(0.0, (endpoint - started).total_seconds())
+        except ValueError:
+            elapsed = None
+
+    eta = None
+    eta_basis = None
+    completed = progress.get("completed") or 0
+    total = progress.get("total")
+    if (
+        status == "running"
+        and elapsed is not None
+        and elapsed > 0
+        and total
+        and 0 < completed < total
+    ):
+        eta = elapsed * (total - completed) / completed
+        eta_basis = f"linear {plan.kind.upper()} root throughput ({completed}/{total})"
+
+    return {
+        "elapsed_seconds": elapsed,
+        "elapsed": _human_duration(elapsed),
+        "eta_seconds": eta,
+        "eta": _human_duration(eta),
+        "eta_basis": eta_basis,
+        "eta_provisional": eta is not None,
+    }
+
+
 def _assemble_snapshot(
     inp: Path,
     output: Path,
@@ -713,12 +832,14 @@ def _assemble_snapshot(
         guards = _block_guards(planned, runtime, status)
         if any(guard["level"] == "fail" for guard in guards):
             status = "failed"
+        progress = _progress(planned, runtime, status)
         row = asdict(planned)
         row.update(
             {
                 "status": status,
                 "runtime": asdict(runtime) if runtime is not None else None,
-                "progress": _progress(planned, runtime, status),
+                "progress": progress,
+                "timing": _timing(planned, runtime, status, progress),
                 "guards": guards,
             }
         )
@@ -1005,6 +1126,15 @@ def render_snapshot(
                 progress_text += f" ({row['expected_roots']} input spin-free states)"
         else:
             progress_text = status
+        timing = row.get("timing") or {}
+        elapsed_text = timing.get("elapsed")
+        if elapsed_text and status in {"finished", "running", "failed"}:
+            progress_text += f" | elapsed {elapsed_text}"
+        if status == "running":
+            eta_text = timing.get("eta")
+            progress_text += (
+                f" | block ETA ~{eta_text}" if eta_text else " | block ETA unavailable"
+            )
         lines.append(
             f"[{icon}] {row['index']:02d} {row['kind'].upper():7}{signature:<15} "
             f"{_bar(bar_percent, bar_width, ascii_only=ascii_only)} {progress_text}"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -169,6 +170,50 @@ def test_snapshot_tracks_active_caspt2_and_reference_weight(tmp_path: Path) -> N
     assert active["progress"]["percent"] == pytest.approx(66.6666666667)
     weight_guard = next(item for item in active["guards"] if item["name"] == "reference weights")
     assert weight_guard["level"] == "warn"
+
+
+def test_completed_block_reports_exact_openmolcas_elapsed_time(tmp_path: Path) -> None:
+    output_text = _rasscf_started("ground", 3, 3) + _finished("rasscf")
+    inp, output = _write_case(tmp_path, output_text)
+
+    snapshot = molcas_live.build_snapshot(inp, output)
+    finished = _block(snapshot, 1)
+
+    assert finished["timing"]["elapsed_seconds"] == 5.0
+    assert finished["timing"]["elapsed"] == "5s"
+    assert "elapsed 5s" in molcas_live.render_snapshot(snapshot, ascii_only=True)
+
+
+def test_running_root_block_reports_elapsed_and_provisional_eta() -> None:
+    plan = molcas_live.PlanBlock(
+        index=1,
+        kind="caspt2",
+        kind_index=1,
+        start_line=1,
+        end_line=10,
+        expected_roots=4,
+    )
+    runtime = molcas_live.RuntimeBlock(
+        kind="caspt2",
+        kind_index=1,
+        start_line=1,
+        started_at="2026-08-06T00:00:00",
+    )
+    progress = {"completed": 2, "total": 4, "percent": 50.0, "label": "roots"}
+
+    timing = molcas_live._timing(
+        plan,
+        runtime,
+        "running",
+        progress,
+        now=datetime(2026, 8, 6, 1, 0, 0),
+    )
+
+    assert timing["elapsed_seconds"] == 3600.0
+    assert timing["elapsed"] == "1h 0m"
+    assert timing["eta_seconds"] == 3600.0
+    assert timing["eta"] == "1h 0m"
+    assert timing["eta_provisional"] is True
 
 
 def test_active_caspt2_uses_reference_weights_before_final_root_table(tmp_path: Path) -> None:

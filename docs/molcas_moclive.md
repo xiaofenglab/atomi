@@ -64,13 +64,22 @@ when the output has no countable SO-state denominator. A finished RASSI block
 uses a full completion bar, but its structured `progress.percent` remains
 `null` because that bar describes module completion, not SO-state coverage.
 
+Each finished block also reports its exact elapsed wall time from OpenMolcas'
+`Module ... spent ...` record. The active block reports elapsed time from its
+`Start Module` timestamp. When a running block has a countable root denominator
+and at least one completed root, `moclive` displays a provisional ETA obtained
+from the observed mean root throughput. This ETA is a live extrapolation, not a
+scheduler guarantee; root cost can vary across a CASPT2 or RASSCF manifold.
+RASSI and pre-root orbital-optimization stages show `ETA unavailable` rather
+than inventing a percentage.
+
 An illustrative live view is:
 
 ```text
 moclive | RUN.inp + RUN.log | RUNNING
- ✓ 01 RASSCF  UO9 ground A1              3/3  100.0% [████████████████████████]
- ✓ 02 CASPT2  UO9 ground A1 PT2          3/3  100.0% [████████████████████████]
- ⠋ 03 RASSCF  UO9 M5 excited A1          2/4   50.0% [████████████------------]
+ ✓ 01 RASSCF  UO9 ground A1              3/3  100.0% | elapsed 43s [████████████████████████]
+ ✓ 02 CASPT2  UO9 ground A1 PT2          3/3  100.0% | elapsed 4m 52s [████████████████████████]
+ ⠋ 03 RASSCF  UO9 M5 excited A1          2/4   50.0% | elapsed 8m 0s | block ETA ~8m 0s [████████████------------]
  · 04 CASPT2  UO9 M5 excited A1 PT2      0/4    0.0% [------------------------]
  · 05 RASSI   [························] pending (7 input spin-free states)
       UO9 M5 spin-orbit
@@ -96,9 +105,11 @@ with schema `atomi.molcas_live.v1`. Its stable fields are:
   bytes read, incomplete buffered bytes, and reset count in watch mode; `null`
   for a one-shot full audit.
 
-Each block progress object contains `completed`, `total`, and `percent`. The
-percentage is a display aid for countable roots, not an estimate of remaining
-wall time.
+Each block progress object contains `completed`, `total`, and `percent`.
+Each block timing object contains `elapsed_seconds`, `elapsed`, `eta_seconds`,
+`eta`, `eta_basis`, and `eta_provisional`. Percent and ETA are display aids for
+countable roots; scientific completion still comes from module return codes
+and the physical guards.
 
 `render_snapshot(snapshot, ascii_only=False, spinner_frame=0, bar_width=24)`
 returns plain text. Rendering has no file or scheduler side effects, so the
