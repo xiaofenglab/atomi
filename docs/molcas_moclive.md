@@ -43,9 +43,11 @@ Each scheduled block has a stable, one-based order and one status:
 | `failed` | `✗` | `X` | Nonzero return code, nonconvergence, or fatal marker |
 
 For RASSCF, the view shows completed roots against the first `CIROOTS` value.
-For CASPT2, it counts unique `CASPT2 Root N Total energy` records against the
-`MULTISTATE` or `XMULTISTATE` state count. If a CASPT2 block omits an explicit
-count, the preceding RASSCF root count is the documented fallback.
+For CASPT2, live progress counts the per-root `Reference weight` records until
+the final numbered `CASPT2 Root N Total energy` table is available. It reports
+the larger of those two counts against the `MULTISTATE` or `XMULTISTATE` state
+count. If a CASPT2 block omits an explicit count, the preceding RASSCF root
+count is the documented fallback.
 
 Some large-root OpenMolcas modules return `_RC_ALL_IS_WELL_` but truncate the
 printed root-energy or orbital-file listings near 99-100 entries. In that

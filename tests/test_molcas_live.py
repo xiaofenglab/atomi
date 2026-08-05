@@ -171,6 +171,23 @@ def test_snapshot_tracks_active_caspt2_and_reference_weight(tmp_path: Path) -> N
     assert weight_guard["level"] == "warn"
 
 
+def test_active_caspt2_uses_reference_weights_before_final_root_table(tmp_path: Path) -> None:
+    output_text = (
+        _rasscf_started("ground", 3, 3)
+        + _finished("rasscf")
+        + "--- Start Module: caspt2 at Thu Aug 6 00:10:00 2026 ---\n"
+        + "      Reference weight:           0.62000\n" * 2
+    )
+    inp, output = _write_case(tmp_path, output_text)
+
+    snapshot = molcas_live.build_snapshot(inp, output)
+    active = _block(snapshot, 2)
+
+    assert active["progress"]["completed"] == 2
+    assert active["progress"]["total"] == 3
+    assert active["progress"]["percent"] == pytest.approx(66.6666666667)
+
+
 def test_snapshot_reports_rassi_stage_without_fake_so_percentage(tmp_path: Path) -> None:
     output_text = (
         _rasscf_started("ground", 3, 3)

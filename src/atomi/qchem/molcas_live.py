@@ -488,6 +488,10 @@ def _block_guards(
     total = runtime.roots_requested or plan.expected_roots
     if plan.kind in {"rasscf", "caspt2"} and total:
         done = len(runtime.roots)
+        if plan.kind == "caspt2":
+            # CASPT2 emits one reference weight per evaluated root before the
+            # numbered XMS/RMS energy table appears at the end of large jobs.
+            done = max(done, len(runtime.caspt2_reference_weights))
         if status == "finished" and done >= total:
             level = "pass"
             detail = f"{done}/{total} root energies found"
@@ -678,7 +682,7 @@ def _progress(plan: PlanBlock, runtime: RuntimeBlock | None, status: str) -> dic
             total = runtime.roots_requested or total
             completed = len(runtime.roots)
         elif plan.kind == "caspt2":
-            completed = len(runtime.roots)
+            completed = max(len(runtime.roots), len(runtime.caspt2_reference_weights))
         else:
             completed = len(runtime.so_states)
             total = None
