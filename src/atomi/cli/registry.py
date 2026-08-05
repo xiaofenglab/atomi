@@ -148,6 +148,12 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Print Molcas postanalysis workflow and build report-style M4/M5 XANES plots.",
     ),
     CommandSpec(
+        aliases=("moccheck", "molcas-check", "molcas_check"),
+        target="atomi.qchem.molcas_diagnostics:main",
+        category="qchem",
+        help="Audit pre-ALTER/SUPSYM frontier orbitals and dominant AO character.",
+    ),
+    CommandSpec(
         aliases=(
             "molcas-bagus-covalency",
             "molcas_bagus_covalency",

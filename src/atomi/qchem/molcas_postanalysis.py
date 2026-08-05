@@ -68,6 +68,11 @@ def workflow_record() -> dict[str, Any]:
                 "purpose": "Confirm OpenMolcas/Pegamoid/xraydb-capable environment before starting or interpreting runs.",
             },
             {
+                "stage": "pre-ALTER/SUPSYM frontier audit",
+                "command": "moccheck RUN.inp RUN.out --json-out moccheck.json",
+                "purpose": "Match the first-symmetry reference RASSCF before orbital homing and print six occupied plus six virtual orbitals with dominant AO character.",
+            },
+            {
                 "stage": "finished-run summary",
                 "command": "molcas-bridge collect --output RUN.out --write openmolcas_summary.json",
                 "purpose": "Collect module return codes, CASPT2 roots, RASSI presence, and error markers.",

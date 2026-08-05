@@ -21,6 +21,7 @@ def test_command_registry_exposes_core_bridge_aliases() -> None:
     assert "qe-wannier-bridge" in aliases
     assert "molcas-exatomic-bridge" in aliases
     assert "molcas-bagus-covalency" in aliases
+    assert "moccheck" in aliases
     assert "fdmnes-xanes-bridge" in aliases
     assert "fdmnes-xanes-status" in aliases
     assert "fdmnes-xanes-install-plan" in aliases
@@ -39,6 +40,7 @@ def test_command_registry_exposes_core_bridge_aliases() -> None:
         registry["molcas-bagus-covalency"].target
         == "atomi.qchem.molcas_bagus_covalency:main"
     )
+    assert registry["moccheck"].target == "atomi.qchem.molcas_diagnostics:main"
     assert "zentropy" in specs_by_category()
     assert "structure" in specs_by_category()
     assert "xafs" in specs_by_category()
