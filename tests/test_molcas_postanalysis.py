@@ -76,6 +76,9 @@ def test_workflow_record_names_core_tools() -> None:
     assert "molcas-postanalysis orbital-splitting" in commands
     assert "molcas-postanalysis orbital-grid-render" in commands
     assert "molcas-postanalysis bagus-covalency" in commands
+    assert "mocparse RUN.out" in commands
+    assert "mocxanes RUN_mocparse_r1" in commands
+    assert "mocmo RUN_mocparse_r1" in commands
     assert any("universal percent-covalent" in rule for rule in record["decision_rules"])
     assert any("Sarah" in tool or "project report" in tool for tool in record["toolset"])
 
@@ -470,6 +473,25 @@ def test_ao_composition_from_pseudonatural_block(tmp_path: Path) -> None:
     summary = (outdir / "molcas_ao_composition_summary.json").read_text(encoding="utf-8")
     assert "atomi.molcas_ao_composition.v1" in summary
     assert '"n_mo_rows": 3' in summary
+
+
+def test_ao_parser_preserves_printed_symmetry_species() -> None:
+    sections = molcas_postanalysis.parse_molcas_ao_sections(
+        """
+ Pseudonatural active orbitals and approximate occupation numbers
+ MOLECULAR ORBITALS FOR SYMMETRY SPECIES    1: ag
+    1   -0.5000   2.0000      1 U1 5f0 ( 0.800)
+ MOLECULAR ORBITALS FOR SYMMETRY SPECIES    2: bg
+    1    0.1000   0.0000      2 U1 5f2+ ( 0.750)
+ Mulliken Population Analysis
+""",
+        section_kind="all",
+    )
+    rows = sections[0]["rows"]
+    assert [(row["symmetry_species"], row["symmetry_label"]) for row in rows] == [
+        (1, "ag"),
+        (2, "bg"),
+    ]
 
 
 

@@ -78,6 +78,21 @@ def workflow_record() -> dict[str, Any]:
                 "purpose": "Collect module return codes, CASPT2 roots, RASSI presence, and error markers.",
             },
             {
+                "stage": "frozen full-postanalysis data layer",
+                "command": "mocparse RUN.out --inp RUN.inp --outdir RUN_mocparse_r1",
+                "purpose": "Freeze hash-verified module, state, transition, orbital, and AO tables once so later plot revisions never reparse or silently change the scientific scope.",
+            },
+            {
+                "stage": "publication edge XANES",
+                "command": "mocxanes RUN_mocparse_r1/plot_dataset.json --element U --edge M5:3545:3560 --initial-states 1,2 --outdir xanes_r1",
+                "purpose": "Render a science-clean XANES envelope and separate dipole-stick band from explicit state, gauge, edge-window, shift, broadening, and normalization choices.",
+            },
+            {
+                "stage": "publication MO and RASSI state correlation",
+                "command": "mocmo RUN_mocparse_r1/plot_dataset.json --orbital-section -1 --state-window 0:5 --outdir mo_r1",
+                "purpose": "Render symmetry-resolved one-electron MO levels separately from the many-electron spin-free to spin-orbit parent-weight diagram.",
+            },
+            {
                 "stage": "root audit",
                 "command": "molcas-root-helper audit --output RUN.out --write molcas_root_audit.json",
                 "purpose": "Read actual Molcas root sections: CSFs, highly excited CSFs, roots required, and highest root.",
@@ -873,6 +888,10 @@ AO_TERM_RE = re.compile(
     r"\(\s*(?P<coeff>[-+]?\d+(?:\.\d*)?(?:[Ee][-+]?\d+)?)\s*\)"
 )
 AO_LABEL_RE = re.compile(r"^(?P<n>\d+)(?P<shell>[spdfghijklm])(?P<angular>.*)$", re.IGNORECASE)
+MO_SYMMETRY_RE = re.compile(
+    r"MOLECULAR ORBITALS FOR SYMMETRY SPECIES\s+(?P<species>\d+)\s*:\s*(?P<label>\S+)",
+    re.IGNORECASE,
+)
 
 
 def _element_from_atom_label(atom: str) -> str:
@@ -947,12 +966,21 @@ def parse_molcas_ao_sections(text: str, *, section_kind: str = "pseudonatural") 
             "rows": [],
         }
         current: dict[str, Any] | None = None
+        current_symmetry_species: int | None = None
+        current_symmetry_label = ""
         quiet_lines_after_rows = 0
         for j, raw in enumerate(lines[idx + 1 :], start=idx + 2):
             next_kind = _section_kind_from_line(raw)
             if j > idx + 2 and next_kind is not None:
                 break
             stripped = raw.strip()
+            symmetry_match = MO_SYMMETRY_RE.search(raw)
+            if symmetry_match:
+                current_symmetry_species = int(symmetry_match.group("species"))
+                current_symmetry_label = symmetry_match.group("label")
+                current = None
+                quiet_lines_after_rows = 0
+                continue
             if section["rows"]:
                 if stripped.startswith("++") and next_kind is None:
                     break
@@ -973,6 +1001,8 @@ def parse_molcas_ao_sections(text: str, *, section_kind: str = "pseudonatural") 
                     "section_source_index": section["source_index"],
                     "section_kind": kind,
                     "section_start_line": section["start_line"],
+                    "symmetry_species": current_symmetry_species,
+                    "symmetry_label": current_symmetry_label,
                     "line": j,
                     "mo": int(row_match.group("mo")),
                     "energy": float(row_match.group("energy")),
