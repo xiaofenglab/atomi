@@ -781,6 +781,14 @@ def _normalize_strengths(rows: Sequence[dict[str, Any]]) -> list[float]:
     return [value / maximum if maximum > 0 else 0.0 for value in values]
 
 
+def _xanes_ylabel(normalization: str) -> str:
+    return {
+        "max": "Normalized intensity (a.u.)",
+        "area": "Area-normalized intensity (eV$^{-1}$)",
+        "none": "Unnormalized intensity (a.u.)",
+    }[normalization]
+
+
 def _resolve_xanes_broadening(
     args: argparse.Namespace,
     xray: dict[str, Any],
@@ -920,7 +928,7 @@ def render_xanes(args: argparse.Namespace) -> dict[str, Any]:
         if args.normalize == "max":
             ax.set_yticks(np.linspace(0.0, 1.0, 5))
         ax.set_xlabel("Excitation energies (eV)")
-        ax.set_ylabel("Normalized intensity (a.u.)" if args.normalize == "max" else "Relative intensity (a.u.)")
+        ax.set_ylabel(_xanes_ylabel(args.normalize))
         ax.legend(loc="upper right", frameon=False)
         ax.grid(False)
         ax.spines["top"].set_visible(False)

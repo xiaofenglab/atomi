@@ -49,7 +49,9 @@ ordinary-XAS width, or `--broadening-profile custom` with explicit
 The renderer writes the broadened curve and stick table as CSV, render
 provenance as JSON, and publication outputs as 300 dpi PNG, PDF, and SVG. Its
 default science-clean style uses no grid, a centered explicit energy window,
-and dipole sticks in a separate band below the spectral baseline.
+and dipole sticks in a separate band below the spectral baseline. The y-axis
+states the selected policy explicitly: maximum-normalized, area-normalized in
+`eV^-1`, or unnormalized arbitrary intensity.
 
 ## 3. Render MO and state-splitting figures
 

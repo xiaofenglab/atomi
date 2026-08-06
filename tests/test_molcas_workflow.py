@@ -143,3 +143,9 @@ def test_renderers_reject_a_generic_non_molcas_bundle(tmp_path: Path) -> None:
                 "--outdir", str(tmp_path / "xanes"),
             ]
         )
+
+
+def test_xanes_normalization_labels_are_explicit() -> None:
+    assert molcas_workflow._xanes_ylabel("max") == "Normalized intensity (a.u.)"
+    assert molcas_workflow._xanes_ylabel("area") == "Area-normalized intensity (eV$^{-1}$)"
+    assert molcas_workflow._xanes_ylabel("none") == "Unnormalized intensity (a.u.)"
