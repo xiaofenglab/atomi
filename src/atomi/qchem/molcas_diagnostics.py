@@ -1,10 +1,9 @@
 """Human-readable OpenMolcas frontier-orbital diagnostics.
 
 ``moccheck`` pairs an OpenMolcas input deck with its output. It finds the
-last RASSCF reference for every available symmetry immediately before the
-first ALTER/SUPSYM setup block, verifies the corresponding output modules,
-and reports occupied and virtual orbitals around each symmetry frontier with
-dominant AO coefficients.
+single last RASSCF reference immediately before the first ALTER/SUPSYM setup
+block, verifies the corresponding output module, and reports occupied and
+virtual orbitals from every symmetry table in that inherited orbital set.
 """
 
 from __future__ import annotations
@@ -163,7 +162,13 @@ def select_reference_block(
     symmetry: int = 1,
     reference_block: int | None = None,
 ) -> tuple[RasscfInputBlock, RasscfInputBlock | None]:
-    """Select the pre-ALTER/SUPSYM reference and first setup block."""
+    """Select the one pre-ALTER/SUPSYM reference inherited by setup.
+
+    ``symmetry`` remains accepted for API compatibility, but reference
+    selection is intentionally independent of it: ALTER/SUPSYM inherits one
+    JobIph from the immediately preceding RASSCF module, and every irrep must
+    therefore be audited from that same module.
+    """
 
     if not blocks:
         raise ValueError("No &RASSCF blocks were found in the input file")
@@ -176,14 +181,28 @@ def select_reference_block(
         raise ValueError(
             "No ALTER/SUPSYM setup block was found; select the reference explicitly with --reference-block"
         )
-    candidates = [
-        block for block in blocks if block.index < setup.index and block.symmetry == symmetry
-    ]
+    candidates = [block for block in blocks if block.index < setup.index]
     if not candidates:
-        raise ValueError(
-            f"No symmetry-{symmetry} RASSCF block occurs before setup block {setup.index}"
-        )
+        raise ValueError(f"No RASSCF block occurs before setup block {setup.index}")
     return candidates[-1], setup
+
+
+def available_mo_symmetries(module_text: str) -> list[int]:
+    """Return MO-table symmetries in the final pseudonatural listing."""
+
+    lowered = module_text.lower()
+    marker = "pseudonatural active orbitals and approximate occupation numbers"
+    anchor = lowered.rfind(marker)
+    search_text = module_text[anchor:] if anchor >= 0 else module_text
+    candidates = sorted(
+        {int(match.group("symmetry")) for match in MO_SYMMETRY_RE.finditer(search_text)}
+    )
+    return [
+        symmetry
+        for symmetry in candidates
+        if parse_full_mo_matrix(module_text, symmetry=symmetry)
+        or parse_compact_mo_listing(module_text, symmetry=symmetry)
+    ]
 
 
 def available_reference_symmetries(
@@ -523,9 +542,7 @@ def _build_diagnostic_from_parsed(
 ) -> dict[str, Any]:
     """Build one structured diagnostic from previously parsed inputs."""
 
-    reference, setup = select_reference_block(
-        input_blocks, symmetry=symmetry, reference_block=reference_block
-    )
+    reference, setup = select_reference_block(input_blocks, reference_block=reference_block)
     module, mapping_method = match_log_module(reference, log_modules)
     mo_rows = parse_full_mo_matrix(module.text, symmetry=symmetry)
     ao_listing_format = "full"
@@ -595,9 +612,12 @@ def _build_diagnostic_from_parsed(
         "input_file": str(inp_path.resolve()),
         "output_file": str(output_path.resolve()),
         "selection_rule": (
-            f"last symmetry-{symmetry} RASSCF block before first ALTER/SUPSYM setup"
+            "symmetry-"
+            f"{symmetry} orbital table from the final RASSCF block before first "
+            "ALTER/SUPSYM setup"
             if reference_block is None
-            else f"explicit input RASSCF block {reference_block}"
+            else f"symmetry-{symmetry} orbital table from explicit input RASSCF block "
+            f"{reference_block}"
         ),
         "reference_input_block": asdict(reference),
         "setup_input_block": asdict(setup) if setup else None,
@@ -677,10 +697,12 @@ def build_diagnostics(
 
     input_blocks = parse_rasscf_input_blocks(_read_text(inp_path))
     log_modules = parse_rasscf_log_modules(_read_text(output_path))
-    available = available_reference_symmetries(input_blocks, reference_block=reference_block)
+    reference, _ = select_reference_block(input_blocks, reference_block=reference_block)
+    module, _ = match_log_module(reference, log_modules)
+    available = available_mo_symmetries(module.text)
     requested = available if symmetries is None else list(dict.fromkeys(symmetries))
     if not requested:
-        raise ValueError("No pre-ALTER/SUPSYM reference symmetries were found")
+        raise ValueError("No MO symmetry tables were found in the selected reference module")
     invalid = [symmetry for symmetry in requested if symmetry < 1]
     if invalid:
         raise ValueError("--symmetry values must be positive")
@@ -689,7 +711,8 @@ def build_diagnostics(
         choices = ", ".join(str(symmetry) for symmetry in available)
         missing = ", ".join(str(symmetry) for symmetry in unavailable)
         raise ValueError(
-            f"No usable pre-setup reference for symmetry {missing}; available: {choices}"
+            f"No orbital table for symmetry {missing} in the selected reference module; "
+            f"available: {choices}"
         )
     return [
         _build_diagnostic_from_parsed(
@@ -759,8 +782,12 @@ def print_diagnostic(
         f"(complete matrix={result['ao_listing']['complete_coefficient_matrix']})"
     )
     print(
-        f"Signature: symmetry {module['state_symmetry']} ({frontier['symmetry_label']}), "
+        f"Reference-state signature: symmetry {module['state_symmetry']}, "
         f"S={module['spin_quantum_number']}, active electrons={module['active_electrons']}"
+    )
+    print(
+        f"Orbital table: symmetry {frontier['symmetry']} "
+        f"({frontier['symmetry_label'] or 'unlabeled'})"
     )
     print(
         f"Frontier: HOMO={frontier['homo']}, LUMO={frontier['lumo']}, "
@@ -804,7 +831,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="moccheck",
         description=(
-            "Inspect every available RASSCF symmetry frontier immediately before an "
+            "Inspect every symmetry table in the one RASSCF orbital set inherited by an "
             "OpenMolcas ALTER/SUPSYM setup block."
         ),
     )
@@ -820,7 +847,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help=(
             "Target symmetry number; repeat for multiple symmetries. "
-            "Default: all symmetries available before setup"
+            "Default: all symmetry tables in the selected reference module"
         ),
     )
     parser.add_argument(

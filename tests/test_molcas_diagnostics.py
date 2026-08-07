@@ -180,6 +180,21 @@ def _matrix_for_symmetry(symmetry: int, label: str) -> str:
     )
 
 
+def _matrix_for_all_symmetries() -> str:
+    section = MATRIX.split(
+        "Molecular orbitals for symmetry species 1: a1", 1
+    )[1].split("Molecular orbitals for symmetry species 2: b1", 1)[0]
+    tables = "".join(
+        f"Molecular orbitals for symmetry species {symmetry}: {label.lower()}\n{section}"
+        for symmetry, label in [(1, "A1"), (2, "B1"), (3, "A2"), (4, "B2")]
+    )
+    return (
+        "      Pseudonatural active orbitals and approximate occupation numbers\n\n"
+        + tables
+        + "Molecular orbitals for symmetry species 99: end\n"
+    )
+
+
 MULTI_INPUT_TEXT = (
     """
 &RASSCF
@@ -218,13 +233,20 @@ End of input
 MULTI_LOG_TEXT = "".join(
     [_module(0, 0.0, 1)]
     + [
-        _module(1, 0.5, symmetry, _matrix_for_symmetry(symmetry, label.lower()))
+        _module(
+            1,
+            0.5,
+            symmetry,
+            _matrix_for_all_symmetries()
+            if symmetry == 4
+            else _matrix_for_symmetry(symmetry, label.lower()),
+        )
         for symmetry, label in [(1, "A1"), (2, "B1"), (3, "A2"), (4, "B2")]
     ]
 )
 
 
-def test_selects_last_symmetry_one_block_before_setup() -> None:
+def test_selects_single_last_block_before_setup() -> None:
     blocks = molcas_diagnostics.parse_rasscf_input_blocks(INPUT_TEXT)
     reference, setup = molcas_diagnostics.select_reference_block(blocks)
 
@@ -288,7 +310,8 @@ def test_build_diagnostics_defaults_to_all_pre_setup_symmetries(tmp_path: Path) 
     results = molcas_diagnostics.build_diagnostics(inp, log)
 
     assert [result["frontier"]["symmetry"] for result in results] == [1, 2, 3, 4]
-    assert [result["matched_output_module"]["index"] for result in results] == [2, 3, 4, 5]
+    assert [result["reference_input_block"]["index"] for result in results] == [5, 5, 5, 5]
+    assert [result["matched_output_module"]["index"] for result in results] == [5, 5, 5, 5]
     assert [result["frontier"]["symmetry_label"] for result in results] == [
         "a1",
         "b1",

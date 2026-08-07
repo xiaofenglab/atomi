@@ -1,9 +1,12 @@
 # `moccheck`: pre-ALTER/SUPSYM orbital diagnostics
 
 `moccheck` reads a matching OpenMolcas input and log/output file. It selects
-the last requested symmetry block before the first RASSCF block containing
-`ALTER` or `SUPSYM`, verifies the corresponding output module using symmetry,
-spin, and active-electron count, and prints frontier-orbital AO character.
+the single last RASSCF block before the first block containing `ALTER` or
+`SUPSYM`, verifies the corresponding output module using symmetry, spin, and
+active-electron count, and prints frontier-orbital AO character from each
+symmetry table in that same module. This matters because the setup inherits
+one JobIph/orbital set; it does not independently inherit the last
+state-specific calculation for each irrep.
 
 ```bash
 moccheck RUN.inp RUN.log
@@ -11,13 +14,14 @@ atomi moccheck RUN.inp RUN.out
 ```
 
 The default report contains six occupied and six virtual orbitals around the
-frontier for every symmetry represented by a RASSCF reference before the first
-`ALTER`/`SUPSYM` setup block. The input and output are parsed once, even for a
-large multi-symmetry log. Partially occupied active orbitals count as occupied
-when their occupation is above the default `1e-3` threshold. HOMO/LUMO labels
-are therefore occupation-defined by orbital order. RASSCF active-space orbital
-energies need not follow canonical Aufbau ordering, and `moccheck` warns when
-the occupation-defined LUMO energy lies below the HOMO energy.
+frontier for every symmetry table printed by the final RASSCF reference before
+the first `ALTER`/`SUPSYM` setup block. The input and output are parsed once,
+even for a large multi-symmetry log. Partially occupied active orbitals count
+as occupied when their occupation is above the default `1e-3` threshold.
+HOMO/LUMO labels are therefore occupation-defined by orbital order. RASSCF
+active-space orbital energies need not follow canonical Aufbau ordering, and
+`moccheck` warns when the occupation-defined LUMO energy lies below the HOMO
+energy.
 
 ```bash
 atomi moccheck RUN.inp RUN.log \
@@ -40,8 +44,9 @@ all-symmetry or multi-symmetry JSON uses
 the `diagnostics` list.
 
 Use `--reference-block N` when the deck has no `ALTER`/`SUPSYM` setup or the
-desired reference is not the automatically selected block. An explicit
-reference block selects only that block's symmetry.
+desired reference is not the automatically selected block. Its output module
+can still contain multiple symmetry tables, and `moccheck` audits those tables
+from that one module.
 
 Each AO line reports the signed Molcas coefficient and a normalized display
 share, `100*c_i^2/sum_j(c_j^2)`, over the AO coefficients printed for that MO.
