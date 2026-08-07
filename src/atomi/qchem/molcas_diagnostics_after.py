@@ -12,6 +12,7 @@ from typing import Any
 from atomi.qchem.molcas_diagnostics import (
     HANDOFF_SCHEMA,
     LOG_RASSCF_END_RE,
+    OPENMOLCAS_MAXALTER,
     RasscfInputBlock,
     RasscfLogModule,
     _component_score,
@@ -41,6 +42,20 @@ STATUS_ORDER = {
     "mixed_retained": 2,
     "stable_identity": 1,
 }
+
+
+def _failed_module_reason(block: RasscfInputBlock, rc: str) -> str:
+    if len(block.alter_swaps) > OPENMOLCAS_MAXALTER:
+        return (
+            f"RASSCF stopped with rc={rc}: this block requests {len(block.alter_swaps)} "
+            f"ALTER pairs, exceeding OpenMolcas MAXALTER={OPENMOLCAS_MAXALTER}. This is an "
+            "input-limit failure, not an orbital-drift result."
+        )
+    return (
+        f"RASSCF stopped with rc={rc} before a complete state signature/orbital table was "
+        "printed; diagnose the input and inherited orbital file. This is not an "
+        "orbital-drift result."
+    )
 
 
 def _rows_for_symmetry(
@@ -374,10 +389,8 @@ def build_after_diagnostic(
                         "mapping": "chronological_failed_before_signature",
                     },
                     "status": "failed_module",
-                    "reason": (
-                        f"RASSCF stopped with rc={chronological_failure.group('rc')} before a "
-                        "complete state signature/orbital table was printed; diagnose the input "
-                        "and inherited orbital file. This is not an orbital-drift result."
+                    "reason": _failed_module_reason(
+                        block, chronological_failure.group("rc")
                     ),
                 }
             )
@@ -415,12 +428,8 @@ def build_after_diagnostic(
                             "end_line": candidate.end_line,
                             "mapping": "chronological_failed_before_signature",
                         },
-                        "status": "failed_module",
-                        "reason": (
-                            f"RASSCF stopped with rc={failed.group('rc')} before a complete "
-                            "state signature/orbital table was printed; diagnose the input and "
-                            "inherited orbital file rather than interpreting this as MO drift."
-                        ),
+                    "status": "failed_module",
+                    "reason": _failed_module_reason(block, failed.group("rc")),
                     }
                 )
                 continue
@@ -462,10 +471,7 @@ def build_after_diagnostic(
                         "mapping": mapping,
                     },
                     "status": "failed_module",
-                    "reason": (
-                        f"RASSCF stopped with rc={failed.group('rc')} before a usable final "
-                        "orbital table; this is a module/input failure, not an orbital-drift result."
-                    ),
+                    "reason": _failed_module_reason(block, failed.group("rc")),
                 }
             )
             continue

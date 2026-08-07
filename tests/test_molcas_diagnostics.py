@@ -523,6 +523,75 @@ End of input
     ]
 
 
+def test_ras3_audit_rejects_more_than_openmolcas_alter_limit() -> None:
+    swaps = "\n".join(f" 1 {index} {index + 1}" for index in range(1, 18))
+    text = f"""
+* ATOMI RAS3_TARGET U1:5f
+&RASSCF
+Title
+ reference
+Symmetry
+ 1
+Spin
+ 2
+nActEl
+ 1 0 0
+End of input
+&RASSCF
+Title
+ setup
+Symmetry
+ 1
+Spin
+ 2
+nActEl
+ 1 0 1
+Inactive
+ 10
+Ras3
+ 1
+Alter
+ 17
+{swaps}
+End of input
+"""
+    blocks = molcas_diagnostics.parse_rasscf_input_blocks(text)
+    rows = [
+        {
+            "mo": mo,
+            "energy": float(mo),
+            "occupation": 0.0,
+            "symmetry": 1,
+            "symmetry_label": "a1",
+            "terms": [
+                {
+                    "ao_index": 1,
+                    "atom": "U1" if mo == 12 else "O2",
+                    "ao": "5f0" if mo == 12 else "2px",
+                    "coefficient": 0.9,
+                    "coeff2": 0.81,
+                }
+            ],
+        }
+        for mo in range(1, 20)
+    ]
+
+    result = molcas_diagnostics.build_ras3_recommendation(
+        text,
+        Path("too_many_alter.inp"),
+        setup=blocks[1],
+        rows_by_symmetry={1: rows},
+        ao_listing_format="full",
+        occupancy_threshold=0.999,
+        mixing_window_ha=0.15,
+    )
+
+    assert result["status"] == "invalid_alter_input"
+    assert result["alter_pair_count"] == 17
+    assert result["alter_pair_limit"] == 16
+    assert result["alter_limit_exceeded"] is True
+
+
 def test_build_diagnostic_accepts_compact_orbital_listing(tmp_path: Path) -> None:
     inp = tmp_path / "run.inp"
     log = tmp_path / "run.log"

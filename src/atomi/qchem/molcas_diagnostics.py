@@ -22,6 +22,7 @@ from typing import Any
 SCHEMA = "atomi.molcas_moccheck.v1"
 COLLECTION_SCHEMA = "atomi.molcas_moccheck_collection.v1"
 HANDOFF_SCHEMA = "atomi.molcas_moccheck_handoff.v1"
+OPENMOLCAS_MAXALTER = 16
 FLOAT_PATTERN = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][-+]?\d+)?"
 FLOAT_RE = re.compile(FLOAT_PATTERN)
 RASSCF_START_RE = re.compile(r"^\s*&RASSCF\b", re.IGNORECASE)
@@ -985,9 +986,25 @@ def build_ras3_recommendation(
             groups.append(target_group)
         suggested_groups.append(groups)
 
+    alter_limit_exceeded = len(setup.alter_swaps) > OPENMOLCAS_MAXALTER
     return {
         **base,
-        "status": "review_required" if conditional_additions else "proposal_available",
+        "status": (
+            "invalid_alter_input"
+            if alter_limit_exceeded
+            else "review_required" if conditional_additions else "proposal_available"
+        ),
+        "alter_pair_count": len(setup.alter_swaps),
+        "alter_pair_limit": OPENMOLCAS_MAXALTER,
+        "alter_limit_exceeded": alter_limit_exceeded,
+        "alter_limit_note": (
+            "OpenMolcas 25.02 defines MAXALTER=16. Reduce or pre-apply the orbital "
+            "permutation before submitting this RASSCF block. Splitting an ALTER map across "
+            "optimized RASSCF blocks is not automatically equivalent and needs its own "
+            "active-space validation."
+            if alter_limit_exceeded
+            else "The setup ALTER pair count is within the OpenMolcas 25.02 limit."
+        ),
         "target_atom": target_atom,
         "target_shells": shells,
         "ao_listing_format": ao_listing_format,
@@ -1386,6 +1403,13 @@ def _print_ras3_recommendation(recommendation: dict[str, Any]) -> None:
         print(f"Target: {recommendation['target_atom']} shells [{shells}]")
     if recommendation.get("reason"):
         print(f"Reason: {recommendation['reason']}")
+    if recommendation.get("alter_pair_count") is not None:
+        print(
+            f"ALTER pairs: {recommendation['alter_pair_count']} / "
+            f"OpenMolcas limit {recommendation['alter_pair_limit']}"
+        )
+        if recommendation.get("alter_limit_exceeded"):
+            print(f"ERROR: {recommendation['alter_limit_note']}")
     if recommendation.get("annotation_example"):
         print(f"Add explicit intent with: {recommendation['annotation_example']}")
     for item in recommendation.get("per_symmetry", []):

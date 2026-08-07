@@ -76,6 +76,13 @@ reports:
   identities intended for RAS3 and reports the expected final RAS3 slots for
   output QA.
 
+For OpenMolcas 25.02, `moccheck` enforces the source-code limit
+`MAXALTER=16`. A setup with more than 16 exchange pairs is reported as
+`invalid_alter_input` before it is mistaken for a convergence or orbital-drift
+failure. Reducing a permutation or pre-applying it to an orbital file is safer
+than assuming that two independently optimized RASSCF setup blocks are
+equivalent.
+
 Source matching is done component by component (for example `5f0`, `5f2+`,
 and `7s`), using the requested atom-shell share normalized over the AO
 coefficients printed for each MO. Raw AO coefficients are not ranked across
