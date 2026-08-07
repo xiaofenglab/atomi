@@ -147,6 +147,83 @@ LOG_TEXT = "".join(
 )
 
 
+def _reference_input(symmetry: int, label: str) -> str:
+    return f"""
+&RASSCF
+Title
+ C2v valence doublet {label}
+Symmetry
+ {symmetry}
+Spin
+ 2
+nActEl
+ 1 0 0
+Inactive
+ 10 8 6 8
+Ras2
+ 2 2 1 2
+ORBL
+ ALL
+ORBA
+ FULL
+End of input
+"""
+
+
+def _matrix_for_symmetry(symmetry: int, label: str) -> str:
+    return MATRIX.replace(
+        "Molecular orbitals for symmetry species 2: b1",
+        "Molecular orbitals for symmetry species 99: end",
+    ).replace(
+        "Molecular orbitals for symmetry species 1: a1",
+        f"Molecular orbitals for symmetry species {symmetry}: {label}",
+    )
+
+
+MULTI_INPUT_TEXT = (
+    """
+&RASSCF
+Title
+ closed-shell seed
+Symmetry
+ 1
+Spin
+ 1
+nActEl
+ 0 0 0
+End of input
+"""
+    + "".join(
+        _reference_input(symmetry, label)
+        for symmetry, label in [(1, "A1"), (2, "B1"), (3, "A2"), (4, "B2")]
+    )
+    + """
+&RASSCF
+Title
+ C2v setup
+Symmetry
+ 1
+Spin
+ 2
+nActEl
+ 7 1 2
+SUPSYM
+ 1
+  2 6 7
+End of input
+"""
+)
+
+
+MULTI_LOG_TEXT = "".join(
+    [_module(0, 0.0, 1)]
+    + [
+        _module(1, 0.5, symmetry, _matrix_for_symmetry(symmetry, label.lower()))
+        for symmetry, label in [(1, "A1"), (2, "B1"), (3, "A2"), (4, "B2")]
+    ]
+)
+
+
 def test_selects_last_symmetry_one_block_before_setup() -> None:
     blocks = molcas_diagnostics.parse_rasscf_input_blocks(INPUT_TEXT)
     reference, setup = molcas_diagnostics.select_reference_block(blocks)
@@ -202,6 +279,35 @@ def test_build_diagnostic_accepts_compact_orbital_listing(tmp_path: Path) -> Non
     assert any("compact AO printing" in warning for warning in result["warnings"])
 
 
+def test_build_diagnostics_defaults_to_all_pre_setup_symmetries(tmp_path: Path) -> None:
+    inp = tmp_path / "run.inp"
+    log = tmp_path / "run.log"
+    inp.write_text(MULTI_INPUT_TEXT, encoding="utf-8")
+    log.write_text(MULTI_LOG_TEXT, encoding="utf-8")
+
+    results = molcas_diagnostics.build_diagnostics(inp, log)
+
+    assert [result["frontier"]["symmetry"] for result in results] == [1, 2, 3, 4]
+    assert [result["matched_output_module"]["index"] for result in results] == [2, 3, 4, 5]
+    assert [result["frontier"]["symmetry_label"] for result in results] == [
+        "a1",
+        "b1",
+        "a2",
+        "b2",
+    ]
+
+
+def test_build_diagnostics_accepts_selected_symmetries(tmp_path: Path) -> None:
+    inp = tmp_path / "run.inp"
+    log = tmp_path / "run.log"
+    inp.write_text(MULTI_INPUT_TEXT, encoding="utf-8")
+    log.write_text(MULTI_LOG_TEXT, encoding="utf-8")
+
+    results = molcas_diagnostics.build_diagnostics(inp, log, symmetries=[4, 2])
+
+    assert [result["frontier"]["symmetry"] for result in results] == [4, 2]
+
+
 def test_moccheck_cli_prints_and_writes_json(tmp_path: Path, capsys) -> None:
     inp = tmp_path / "run.inp"
     log = tmp_path / "run.out"
@@ -220,3 +326,25 @@ def test_moccheck_cli_prints_and_writes_json(tmp_path: Path, capsys) -> None:
     assert "rel|c|^2" in output
     payload = json.loads(json_out.read_text(encoding="utf-8"))
     assert payload["schema"] == "atomi.molcas_moccheck.v1"
+
+
+def test_moccheck_cli_prints_all_symmetries_and_writes_collection_json(
+    tmp_path: Path, capsys
+) -> None:
+    inp = tmp_path / "run.inp"
+    log = tmp_path / "run.out"
+    json_out = tmp_path / "moccheck_all.json"
+    inp.write_text(MULTI_INPUT_TEXT, encoding="utf-8")
+    log.write_text(MULTI_LOG_TEXT, encoding="utf-8")
+
+    rc = molcas_diagnostics.main([str(inp), str(log), "--json-out", str(json_out)])
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "MOCHECK - OpenMolcas all-symmetry" in output
+    assert "Symmetries: 1 (a1), 2 (b1), 3 (a2), 4 (b2)" in output
+    assert output.count("SYMMETRY ") == 4
+    payload = json.loads(json_out.read_text(encoding="utf-8"))
+    assert payload["schema"] == "atomi.molcas_moccheck_collection.v1"
+    assert payload["symmetries"] == [1, 2, 3, 4]
+    assert len(payload["diagnostics"]) == 4

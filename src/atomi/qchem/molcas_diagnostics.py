@@ -1,9 +1,10 @@
 """Human-readable OpenMolcas frontier-orbital diagnostics.
 
 ``moccheck`` pairs an OpenMolcas input deck with its output. It finds the
-last symmetry-1 RASSCF reference immediately before the first ALTER/SUPSYM
-setup block, verifies the corresponding output module, and reports occupied
-and virtual orbitals around the frontier with dominant AO coefficients.
+last RASSCF reference for every available symmetry immediately before the
+first ALTER/SUPSYM setup block, verifies the corresponding output modules,
+and reports occupied and virtual orbitals around each symmetry frontier with
+dominant AO coefficients.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from typing import Any
 
 
 SCHEMA = "atomi.molcas_moccheck.v1"
+COLLECTION_SCHEMA = "atomi.molcas_moccheck_collection.v1"
 FLOAT_PATTERN = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][-+]?\d+)?"
 FLOAT_RE = re.compile(FLOAT_PATTERN)
 RASSCF_START_RE = re.compile(r"^\s*&RASSCF\b", re.IGNORECASE)
@@ -182,6 +184,35 @@ def select_reference_block(
             f"No symmetry-{symmetry} RASSCF block occurs before setup block {setup.index}"
         )
     return candidates[-1], setup
+
+
+def available_reference_symmetries(
+    blocks: list[RasscfInputBlock], *, reference_block: int | None = None
+) -> list[int]:
+    """Return symmetries that have a usable pre-setup reference block."""
+
+    if not blocks:
+        raise ValueError("No &RASSCF blocks were found in the input file")
+    if reference_block is not None:
+        if reference_block < 1 or reference_block > len(blocks):
+            raise ValueError(f"--reference-block must be between 1 and {len(blocks)}")
+        symmetry = blocks[reference_block - 1].symmetry
+        if symmetry is None:
+            raise ValueError(f"Input RASSCF block {reference_block} has no Symmetry value")
+        return [symmetry]
+    setup = next((block for block in blocks if block.has_alter or block.has_supsym), None)
+    if setup is None:
+        raise ValueError(
+            "No ALTER/SUPSYM setup block was found; select the reference explicitly "
+            "with --reference-block"
+        )
+    return sorted(
+        {
+            block.symmetry
+            for block in blocks
+            if block.index < setup.index and block.symmetry is not None
+        }
+    )
 
 
 def _search_int(pattern: str, text: str) -> int | None:
@@ -400,9 +431,7 @@ def parse_compact_mo_listing(module_text: str, *, symmetry: int = 1) -> list[dic
         row: dict[str, Any] = {
             "mo": int(match.group("mo")),
             "energy": float(match.group("energy").replace("D", "E").replace("d", "e")),
-            "occupation": float(
-                match.group("occupation").replace("D", "E").replace("d", "e")
-            ),
+            "occupation": float(match.group("occupation").replace("D", "E").replace("d", "e")),
             "symmetry": symmetry,
             "symmetry_label": symmetry_label,
             "terms": [],
@@ -479,10 +508,12 @@ def _decorate_orbital(
     return result
 
 
-def build_diagnostic(
+def _build_diagnostic_from_parsed(
     inp_path: Path,
     output_path: Path,
     *,
+    input_blocks: list[RasscfInputBlock],
+    log_modules: list[RasscfLogModule],
     symmetry: int = 1,
     reference_block: int | None = None,
     orbitals_each: int = 6,
@@ -490,13 +521,11 @@ def build_diagnostic(
     min_ao_weight: float = 0.5,
     occupancy_threshold: float = 1.0e-3,
 ) -> dict[str, Any]:
-    """Build a structured pre-ALTER/SUPSYM frontier diagnostic."""
+    """Build one structured diagnostic from previously parsed inputs."""
 
-    input_blocks = parse_rasscf_input_blocks(_read_text(inp_path))
     reference, setup = select_reference_block(
         input_blocks, symmetry=symmetry, reference_block=reference_block
     )
-    log_modules = parse_rasscf_log_modules(_read_text(output_path))
     module, mapping_method = match_log_module(reference, log_modules)
     mo_rows = parse_full_mo_matrix(module.text, symmetry=symmetry)
     ao_listing_format = "full"
@@ -604,6 +633,81 @@ def build_diagnostic(
     }
 
 
+def build_diagnostic(
+    inp_path: Path,
+    output_path: Path,
+    *,
+    symmetry: int = 1,
+    reference_block: int | None = None,
+    orbitals_each: int = 6,
+    top_aos: int = 6,
+    min_ao_weight: float = 0.5,
+    occupancy_threshold: float = 1.0e-3,
+) -> dict[str, Any]:
+    """Build a structured diagnostic for one symmetry."""
+
+    input_blocks = parse_rasscf_input_blocks(_read_text(inp_path))
+    log_modules = parse_rasscf_log_modules(_read_text(output_path))
+    return _build_diagnostic_from_parsed(
+        inp_path,
+        output_path,
+        input_blocks=input_blocks,
+        log_modules=log_modules,
+        symmetry=symmetry,
+        reference_block=reference_block,
+        orbitals_each=orbitals_each,
+        top_aos=top_aos,
+        min_ao_weight=min_ao_weight,
+        occupancy_threshold=occupancy_threshold,
+    )
+
+
+def build_diagnostics(
+    inp_path: Path,
+    output_path: Path,
+    *,
+    symmetries: list[int] | None = None,
+    reference_block: int | None = None,
+    orbitals_each: int = 6,
+    top_aos: int = 6,
+    min_ao_weight: float = 0.5,
+    occupancy_threshold: float = 1.0e-3,
+) -> list[dict[str, Any]]:
+    """Build diagnostics for all or selected symmetries with one file read."""
+
+    input_blocks = parse_rasscf_input_blocks(_read_text(inp_path))
+    log_modules = parse_rasscf_log_modules(_read_text(output_path))
+    available = available_reference_symmetries(input_blocks, reference_block=reference_block)
+    requested = available if symmetries is None else list(dict.fromkeys(symmetries))
+    if not requested:
+        raise ValueError("No pre-ALTER/SUPSYM reference symmetries were found")
+    invalid = [symmetry for symmetry in requested if symmetry < 1]
+    if invalid:
+        raise ValueError("--symmetry values must be positive")
+    unavailable = [symmetry for symmetry in requested if symmetry not in available]
+    if unavailable:
+        choices = ", ".join(str(symmetry) for symmetry in available)
+        missing = ", ".join(str(symmetry) for symmetry in unavailable)
+        raise ValueError(
+            f"No usable pre-setup reference for symmetry {missing}; available: {choices}"
+        )
+    return [
+        _build_diagnostic_from_parsed(
+            inp_path,
+            output_path,
+            input_blocks=input_blocks,
+            log_modules=log_modules,
+            symmetry=symmetry,
+            reference_block=reference_block,
+            orbitals_each=orbitals_each,
+            top_aos=top_aos,
+            min_ao_weight=min_ao_weight,
+            occupancy_threshold=occupancy_threshold,
+        )
+        for symmetry in requested
+    ]
+
+
 def _print_orbital(item: dict[str, Any]) -> None:
     print(
         f"  {item['frontier_label']:>7}  MO {item['mo']:>4}  "
@@ -616,16 +720,20 @@ def _print_orbital(item: dict[str, Any]) -> None:
         )
 
 
-def print_diagnostic(result: dict[str, Any]) -> None:
+def print_diagnostic(
+    result: dict[str, Any], *, show_heading: bool = True, show_paths: bool = True
+) -> None:
     """Print a compact, human-readable diagnostic report."""
 
     reference = result["reference_input_block"]
     setup = result["setup_input_block"]
     module = result["matched_output_module"]
     frontier = result["frontier"]
-    print("MOCHECK - OpenMolcas pre-ALTER/SUPSYM frontier audit")
-    print(f"Input : {result['input_file']}")
-    print(f"Output: {result['output_file']}")
+    if show_heading:
+        print("MOCHECK - OpenMolcas pre-ALTER/SUPSYM frontier audit")
+    if show_paths:
+        print(f"Input : {result['input_file']}")
+        print(f"Output: {result['output_file']}")
     print(
         f"Reference input RASSCF #{reference['index']} "
         f"(lines {reference['start_line']}-{reference['end_line']}): {reference['title'] or '(untitled)'}"
@@ -671,11 +779,32 @@ def print_diagnostic(result: dict[str, Any]) -> None:
             print(f"- {warning}")
 
 
+def print_diagnostics(results: list[dict[str, Any]]) -> None:
+    """Print one report or an all-symmetry report with stable separators."""
+
+    if len(results) == 1:
+        print_diagnostic(results[0])
+        return
+    labels = ", ".join(
+        f"{result['frontier']['symmetry']} ({result['frontier']['symmetry_label']})"
+        for result in results
+    )
+    print("MOCHECK - OpenMolcas all-symmetry pre-ALTER/SUPSYM frontier audit")
+    print(f"Input : {results[0]['input_file']}")
+    print(f"Output: {results[0]['output_file']}")
+    print(f"Symmetries: {labels}")
+    for result in results:
+        frontier = result["frontier"]
+        print("\n" + "=" * 78)
+        print(f"SYMMETRY {frontier['symmetry']} ({frontier['symmetry_label'] or 'unlabeled'})")
+        print_diagnostic(result, show_heading=False, show_paths=False)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="moccheck",
         description=(
-            "Inspect the first-symmetry RASSCF frontier immediately before an "
+            "Inspect every available RASSCF symmetry frontier immediately before an "
             "OpenMolcas ALTER/SUPSYM setup block."
         ),
     )
@@ -684,7 +813,15 @@ def build_parser() -> argparse.ArgumentParser:
         "output", type=Path, help="Matching OpenMolcas .log/.out file, optionally .gz"
     )
     parser.add_argument(
-        "--symmetry", type=int, default=1, help="Target symmetry number (default: 1)"
+        "--symmetry",
+        type=int,
+        action="append",
+        default=None,
+        metavar="N",
+        help=(
+            "Target symmetry number; repeat for multiple symmetries. "
+            "Default: all symmetries available before setup"
+        ),
     )
     parser.add_argument(
         "--reference-block",
@@ -720,21 +857,32 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--orbitals must be positive")
     if args.top_aos < 1:
         raise ValueError("--top-aos must be positive")
-    result = build_diagnostic(
+    results = build_diagnostics(
         args.inp,
         args.output,
-        symmetry=args.symmetry,
+        symmetries=args.symmetry,
         reference_block=args.reference_block,
         orbitals_each=args.orbitals,
         top_aos=args.top_aos,
         min_ao_weight=args.min_ao_weight,
         occupancy_threshold=args.occupancy_threshold,
     )
-    print_diagnostic(result)
+    print_diagnostics(results)
     if args.json_out is not None:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, Any]
+        if len(results) == 1:
+            payload = results[0]
+        else:
+            payload = {
+                "schema": COLLECTION_SCHEMA,
+                "input_file": results[0]["input_file"],
+                "output_file": results[0]["output_file"],
+                "symmetries": [result["frontier"]["symmetry"] for result in results],
+                "diagnostics": results,
+            }
         args.json_out.write_text(
-            json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         print(f"\nWrote diagnostic JSON: {args.json_out}")
     return 0
