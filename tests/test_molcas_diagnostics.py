@@ -379,6 +379,8 @@ End of input
     assert "not required for homing" in result["supsym"]["note"]
     assert "outside RAS3" in result["transition_space_note"]
     assert "does not create a transition" in result["transition_space_note"]
+    assert "high starting SCF" in result["transition_space_note"]
+    assert "weak intensity alone" in result["transition_space_note"]
 
 
 def test_ras3_audit_does_not_call_occupied_source_a_safe_homing_swap() -> None:
@@ -592,6 +594,8 @@ End of input
     assert result["alter_pair_count"] == 17
     assert result["alter_pair_limit"] == 16
     assert result["alter_limit_exceeded"] is True
+    assert "sequential CIONLY homing blocks" in result["alter_limit_note"]
+    assert "post-previous-stage MO ordering" in result["alter_limit_note"]
 
 
 def test_build_diagnostic_accepts_compact_orbital_listing(tmp_path: Path) -> None:

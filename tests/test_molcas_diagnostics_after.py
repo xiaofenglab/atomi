@@ -230,6 +230,8 @@ End of input
     assert result["blocks"][1]["status"] == "mixed_retained"
     assert result["blocks"][1]["output_module"]["index"] == 3
     assert "converged calculation alone" in result["transition_space_guard"]
+    assert "high starting orbital energy" in result["transition_space_guard"]
+    assert "transition densities together" in result["transition_space_guard"]
 
 
 def test_after_command_marks_active_module_running(tmp_path: Path) -> None:

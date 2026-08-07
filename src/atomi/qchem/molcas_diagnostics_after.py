@@ -563,7 +563,10 @@ def build_after_diagnostic(
             "remains inside the final RAS3 slots. Pseudo-natural orbitals may reorder or mix "
             "within that subspace. If the target character moves outside RAS3, associated "
             "configurations are no longer explicit in the RAS wave function; a converged "
-            "calculation alone is not a physical pass."
+            "calculation alone is not a physical pass. Conversely, a high starting orbital "
+            "energy or a weak transition alone is not evidence of an unphysical active-space "
+            "choice; inspect retained AO character, occupations, roots, and transition "
+            "densities together."
         ),
     }
 

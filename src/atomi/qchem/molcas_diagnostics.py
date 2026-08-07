@@ -740,9 +740,13 @@ def build_ras3_recommendation(
         ),
         "transition_space_note": (
             "A chemically intended orbital that remains outside RAS3 is absent from the "
-            "explicit RAS excitation manifold, even when its SCF energy is high. ALTER can "
-            "home that orbital into RAS3; SUPSYM does not create a transition or force an "
-            "occupation, but restricts subsequent same-irrep orbital rotations."
+            "explicit RAS excitation manifold. A high starting SCF or pseudonatural-orbital "
+            "energy does not make the orbital unphysical or exclude it from a chemically "
+            "chosen active space. ALTER only homes the intended orbital into RAS3; SUPSYM "
+            "does not create a transition or force an occupation, but restricts subsequent "
+            "same-irrep orbital rotations. Validate the final AO-character subspace, RAS "
+            "occupations, roots, and oscillator strengths together; weak intensity alone "
+            "does not prove that a target orbital is missing."
         ),
     }
     if setup is None or not setup.ras3:
@@ -1004,10 +1008,12 @@ def build_ras3_recommendation(
         "alter_pair_limit": OPENMOLCAS_MAXALTER,
         "alter_limit_exceeded": alter_limit_exceeded,
         "alter_limit_note": (
-            "OpenMolcas 25.02 defines MAXALTER=16. Reduce or pre-apply the orbital "
-            "permutation before submitting this RASSCF block. Splitting an ALTER map across "
-            "optimized RASSCF blocks is not automatically equivalent and needs its own "
-            "active-space validation."
+            "OpenMolcas 25.02 defines MAXALTER=16. Split a larger accepted permutation "
+            "across sequential CIONLY homing blocks with at most 16 pairs each, pass the "
+            "completed JobIph from one stage to the next, and define each later ALTER map "
+            "against the post-previous-stage MO ordering. Do not optimize orbitals between "
+            "homing stages. The final production probe should remove CIONLY and ALTER, then "
+            "validate the active-space identity after real orbital optimization."
             if alter_limit_exceeded
             else "The setup ALTER pair count is within the OpenMolcas 25.02 limit."
         ),
