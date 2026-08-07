@@ -558,6 +558,13 @@ def build_after_diagnostic(
         "target_shells": shells,
         "blocks": block_results,
         "interpretation_guard": handoff["interpretation_guard"],
+        "transition_space_guard": (
+            "Accept an unconstrained result only when the intended AO-character subspace "
+            "remains inside the final RAS3 slots. Pseudo-natural orbitals may reorder or mix "
+            "within that subspace. If the target character moves outside RAS3, associated "
+            "configurations are no longer explicit in the RAS wave function; a converged "
+            "calculation alone is not a physical pass."
+        ),
     }
 
 
@@ -657,6 +664,7 @@ def print_after_diagnostic(result: dict[str, Any]) -> None:
                 print(f"    non-target AO character: {labels}")
             print(f"    Decision: {item['recommendation']}")
     print("\nGuard: " + result["interpretation_guard"])
+    print("Transition-space guard: " + result["transition_space_guard"])
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -738,6 +738,12 @@ def build_ras3_recommendation(
             "same-symmetry exchange, but over-constraining RAS3 can suppress physical "
             "metal-ligand mixing. Validate the proposed setup in a short RASSCF-only probe."
         ),
+        "transition_space_note": (
+            "A chemically intended orbital that remains outside RAS3 is absent from the "
+            "explicit RAS excitation manifold, even when its SCF energy is high. ALTER can "
+            "home that orbital into RAS3; SUPSYM does not create a transition or force an "
+            "occupation, but restricts subsequent same-irrep orbital rotations."
+        ),
     }
     if setup is None or not setup.ras3:
         return {**base, "status": "unavailable", "reason": "The setup block has no RAS3 vector"}
@@ -1473,6 +1479,7 @@ def _print_ras3_recommendation(recommendation: dict[str, Any]) -> None:
             print(f"  {line}")
         print("  " + supsym["note"])
     print("Safety: " + recommendation["safety_note"])
+    print("Transition-space guard: " + recommendation["transition_space_note"])
 
 
 def print_diagnostic(
@@ -1632,7 +1639,9 @@ def build_moccheck_handoff(
         "interpretation_guard": (
             "Track the intended RAS3 subspace and AO components, not fixed pseudo-natural "
             "MO identities. Mixed metal-ligand character can be physical; SUPSYM is a "
-            "fallback only after reproducible destructive identity drift."
+            "fallback only after reproducible destructive identity drift. An orbital outside "
+            "RAS3 is absent from the explicit RAS excitation manifold; SUPSYM does not add "
+            "transitions or force occupations."
         ),
     }
 

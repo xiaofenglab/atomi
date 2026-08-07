@@ -377,6 +377,8 @@ End of input
         "input_index_semantics"
     ]
     assert "not required for homing" in result["supsym"]["note"]
+    assert "outside RAS3" in result["transition_space_note"]
+    assert "does not create a transition" in result["transition_space_note"]
 
 
 def test_ras3_audit_does_not_call_occupied_source_a_safe_homing_swap() -> None:
