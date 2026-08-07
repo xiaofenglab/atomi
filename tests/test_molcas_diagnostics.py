@@ -85,11 +85,11 @@ MATRIX = """
      1 U1     5f0        0.1000    0.2000    0.3000    0.4000    0.5000    0.6000    0.7000    0.8000    0.9000    1.0000
      2 O2     2px        0.9000    0.8000    0.7000    0.6000    0.5000    0.4000    0.3000    0.2000    0.1000    0.0500
 
-      Orbital                11        12        13        14        15        16
-      Energy              0.1000    0.3000    0.5000    0.7000    0.9000    1.1000
-      Occ. No.            0.0000    0.0000    0.0000    0.0000    0.0000    0.0000
-     1 U1     7s         1.0000    0.8000    0.6000    0.4000    0.2000    0.1000
-     2 O2     2px        0.1000    0.2000    0.4000    0.6000    0.8000    1.0000
+      Orbital                11        12        13        14        15        16        17        18        19        20
+      Energy              0.1000    0.3000    0.5000    0.7000    0.9000    1.1000    1.3000    1.5000    1.7000    1.9000
+      Occ. No.            0.0000    0.0000    0.0000    0.0000    0.0000    0.0000    0.0000    0.0000    0.0000    0.0000
+     1 U1     7s         1.0000    0.8000    0.6000    0.4000    0.2000    0.1000    0.0800    0.0600    0.0400    0.0200
+     2 O2     2px        0.1000    0.2000    0.4000    0.6000    0.8000    1.0000    1.1000    1.2000    1.3000    1.4000
 
       Molecular orbitals for symmetry species 2: b1
 """
@@ -257,9 +257,11 @@ def test_selects_single_last_block_before_setup() -> None:
     assert setup.index == 3
     assert setup.has_alter is True
     assert setup.has_supsym is True
+    assert setup.alter_swaps == ((1, 6, 9),)
+    assert setup.supsym_groups[0] == ((6, 7), (11, 12))
 
 
-def test_build_diagnostic_reports_six_frontier_orbitals_each(tmp_path: Path) -> None:
+def test_build_diagnostic_reports_six_occupied_and_ten_virtual_orbitals(tmp_path: Path) -> None:
     inp = tmp_path / "run.inp"
     log = tmp_path / "run.log"
     inp.write_text(INPUT_TEXT, encoding="utf-8")
@@ -269,14 +271,168 @@ def test_build_diagnostic_reports_six_frontier_orbitals_each(tmp_path: Path) -> 
 
     assert result["reference_input_block"]["index"] == 2
     assert result["matched_output_module"]["index"] == 2
-    assert result["frontier"]["homo"] == 10
-    assert result["frontier"]["lumo"] == 11
+    assert result["frontier"]["homo"] == 9
+    assert result["frontier"]["lumo"] == 10
     assert len(result["frontier"]["occupied"]) == 6
-    assert len(result["frontier"]["virtual"]) == 6
+    assert len(result["frontier"]["virtual"]) == 10
     assert result["frontier"]["occupied"][-1]["frontier_label"] == "HOMO"
     assert result["frontier"]["virtual"][0]["frontier_label"] == "LUMO"
-    assert result["frontier"]["virtual"][0]["dominant_aos"][0]["ao"] == "7s"
+    assert result["frontier"]["virtual"][1]["dominant_aos"][0]["ao"] == "7s"
     assert any("title says triplet" in warning for warning in result["warnings"])
+
+
+def test_legacy_orbitals_override_remains_symmetric(tmp_path: Path) -> None:
+    inp = tmp_path / "run.inp"
+    log = tmp_path / "run.log"
+    inp.write_text(INPUT_TEXT, encoding="utf-8")
+    log.write_text(LOG_TEXT, encoding="utf-8")
+
+    result = molcas_diagnostics.build_diagnostic(inp, log, orbitals_each=4)
+
+    assert len(result["frontier"]["occupied"]) == 4
+    assert len(result["frontier"]["virtual"]) == 4
+
+
+def test_ras3_audit_proposes_minimal_virtual_homing_and_supsym() -> None:
+    text = """
+* ATOMI RAS3_TARGET U1:5f
+&RASSCF
+Title
+ reference
+Symmetry
+ 1
+Spin
+ 2
+nActEl
+ 1 0 0
+End of input
+&RASSCF
+Title
+ setup
+Symmetry
+ 1
+Spin
+ 2
+nActEl
+ 1 0 2
+Inactive
+ 10
+Ras3
+ 2
+SUPSYM
+ 0
+Alter
+ 0
+End of input
+"""
+    blocks = molcas_diagnostics.parse_rasscf_input_blocks(text)
+    rows = [
+        {
+            "mo": mo,
+            "energy": float(mo) / 10.0,
+            "occupation": 0.0,
+            "symmetry": 1,
+            "symmetry_label": "a1",
+            "terms": [
+                {
+                    "ao_index": 1,
+                    "atom": "U1" if mo in {15, 16} else "O2",
+                    "ao": (
+                        "5f0" if mo == 15 else "5f2+" if mo == 16 else "2px"
+                    ),
+                    "coefficient": 0.9,
+                    "coeff2": 0.81,
+                }
+            ],
+        }
+        for mo in range(1, 21)
+    ]
+
+    result = molcas_diagnostics.build_ras3_recommendation(
+        text,
+        Path("trial_5fonly.inp"),
+        setup=blocks[1],
+        rows_by_symmetry={1: rows},
+        ao_listing_format="full",
+        occupancy_threshold=0.999,
+        mixing_window_ha=0.15,
+    )
+
+    assert result["status"] == "proposal_available"
+    assert result["target_atom"] == "U1"
+    assert result["safe_virtual_alter_additions"] == [[1, 15, 11], [1, 16, 12]]
+    assert result["conditional_occupied_alter_additions"] == []
+    assert result["supsym"]["production_final_ras3_slot_groups"] == [[11, 12]]
+
+
+def test_ras3_audit_does_not_call_occupied_source_a_safe_homing_swap() -> None:
+    text = """
+* ATOMI RAS3_TARGET U1:5f
+&RASSCF
+Title
+ reference
+Symmetry
+ 1
+Spin
+ 2
+nActEl
+ 1 0 0
+End of input
+&RASSCF
+Title
+ setup
+Symmetry
+ 1
+Spin
+ 2
+nActEl
+ 1 0 1
+Inactive
+ 13
+Ras1
+ 1
+Ras3
+ 1
+Alter
+ 0
+End of input
+"""
+    blocks = molcas_diagnostics.parse_rasscf_input_blocks(text)
+    rows = [
+        {
+            "mo": mo,
+            "energy": float(mo) / 10.0,
+            "occupation": 2.0 if mo <= 14 else 0.0,
+            "symmetry": 1,
+            "symmetry_label": "a2",
+            "terms": [
+                {
+                    "ao_index": 1,
+                    "atom": "U1" if mo == 12 else "O2",
+                    "ao": "5f2-" if mo == 12 else "2px",
+                    "coefficient": 0.9,
+                    "coeff2": 0.81,
+                }
+            ],
+        }
+        for mo in range(1, 21)
+    ]
+
+    result = molcas_diagnostics.build_ras3_recommendation(
+        text,
+        Path("trial_5fonly.inp"),
+        setup=blocks[1],
+        rows_by_symmetry={1: rows},
+        ao_listing_format="full",
+        occupancy_threshold=0.999,
+        mixing_window_ha=0.15,
+    )
+
+    assert result["status"] == "review_required"
+    assert result["safe_virtual_alter_additions"] == []
+    assert result["conditional_occupied_alter_additions"] == [[1, 12, 15]]
+    source = result["per_symmetry"][0]["selected_sources"][0]
+    assert source["occupied_partition_change"] is True
 
 
 def test_build_diagnostic_accepts_compact_orbital_listing(tmp_path: Path) -> None:
@@ -294,10 +450,10 @@ def test_build_diagnostic_accepts_compact_orbital_listing(tmp_path: Path) -> Non
         "format": "compact",
         "complete_coefficient_matrix": False,
     }
-    assert result["frontier"]["homo"] == 10
-    assert result["frontier"]["lumo"] == 11
+    assert result["frontier"]["homo"] == 9
+    assert result["frontier"]["lumo"] == 10
     assert result["frontier"]["occupied"][-1]["dominant_aos"][0]["ao"] == "5f0"
-    assert result["frontier"]["virtual"][0]["dominant_aos"][0]["ao"] == "7s"
+    assert result["frontier"]["virtual"][1]["dominant_aos"][0]["ao"] == "7s"
     assert any("compact AO printing" in warning for warning in result["warnings"])
 
 
@@ -345,7 +501,8 @@ def test_moccheck_cli_prints_and_writes_json(tmp_path: Path, capsys) -> None:
     assert rc == 0
     output = capsys.readouterr().out
     assert "MOCHECK - OpenMolcas pre-ALTER/SUPSYM frontier audit" in output
-    assert "HOMO=10, LUMO=11" in output
+    assert "HOMO=9, LUMO=10" in output
+    assert "LUMO+9" in output
     assert "rel|c|^2" in output
     payload = json.loads(json_out.read_text(encoding="utf-8"))
     assert payload["schema"] == "atomi.molcas_moccheck.v1"

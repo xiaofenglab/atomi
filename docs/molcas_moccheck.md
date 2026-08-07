@@ -13,22 +13,73 @@ moccheck RUN.inp RUN.log
 atomi moccheck RUN.inp RUN.out
 ```
 
-The default report contains six occupied and six virtual orbitals around the
+The default report contains six occupied and ten virtual orbitals around the
 frontier for every symmetry table printed by the final RASSCF reference before
 the first `ALTER`/`SUPSYM` setup block. The input and output are parsed once,
-even for a large multi-symmetry log. Partially occupied active orbitals count
-as occupied when their occupation is above the default `1e-3` threshold.
-HOMO/LUMO labels are therefore occupation-defined by orbital order. RASSCF
+even for a large multi-symmetry log. Only orbitals above the default `0.999`
+occupation threshold count as occupied; partially occupied orbitals such as
+`0.5` are shown on the LUMO/virtual-like side. HOMO/LUMO labels are therefore
+occupation-defined by orbital order, not canonical filling. RASSCF
 active-space orbital energies need not follow canonical Aufbau ordering, and
 `moccheck` warns when the occupation-defined LUMO energy lies below the HOMO
 energy.
 
 ```bash
 atomi moccheck RUN.inp RUN.log \
-  --orbitals 6 \
+  --occupied-orbitals 6 \
+  --virtual-orbitals 10 \
   --top-aos 6 \
   --json-out moccheck_all_symmetries.json
 ```
+
+The legacy `--orbitals N` option remains available and overrides both counts.
+
+## RAS3 intent and homing audit
+
+`moccheck` also reads `Inactive`, `RAS1`, `RAS2`, `RAS3`, existing `ALTER`,
+and existing `SUPSYM` data from the first setup block. It compares the final
+pre-setup orbital identities with the intended RAS3 central-atom shells and
+reports:
+
+- the actual final RAS3 slot range in every symmetry;
+- the strongest matching source MOs and their occupations;
+- existing RAS3 identities after the deck's current `ALTER` sequence;
+- minimal missing virtual-homing swaps;
+- occupied-source swaps in a separate, conditional partition-change section;
+- close-energy same-symmetry neighbors within the configurable
+  `--mixing-window-ha` window; and
+- an advisory `SUPSYM` scaffold that preserves existing groups and adds the
+  final RAS3 slot group.
+
+Source matching is done component by component (for example `5f0`, `5f2+`,
+and `7s`), using the requested atom-shell share normalized over the AO
+coefficients printed for each MO. Raw AO coefficients are not ranked across
+MOs because their magnitudes are not directly comparable in a nonorthogonal
+basis. This remains an identity diagnostic, not a quantitative population
+analysis.
+
+Declare intent explicitly near the top of a production input:
+
+```text
+* ATOMI RAS3_TARGET U1:5f
+* ATOMI RAS3_TARGET U1:5f U1:7s
+* ATOMI RAS3_TARGET U1:5f U1:7s U1:7p
+```
+
+For compatibility with existing decks, `moccheck` recognizes clear filename
+or leading-comment labels such as `5f-only`, `5f+7s`, and `5f+7s+7p`, then
+infers a unique central atom from the printed AO character. If shell intent or
+the central atom is ambiguous, it stops at diagnosis and asks for the explicit
+annotation instead of inventing an `ALTER` recipe.
+
+An occupied source is never labeled as a safe virtual-homing swap. For an
+f-electron ion it may still need to enter the active space, but that operation
+changes the orbital partition and must be checked against `NACTEL`, inactive
+counts, and the intended ground configuration. Likewise, the suggested
+`SUPSYM` block is review-required: it can prevent accidental same-symmetry
+orbital exchange, but over-constraining RAS3 can suppress physical
+metal-ligand mixing. Validate accepted changes in a short RASSCF-only setup
+probe before production.
 
 Use `--symmetry N` for a focused report. Repeat the option to preserve a
 specific subset and order:

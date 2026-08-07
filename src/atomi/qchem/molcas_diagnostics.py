@@ -62,6 +62,8 @@ class RasscfInputBlock:
     ras3: tuple[int, ...]
     has_alter: bool
     has_supsym: bool
+    alter_swaps: tuple[tuple[int, int, int], ...]
+    supsym_groups: tuple[tuple[tuple[int, ...], ...], ...]
 
 
 @dataclass(frozen=True)
@@ -116,6 +118,86 @@ def _first_int(payload: str | None) -> int | None:
     return values[0] if values else None
 
 
+def _keyword_line_index(lines: list[str], keyword: str) -> int | None:
+    wanted = keyword.lower()
+    for idx, raw in enumerate(lines):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("*"):
+            continue
+        token = stripped.split(None, 1)[0].rstrip("=").lower()
+        if token == wanted:
+            return idx
+    return None
+
+
+def _data_lines_after_keyword(lines: list[str], keyword: str) -> list[str]:
+    index = _keyword_line_index(lines, keyword)
+    if index is None:
+        return []
+    data: list[str] = []
+    for raw in lines[index + 1 :]:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("*"):
+            continue
+        token = stripped.split(None, 1)[0].rstrip("=").lower()
+        if token in {
+            "alter",
+            "supsym",
+            "thrs",
+            "iterations",
+            "levs",
+            "orbl",
+            "orba",
+            "tdm",
+            "end",
+        }:
+            break
+        data.append(stripped)
+    return data
+
+
+def _parse_alter_swaps(lines: list[str]) -> tuple[tuple[int, int, int], ...]:
+    data = _data_lines_after_keyword(lines, "alter")
+    if not data:
+        return ()
+    count_values = _int_tuple(data[0])
+    if not count_values:
+        return ()
+    swaps: list[tuple[int, int, int]] = []
+    for line in data[1 : 1 + count_values[0]]:
+        values = _int_tuple(line)
+        if len(values) >= 3:
+            swaps.append((values[0], values[1], values[2]))
+    return tuple(swaps)
+
+
+def _parse_supsym_groups(
+    lines: list[str], *, symmetry_count: int
+) -> tuple[tuple[tuple[int, ...], ...], ...]:
+    data = _data_lines_after_keyword(lines, "supsym")
+    if not data:
+        return ()
+    groups_by_symmetry: list[tuple[tuple[int, ...], ...]] = []
+    cursor = 0
+    for _ in range(symmetry_count):
+        if cursor >= len(data):
+            groups_by_symmetry.append(())
+            continue
+        count_values = _int_tuple(data[cursor])
+        cursor += 1
+        group_count = count_values[0] if count_values else 0
+        groups: list[tuple[int, ...]] = []
+        for _ in range(group_count):
+            if cursor >= len(data):
+                break
+            values = _int_tuple(data[cursor])
+            cursor += 1
+            if values:
+                groups.append(tuple(values[1 : 1 + values[0]]))
+        groups_by_symmetry.append(tuple(groups))
+    return tuple(groups_by_symmetry)
+
+
 def parse_rasscf_input_blocks(text: str) -> list[RasscfInputBlock]:
     """Parse chronological RASSCF blocks from an OpenMolcas input deck."""
 
@@ -135,6 +217,11 @@ def parse_rasscf_input_blocks(text: str) -> list[RasscfInputBlock]:
             end += 1
         body = lines[idx:end]
         tokens = {line.strip().split(None, 1)[0].lower() for line in body if line.strip()}
+        orbital_vectors = [
+            _int_tuple(_keyword_payload(body, keyword))
+            for keyword in ("inactive", "ras1", "ras2", "ras3")
+        ]
+        symmetry_count = max((len(values) for values in orbital_vectors), default=0)
         blocks.append(
             RasscfInputBlock(
                 index=len(blocks) + 1,
@@ -150,6 +237,8 @@ def parse_rasscf_input_blocks(text: str) -> list[RasscfInputBlock]:
                 ras3=_int_tuple(_keyword_payload(body, "ras3")),
                 has_alter="alter" in tokens,
                 has_supsym="supsym" in tokens,
+                alter_swaps=_parse_alter_swaps(body),
+                supsym_groups=_parse_supsym_groups(body, symmetry_count=symmetry_count),
             )
         )
         idx = max(end, idx + 1)
@@ -486,8 +575,414 @@ def _title_spin_warning(block: RasscfInputBlock, role: str) -> str | None:
     return None
 
 
+def _infer_ras3_intent(input_text: str, inp_path: Path) -> dict[str, Any]:
+    directive = re.search(
+        r"^\s*\*\s*ATOMI\s+RAS3_TARGET\s+(.+?)\s*$",
+        input_text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    if directive:
+        targets = []
+        for token in re.split(r"[\s,]+", directive.group(1).strip()):
+            if not token:
+                continue
+            atom, separator, shell = token.partition(":")
+            if not separator or not atom or not shell:
+                continue
+            targets.append({"atom": atom, "shell": shell.lower()})
+        if targets:
+            return {
+                "status": "explicit",
+                "targets": targets,
+                "evidence": directive.group(0).strip(),
+            }
+
+    evidence_text = f"{inp_path.name}\n{input_text[:2500]}".lower()
+    shells: list[str] = []
+    if re.search(r"5f\s*[-+_/ ]\s*7s\s*[-+_/ ]\s*7p|5f7s7p", evidence_text):
+        shells = ["5f", "7s", "7p"]
+    elif re.search(r"5f\s*[-+_/ ]\s*7s|5f7s|7s\s+with\s+5f", evidence_text):
+        shells = ["5f", "7s"]
+    elif re.search(r"5f.?only|only\s+5f\s+for\s+ras3", evidence_text):
+        shells = ["5f"]
+    if shells:
+        return {
+            "status": "inferred",
+            "targets": [{"atom": None, "shell": shell} for shell in shells],
+            "evidence": "filename or leading input comments",
+        }
+    return {
+        "status": "ambiguous",
+        "targets": [],
+        "evidence": (
+            "No explicit '* ATOMI RAS3_TARGET Atom:Shell ...' annotation or recognized "
+            "5f-only/5f+7s/5f+7s+7p label was found"
+        ),
+    }
+
+
+def _shell_matches(ao: str, shell: str) -> bool:
+    return ao.lower().startswith(shell.lower())
+
+
+def _target_score(row: dict[str, Any], *, atom: str, shells: list[str]) -> float:
+    target_coeff2 = sum(
+        float(term["coeff2"])
+        for term in row["terms"]
+        if str(term["atom"]).lower() == atom.lower()
+        and any(_shell_matches(str(term["ao"]), shell) for shell in shells)
+    )
+    printed_coeff2 = sum(float(term["coeff2"]) for term in row["terms"])
+    return target_coeff2 / printed_coeff2 if printed_coeff2 > 0.0 else 0.0
+
+
+def _component_score(row: dict[str, Any], *, atom: str, ao: str) -> float:
+    component_coeff2 = sum(
+        float(term["coeff2"])
+        for term in row["terms"]
+        if str(term["atom"]).lower() == atom.lower()
+        and str(term["ao"]).lower() == ao.lower()
+    )
+    printed_coeff2 = sum(float(term["coeff2"]) for term in row["terms"])
+    return component_coeff2 / printed_coeff2 if printed_coeff2 > 0.0 else 0.0
+
+
+def _infer_target_atom(
+    rows_by_symmetry: dict[int, list[dict[str, Any]]], shells: list[str]
+) -> tuple[str | None, dict[str, float]]:
+    totals: dict[str, float] = {}
+    for rows in rows_by_symmetry.values():
+        for row in rows:
+            for term in row["terms"]:
+                if any(_shell_matches(str(term["ao"]), shell) for shell in shells):
+                    atom = str(term["atom"])
+                    totals[atom] = totals.get(atom, 0.0) + float(term["coeff2"])
+    if not totals:
+        return None, totals
+    ranked = sorted(totals.items(), key=lambda item: item[1], reverse=True)
+    if len(ranked) > 1 and ranked[1][1] >= 0.8 * ranked[0][1]:
+        return None, totals
+    return ranked[0][0], totals
+
+
+def _vector_value(values: tuple[int, ...], symmetry: int) -> int:
+    return values[symmetry - 1] if symmetry <= len(values) else 0
+
+
+def _ras3_slots(block: RasscfInputBlock, symmetry: int) -> list[int]:
+    count = _vector_value(block.ras3, symmetry)
+    start = (
+        _vector_value(block.inactive, symmetry)
+        + _vector_value(block.ras1, symmetry)
+        + _vector_value(block.ras2, symmetry)
+    )
+    return list(range(start + 1, start + count + 1))
+
+
+def _identity_positions_after_swaps(
+    rows_by_symmetry: dict[int, list[dict[str, Any]]],
+    swaps: tuple[tuple[int, int, int], ...],
+) -> dict[int, dict[int, int]]:
+    positions = {
+        symmetry: {int(row["mo"]): int(row["mo"]) for row in rows}
+        for symmetry, rows in rows_by_symmetry.items()
+    }
+    for symmetry, first, second in swaps:
+        mapping = positions.get(symmetry)
+        if mapping is None or first not in mapping or second not in mapping:
+            continue
+        mapping[first], mapping[second] = mapping[second], mapping[first]
+    return positions
+
+
+def _format_supsym_block(groups_by_symmetry: list[list[list[int]]]) -> list[str]:
+    lines = ["SUPSYM"]
+    for groups in groups_by_symmetry:
+        lines.append(f" {len(groups)}")
+        for group in groups:
+            lines.append("  " + " ".join([str(len(group)), *(str(value) for value in group)]))
+    return lines
+
+
+def build_ras3_recommendation(
+    input_text: str,
+    inp_path: Path,
+    *,
+    setup: RasscfInputBlock | None,
+    rows_by_symmetry: dict[int, list[dict[str, Any]]],
+    ao_listing_format: str,
+    occupancy_threshold: float,
+    mixing_window_ha: float,
+) -> dict[str, Any]:
+    """Audit intended RAS3 identity and propose only evidence-backed homing changes."""
+
+    intent = _infer_ras3_intent(input_text, inp_path)
+    base: dict[str, Any] = {
+        "status": "review_required",
+        "intent": intent,
+        "mixing_window_hartree": mixing_window_ha,
+        "safety_note": (
+            "ALTER changes orbital subspace membership. SUPSYM can prevent accidental "
+            "same-symmetry exchange, but over-constraining RAS3 can suppress physical "
+            "metal-ligand mixing. Validate the proposed setup in a short RASSCF-only probe."
+        ),
+    }
+    if setup is None or not setup.ras3:
+        return {**base, "status": "unavailable", "reason": "The setup block has no RAS3 vector"}
+    if not rows_by_symmetry:
+        return {**base, "status": "unavailable", "reason": "No MO rows were parsed"}
+    if not intent["targets"]:
+        return {
+            **base,
+            "status": "ambiguous_intent",
+            "reason": intent["evidence"],
+            "annotation_example": "* ATOMI RAS3_TARGET U1:5f U1:7s",
+        }
+
+    shells = list(dict.fromkeys(str(target["shell"]).lower() for target in intent["targets"]))
+    explicit_atoms = {
+        str(target["atom"])
+        for target in intent["targets"]
+        if target.get("atom") is not None
+    }
+    atom_scores: dict[str, float] = {}
+    if len(explicit_atoms) == 1:
+        target_atom = next(iter(explicit_atoms))
+    elif len(explicit_atoms) > 1:
+        return {
+            **base,
+            "status": "ambiguous_intent",
+            "reason": "Multiple target atoms were declared; one central-atom target is required",
+        }
+    else:
+        target_atom, atom_scores = _infer_target_atom(rows_by_symmetry, shells)
+    if target_atom is None:
+        return {
+            **base,
+            "status": "ambiguous_atom",
+            "reason": "A unique central atom could not be inferred from the requested AO shells",
+            "atom_scores": atom_scores,
+            "annotation_example": "* ATOMI RAS3_TARGET U1:5f U1:7s",
+        }
+
+    positions = _identity_positions_after_swaps(rows_by_symmetry, setup.alter_swaps)
+    per_symmetry: list[dict[str, Any]] = []
+    safe_additions: list[list[int]] = []
+    conditional_additions: list[list[int]] = []
+    source_groups: list[list[int]] = []
+    final_groups: list[list[int]] = []
+    max_symmetry = max(
+        len(setup.inactive), len(setup.ras1), len(setup.ras2), len(setup.ras3), 0
+    )
+
+    for symmetry in range(1, max_symmetry + 1):
+        rows = rows_by_symmetry.get(symmetry, [])
+        slots = _ras3_slots(setup, symmetry)
+        final_groups.append(slots)
+        if not slots or not rows:
+            source_groups.append([])
+            per_symmetry.append(
+                {
+                    "symmetry": symmetry,
+                    "ras3_slots": slots,
+                    "status": "no_ras3" if not slots else "missing_mo_table",
+                }
+            )
+            continue
+        row_by_id = {int(row["mo"]): row for row in rows}
+        component_shell_order = {shell: index for index, shell in enumerate(shells)}
+        component_labels = sorted(
+            {
+                str(term["ao"])
+                for row in rows
+                for term in row["terms"]
+                if str(term["atom"]).lower() == target_atom.lower()
+                and any(_shell_matches(str(term["ao"]), shell) for shell in shells)
+            },
+            key=lambda ao: (
+                min(
+                    component_shell_order[shell]
+                    for shell in shells
+                    if _shell_matches(ao, shell)
+                ),
+                ao.lower(),
+            ),
+        )
+        component_candidates = []
+        for component in component_labels:
+            ranked = sorted(
+                (
+                    (_component_score(row, atom=target_atom, ao=component), int(row["mo"]), row)
+                    for row in rows
+                ),
+                key=lambda item: (item[0], -item[1]),
+                reverse=True,
+            )
+            if ranked and ranked[0][0] > 1.0e-4:
+                component_candidates.append((component, ranked))
+        component_candidates.sort(
+            key=lambda item: (
+                item[1][0][0] - (item[1][1][0] if len(item[1]) > 1 else 0.0),
+                item[1][0][0],
+            ),
+            reverse=True,
+        )
+        selected: list[tuple[float, int, dict[str, Any], str]] = []
+        used_mos: set[int] = set()
+        for component, ranked in component_candidates:
+            choice = next((item for item in ranked if item[1] not in used_mos), None)
+            if choice is None:
+                continue
+            score, identity, row = choice
+            selected.append((score, identity, row, component))
+            used_mos.add(identity)
+        selected = selected[: len(slots)]
+        selected_ids = [item[1] for item in selected]
+        source_groups.append(selected_ids)
+        mapping = positions[symmetry]
+        inverse = {identity: position for position, identity in mapping.items()}
+        occupants = [mapping.get(slot, slot) for slot in slots]
+        missing = [identity for identity in selected_ids if identity not in occupants]
+        replaceable_slots = [slot for slot in slots if mapping.get(slot, slot) not in selected_ids]
+        additions: list[dict[str, Any]] = []
+        for identity, target_slot in zip(missing, replaceable_slots):
+            source_slot = inverse[identity]
+            row = row_by_id[identity]
+            occupied = float(row["occupation"]) > occupancy_threshold
+            proposal = {
+                "swap": [symmetry, source_slot, target_slot],
+                "source_identity_mo": identity,
+                "source_energy_hartree": float(row["energy"]),
+                "source_occupation": float(row["occupation"]),
+                "target_score": _target_score(row, atom=target_atom, shells=shells),
+                "classification": (
+                    "conditional_partition_change" if occupied else "virtual_homing"
+                ),
+            }
+            additions.append(proposal)
+            if occupied:
+                conditional_additions.append(proposal["swap"])
+            else:
+                safe_additions.append(proposal["swap"])
+            mapping[source_slot], mapping[target_slot] = mapping[target_slot], mapping[source_slot]
+            inverse = {value: key for key, value in mapping.items()}
+
+        close_pairs: list[dict[str, Any]] = []
+        scored = sorted(
+            (
+                (_target_score(row, atom=target_atom, shells=shells), int(row["mo"]), row)
+                for row in rows
+            ),
+            key=lambda item: (item[0], -item[1]),
+            reverse=True,
+        )
+        for score, identity, row, component in selected:
+            neighbors = [
+                other
+                for other_score, other_id, other in scored
+                if other_id not in selected_ids
+                and abs(float(other["energy"]) - float(row["energy"])) <= mixing_window_ha
+            ]
+            if neighbors:
+                closest = min(
+                    neighbors,
+                    key=lambda other: abs(float(other["energy"]) - float(row["energy"])),
+                )
+                close_pairs.append(
+                    {
+                        "selected_mo": identity,
+                        "selected_target_score": score,
+                        "target_component": component,
+                        "neighbor_mo": int(closest["mo"]),
+                        "delta_energy_hartree": abs(
+                            float(closest["energy"]) - float(row["energy"])
+                        ),
+                        "neighbor_target_score": _target_score(
+                            closest, atom=target_atom, shells=shells
+                        ),
+                    }
+                )
+        per_symmetry.append(
+            {
+                "symmetry": symmetry,
+                "symmetry_label": rows[0].get("symmetry_label", ""),
+                "ras3_slots": slots,
+                "target_components": component_labels,
+                "selected_source_mos": selected_ids,
+                "selected_sources": [
+                    {
+                        "mo": identity,
+                        "energy_hartree": float(row["energy"]),
+                        "occupation": float(row["occupation"]),
+                        "target_score": score,
+                        "target_component": component,
+                        "occupied_partition_change": (
+                            float(row["occupation"]) > occupancy_threshold
+                        ),
+                    }
+                    for score, identity, row, component in selected
+                ],
+                "current_ras3_identity_mos_after_existing_alter": occupants,
+                "suggested_additions": additions,
+                "close_energy_risks": close_pairs,
+                "status": (
+                    "complete"
+                    if len(selected) == len(slots) == len(component_labels)
+                    else "component_slot_mismatch"
+                ),
+            }
+        )
+
+    existing_groups = [
+        [list(group) for group in groups] for groups in setup.supsym_groups
+    ]
+    while len(existing_groups) < max_symmetry:
+        existing_groups.append([])
+    suggested_groups: list[list[list[int]]] = []
+    for symmetry in range(max_symmetry):
+        groups = [list(group) for group in existing_groups[symmetry]]
+        target_group = final_groups[symmetry]
+        if target_group and target_group not in groups:
+            groups.append(target_group)
+        suggested_groups.append(groups)
+
+    return {
+        **base,
+        "status": "review_required" if conditional_additions else "proposal_available",
+        "target_atom": target_atom,
+        "target_shells": shells,
+        "ao_listing_format": ao_listing_format,
+        "existing_alter_swaps": [list(swap) for swap in setup.alter_swaps],
+        "safe_virtual_alter_additions": safe_additions,
+        "conditional_occupied_alter_additions": conditional_additions,
+        "occupied_source_note": (
+            "An occupied source is not an automatic error: for an f^n ion it may need to enter "
+            "the active space. Moving it from inactive/RAS2 into RAS3 changes the partition and "
+            "must be checked against NACTEL, inactive counts, and the intended ground configuration."
+        ),
+        "per_symmetry": per_symmetry,
+        "supsym": {
+            "status": "review_required",
+            "existing_groups": existing_groups,
+            "pre_alter_source_identity_groups": source_groups,
+            "production_final_ras3_slot_groups": final_groups,
+            "suggested_full_block_preserving_existing_groups": _format_supsym_block(
+                suggested_groups
+            ),
+            "note": (
+                "Use final-slot groups only after accepting the ALTER map. Do not constrain "
+                "extra close-energy orbitals solely because they are near the LUMO."
+            ),
+        },
+    }
+
+
 def _frontier_rows(
-    rows: list[dict[str, Any]], *, count: int, occupancy_threshold: float
+    rows: list[dict[str, Any]],
+    *,
+    occupied_count: int,
+    virtual_count: int,
+    occupancy_threshold: float,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, int]:
     ordered = sorted(rows, key=lambda row: int(row["mo"]))
     occupied = [row for row in ordered if float(row["occupation"]) > occupancy_threshold]
@@ -501,7 +996,7 @@ def _frontier_rows(
     ]
     if not virtual:
         raise ValueError("No virtual orbitals were found after the highest occupied orbital")
-    return occupied[-count:], virtual[:count], homo, int(virtual[0]["mo"])
+    return occupied[-occupied_count:], virtual[:virtual_count], homo, int(virtual[0]["mo"])
 
 
 def _decorate_orbital(
@@ -533,12 +1028,15 @@ def _build_diagnostic_from_parsed(
     *,
     input_blocks: list[RasscfInputBlock],
     log_modules: list[RasscfLogModule],
+    ras3_recommendation: dict[str, Any],
     symmetry: int = 1,
     reference_block: int | None = None,
-    orbitals_each: int = 6,
+    orbitals_each: int | None = None,
+    occupied_orbitals: int = 6,
+    virtual_orbitals: int = 10,
     top_aos: int = 6,
     min_ao_weight: float = 0.5,
-    occupancy_threshold: float = 1.0e-3,
+    occupancy_threshold: float = 0.999,
 ) -> dict[str, Any]:
     """Build one structured diagnostic from previously parsed inputs."""
 
@@ -554,8 +1052,14 @@ def _build_diagnostic_from_parsed(
             "No pseudonatural MO coefficient table was found for the selected symmetry. "
             "Ensure the reference RASSCF prints orbitals with ORBL ALL and ORBA FULL or COMP."
         )
+    if orbitals_each is not None:
+        occupied_orbitals = orbitals_each
+        virtual_orbitals = orbitals_each
     occupied, virtual, homo, lumo = _frontier_rows(
-        mo_rows, count=orbitals_each, occupancy_threshold=occupancy_threshold
+        mo_rows,
+        occupied_count=occupied_orbitals,
+        virtual_count=virtual_orbitals,
+        occupancy_threshold=occupancy_threshold,
     )
     occupied_items = []
     for offset, row in enumerate(reversed(occupied)):
@@ -593,13 +1097,15 @@ def _build_diagnostic_from_parsed(
         warning = _title_spin_warning(block, role)
         if warning:
             warnings.append(warning)
-    if len(occupied_items) < orbitals_each:
+    if len(occupied_items) < occupied_orbitals:
         warnings.append(
-            f"Only {len(occupied_items)} occupied orbitals were available; {orbitals_each} requested"
+            f"Only {len(occupied_items)} occupied orbitals were available; "
+            f"{occupied_orbitals} requested"
         )
-    if len(virtual_items) < orbitals_each:
+    if len(virtual_items) < virtual_orbitals:
         warnings.append(
-            f"Only {len(virtual_items)} virtual orbitals were available; {orbitals_each} requested"
+            f"Only {len(virtual_items)} virtual orbitals were available; "
+            f"{virtual_orbitals} requested"
         )
     if float(virtual_items[0]["energy"]) < float(occupied_items[-1]["energy"]):
         warnings.append(
@@ -638,7 +1144,10 @@ def _build_diagnostic_from_parsed(
             "symmetry": symmetry,
             "symmetry_label": mo_rows[0].get("symmetry_label", ""),
             "occupation_threshold": occupancy_threshold,
-            "definition": "highest/lowest orbital index classified by occupation, not canonical energy",
+            "definition": (
+                "highest/lowest orbital index classified by occupation; values at or below "
+                "the threshold, including partial occupations such as 0.5, are virtual-like"
+            ),
             "homo": homo,
             "lumo": lumo,
             "occupied": occupied_items,
@@ -649,8 +1158,28 @@ def _build_diagnostic_from_parsed(
             f"{ao_listing_format} listing for each MO; "
             "diagnostic display share, not Mulliken or Loewdin population"
         ),
+        "ras3_recommendation": ras3_recommendation,
         "warnings": warnings,
     }
+
+
+def _reference_rows_for_all_symmetries(
+    module: RasscfLogModule,
+) -> tuple[dict[int, list[dict[str, Any]]], str]:
+    rows_by_symmetry: dict[int, list[dict[str, Any]]] = {}
+    formats: set[str] = set()
+    for symmetry in available_mo_symmetries(module.text):
+        rows = parse_full_mo_matrix(module.text, symmetry=symmetry)
+        if rows:
+            formats.add("full")
+        else:
+            rows = parse_compact_mo_listing(module.text, symmetry=symmetry)
+            if rows:
+                formats.add("compact")
+        if rows:
+            rows_by_symmetry[symmetry] = rows
+    listing_format = "full" if formats == {"full"} else "compact" if formats == {"compact"} else "mixed"
+    return rows_by_symmetry, listing_format
 
 
 def build_diagnostic(
@@ -659,23 +1188,42 @@ def build_diagnostic(
     *,
     symmetry: int = 1,
     reference_block: int | None = None,
-    orbitals_each: int = 6,
+    orbitals_each: int | None = None,
+    occupied_orbitals: int = 6,
+    virtual_orbitals: int = 10,
     top_aos: int = 6,
     min_ao_weight: float = 0.5,
-    occupancy_threshold: float = 1.0e-3,
+    occupancy_threshold: float = 0.999,
+    mixing_window_ha: float = 0.15,
 ) -> dict[str, Any]:
     """Build a structured diagnostic for one symmetry."""
 
-    input_blocks = parse_rasscf_input_blocks(_read_text(inp_path))
+    input_text = _read_text(inp_path)
+    input_blocks = parse_rasscf_input_blocks(input_text)
     log_modules = parse_rasscf_log_modules(_read_text(output_path))
+    reference, setup = select_reference_block(input_blocks, reference_block=reference_block)
+    module, _ = match_log_module(reference, log_modules)
+    rows_by_symmetry, listing_format = _reference_rows_for_all_symmetries(module)
+    recommendation = build_ras3_recommendation(
+        input_text,
+        inp_path,
+        setup=setup,
+        rows_by_symmetry=rows_by_symmetry,
+        ao_listing_format=listing_format,
+        occupancy_threshold=occupancy_threshold,
+        mixing_window_ha=mixing_window_ha,
+    )
     return _build_diagnostic_from_parsed(
         inp_path,
         output_path,
         input_blocks=input_blocks,
         log_modules=log_modules,
+        ras3_recommendation=recommendation,
         symmetry=symmetry,
         reference_block=reference_block,
         orbitals_each=orbitals_each,
+        occupied_orbitals=occupied_orbitals,
+        virtual_orbitals=virtual_orbitals,
         top_aos=top_aos,
         min_ao_weight=min_ao_weight,
         occupancy_threshold=occupancy_threshold,
@@ -688,18 +1236,32 @@ def build_diagnostics(
     *,
     symmetries: list[int] | None = None,
     reference_block: int | None = None,
-    orbitals_each: int = 6,
+    orbitals_each: int | None = None,
+    occupied_orbitals: int = 6,
+    virtual_orbitals: int = 10,
     top_aos: int = 6,
     min_ao_weight: float = 0.5,
-    occupancy_threshold: float = 1.0e-3,
+    occupancy_threshold: float = 0.999,
+    mixing_window_ha: float = 0.15,
 ) -> list[dict[str, Any]]:
     """Build diagnostics for all or selected symmetries with one file read."""
 
-    input_blocks = parse_rasscf_input_blocks(_read_text(inp_path))
+    input_text = _read_text(inp_path)
+    input_blocks = parse_rasscf_input_blocks(input_text)
     log_modules = parse_rasscf_log_modules(_read_text(output_path))
-    reference, _ = select_reference_block(input_blocks, reference_block=reference_block)
+    reference, setup = select_reference_block(input_blocks, reference_block=reference_block)
     module, _ = match_log_module(reference, log_modules)
     available = available_mo_symmetries(module.text)
+    rows_by_symmetry, listing_format = _reference_rows_for_all_symmetries(module)
+    recommendation = build_ras3_recommendation(
+        input_text,
+        inp_path,
+        setup=setup,
+        rows_by_symmetry=rows_by_symmetry,
+        ao_listing_format=listing_format,
+        occupancy_threshold=occupancy_threshold,
+        mixing_window_ha=mixing_window_ha,
+    )
     requested = available if symmetries is None else list(dict.fromkeys(symmetries))
     if not requested:
         raise ValueError("No MO symmetry tables were found in the selected reference module")
@@ -720,9 +1282,12 @@ def build_diagnostics(
             output_path,
             input_blocks=input_blocks,
             log_modules=log_modules,
+            ras3_recommendation=recommendation,
             symmetry=symmetry,
             reference_block=reference_block,
             orbitals_each=orbitals_each,
+            occupied_orbitals=occupied_orbitals,
+            virtual_orbitals=virtual_orbitals,
             top_aos=top_aos,
             min_ao_weight=min_ao_weight,
             occupancy_threshold=occupancy_threshold,
@@ -743,8 +1308,75 @@ def _print_orbital(item: dict[str, Any]) -> None:
         )
 
 
+def _print_ras3_recommendation(recommendation: dict[str, Any]) -> None:
+    print("\nRAS3 intent and homing audit")
+    print(f"Status: {recommendation['status']}")
+    intent = recommendation.get("intent", {})
+    if intent:
+        print(
+            f"Intent: {intent.get('status', 'unknown')} "
+            f"({intent.get('evidence', 'no evidence')})"
+        )
+    if recommendation.get("target_atom"):
+        shells = ", ".join(recommendation.get("target_shells", []))
+        print(f"Target: {recommendation['target_atom']} shells [{shells}]")
+    if recommendation.get("reason"):
+        print(f"Reason: {recommendation['reason']}")
+    if recommendation.get("annotation_example"):
+        print(f"Add explicit intent with: {recommendation['annotation_example']}")
+    for item in recommendation.get("per_symmetry", []):
+        slots = item.get("ras3_slots", [])
+        if not slots:
+            continue
+        label = item.get("symmetry_label", "") or "unlabeled"
+        print(
+            f"- Symmetry {item['symmetry']} ({label}): RAS3 slots {slots}; "
+            f"selected source MOs {item.get('selected_source_mos', [])}; "
+            f"current identities {item.get('current_ras3_identity_mos_after_existing_alter', [])}"
+        )
+        for source in item.get("selected_sources", []):
+            marker = " OCCUPIED/PARTITION CHANGE" if source["occupied_partition_change"] else ""
+            print(
+                f"    source MO {source['mo']}: occ={source['occupation']:.4f}, "
+                f"E={source['energy_hartree']:.4f} au, "
+                f"component={source['target_component']}, "
+                f"normalized printed-shell share={source['target_score']:.4f}"
+                f"{marker}"
+            )
+        for proposal in item.get("suggested_additions", []):
+            swap = " ".join(str(value) for value in proposal["swap"])
+            print(f"    ALTER {swap}  [{proposal['classification']}]")
+        for risk in item.get("close_energy_risks", []):
+            print(
+                f"    close-energy review: MO {risk['selected_mo']} vs "
+                f"MO {risk['neighbor_mo']}, deltaE={risk['delta_energy_hartree']:.4f} au"
+            )
+    safe = recommendation.get("safe_virtual_alter_additions", [])
+    conditional = recommendation.get("conditional_occupied_alter_additions", [])
+    if safe:
+        print("Safe virtual-homing ALTER additions")
+        for swap in safe:
+            print("  " + " ".join(str(value) for value in swap))
+    if conditional:
+        print("Conditional occupied-source ALTER additions - active-space review required")
+        for swap in conditional:
+            print("  " + " ".join(str(value) for value in swap))
+        print("  " + recommendation["occupied_source_note"])
+    supsym = recommendation.get("supsym")
+    if supsym:
+        print("SUPSYM scaffold - review required")
+        for line in supsym["suggested_full_block_preserving_existing_groups"]:
+            print(f"  {line}")
+        print("  " + supsym["note"])
+    print("Safety: " + recommendation["safety_note"])
+
+
 def print_diagnostic(
-    result: dict[str, Any], *, show_heading: bool = True, show_paths: bool = True
+    result: dict[str, Any],
+    *,
+    show_heading: bool = True,
+    show_paths: bool = True,
+    show_ras3: bool = True,
 ) -> None:
     """Print a compact, human-readable diagnostic report."""
 
@@ -804,6 +1436,8 @@ def print_diagnostic(
         print("\nWarnings")
         for warning in result["warnings"]:
             print(f"- {warning}")
+    if show_ras3:
+        _print_ras3_recommendation(result["ras3_recommendation"])
 
 
 def print_diagnostics(results: list[dict[str, Any]]) -> None:
@@ -824,7 +1458,8 @@ def print_diagnostics(results: list[dict[str, Any]]) -> None:
         frontier = result["frontier"]
         print("\n" + "=" * 78)
         print(f"SYMMETRY {frontier['symmetry']} ({frontier['symmetry_label'] or 'unlabeled'})")
-        print_diagnostic(result, show_heading=False, show_paths=False)
+        print_diagnostic(result, show_heading=False, show_paths=False, show_ras3=False)
+    _print_ras3_recommendation(results[0]["ras3_recommendation"])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -857,7 +1492,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use this 1-based input RASSCF block instead of automatic pre-ALTER/SUPSYM selection",
     )
     parser.add_argument(
-        "--orbitals", type=int, default=6, help="Occupied and virtual orbitals to show"
+        "--orbitals",
+        type=int,
+        default=None,
+        help="Legacy symmetric override: show N occupied and N virtual orbitals",
+    )
+    parser.add_argument(
+        "--occupied-orbitals",
+        type=int,
+        default=6,
+        help="Occupied frontier orbitals to show (default: 6)",
+    )
+    parser.add_argument(
+        "--virtual-orbitals",
+        type=int,
+        default=10,
+        help="Virtual frontier orbitals to show (default: 10)",
     )
     parser.add_argument("--top-aos", type=int, default=6, help="Maximum dominant AOs shown per MO")
     parser.add_argument(
@@ -869,19 +1519,34 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--occupancy-threshold",
         type=float,
-        default=1.0e-3,
-        help="Occupation above which an orbital is treated as occupied",
+        default=0.999,
+        help=(
+            "Occupation above which an orbital is treated as occupied; partial occupations "
+            "such as 0.5 are virtual-like by default"
+        ),
     )
     parser.add_argument(
         "--json-out", type=Path, default=None, help="Optional structured diagnostic JSON"
+    )
+    parser.add_argument(
+        "--mixing-window-ha",
+        type=float,
+        default=0.15,
+        help="Energy window in Hartree for advisory same-symmetry mixing-risk flags",
     )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.orbitals < 1:
+    if args.orbitals is not None and args.orbitals < 1:
         raise ValueError("--orbitals must be positive")
+    if args.occupied_orbitals < 1:
+        raise ValueError("--occupied-orbitals must be positive")
+    if args.virtual_orbitals < 1:
+        raise ValueError("--virtual-orbitals must be positive")
+    if args.mixing_window_ha < 0:
+        raise ValueError("--mixing-window-ha must be non-negative")
     if args.top_aos < 1:
         raise ValueError("--top-aos must be positive")
     results = build_diagnostics(
@@ -890,9 +1555,12 @@ def main(argv: list[str] | None = None) -> int:
         symmetries=args.symmetry,
         reference_block=args.reference_block,
         orbitals_each=args.orbitals,
+        occupied_orbitals=args.occupied_orbitals,
+        virtual_orbitals=args.virtual_orbitals,
         top_aos=args.top_aos,
         min_ao_weight=args.min_ao_weight,
         occupancy_threshold=args.occupancy_threshold,
+        mixing_window_ha=args.mixing_window_ha,
     )
     print_diagnostics(results)
     if args.json_out is not None:
