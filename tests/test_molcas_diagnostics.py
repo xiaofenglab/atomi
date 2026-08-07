@@ -449,6 +449,80 @@ End of input
     assert source["occupied_partition_change"] is True
 
 
+def test_ras3_audit_identifies_existing_identity_lock() -> None:
+    text = """
+* ATOMI RAS3_TARGET U1:5f U1:7s
+&RASSCF
+Title
+ reference
+Symmetry
+ 1
+Spin
+ 2
+nActEl
+ 1 0 0
+End of input
+&RASSCF
+Title
+ setup
+Symmetry
+ 1
+Spin
+ 2
+nActEl
+ 1 0 2
+Inactive
+ 10
+Ras3
+ 2
+SUPSYM
+ 2
+  1 6
+  2 15 16
+Alter
+ 0
+End of input
+"""
+    blocks = molcas_diagnostics.parse_rasscf_input_blocks(text)
+    rows = [
+        {
+            "mo": mo,
+            "energy": float(mo) / 10.0,
+            "occupation": 0.0,
+            "symmetry": 1,
+            "symmetry_label": "a1",
+            "terms": [
+                {
+                    "ao_index": 1,
+                    "atom": "U1" if mo in {15, 16} else "O2",
+                    "ao": "5f0" if mo == 15 else "7s" if mo == 16 else "2px",
+                    "coefficient": 0.9,
+                    "coeff2": 0.81,
+                }
+            ],
+        }
+        for mo in range(1, 21)
+    ]
+
+    result = molcas_diagnostics.build_ras3_recommendation(
+        text,
+        Path("trial_5f7s.inp"),
+        setup=blocks[1],
+        rows_by_symmetry={1: rows},
+        ao_listing_format="full",
+        occupancy_threshold=0.999,
+        mixing_window_ha=0.15,
+    )
+
+    assert result["supsym"]["ras3_constraint_levels"] == ["fully_constrained"]
+    assert result["supsym"]["existing_ras3_identity_groups"] == [[[15, 16]]]
+    assert result["supsym"]["mixing_preserving_candidate_block"] == [
+        "SUPSYM",
+        " 1",
+        "  1 6",
+    ]
+
+
 def test_build_diagnostic_accepts_compact_orbital_listing(tmp_path: Path) -> None:
     inp = tmp_path / "run.inp"
     log = tmp_path / "run.log"

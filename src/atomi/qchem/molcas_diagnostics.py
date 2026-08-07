@@ -949,6 +949,32 @@ def build_ras3_recommendation(
     ]
     while len(existing_groups) < max_symmetry:
         existing_groups.append([])
+    existing_ras3_groups: list[list[list[int]]] = []
+    mixing_preserving_groups: list[list[list[int]]] = []
+    constraint_levels: list[str] = []
+    for symmetry in range(max_symmetry):
+        targets = set(source_groups[symmetry])
+        matched = [
+            list(group)
+            for group in existing_groups[symmetry]
+            if targets.intersection(group)
+        ]
+        covered = targets.intersection(value for group in matched for value in group)
+        if not targets or not covered:
+            level = "unconstrained"
+        elif covered == targets:
+            level = "fully_constrained"
+        else:
+            level = "partially_constrained"
+        constraint_levels.append(level)
+        existing_ras3_groups.append(matched)
+        mixing_preserving_groups.append(
+            [
+                list(group)
+                for group in existing_groups[symmetry]
+                if not targets.intersection(group)
+            ]
+        )
     suggested_groups: list[list[list[int]]] = []
     for symmetry in range(max_symmetry):
         groups = [list(group) for group in existing_groups[symmetry]]
@@ -977,6 +1003,8 @@ def build_ras3_recommendation(
         "supsym": {
             "status": "review_required",
             "existing_groups": existing_groups,
+            "existing_ras3_identity_groups": existing_ras3_groups,
+            "ras3_constraint_levels": constraint_levels,
             "pre_alter_source_identity_groups": source_groups,
             "production_final_ras3_slot_groups": final_groups,
             "input_index_semantics": (
@@ -985,6 +1013,9 @@ def build_ras3_recommendation(
             ),
             "alter_only_probe_block_preserving_existing_groups": _format_supsym_block(
                 existing_groups
+            ),
+            "mixing_preserving_candidate_block": _format_supsym_block(
+                mixing_preserving_groups
             ),
             "suggested_full_block_preserving_existing_groups": _format_supsym_block(
                 suggested_groups
@@ -1002,7 +1033,9 @@ def build_ras3_recommendation(
                 "Confirm that the same labels appear at the reported final RAS3 slots after "
                 "ALTER. A new RAS3 SUPSYM group is not required for homing and can suppress "
                 "physical same-irrep metal-ligand mixing, so do not apply it solely because "
-                "another orbital is near the LUMO."
+                "another orbital is near the LUMO. Existing RAS3 SUPSYM groups are an "
+                "identity-locked control, not evidence that unconstrained active-external "
+                "mixing would retain the same orbitals."
             ),
         },
     }
@@ -1395,9 +1428,22 @@ def _print_ras3_recommendation(recommendation: dict[str, Any]) -> None:
         print("  " + recommendation["occupied_source_note"])
     supsym = recommendation.get("supsym")
     if supsym:
-        print("Mixing-preserving ALTER probe: retain only existing SUPSYM groups")
+        levels = supsym.get("ras3_constraint_levels", [])
+        constrained = [index + 1 for index, value in enumerate(levels) if value != "unconstrained"]
+        if constrained:
+            print(
+                "Existing SUPSYM context: intended RAS3 source identities are constrained "
+                f"in symmetries {constrained}"
+            )
+        else:
+            print("Existing SUPSYM context: intended RAS3 source identities are unconstrained")
+        print("Exact existing SUPSYM block")
         for line in supsym["alter_only_probe_block_preserving_existing_groups"]:
             print(f"  {line}")
+        if constrained:
+            print("Candidate probe without existing RAS3 identity locks")
+            for line in supsym["mixing_preserving_candidate_block"]:
+                print(f"  {line}")
         print("Optional RAS3 SUPSYM identity lock - use only after observed drift")
         for line in supsym["suggested_full_block_preserving_existing_groups"]:
             print(f"  {line}")
@@ -1527,6 +1573,17 @@ def build_moccheck_handoff(
                     }
                     for source in sources
                 ],
+                "setup_ras3_supsym_constraint": (
+                    recommendation.get("supsym", {})
+                    .get("ras3_constraint_levels", [])[int(item["symmetry"]) - 1]
+                    if int(item["symmetry"]) - 1
+                    < len(
+                        recommendation.get("supsym", {}).get(
+                            "ras3_constraint_levels", []
+                        )
+                    )
+                    else "unknown"
+                ),
             }
         )
     stat = output_path.stat()

@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from atomi.qchem.molcas_diagnostics import (
     HANDOFF_SCHEMA,
+    LOG_RASSCF_END_RE,
     RasscfInputBlock,
     RasscfLogModule,
     _component_score,
@@ -28,6 +30,10 @@ from atomi.qchem.molcas_diagnostics import (
 
 
 SCHEMA = "atomi.molcas_moccheckafter.v1"
+FAILED_RASSCF_STOP_RE = re.compile(
+    r"--- Stop Module:\s*rasscf\b.*?/rc=(?!_RC_ALL_IS_WELL_)(?P<rc>\S+)",
+    re.IGNORECASE,
+)
 STATUS_ORDER = {
     "unavailable": 5,
     "drift_risk": 4,
@@ -132,6 +138,8 @@ def analyze_ras3_target(
     atom: str,
     shells: list[str],
     listing_format: str,
+    baseline_listing_format: str | None = None,
+    supsym_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assess one symmetry's final RAS3 subspace without fixing MO ordering."""
 
@@ -154,15 +162,18 @@ def analyze_ras3_target(
     baseline_total = sum(float(item["baseline_score"]) for item in components) or 1.0
     captured_total = sum(float(item["score"]) for item in assignment)
     capture_ratio = captured_total / baseline_total
+    capture_comparable = (
+        baseline_listing_format in {None, "unavailable", listing_format}
+    )
     shell_scores = [_target_score(row, atom=atom, shells=shells) for row in active_rows]
     mean_shell_score = sum(shell_scores) / len(shell_scores) if shell_scores else 0.0
     non_target, ligand_share, central_other_share = _dominant_non_target_terms(
         active_rows, atom=atom, shells=shells
     )
 
-    if mean_shell_score < 0.15 or capture_ratio < 0.25:
+    if mean_shell_score < 0.15 or capture_comparable and capture_ratio < 0.25:
         status = "drift_risk"
-    elif mean_shell_score < 0.30 or capture_ratio < 0.50:
+    elif mean_shell_score < 0.30 or capture_comparable and capture_ratio < 0.50:
         status = "review"
     elif ligand_share >= 0.10 or central_other_share >= 0.10 or mean_shell_score < 0.85:
         status = "mixed_retained"
@@ -202,6 +213,8 @@ def analyze_ras3_target(
                 }
             )
 
+    constraint_level = str((supsym_context or {}).get("level", "unknown"))
+    constrained = constraint_level in {"fully_constrained", "partially_constrained"}
     if status == "drift_risk":
         recommendation = (
             "The intended AO subspace is no longer retained. Verify the setup ALTER map and "
@@ -216,13 +229,27 @@ def analyze_ras3_target(
             "orbitals; this result is between clear retention and clear identity loss."
         )
     elif status == "mixed_retained":
-        recommendation = (
-            "The intended central-atom subspace remains present with non-target character. "
-            "Treat this as potential physical metal-ligand mixing and do not add SUPSYM unless "
-            "root instability or destructive active-space exchange is independently observed."
-        )
+        if constrained:
+            recommendation = (
+                "The intended subspace remains present, but RAS3 is already SUPSYM-constrained. "
+                "The ligand character in these orbitals is real; this run cannot establish how "
+                "much unconstrained active-external mixing would survive. Compare with an "
+                "ALTER-only or no-RAS3-SUPSYM control before interpreting the constraint as "
+                "necessary or the mixing as unrestricted."
+            )
+        else:
+            recommendation = (
+                "The intended central-atom subspace remains present with non-target character. "
+                "Treat this as potential physical metal-ligand mixing and do not add SUPSYM unless "
+                "root instability or destructive active-space exchange is independently observed."
+            )
     else:
-        recommendation = "The intended RAS3 identity is retained; no new ALTER or SUPSYM is indicated."
+        recommendation = (
+            "The intended RAS3 identity is retained under an existing SUPSYM constraint; this "
+            "is expected and does not prove that the constraint is necessary."
+            if constrained
+            else "The intended RAS3 identity is retained; no new ALTER or SUPSYM is indicated."
+        )
 
     return {
         "symmetry": int(target["symmetry"]),
@@ -231,6 +258,8 @@ def analyze_ras3_target(
         "final_ras3_slots": slots,
         "component_assignment": assignment,
         "baseline_normalized_capture": capture_ratio,
+        "baseline_capture_comparable": capture_comparable,
+        "baseline_ao_listing_format": baseline_listing_format,
         "mean_target_shell_share": mean_shell_score,
         "ligand_share": ligand_share,
         "central_atom_other_shell_share": central_other_share,
@@ -239,11 +268,47 @@ def analyze_ras3_target(
         "outside_target_candidates": outside_candidates,
         "optional_final_slot_supsym_group": slots,
         "ao_listing_format": listing_format,
+        "supsym_context": supsym_context or {"level": "unknown", "groups": []},
         "recommendation": recommendation,
         "weight_guard": (
             "Shares are coefficient-squared diagnostics over printed AO terms, not Mulliken or "
             "Loewdin populations; compact listings omit small coefficients."
         ),
+    }
+
+
+def _ras3_supsym_context(
+    block: RasscfInputBlock,
+    target: dict[str, Any],
+    *,
+    setup_index: int,
+) -> dict[str, Any]:
+    symmetry = int(target["symmetry"])
+    groups = (
+        [list(group) for group in block.supsym_groups[symmetry - 1]]
+        if symmetry <= len(block.supsym_groups)
+        else []
+    )
+    if block.index == setup_index and block.has_alter:
+        identities = [int(item["source_mo"]) for item in target.get("components", [])]
+        identity_basis = "pre-ALTER source identities"
+    else:
+        identities = [int(value) for value in target.get("final_ras3_slots", [])]
+        identity_basis = "final RAS3 slots"
+    wanted = set(identities)
+    matched = [group for group in groups if wanted.intersection(group)]
+    covered = wanted.intersection(value for group in matched for value in group)
+    if not wanted or not covered:
+        level = "unconstrained"
+    elif covered == wanted:
+        level = "fully_constrained"
+    else:
+        level = "partially_constrained"
+    return {
+        "level": level,
+        "identity_basis": identity_basis,
+        "identities": identities,
+        "groups": matched,
     }
 
 
@@ -294,14 +359,131 @@ def build_after_diagnostic(
 
     block_results: list[dict[str, Any]] = []
     for block in selected_blocks:
+        chronological = modules[block.index - 1] if block.index <= len(modules) else None
+        chronological_failure = (
+            FAILED_RASSCF_STOP_RE.search(chronological.text) if chronological else None
+        )
+        if chronological is not None and chronological_failure is not None:
+            block_results.append(
+                {
+                    "input_block": _block_summary(block),
+                    "output_module": {
+                        "index": chronological.index,
+                        "start_line": chronological.start_line,
+                        "end_line": chronological.end_line,
+                        "mapping": "chronological_failed_before_signature",
+                    },
+                    "status": "failed_module",
+                    "reason": (
+                        f"RASSCF stopped with rc={chronological_failure.group('rc')} before a "
+                        "complete state signature/orbital table was printed; diagnose the input "
+                        "and inherited orbital file. This is not an orbital-drift result."
+                    ),
+                }
+            )
+            continue
+        if chronological is not None and not LOG_RASSCF_END_RE.search(chronological.text):
+            block_results.append(
+                {
+                    "input_block": _block_summary(block),
+                    "output_module": {
+                        "index": chronological.index,
+                        "start_line": chronological.start_line,
+                        "end_line": chronological.end_line,
+                        "mapping": "chronological_incomplete",
+                    },
+                    "status": "running_incomplete",
+                    "reason": (
+                        "The chronological RASSCF module is still active and has no completed "
+                        "pseudonatural-orbital table yet; rerun after the module ends."
+                    ),
+                }
+            )
+            continue
         try:
             module, mapping = match_log_module(block, modules)
         except ValueError as exc:
+            candidate = modules[block.index - 1] if block.index <= len(modules) else None
+            failed = FAILED_RASSCF_STOP_RE.search(candidate.text) if candidate else None
+            if candidate is not None and failed is not None:
+                block_results.append(
+                    {
+                        "input_block": _block_summary(block),
+                        "output_module": {
+                            "index": candidate.index,
+                            "start_line": candidate.start_line,
+                            "end_line": candidate.end_line,
+                            "mapping": "chronological_failed_before_signature",
+                        },
+                        "status": "failed_module",
+                        "reason": (
+                            f"RASSCF stopped with rc={failed.group('rc')} before a complete "
+                            "state signature/orbital table was printed; diagnose the input and "
+                            "inherited orbital file rather than interpreting this as MO drift."
+                        ),
+                    }
+                )
+                continue
+            if candidate is not None and not LOG_RASSCF_END_RE.search(candidate.text):
+                block_results.append(
+                    {
+                        "input_block": _block_summary(block),
+                        "output_module": {
+                            "index": candidate.index,
+                            "start_line": candidate.start_line,
+                            "end_line": candidate.end_line,
+                            "mapping": "chronological_incomplete",
+                        },
+                        "status": "running_incomplete",
+                        "reason": (
+                            "The matching RASSCF module is still active and has no completed "
+                            "pseudonatural-orbital table yet; rerun after the module ends."
+                        ),
+                    }
+                )
+                continue
             block_results.append(
                 {
                     "input_block": _block_summary(block),
                     "status": "pending_or_unavailable",
                     "reason": str(exc),
+                }
+            )
+            continue
+        failed = FAILED_RASSCF_STOP_RE.search(module.text)
+        if failed is not None:
+            block_results.append(
+                {
+                    "input_block": _block_summary(block),
+                    "output_module": {
+                        "index": module.index,
+                        "start_line": module.start_line,
+                        "end_line": module.end_line,
+                        "mapping": mapping,
+                    },
+                    "status": "failed_module",
+                    "reason": (
+                        f"RASSCF stopped with rc={failed.group('rc')} before a usable final "
+                        "orbital table; this is a module/input failure, not an orbital-drift result."
+                    ),
+                }
+            )
+            continue
+        if not LOG_RASSCF_END_RE.search(module.text):
+            block_results.append(
+                {
+                    "input_block": _block_summary(block),
+                    "output_module": {
+                        "index": module.index,
+                        "start_line": module.start_line,
+                        "end_line": module.end_line,
+                        "mapping": mapping,
+                    },
+                    "status": "running_incomplete",
+                    "reason": (
+                        "The matching RASSCF module is still active; post-setup orbital "
+                        "identity is deferred until its final pseudonatural table is complete."
+                    ),
                 }
             )
             continue
@@ -317,6 +499,10 @@ def build_after_diagnostic(
                     atom=str(target_atom),
                     shells=shells,
                     listing_format=listing_format,
+                    baseline_listing_format=handoff.get("ao_listing_format"),
+                    supsym_context=_ras3_supsym_context(
+                        block, target, setup_index=setup_index
+                    ),
                 )
             )
         available_statuses = [
@@ -398,7 +584,11 @@ def print_after_diagnostic(result: dict[str, Any]) -> None:
             f"RASSCF #{input_block['index']} | {input_block['title'] or '(untitled)'} | "
             f"{block['status']}"
         )
-        if "output_module" not in block:
+        if block["status"] in {
+            "pending_or_unavailable",
+            "running_incomplete",
+            "failed_module",
+        }:
             print(f"  {block['reason']}")
             continue
         print(
@@ -429,6 +619,17 @@ def print_after_diagnostic(result: dict[str, Any]) -> None:
                 f"baseline capture={item['baseline_normalized_capture']:.3f}, "
                 f"ligand share={item['ligand_share']:.3f}"
             )
+            context = item.get("supsym_context", {})
+            print(
+                f"    SUPSYM: {context.get('level', 'unknown')} using "
+                f"{context.get('identity_basis', 'unknown identities')} "
+                f"{context.get('groups', [])}"
+            )
+            if not item.get("baseline_capture_comparable", True):
+                print(
+                    "    CAUTION: baseline and current AO listings have different coefficient "
+                    "coverage; the capture ratio is qualitative only."
+                )
             for assignment in item["component_assignment"]:
                 print(
                     f"    {assignment['component']}: source MO {assignment['baseline_source_mo']} "

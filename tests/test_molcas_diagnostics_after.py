@@ -70,6 +70,28 @@ def test_after_audit_preserves_physical_metal_ligand_mixing() -> None:
     assert "do not add SUPSYM" in result["recommendation"]
 
 
+def test_after_audit_does_not_call_locked_mixing_unconstrained() -> None:
+    result = molcas_diagnostics_after.analyze_ras3_target(
+        [_row(15, uranium=0.70, oxygen=0.55)],
+        TARGET,
+        atom="U1",
+        shells=["5f"],
+        listing_format="full",
+        baseline_listing_format="compact",
+        supsym_context={
+            "level": "fully_constrained",
+            "identity_basis": "final RAS3 slots",
+            "identities": [15],
+            "groups": [[15]],
+        },
+    )
+
+    assert result["status"] == "mixed_retained"
+    assert result["baseline_capture_comparable"] is False
+    assert "already SUPSYM-constrained" in result["recommendation"]
+    assert "cannot establish" in result["recommendation"]
+
+
 def test_after_audit_flags_component_outside_ras3() -> None:
     result = molcas_diagnostics_after.analyze_ras3_target(
         [
@@ -207,3 +229,136 @@ End of input
     assert result["blocks"][0]["status"] == "stable_identity"
     assert result["blocks"][1]["status"] == "mixed_retained"
     assert result["blocks"][1]["output_module"]["index"] == 3
+
+
+def test_after_command_marks_active_module_running(tmp_path: Path) -> None:
+    inp = tmp_path / "run.inp"
+    log = tmp_path / "run.log"
+    handoff_path = tmp_path / "run.moccheck-handoff.json"
+    inp.write_text(
+        """
+&RASSCF
+Title
+ reference
+Symmetry
+ 1
+Spin
+ 2
+nActEl
+ 1 0 1
+Inactive
+ 2
+Ras3
+ 1
+End of input
+&RASSCF
+Title
+ setup
+Symmetry
+ 1
+Spin
+ 2
+nActEl
+ 1 0 1
+Inactive
+ 2
+Ras3
+ 1
+Alter
+ 0
+End of input
+""",
+        encoding="utf-8",
+    )
+    log.write_text(
+        _module(_compact_matrix(0.95, 0.05))
+        + """
+--- Start Module: rasscf at Tue Aug 4 00:00:00 2026 ---
+ Number of electrons in active shells 1
+ Spin quantum number 0.5
+ State symmetry 1
+""",
+        encoding="utf-8",
+    )
+    handoff = {
+        "schema": molcas_diagnostics.HANDOFF_SCHEMA,
+        "input": {"path": str(inp), "sha256": molcas_diagnostics._sha256(inp)},
+        "output_snapshot": {"path": str(log)},
+        "reference_input_block": {"index": 1},
+        "setup_input_block": {"index": 2},
+        "target_atom": "U1",
+        "target_shells": ["5f"],
+        "ao_listing_format": "compact",
+        "targets": [TARGET | {"symmetry": 1, "final_ras3_slots": [3]}],
+        "interpretation_guard": "test guard",
+    }
+    handoff_path.write_text(json.dumps(handoff), encoding="utf-8")
+
+    result = molcas_diagnostics_after.build_after_diagnostic(
+        inp, log, handoff_path=handoff_path, blocks_after=0
+    )
+
+    assert result["blocks"][0]["status"] == "running_incomplete"
+
+
+def test_after_command_marks_module_failure_before_signature(tmp_path: Path) -> None:
+    inp = tmp_path / "run.inp"
+    log = tmp_path / "run.log"
+    handoff_path = tmp_path / "run.moccheck-handoff.json"
+    inp.write_text(
+        """
+&RASSCF
+Title
+ reference
+Symmetry
+ 1
+Spin
+ 2
+nActEl
+ 1 0 1
+End of input
+&RASSCF
+Title
+ setup
+Symmetry
+ 1
+Spin
+ 2
+nActEl
+ 1 0 1
+Ras3
+ 1
+Alter
+ 0
+End of input
+""",
+        encoding="utf-8",
+    )
+    log.write_text(
+        _module(_compact_matrix(0.95, 0.05))
+        + """
+--- Start Module: rasscf at Tue Aug 4 00:00:00 2026 ---
+--- Stop Module: rasscf at Tue Aug 4 00:00:01 2026 /rc=2 ---
+""",
+        encoding="utf-8",
+    )
+    handoff = {
+        "schema": molcas_diagnostics.HANDOFF_SCHEMA,
+        "input": {"path": str(inp), "sha256": molcas_diagnostics._sha256(inp)},
+        "output_snapshot": {"path": str(log)},
+        "reference_input_block": {"index": 1},
+        "setup_input_block": {"index": 2},
+        "target_atom": "U1",
+        "target_shells": ["5f"],
+        "ao_listing_format": "compact",
+        "targets": [TARGET | {"symmetry": 1, "final_ras3_slots": [1]}],
+        "interpretation_guard": "test guard",
+    }
+    handoff_path.write_text(json.dumps(handoff), encoding="utf-8")
+
+    result = molcas_diagnostics_after.build_after_diagnostic(
+        inp, log, handoff_path=handoff_path, blocks_after=0
+    )
+
+    assert result["blocks"][0]["status"] == "failed_module"
+    assert "not an orbital-drift" in result["blocks"][0]["reason"]

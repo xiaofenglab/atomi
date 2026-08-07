@@ -68,8 +68,11 @@ reports:
 - occupied-source swaps in a separate, conditional partition-change section;
 - close-energy same-symmetry neighbors within the configurable
   `--mixing-window-ha` window; and
-- a mixing-preserving probe block that keeps only existing `SUPSYM` groups,
-  plus an optional identity-lock scaffold that adds the pre-`ALTER` source
+- an exact audit of existing `SUPSYM` groups, including whether they already
+  constrain intended RAS3 source identities;
+- a candidate probe block with separable RAS3 identity locks removed while
+  preserving unrelated core constraints; and
+- an optional identity-lock scaffold that adds the pre-`ALTER` source
   identities intended for RAS3 and reports the expected final RAS3 slots for
   output QA.
 
@@ -141,6 +144,14 @@ numbering was analyzed. If the setup block is healthy and only a later block
 drifts reproducibly, first test a minimal `SUPSYM` group using that later
 block's final RAS3 slot indices. A `mixed_retained` result is not, by itself, a
 reason to constrain metal-ligand rotation.
+
+`moccheckafter` reports the `SUPSYM` context for each block. Ligand character
+seen inside an already constrained RAS3 orbital is still real orbital
+character, but that identity-locked run cannot establish how much
+active-external mixing would survive without the lock. Use an ALTER-only or
+no-RAS3-SUPSYM control for that comparison. When the baseline uses a compact
+AO listing and a later block uses a full coefficient matrix, the normalized
+capture ratio is marked qualitative and is not used as a hard drift threshold.
 
 All coefficient-squared shares remain orbital-identity diagnostics over the
 printed AO terms. They are not Mulliken or Loewdin populations, and compact
