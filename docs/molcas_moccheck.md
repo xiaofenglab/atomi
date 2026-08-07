@@ -48,8 +48,10 @@ reports:
 - occupied-source swaps in a separate, conditional partition-change section;
 - close-energy same-symmetry neighbors within the configurable
   `--mixing-window-ha` window; and
-- an advisory `SUPSYM` scaffold that preserves existing groups and adds the
-  final RAS3 slot group.
+- a mixing-preserving probe block that keeps only existing `SUPSYM` groups,
+  plus an optional identity-lock scaffold that adds the pre-`ALTER` source
+  identities intended for RAS3 and reports the expected final RAS3 slots for
+  output QA.
 
 Source matching is done component by component (for example `5f0`, `5f2+`,
 and `7s`), using the requested atom-shell share normalized over the AO
@@ -80,6 +82,19 @@ counts, and the intended ground configuration. Likewise, the suggested
 orbital exchange, but over-constraining RAS3 can suppress physical
 metal-ligand mixing. Validate accepted changes in a short RASSCF-only setup
 probe before production.
+
+The preferred sequence when metal-ligand mixing is physically meaningful is
+therefore `ALTER` homing first, with no new RAS3 `SUPSYM` group. Inspect the
+resulting active-orbital character and occupations. Add the optional RAS3
+identity lock only if this probe demonstrates destructive identity exchange or
+active-space drift. Existing core-orbital `SUPSYM` constraints can be retained
+independently.
+
+OpenMolcas applies `SUPSYM` to the starting orbital identities. When `ALTER`
+then swaps an identity into a RAS3 slot, its supersymmetry label follows that
+identity. Consequently, the generated input scaffold uses pre-`ALTER` source
+MO indices; the separately reported final-slot groups are post-`ALTER` QA
+expectations and must not be copied back as source indices.
 
 Use `--symmetry N` for a focused report. Repeat the option to preserve a
 specific subset and order:

@@ -362,7 +362,21 @@ End of input
     assert result["target_atom"] == "U1"
     assert result["safe_virtual_alter_additions"] == [[1, 15, 11], [1, 16, 12]]
     assert result["conditional_occupied_alter_additions"] == []
+    assert result["supsym"]["pre_alter_source_identity_groups"] == [[15, 16]]
     assert result["supsym"]["production_final_ras3_slot_groups"] == [[11, 12]]
+    assert result["supsym"]["alter_only_probe_block_preserving_existing_groups"] == [
+        "SUPSYM",
+        " 0",
+    ]
+    assert result["supsym"]["suggested_full_block_preserving_existing_groups"] == [
+        "SUPSYM",
+        " 1",
+        "  2 15 16",
+    ]
+    assert "pre-ALTER source orbital identities" in result["supsym"][
+        "input_index_semantics"
+    ]
+    assert "not required for homing" in result["supsym"]["note"]
 
 
 def test_ras3_audit_does_not_call_occupied_source_a_safe_homing_swap() -> None:

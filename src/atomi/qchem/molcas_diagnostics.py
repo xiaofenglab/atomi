@@ -941,7 +941,9 @@ def build_ras3_recommendation(
     suggested_groups: list[list[list[int]]] = []
     for symmetry in range(max_symmetry):
         groups = [list(group) for group in existing_groups[symmetry]]
-        target_group = final_groups[symmetry]
+        # SUPSYM labels the input-orbital identities. ALTER then carries those
+        # labels with the identities into their final active-space slots.
+        target_group = source_groups[symmetry]
         if target_group and target_group not in groups:
             groups.append(target_group)
         suggested_groups.append(groups)
@@ -966,12 +968,30 @@ def build_ras3_recommendation(
             "existing_groups": existing_groups,
             "pre_alter_source_identity_groups": source_groups,
             "production_final_ras3_slot_groups": final_groups,
+            "input_index_semantics": (
+                "SUPSYM input indices are pre-ALTER source orbital identities; ALTER "
+                "carries their labels to the final RAS3 slots."
+            ),
+            "alter_only_probe_block_preserving_existing_groups": _format_supsym_block(
+                existing_groups
+            ),
             "suggested_full_block_preserving_existing_groups": _format_supsym_block(
                 suggested_groups
             ),
+            "recommended_sequence": [
+                "Apply the accepted ALTER homing swaps while preserving only existing "
+                "SUPSYM constraints when physical metal-ligand mixing is desired.",
+                "Run a short RASSCF-only probe and audit the final RAS3 AO character, "
+                "occupations, roots, and convergence.",
+                "Add the optional RAS3 source-identity SUPSYM group only if the probe "
+                "shows destructive same-symmetry identity exchange or active-space drift.",
+            ],
             "note": (
-                "Use final-slot groups only after accepting the ALTER map. Do not constrain "
-                "extra close-energy orbitals solely because they are near the LUMO."
+                "The optional identity-lock block labels pre-ALTER source identities. "
+                "Confirm that the same labels appear at the reported final RAS3 slots after "
+                "ALTER. A new RAS3 SUPSYM group is not required for homing and can suppress "
+                "physical same-irrep metal-ligand mixing, so do not apply it solely because "
+                "another orbital is near the LUMO."
             ),
         },
     }
@@ -1364,7 +1384,10 @@ def _print_ras3_recommendation(recommendation: dict[str, Any]) -> None:
         print("  " + recommendation["occupied_source_note"])
     supsym = recommendation.get("supsym")
     if supsym:
-        print("SUPSYM scaffold - review required")
+        print("Mixing-preserving ALTER probe: retain only existing SUPSYM groups")
+        for line in supsym["alter_only_probe_block_preserving_existing_groups"]:
+            print(f"  {line}")
+        print("Optional RAS3 SUPSYM identity lock - use only after observed drift")
         for line in supsym["suggested_full_block_preserving_existing_groups"]:
             print(f"  {line}")
         print("  " + supsym["note"])
