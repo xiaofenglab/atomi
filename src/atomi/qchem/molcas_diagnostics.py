@@ -863,8 +863,40 @@ def build_ras3_recommendation(
         source_groups.append(selected_ids)
         mapping = positions[symmetry]
         inverse = {identity: position for position, identity in mapping.items()}
+        initial_occupants = list(slots)
         occupants = [mapping.get(slot, slot) for slot in slots]
         missing = [identity for identity in selected_ids if identity not in occupants]
+        initially_present = [
+            identity for identity in selected_ids if identity in initial_occupants
+        ]
+        present_after_existing_alter = [
+            identity for identity in selected_ids if identity in occupants
+        ]
+        if selected_ids and len(initially_present) == len(selected_ids):
+            residency_status = "already_resident"
+            residency_note = (
+                "Every intended target already occupies a final RAS3 slot before ALTER. "
+                "No RAS3 homing swap is needed; any RAS3 SUPSYM group is only an identity "
+                "lock during subsequent orbital optimization."
+            )
+        elif selected_ids and len(present_after_existing_alter) == len(selected_ids):
+            residency_status = "homed_by_existing_alter"
+            residency_note = (
+                "The intended target reaches RAS3 through the existing ALTER map. Preserve "
+                "that map when testing whether a RAS3 SUPSYM identity lock is necessary."
+            )
+        elif selected_ids:
+            residency_status = "additional_homing_required"
+            residency_note = (
+                "One or more intended targets remain outside RAS3 after the existing ALTER "
+                "map. Review the proposed homing swaps before interpreting transitions."
+            )
+        else:
+            residency_status = "incomplete_target_selection"
+            residency_note = (
+                "The requested target-shell components could not be mapped completely to "
+                "the available RAS3 slots."
+            )
         replaceable_slots = [slot for slot in slots if mapping.get(slot, slot) not in selected_ids]
         additions: list[dict[str, Any]] = []
         for identity, target_slot in zip(missing, replaceable_slots):
@@ -931,6 +963,9 @@ def build_ras3_recommendation(
                 "ras3_slots": slots,
                 "target_components": component_labels,
                 "selected_source_mos": selected_ids,
+                "initial_ras3_identity_mos_before_alter": initial_occupants,
+                "ras3_residency_status": residency_status,
+                "ras3_residency_note": residency_note,
                 "selected_sources": [
                     {
                         "mo": identity,
@@ -1434,6 +1469,11 @@ def _print_ras3_recommendation(recommendation: dict[str, Any]) -> None:
             f"selected source MOs {item.get('selected_source_mos', [])}; "
             f"current identities {item.get('current_ras3_identity_mos_after_existing_alter', [])}"
         )
+        if item.get("ras3_residency_status"):
+            print(
+                f"    residency: {item['ras3_residency_status']} - "
+                f"{item.get('ras3_residency_note', '')}"
+            )
         for source in item.get("selected_sources", []):
             marker = " OCCUPIED/PARTITION CHANGE" if source["occupied_partition_change"] else ""
             print(
@@ -1620,6 +1660,12 @@ def build_moccheck_handoff(
                         )
                     )
                     else "unknown"
+                ),
+                "baseline_ras3_residency_status": str(
+                    item.get("ras3_residency_status", "unknown")
+                ),
+                "baseline_ras3_residency_note": str(
+                    item.get("ras3_residency_note", "")
                 ),
             }
         )

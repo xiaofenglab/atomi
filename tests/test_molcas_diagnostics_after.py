@@ -51,6 +51,8 @@ TARGET = {
             "baseline_occupation": 2.0,
         }
     ],
+    "baseline_ras3_residency_status": "already_resident",
+    "baseline_ras3_residency_note": "Target was resident before ALTER.",
 }
 
 
@@ -67,6 +69,7 @@ def test_after_audit_preserves_physical_metal_ligand_mixing() -> None:
     assert result["component_assignment"][0]["final_slot"] == 15
     assert result["ligand_share"] > 0.30
     assert result["outside_target_candidates"] == []
+    assert result["baseline_ras3_residency_status"] == "already_resident"
     assert "do not add SUPSYM" in result["recommendation"]
 
 

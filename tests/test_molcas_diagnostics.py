@@ -362,6 +362,9 @@ End of input
     assert result["target_atom"] == "U1"
     assert result["safe_virtual_alter_additions"] == [[1, 15, 11], [1, 16, 12]]
     assert result["conditional_occupied_alter_additions"] == []
+    assert result["per_symmetry"][0]["ras3_residency_status"] == (
+        "additional_homing_required"
+    )
     assert result["supsym"]["pre_alter_source_identity_groups"] == [[15, 16]]
     assert result["supsym"]["production_final_ras3_slot_groups"] == [[11, 12]]
     assert result["supsym"]["alter_only_probe_block_preserving_existing_groups"] == [
@@ -381,6 +384,79 @@ End of input
     assert "does not create a transition" in result["transition_space_note"]
     assert "high starting SCF" in result["transition_space_note"]
     assert "weak intensity alone" in result["transition_space_note"]
+
+
+def test_ras3_audit_marks_target_already_resident_without_ras3_alter() -> None:
+    text = """
+* ATOMI RAS3_TARGET U1:5f U1:7s
+&RASSCF
+Title
+ reference
+Symmetry
+ 1
+Spin
+ 2
+nActEl
+ 1 0 0
+End of input
+&RASSCF
+Title
+ setup
+Symmetry
+ 1
+Spin
+ 2
+nActEl
+ 1 0 2
+Inactive
+ 10
+Ras3
+ 2
+SUPSYM
+ 1
+  2 11 12
+Alter
+ 1
+ 1 2 5
+End of input
+"""
+    blocks = molcas_diagnostics.parse_rasscf_input_blocks(text)
+    rows = [
+        {
+            "mo": mo,
+            "energy": float(mo) / 10.0,
+            "occupation": 0.0,
+            "symmetry": 1,
+            "symmetry_label": "a1",
+            "terms": [
+                {
+                    "ao_index": 1,
+                    "atom": "U1" if mo in {11, 12} else "O2",
+                    "ao": "5f0" if mo == 11 else "7s" if mo == 12 else "2px",
+                    "coefficient": 0.9,
+                    "coeff2": 0.81,
+                }
+            ],
+        }
+        for mo in range(1, 16)
+    ]
+
+    result = molcas_diagnostics.build_ras3_recommendation(
+        text,
+        Path("resident_5f7s.inp"),
+        setup=blocks[1],
+        rows_by_symmetry={1: rows},
+        ao_listing_format="full",
+        occupancy_threshold=0.999,
+        mixing_window_ha=0.15,
+    )
+
+    item = result["per_symmetry"][0]
+    assert item["ras3_residency_status"] == "already_resident"
+    assert item["initial_ras3_identity_mos_before_alter"] == [11, 12]
+    assert item["suggested_additions"] == []
+    assert result["safe_virtual_alter_additions"] == []
+    assert "No RAS3 homing swap is needed" in item["ras3_residency_note"]
 
 
 def test_ras3_audit_does_not_call_occupied_source_a_safe_homing_swap() -> None:

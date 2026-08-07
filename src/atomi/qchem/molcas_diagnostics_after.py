@@ -270,6 +270,12 @@ def analyze_ras3_target(
         "symmetry": int(target["symmetry"]),
         "symmetry_label": str(target.get("symmetry_label", "")),
         "status": status,
+        "baseline_ras3_residency_status": str(
+            target.get("baseline_ras3_residency_status", "unknown")
+        ),
+        "baseline_ras3_residency_note": str(
+            target.get("baseline_ras3_residency_note", "")
+        ),
         "final_ras3_slots": slots,
         "component_assignment": assignment,
         "baseline_normalized_capture": capture_ratio,
@@ -630,6 +636,12 @@ def print_after_diagnostic(result: dict[str, Any]) -> None:
             if item["status"] == "unavailable":
                 print(f"    {item['reason']}")
                 continue
+            residency = item.get("baseline_ras3_residency_status", "unknown")
+            if residency != "unknown":
+                print(
+                    f"    baseline residency: {residency} - "
+                    f"{item.get('baseline_ras3_residency_note', '')}"
+                )
             print(
                 f"    target-shell share={item['mean_target_shell_share']:.3f}, "
                 f"baseline capture={item['baseline_normalized_capture']:.3f}, "
