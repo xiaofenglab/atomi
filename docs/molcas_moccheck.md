@@ -13,6 +13,26 @@ moccheck RUN.inp RUN.log
 atomi moccheck RUN.inp RUN.out
 ```
 
+For a durable post-setup comparison, write the compact baseline handoff while
+running the pre-check, then inspect the setup block and the next few
+state-specific RASSCF modules:
+
+```bash
+moccheck RUN.inp RUN.log \
+  --handoff-out RUN.moccheck-handoff.json
+
+moccheckafter RUN.inp RUN.log \
+  --handoff RUN.moccheck-handoff.json \
+  --blocks-after 4 \
+  --json-out RUN.moccheckafter.json
+```
+
+`moccheckafter` verifies that the handoff belongs to the current input by
+SHA256. Without `--handoff`, it first looks for
+`RUN.moccheck-handoff.json`; if no sidecar exists, it reconstructs the same
+baseline in memory. The output log may continue to grow after the handoff was
+written.
+
 The default report contains six occupied and ten virtual orbitals around the
 frontier for every symmetry table printed by the final RASSCF reference before
 the first `ALTER`/`SUPSYM` setup block. The input and output are parsed once,
@@ -95,6 +115,36 @@ then swaps an identity into a RAS3 slot, its supersymmetry label follows that
 identity. Consequently, the generated input scaffold uses pre-`ALTER` source
 MO indices; the separately reported final-slot groups are post-`ALTER` QA
 expectations and must not be copied back as source indices.
+
+## Post-setup drift and mixing audit
+
+Pseudo-natural orbitals can rotate within a RAS subspace, so
+`moccheckafter` does not require one AO component to remain attached to one MO
+number. It performs a best one-to-one component assignment over the final RAS3
+slots, measures retention relative to the pre-setup baseline, reports total
+target-shell, ligand, and central-atom-other-shell character, and checks the
+printed total RAS3 occupation against the input maximum.
+
+The screen classifies each symmetry as:
+
+- `stable_identity`: the intended target subspace is retained;
+- `mixed_retained`: target character remains while non-target or ligand
+  character appears, consistent with possible physical covalency;
+- `review`: retention is intermediate and should be checked against roots and
+  repeated probes; or
+- `drift_risk`: target character has largely moved outside RAS3.
+
+An outside-RAS3 candidate is reported only when the same requested AO
+component scores substantially better outside the active slot. Its `ALTER`
+line is conditional on restarting from the exact orbital file whose MO
+numbering was analyzed. If the setup block is healthy and only a later block
+drifts reproducibly, first test a minimal `SUPSYM` group using that later
+block's final RAS3 slot indices. A `mixed_retained` result is not, by itself, a
+reason to constrain metal-ligand rotation.
+
+All coefficient-squared shares remain orbital-identity diagnostics over the
+printed AO terms. They are not Mulliken or Loewdin populations, and compact
+OpenMolcas listings omit small coefficients.
 
 Use `--symmetry N` for a focused report. Repeat the option to preserve a
 specific subset and order:

@@ -154,6 +154,12 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Audit pre-ALTER/SUPSYM frontier orbitals and dominant AO character.",
     ),
     CommandSpec(
+        aliases=("moccheckafter", "molcas-check-after", "molcas_check_after"),
+        target="atomi.qchem.molcas_diagnostics_after:main",
+        category="qchem",
+        help="Audit post-ALTER RAS3 identity drift and retained metal-ligand mixing.",
+    ),
+    CommandSpec(
         aliases=("moclive", "molcas-live", "molcas_live"),
         target="atomi.qchem.molcas_live:main",
         category="qchem",

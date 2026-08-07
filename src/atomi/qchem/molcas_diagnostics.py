@@ -10,15 +10,18 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 SCHEMA = "atomi.molcas_moccheck.v1"
 COLLECTION_SCHEMA = "atomi.molcas_moccheck_collection.v1"
+HANDOFF_SCHEMA = "atomi.molcas_moccheck_handoff.v1"
 FLOAT_PATTERN = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][-+]?\d+)?"
 FLOAT_RE = re.compile(FLOAT_PATTERN)
 RASSCF_START_RE = re.compile(r"^\s*&RASSCF\b", re.IGNORECASE)
@@ -84,6 +87,14 @@ def _read_text(path: Path) -> str:
         with gzip.open(path, "rt", encoding="utf-8", errors="replace") as handle:
             return handle.read()
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _keyword_payload(lines: list[str], keyword: str) -> str | None:
@@ -1485,6 +1496,77 @@ def print_diagnostics(results: list[dict[str, Any]]) -> None:
     _print_ras3_recommendation(results[0]["ras3_recommendation"])
 
 
+def build_moccheck_handoff(
+    results: list[dict[str, Any]], inp_path: Path, output_path: Path
+) -> dict[str, Any]:
+    """Build the compact, provenance-checked baseline used by ``moccheckafter``."""
+
+    if not results:
+        raise ValueError("At least one moccheck diagnostic is required for a handoff")
+    recommendation = results[0].get("ras3_recommendation", {})
+    setup = results[0].get("setup_input_block")
+    if setup is None:
+        raise ValueError("A moccheck handoff requires an ALTER/SUPSYM setup block")
+    targets = []
+    for item in recommendation.get("per_symmetry", []):
+        slots = [int(value) for value in item.get("ras3_slots", [])]
+        sources = item.get("selected_sources", [])
+        if not slots or not sources:
+            continue
+        targets.append(
+            {
+                "symmetry": int(item["symmetry"]),
+                "symmetry_label": str(item.get("symmetry_label", "")),
+                "final_ras3_slots": slots,
+                "components": [
+                    {
+                        "ao": str(source["target_component"]),
+                        "source_mo": int(source["mo"]),
+                        "baseline_score": float(source["target_score"]),
+                        "baseline_occupation": float(source["occupation"]),
+                    }
+                    for source in sources
+                ],
+            }
+        )
+    stat = output_path.stat()
+    return {
+        "schema": HANDOFF_SCHEMA,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "input": {
+            "path": str(inp_path.resolve()),
+            "sha256": _sha256(inp_path),
+        },
+        "output_snapshot": {
+            "path": str(output_path.resolve()),
+            "size_bytes": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        },
+        "reference_input_block": results[0]["reference_input_block"],
+        "setup_input_block": setup,
+        "target_atom": recommendation.get("target_atom"),
+        "target_shells": recommendation.get("target_shells", []),
+        "ao_listing_format": recommendation.get("ao_listing_format"),
+        "targets": targets,
+        "interpretation_guard": (
+            "Track the intended RAS3 subspace and AO components, not fixed pseudo-natural "
+            "MO identities. Mixed metal-ligand character can be physical; SUPSYM is a "
+            "fallback only after reproducible destructive identity drift."
+        ),
+    }
+
+
+def write_moccheck_handoff(
+    results: list[dict[str, Any]], inp_path: Path, output_path: Path, handoff_path: Path
+) -> dict[str, Any]:
+    payload = build_moccheck_handoff(results, inp_path, output_path)
+    handoff_path.parent.mkdir(parents=True, exist_ok=True)
+    handoff_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return payload
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="moccheck",
@@ -1552,6 +1634,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--json-out", type=Path, default=None, help="Optional structured diagnostic JSON"
     )
     parser.add_argument(
+        "--handoff-out",
+        type=Path,
+        default=None,
+        help="Optional compact baseline JSON for a later moccheckafter run",
+    )
+    parser.add_argument(
         "--mixing-window-ha",
         type=float,
         default=0.15,
@@ -1603,6 +1691,9 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         print(f"\nWrote diagnostic JSON: {args.json_out}")
+    if args.handoff_out is not None:
+        write_moccheck_handoff(results, args.inp, args.output, args.handoff_out)
+        print(f"Wrote moccheckafter handoff: {args.handoff_out}")
     return 0
 
 

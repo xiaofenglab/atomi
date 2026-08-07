@@ -85,6 +85,7 @@ Atomi currently includes command families for:
 
 - Electronic-structure preparation, monitoring, convergence checks, and run summaries.
 - OpenMolcas pre-`ALTER`/`SUPSYM` frontier diagnostics with `moccheck`,
+  post-setup RAS3 identity/mixing checks with `moccheckafter`,
   plus input-scoped live RASSCF/CASPT2/RASSI monitoring with `moclive`,
   frozen full-postanalysis bundles with `mocparse`, publication XANES with
   `mocxanes`, MO and spin-free-to-SO state diagrams with `mocmo`, orbital-grid
